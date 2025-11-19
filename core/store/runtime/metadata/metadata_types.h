@@ -8,35 +8,34 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
-#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
+#include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
-#include "core/store/runtime/global_metadata_gateway.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::components {
+namespace tensorcast::store::runtime::metadata {
 
 enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
 
-using CanonicalRange = view::CanonicalRange;
+using CanonicalRange = tensorcast::store::view::CanonicalRange;
 
 struct ViewRegistration {
   std::string view_id;
@@ -88,62 +87,33 @@ struct RegistrationCommitResult {
 };
 
 struct RegistrationResources {
-  gsl::not_null<DeviceManager*> device_manager;
-  gsl::not_null<ReplicaRegistry*> replica_registry;
-  gsl::not_null<MetricsCollector*> metrics_collector;
+  gsl::not_null<components::DeviceManager*> device_manager;
+  gsl::not_null<components::ReplicaRegistry*> replica_registry;
+  gsl::not_null<components::MetricsCollector*> metrics_collector;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
-  std::shared_ptr<CommunicationManager> communication_manager;
+  std::shared_ptr<components::CommunicationManager> communication_manager;
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;
 
-class RegistrationFacade {
- public:
-  RegistrationFacade(
-      RegistrationResources resources,
-      ReplicaFactory replica_factory,
-      size_t artifact_chunk_bytes,
-      std::chrono::milliseconds pinned_memory_timeout,
-      runtime::GlobalMetadataGateway* metadata_gateway);
-
-  RegistrationFacade(const RegistrationFacade&) = delete;
-  RegistrationFacade& operator=(const RegistrationFacade&) = delete;
-
-  absl::StatusOr<RegistrationBeginResult> begin(const ArtifactRegistration& reg);
-  absl::StatusOr<RegistrationCommitResult> commit(std::string_view registration_id);
-  absl::Status abort(std::string_view registration_id);
-  absl::Status keep_alive(std::string_view registration_id, uint32_t ttl_ms);
-  absl::Status ingest_view_chunk(
-      std::string_view registration_id,
-      uint64_t view_offset,
-      absl::Span<const std::byte> data);
-  absl::StatusOr<uint64_t> get_view_ingested_bytes(std::string_view registration_id) const;
-
- private:
-  struct PendingRegistrationContext;
-
-  std::shared_ptr<PendingRegistrationContext> erase_pending(
-      std::string_view registration_id,
-      size_t* pending_size_after = nullptr);
-  std::shared_ptr<PendingRegistrationContext> lookup_pending(std::string_view registration_id) const;
-  static void release_replica_memory(
-      const std::shared_ptr<replica::Replica>& replica,
-      common::memory::MemoryLocation location);
-  void record_pending_gauge(size_t pending_count) const;
-  void record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status) const;
-
-  gsl::not_null<DeviceManager*> device_manager_;
-  gsl::not_null<ReplicaRegistry*> replica_registry_;
-  gsl::not_null<MetricsCollector*> metrics_collector_;
-  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
-  ReplicaFactory replica_factory_;
-  size_t artifact_chunk_bytes_{0};
-  std::chrono::milliseconds pinned_memory_timeout_{0};
-  std::shared_ptr<CommunicationManager> communication_manager_;
-  runtime::GlobalMetadataGateway* metadata_gateway_;
-
-  mutable std::mutex pending_mutex_;
-  absl::flat_hash_map<std::string, std::shared_ptr<PendingRegistrationContext>> pending_regs_;
+struct RegistrationPublication {
+  std::string artifact_id;
+  DeviceKey device;
+  uint64_t size_bytes{0};
+  std::string tensor_index_key;
+  std::vector<std::string> remote_memory_keys;
+  std::vector<uint64_t> buffer_sizes;
+  std::optional<std::string> tensor_index_data;
+  std::string encoding{"json"};
+  std::string schema_version{"v3"};
+  std::optional<std::string> verification_json;
 };
 
-} // namespace tensorcast::store::components
+class RegistrationPublisher {
+ public:
+  virtual ~RegistrationPublisher() = default;
+  virtual absl::Status publish_registration(const RegistrationPublication& publication) = 0;
+  virtual absl::Status update_variant_view(const components::VariantViewUpdate& update) = 0;
+};
+
+} // namespace tensorcast::store::runtime::metadata

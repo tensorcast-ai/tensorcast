@@ -15,8 +15,8 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
@@ -50,6 +50,9 @@ struct VerificationState {
 
 struct IngestionContext {
   SourceType source_type;
+  std::string request_id;
+  std::string publish_context_id;
+  loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
   std::string artifact_identifier;
   loading::ReplicaTarget target;
   loading::MaterializeHints hints;
@@ -65,7 +68,7 @@ struct IngestionContext {
   std::chrono::milliseconds pinned_memory_timeout{0};
   const StoreEngineOptions* options{nullptr};
   store_runtime::ReplicaRuntime* replica_runtime{nullptr};
-  store_runtime::ComponentCatalog* component_catalog{nullptr};
+  store_runtime::RuntimeContext* runtime_context{nullptr};
 
   DiskSourceMetadata disk;
   P2PSourceMetadata p2p;

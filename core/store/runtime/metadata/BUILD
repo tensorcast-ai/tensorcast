@@ -1,0 +1,106 @@
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
+
+package(default_visibility = ["//visibility:public"])
+
+sc_header_only_library(
+    name = "metadata_types",
+    hdrs = ["metadata_types.h"],
+    deps = [
+        "//core/common:artifact_identity_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:communication_manager",
+        "//core/store:device_manager",
+        "//core/store:global_store_client",
+        "//core/store:metrics_collector",
+        "//core/store:replica_registry",
+        "//core/store/materialization/dataplane:view_planner",
+        "//core/store/replica",
+        "@abseil-cpp//absl/status:statusor",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
+    name = "registration_backend",
+    srcs = ["registration_backend.cc"],
+    hdrs = ["registration_backend.h"],
+    visibility = ["//core/store/runtime/metadata:__pkg__"],
+    deps = [
+        ":metadata_types",
+        "//core/common:artifact_hash_lib",
+        "//core/common:artifact_verification_lib",
+        "//core/common:cuda_api_lib",
+        "//core/common:memory_location_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:trace_macros_lib",
+        "//core/store:device_types",
+        "//core/store:eviction_service",
+        "//core/store:view_utils",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:canonical_index",
+        "//core/store/materialization/dataplane:segment_plan_source",
+        "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:verification_utils",
+        "//core/store/materialization/dataplane:view_ingest_executor",
+        "//core/store/materialization/dataplane:view_plan_source",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
+    name = "metadata_gateway",
+    srcs = ["metadata_gateway.cc"],
+    hdrs = ["metadata_gateway.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":metadata_types",
+        ":registration_backend",
+        "//core/common:memory_location_lib",
+        "//core/store:device_types",
+        "//core/store:global_store_client",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/control:replica_registration_helper",
+        "//core/store/runtime:ingestion_events",
+        "//core/store/runtime/context:runtime_context",
+        "//core/store/runtime/context:runtime_context_events",
+        "//core/store/runtime/replica:replica_runtime",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+        "@gsl",
+    ],
+)
+
+cc_test(
+    name = "metadata_gateway_test",
+    srcs = ["metadata_gateway_test.cc"],
+    deps = [
+        ":metadata_gateway",
+        ":metadata_types",
+        ":registration_backend",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:device_manager",
+        "//core/store:device_types",
+        "//core/store:global_store_client",
+        "//core/store:metrics_collector",
+        "//core/store:replica_registry",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica",
+        "//core/store/runtime:ingestion_events",
+        "//core/store/runtime/context:runtime_context",
+        "//core/store/runtime/replica:replica_runtime",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)

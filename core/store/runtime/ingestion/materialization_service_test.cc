@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/materialization/control/materialization_service.h"
+#include "core/store/runtime/ingestion/materialization_service.h"
 
 #include <chrono>
 #include <future>
@@ -30,8 +30,8 @@ using tensorcast::store::loading::MaterializeMode;
 using tensorcast::store::loading::ReplicaHandle;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::loading::ReplicaTarget;
-using tensorcast::store::materialization::control::MaterializationDeps;
-using tensorcast::store::materialization::control::MaterializationService;
+using tensorcast::store::runtime::ingestion::MaterializationDeps;
+using tensorcast::store::runtime::ingestion::MaterializationService;
 
 namespace {
 

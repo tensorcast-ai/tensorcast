@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/materialization/control/materialization_service.h"
+#include "core/store/runtime/ingestion/materialization_service.h"
 
 #include <cstring>
 #include <filesystem>
@@ -19,7 +19,7 @@
 #include "core/store/replica/replica.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::materialization::control {
+namespace tensorcast::store::runtime::ingestion {
 
 namespace {
 
@@ -222,4 +222,4 @@ ReplicaHandle MaterializationService::BuildHandle(
   return handle;
 }
 
-} // namespace tensorcast::store::materialization::control
+} // namespace tensorcast::store::runtime::ingestion

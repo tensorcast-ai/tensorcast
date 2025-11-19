@@ -20,10 +20,9 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
-#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion_events.h"
-#include "core/store/runtime/replica_info.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/replica/replica_info.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::runtime {
@@ -36,11 +35,10 @@ using components::ReplicaRegistry;
 class ReplicaRuntime {
  public:
   struct Config {
-    gsl::not_null<ComponentCatalog*> component_catalog;
-    RuntimeEventHub* event_hub = nullptr;
+    gsl::not_null<RuntimeContext*> runtime_context;
   };
 
-  explicit ReplicaRuntime(gsl::not_null<ComponentCatalog*> catalog);
+  explicit ReplicaRuntime(gsl::not_null<RuntimeContext*> context);
   explicit ReplicaRuntime(Config config);
   ~ReplicaRuntime() = default;
 
@@ -94,11 +92,15 @@ class ReplicaRuntime {
   const MetricsCollector& metrics() const;
 
  private:
-  void subscribe_to_events();
+  void publish_replica_event(RuntimeEventType type, const loading::ReplicaKey& key, size_t size_bytes) const;
+  void publish_remote_access_event(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
+      bool enabled) const;
+  size_t get_replica_size_or_zero(const loading::ReplicaKey& key) const;
 
-  gsl::not_null<ComponentCatalog*> catalog_;
-  RuntimeEventHub* event_hub_{nullptr};
-  std::unique_ptr<RuntimeEventHub::Subscription> ingress_subscription_;
+  gsl::not_null<RuntimeContext*> context_;
+  RuntimeContextEvents::Publisher event_publisher_;
 };
 
 } // namespace tensorcast::store::runtime

@@ -2,7 +2,9 @@
 
 #pragma once
 
+#include <atomic>
 #include <memory>
+#include <string>
 
 #include "absl/status/status.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -13,17 +15,18 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/common/view_hash_utils.h"
+#include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::runtime {
 
-class ComponentCatalog {
+class RuntimeContext {
  public:
-  explicit ComponentCatalog(const StoreEngineOptions& options);
-  ~ComponentCatalog();
+  explicit RuntimeContext(const StoreEngineOptions& options);
+  ~RuntimeContext();
 
-  ComponentCatalog(const ComponentCatalog&) = delete;
-  ComponentCatalog& operator=(const ComponentCatalog&) = delete;
+  RuntimeContext(const RuntimeContext&) = delete;
+  RuntimeContext& operator=(const RuntimeContext&) = delete;
 
   absl::Status start();
   void shutdown();
@@ -72,6 +75,11 @@ class ComponentCatalog {
     return worker_identity_;
   }
 
+  RuntimeContextEvents::Publisher event_publisher();
+  std::unique_ptr<RuntimeContextEvents::Subscription> subscribe_to_events(RuntimeContextEvents::Callback callback);
+  void drain_events();
+  [[nodiscard]] std::string mint_publish_context_id();
+
  private:
   void validate_options() const;
   absl::Status initialize_device_manager();
@@ -87,7 +95,9 @@ class ComponentCatalog {
   std::shared_ptr<components::CommunicationManager> comm_manager_;
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
+  std::unique_ptr<RuntimeContextEvents> events_;
   components::WorkerIdentity worker_identity_;
+  std::atomic<uint64_t> publish_context_counter_{1};
   bool started_{false};
 };
 

@@ -12,9 +12,8 @@
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/replica_runtime.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
@@ -26,8 +25,8 @@ using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
 using tensorcast::store::loading::ReplicaTarget;
-using tensorcast::store::runtime::ComponentCatalog;
 using tensorcast::store::runtime::ReplicaRuntime;
+using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::testing::create_test_pattern;
 using tensorcast::testing::find_available_port;
 using tensorcast::testing::make_tcp_communicator_config;
@@ -36,16 +35,13 @@ using tensorcast::testing::verify_pattern;
 namespace {
 
 struct PipelineHarness {
-  ComponentCatalog catalog;
-  tensorcast::store::runtime::RuntimeEventHub event_hub;
+  RuntimeContext catalog;
   std::unique_ptr<ReplicaRuntime> replica_runtime;
   std::unique_ptr<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline> pipeline;
 
   explicit PipelineHarness(const StoreEngineOptions& opts)
       : catalog(opts),
-        replica_runtime(
-            std::make_unique<ReplicaRuntime>(
-                ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &event_hub})) {
+        replica_runtime(std::make_unique<ReplicaRuntime>(ReplicaRuntime::Config{.runtime_context = &catalog})) {
     CHECK_OK(catalog.start());
     tensorcast::store::materialization::runtime::pipeline::IngestionPipeline::Config cfg{
         .storage_path = fs::path(opts.storage_path),
@@ -54,9 +50,9 @@ struct PipelineHarness {
         .pinned_memory_timeout = opts.pinned_memory_timeout,
         .engine_options = &opts,
         .replica_runtime = replica_runtime.get(),
-        .component_catalog = &catalog,
+        .runtime_context = &catalog,
         .metadata_gateway = nullptr,
-        .event_hub = &event_hub,
+        .event_publisher = catalog.event_publisher(),
     };
     pipeline = std::make_unique<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline>(cfg);
   }

@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/registration/registration_facade.h"
+#include "core/store/runtime/metadata/registration_backend.h"
 
 #include <unistd.h>
 
@@ -29,7 +29,7 @@
 #include "core/store/view_utils.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
-namespace tensorcast::store::components {
+namespace tensorcast::store::runtime::metadata {
 
 namespace {
 
@@ -84,7 +84,7 @@ std::string make_registration_id() {
 
 } // namespace
 
-struct RegistrationFacade::PendingRegistrationContext {
+struct RegistrationBackend::PendingRegistrationContext {
   enum class Plan : uint8_t { kCoalesced = 0, kCpu = 1 };
 
   std::string registration_id;
@@ -117,25 +117,25 @@ struct RegistrationFacade::PendingRegistrationContext {
   std::unique_ptr<ViewState> view_state;
 };
 
-RegistrationFacade::RegistrationFacade(
+RegistrationBackend::RegistrationBackend(
     RegistrationResources resources,
     ReplicaFactory replica_factory,
     size_t artifact_chunk_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
-    runtime::GlobalMetadataGateway* metadata_gateway)
+    RegistrationPublisher* publisher)
     : device_manager_(resources.device_manager),
       replica_registry_(resources.replica_registry),
       metrics_collector_(resources.metrics_collector),
       memory_pool_(resources.memory_pool),
+      communication_manager_(std::move(resources.communication_manager)),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
-      communication_manager_(std::move(resources.communication_manager)),
-      metadata_gateway_(metadata_gateway) {
+      publisher_(publisher) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
 }
 
-absl::StatusOr<RegistrationBeginResult> RegistrationFacade::begin(const ArtifactRegistration& reg) {
+absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const ArtifactRegistration& reg) {
   std::string trace_request_id = reg.tensor_index_key;
   if (trace_request_id.empty()) {
     trace_request_id = reg.artifact_id;
@@ -326,7 +326,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationFacade::begin(const Artifact
   return out;
 }
 
-absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_view registration_id) {
+absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string_view registration_id) {
   std::string request_id(registration_id);
   if (request_id.empty()) {
     request_id = "registration";
@@ -596,8 +596,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     }
   }
 
-  if (metadata_gateway_) {
-    runtime::GlobalMetadataGateway::RegistrationPublication publication{
+  if (publisher_) {
+    RegistrationPublication publication{
         .artifact_id = entry->artifact_id,
         .device = device,
         .size_bytes = entry->size_bytes,
@@ -608,7 +608,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
         .encoding = entry->encoding,
         .schema_version = entry->schema_version,
         .verification_json = verification_json};
-    absl::Status registration_status = metadata_gateway_->publish_registration(publication);
+    absl::Status registration_status = publisher_->publish_registration(publication);
     if (!registration_status.ok()) {
       return registration_status;
     }
@@ -747,7 +747,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     }
   }
 
-  if (entry->view_state && !entry->view_state->options.view_id.empty() && metadata_gateway_) {
+  if (entry->view_state && !entry->view_state->options.view_id.empty() && publisher_) {
     components::VariantViewUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
@@ -758,7 +758,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
     update.canonical_size_bytes = entry->size_bytes;
     update.canonical_bytes_covered = covered_bytes;
     update.leaf_writes = std::move(leaf_writes);
-    absl::Status update_status = metadata_gateway_->update_variant_view(update);
+    absl::Status update_status = publisher_->update_variant_view(update);
     if (!update_status.ok()) {
       LOG(WARNING) << "UpdateArtifactViewState failed for artifact " << entry->artifact_id
                    << " view_id=" << entry->view_state->options.view_id << ": " << update_status;
@@ -768,7 +768,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationFacade::commit(std::string_
   return result;
 }
 
-absl::Status RegistrationFacade::ingest_view_chunk(
+absl::Status RegistrationBackend::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
     absl::Span<const std::byte> data) {
@@ -807,7 +807,7 @@ absl::Status RegistrationFacade::ingest_view_chunk(
   return absl::OkStatus();
 }
 
-absl::StatusOr<uint64_t> RegistrationFacade::get_view_ingested_bytes(std::string_view registration_id) const {
+absl::StatusOr<uint64_t> RegistrationBackend::get_view_ingested_bytes(std::string_view registration_id) const {
   auto entry = lookup_pending(registration_id);
   if (!entry) {
     return absl::NotFoundError("registration_id not found");
@@ -821,7 +821,7 @@ absl::StatusOr<uint64_t> RegistrationFacade::get_view_ingested_bytes(std::string
   return entry->view_state->expected_view_bytes;
 }
 
-absl::Status RegistrationFacade::abort(std::string_view registration_id) {
+absl::Status RegistrationBackend::abort(std::string_view registration_id) {
   size_t pending_size_after = 0;
   auto entry = erase_pending(registration_id, &pending_size_after);
   if (!entry) {
@@ -835,7 +835,7 @@ absl::Status RegistrationFacade::abort(std::string_view registration_id) {
   return absl::OkStatus();
 }
 
-absl::Status RegistrationFacade::keep_alive(std::string_view registration_id, uint32_t ttl_ms) {
+absl::Status RegistrationBackend::keep_alive(std::string_view registration_id, uint32_t ttl_ms) {
   if (ttl_ms == 0) {
     return absl::OkStatus();
   }
@@ -848,7 +848,7 @@ absl::Status RegistrationFacade::keep_alive(std::string_view registration_id, ui
   return absl::OkStatus();
 }
 
-std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFacade::erase_pending(
+std::shared_ptr<RegistrationBackend::PendingRegistrationContext> RegistrationBackend::erase_pending(
     std::string_view registration_id,
     size_t* pending_size_after) {
   std::shared_ptr<PendingRegistrationContext> entry;
@@ -870,7 +870,7 @@ std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFaca
   return entry;
 }
 
-std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFacade::lookup_pending(
+std::shared_ptr<RegistrationBackend::PendingRegistrationContext> RegistrationBackend::lookup_pending(
     std::string_view registration_id) const {
   std::lock_guard<std::mutex> lock(pending_mutex_);
   auto it = pending_regs_.find(std::string(registration_id));
@@ -880,7 +880,7 @@ std::shared_ptr<RegistrationFacade::PendingRegistrationContext> RegistrationFaca
   return it->second;
 }
 
-void RegistrationFacade::release_replica_memory(
+void RegistrationBackend::release_replica_memory(
     const std::shared_ptr<replica::Replica>& replica,
     common::memory::MemoryLocation location) {
   if (!replica) {
@@ -892,11 +892,11 @@ void RegistrationFacade::release_replica_memory(
   }
 }
 
-void RegistrationFacade::record_pending_gauge(size_t pending_count) const {
+void RegistrationBackend::record_pending_gauge(size_t pending_count) const {
   metrics_collector_->record_registration_pending(pending_count);
 }
 
-void RegistrationFacade::record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status) const {
+void RegistrationBackend::record_commit_latency(const PendingRegistrationContext& ctx, std::string_view status) const {
   if (ctx.begin_time.time_since_epoch().count() == 0) {
     return;
   }
@@ -905,4 +905,4 @@ void RegistrationFacade::record_commit_latency(const PendingRegistrationContext&
   metrics_collector_->record_registration_commit(duration_seconds, status);
 }
 
-} // namespace tensorcast::store::components
+} // namespace tensorcast::store::runtime::metadata

@@ -1,9 +1,16 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/context/runtime_context.h"
+
+#include <string>
+#include <utility>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 
 namespace {
 constexpr char kDefaultP2PHost[] = "0.0.0.0";
@@ -11,7 +18,7 @@ constexpr char kDefaultP2PHost[] = "0.0.0.0";
 
 namespace tensorcast::store::runtime {
 
-ComponentCatalog::ComponentCatalog(const StoreEngineOptions& options)
+RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
     : options_(options),
       artifact_chunk_bytes_(
           options.artifact_chunk_bytes == 0 ? tensorcast::common::consts::kArtifactChunkDefault
@@ -21,7 +28,8 @@ ComponentCatalog::ComponentCatalog(const StoreEngineOptions& options)
       device_manager_(std::make_unique<components::DeviceManager>()),
       replica_registry_(std::make_unique<components::ReplicaRegistry>()),
       metrics_collector_(std::make_unique<components::MetricsCollector>()),
-      view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})) {
+      view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})),
+      events_(std::make_unique<RuntimeContextEvents>()) {
   if (options_.comm_manager) {
     comm_manager_ = options_.comm_manager;
   } else {
@@ -29,11 +37,11 @@ ComponentCatalog::ComponentCatalog(const StoreEngineOptions& options)
   }
 }
 
-ComponentCatalog::~ComponentCatalog() {
+RuntimeContext::~RuntimeContext() {
   shutdown();
 }
 
-absl::Status ComponentCatalog::start() {
+absl::Status RuntimeContext::start() {
   if (started_) {
     return absl::OkStatus();
   }
@@ -48,36 +56,39 @@ absl::Status ComponentCatalog::start() {
   }
   auto gs_status = initialize_global_store_client();
   if (!gs_status.ok()) {
-    LOG(WARNING) << "ComponentCatalog: GlobalStoreClient init failed: " << gs_status;
+    LOG(WARNING) << "RuntimeContext: GlobalStoreClient init failed: " << gs_status;
   }
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
   started_ = true;
   return absl::OkStatus();
 }
 
-void ComponentCatalog::shutdown() {
+void RuntimeContext::shutdown() {
   if (!started_) {
     return;
   }
   started_ = false;
+  if (events_) {
+    events_->drain();
+  }
   replica_registry_->clear_all();
   global_store_client_.reset();
   comm_manager_.reset();
 }
 
-components::DeviceManager& ComponentCatalog::device_manager() {
+components::DeviceManager& RuntimeContext::device_manager() {
   return *device_manager_;
 }
 
-components::ReplicaRegistry& ComponentCatalog::replica_registry() {
+components::ReplicaRegistry& RuntimeContext::replica_registry() {
   return *replica_registry_;
 }
 
-components::MetricsCollector& ComponentCatalog::metrics_collector() {
+components::MetricsCollector& RuntimeContext::metrics_collector() {
   return *metrics_collector_;
 }
 
-void ComponentCatalog::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
+void RuntimeContext::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
   global_store_client_ = std::move(client);
   if (global_store_client_) {
     global_store_client_->update_local_endpoint(
@@ -85,7 +96,7 @@ void ComponentCatalog::set_global_store_client_for_testing(std::shared_ptr<compo
   }
 }
 
-void ComponentCatalog::set_worker_identity(components::WorkerIdentity identity) {
+void RuntimeContext::set_worker_identity(components::WorkerIdentity identity) {
   worker_identity_ = std::move(identity);
   if (global_store_client_) {
     global_store_client_->update_local_endpoint(
@@ -93,7 +104,36 @@ void ComponentCatalog::set_worker_identity(components::WorkerIdentity identity) 
   }
 }
 
-void ComponentCatalog::validate_options() const {
+RuntimeContextEvents::Publisher RuntimeContext::event_publisher() {
+  if (!events_) {
+    return RuntimeContextEvents::Publisher();
+  }
+  return events_->publisher();
+}
+
+std::unique_ptr<RuntimeContextEvents::Subscription> RuntimeContext::subscribe_to_events(
+    RuntimeContextEvents::Callback callback) {
+  if (!events_) {
+    return nullptr;
+  }
+  return events_->subscribe(std::move(callback));
+}
+
+void RuntimeContext::drain_events() {
+  if (events_) {
+    events_->drain();
+  }
+}
+
+std::string RuntimeContext::mint_publish_context_id() {
+  const uint64_t sequence = publish_context_counter_.fetch_add(1, std::memory_order_relaxed);
+  const int64_t timestamp = absl::ToUnixNanos(absl::Now());
+  const absl::string_view worker =
+      worker_identity_.worker_id.empty() ? absl::string_view("local") : absl::string_view(worker_identity_.worker_id);
+  return absl::StrCat("pubctx_", worker, "_", timestamp, "_", sequence);
+}
+
+void RuntimeContext::validate_options() const {
   ABSL_CHECK_GT(options_.tx_slice_bytes, 0) << "Pinned buffer slice size must be non-zero";
   ABSL_CHECK_EQ(artifact_chunk_bytes_ % options_.tx_slice_bytes, 0)
       << "artifact_chunk_bytes must be a multiple of tx_slice_bytes";
@@ -104,11 +144,11 @@ void ComponentCatalog::validate_options() const {
       << "Pinned buffer block size must be aligned to page size";
 }
 
-absl::Status ComponentCatalog::initialize_device_manager() {
+absl::Status RuntimeContext::initialize_device_manager() {
   return device_manager_->initialize();
 }
 
-absl::Status ComponentCatalog::initialize_communication_manager() {
+absl::Status RuntimeContext::initialize_communication_manager() {
   if (comm_manager_) {
     if (comm_manager_->is_enabled()) {
       const uint16_t active_port = comm_manager_->listen_port();
@@ -136,13 +176,13 @@ absl::Status ComponentCatalog::initialize_communication_manager() {
     options_.p2p_port = active_port;
   }
 
-  LOG(INFO) << "ComponentCatalog: communication manager listening on " << listen_host << ":" << active_port
+  LOG(INFO) << "RuntimeContext: communication manager listening on " << listen_host << ":" << active_port
             << (enable_rdma ? " (RDMA enabled)" : " (RDMA disabled)");
 
   return absl::OkStatus();
 }
 
-absl::Status ComponentCatalog::initialize_global_store_client() {
+absl::Status RuntimeContext::initialize_global_store_client() {
   if (options_.global_store_address.empty()) {
     return absl::OkStatus();
   }
@@ -154,7 +194,7 @@ absl::Status ComponentCatalog::initialize_global_store_client() {
   if (!st.ok()) {
     return st;
   }
-  LOG(INFO) << "ComponentCatalog: connected to Global Store at " << cfg.global_store_address;
+  LOG(INFO) << "RuntimeContext: connected to Global Store at " << cfg.global_store_address;
   client->update_local_endpoint(
       worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
   global_store_client_ = std::move(client);

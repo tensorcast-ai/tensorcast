@@ -137,7 +137,7 @@ absl::Status DiskSourceAdapter::prepare(const loading::DiskSource& source, Inges
 }
 
 absl::Status P2PSourceAdapter::prepare(const P2PSource& source, IngestionContext& ctx) {
-  auto comm_manager = ctx.component_catalog->communication_manager();
+  auto comm_manager = ctx.runtime_context->communication_manager();
   if (!comm_manager || !comm_manager->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }

@@ -40,7 +40,8 @@ class MaterializationBackend {
 
   virtual absl::Status register_replica_with_global_store(
       const ReplicaKey& key,
-      std::string_view artifact_id_override) = 0;
+      std::string_view artifact_id_override,
+      std::string_view publish_context_id = {}) = 0;
 };
 
 } // namespace tensorcast::store::materialization::control

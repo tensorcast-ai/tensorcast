@@ -34,7 +34,7 @@ Implement Design 0029 by replacing the monolithic runtime wiring in `StoreEngine
   - [x] Refresh `core/store/README.md` and `docs/architecture/architecture-overview.md` diagrams to introduce RuntimeEnv, following the doc-sync rule.
 
 - [ ] **Phase 2: ReplicaRuntime Merge**
-  - [x] Merge `ReplicaService` + `TelemetryService` contracts into `runtime/replica_runtime.{h,cc}`; ensure namespaces follow AGENTS.md conventions.
+  - [x] Merge `ReplicaService` + `TelemetryService` contracts into `runtime/replica/replica_runtime.{h,cc}`; ensure namespaces follow AGENTS.md conventions.
   - [x] Update call sites inside `core/store/store_engine.cc`, ingestion/materialization helpers, and `//core/store:store_engine_test` to use ReplicaRuntime.
   - [ ] Add `//core/store/runtime:replica_runtime_test` covering eviction, chunk-state snapshots, telemetry queries, and CUDA export toggles. *(Blocking TODO.)*
   - [x] Remove legacy telemetry plumbing inside `StoreEngine` (lines 147-198, 340-360) and delete transitional helper methods.

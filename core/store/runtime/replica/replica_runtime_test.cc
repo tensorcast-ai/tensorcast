@@ -8,15 +8,17 @@
 
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/mutex.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/replica_runtime.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/context/runtime_context_events.h"
+#include "core/store/runtime/ingestion_events.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 #include "gsl/pointers"
@@ -29,9 +31,13 @@ using tensorcast::store::loading::InlineBufferSource;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::replica::Replica;
 using tensorcast::store::replica::ReplicaConfig;
-using tensorcast::store::runtime::ComponentCatalog;
+using tensorcast::store::runtime::IngestionResultEvent;
+using tensorcast::store::runtime::RemoteAccessEvent;
+using tensorcast::store::runtime::ReplicaLifecycleEvent;
 using tensorcast::store::runtime::ReplicaRuntime;
-using tensorcast::store::runtime::RuntimeEventHub;
+using tensorcast::store::runtime::RuntimeContext;
+using tensorcast::store::runtime::RuntimeEvent;
+using tensorcast::store::runtime::RuntimeEventType;
 
 namespace {
 
@@ -50,7 +56,7 @@ StoreEngineOptions MakeTestOptions() {
 }
 
 ReplicaConfig MakeInlineReplicaConfig(
-    ComponentCatalog& catalog,
+    RuntimeContext& catalog,
     std::string artifact_id,
     DeviceType device_type,
     int device_id,
@@ -87,11 +93,9 @@ TEST_CASE("ReplicaRuntime evicts CPU replicas and reports telemetry", "[runtime]
   SKIP_IF_NO_CUDA();
 
   auto opts = MakeTestOptions();
-  ComponentCatalog catalog(opts);
+  RuntimeContext catalog(opts);
   CHECK_OK(catalog.start());
-
-  RuntimeEventHub hub;
-  ReplicaRuntime runtime(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &hub});
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.runtime_context = &catalog});
 
   constexpr size_t kCpuBytes = 16 * 1024;
   auto cpu_backing = std::make_shared<std::vector<uint8_t>>(kCpuBytes, 0x5C);
@@ -128,15 +132,110 @@ TEST_CASE("ReplicaRuntime evicts CPU replicas and reports telemetry", "[runtime]
   catalog.shutdown();
 }
 
+TEST_CASE("ReplicaRuntime publishes lifecycle events", "[runtime][replica_runtime][events]") {
+  SKIP_IF_NO_CUDA();
+
+  auto opts = MakeTestOptions();
+  RuntimeContext catalog(opts);
+  CHECK_OK(catalog.start());
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.runtime_context = &catalog});
+
+  absl::Mutex mu;
+  std::vector<RuntimeEvent> observed;
+  auto subscription = catalog.subscribe_to_events([&](const RuntimeEvent& event) {
+    absl::MutexLock lock(&mu);
+    observed.push_back(event);
+  });
+  REQUIRE(subscription != nullptr);
+
+  constexpr size_t kCpuBytes = 8192;
+  auto cpu_backing = std::make_shared<std::vector<uint8_t>>(kCpuBytes, 0xAB);
+  auto cpu_view = std::shared_ptr<const void>(cpu_backing, static_cast<const void*>(cpu_backing->data()));
+  auto cpu_config = MakeInlineReplicaConfig(catalog, "cpu_lifecycle", DeviceType::CPU, -1, cpu_view, kCpuBytes);
+  auto cpu_replica = runtime.get_or_create_replica("cpu_lifecycle", cpu_config);
+  REQUIRE(cpu_replica != nullptr);
+
+  DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  ReplicaKey cpu_key = MakeReplicaKey("cpu_lifecycle", cpu_device);
+
+  IngestionResultEvent result_event;
+  result_event.source = tensorcast::store::runtime::IngestionSource::kDisk;
+  result_event.artifact_id = "cpu_lifecycle";
+  result_event.target_device = cpu_device;
+  result_event.target_location = MemoryLocation::CPU;
+  result_event.bytes_transferred = kCpuBytes;
+  result_event.duration_seconds = 0.01;
+  result_event.status = absl::OkStatus();
+  result_event.replica_key = cpu_key;
+  runtime.record_ingestion_result(result_event);
+
+  catalog.drain_events();
+  std::vector<RuntimeEvent> snapshot;
+  {
+    absl::MutexLock lock(&mu);
+    snapshot = observed;
+    observed.clear();
+  }
+
+  bool saw_loaded = false;
+  for (const auto& event : snapshot) {
+    if (event.type != RuntimeEventType::kReplicaLoaded) {
+      continue;
+    }
+    const auto* payload = std::get_if<ReplicaLifecycleEvent>(&event.payload);
+    REQUIRE(payload != nullptr);
+    CHECK(payload->key.artifact_id == "cpu_lifecycle");
+    CHECK(payload->size_bytes == kCpuBytes);
+    saw_loaded = true;
+  }
+  CHECK(saw_loaded);
+
+  CHECK(runtime.unload_replica(cpu_key) == 0);
+  catalog.drain_events();
+  {
+    absl::MutexLock lock(&mu);
+    snapshot = observed;
+    observed.clear();
+  }
+  bool saw_evicted = false;
+  for (const auto& event : snapshot) {
+    if (event.type != RuntimeEventType::kReplicaEvicted) {
+      continue;
+    }
+    const auto* payload = std::get_if<ReplicaLifecycleEvent>(&event.payload);
+    REQUIRE(payload != nullptr);
+    CHECK(payload->key.artifact_id == "cpu_lifecycle");
+    CHECK(payload->size_bytes == kCpuBytes);
+    saw_evicted = true;
+  }
+  CHECK(saw_evicted);
+
+  CHECK(runtime.clear_mem() == 0);
+  catalog.shutdown();
+}
+
 TEST_CASE("ReplicaRuntime toggles GPU exports and chunk snapshots", "[runtime][replica_runtime]") {
   SKIP_IF_NO_CUDA();
 
   auto opts = MakeTestOptions();
-  ComponentCatalog catalog(opts);
+  RuntimeContext catalog(opts);
   CHECK_OK(catalog.start());
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.runtime_context = &catalog});
 
-  RuntimeEventHub hub;
-  ReplicaRuntime runtime(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &hub});
+  absl::Mutex remote_mu;
+  std::vector<RemoteAccessEvent> remote_events;
+  auto remote_subscription = catalog.subscribe_to_events([&](const RuntimeEvent& event) {
+    if (event.type != RuntimeEventType::kRemoteAccessToggled) {
+      return;
+    }
+    const auto* payload = std::get_if<RemoteAccessEvent>(&event.payload);
+    if (payload == nullptr) {
+      return;
+    }
+    absl::MutexLock lock(&remote_mu);
+    remote_events.push_back(*payload);
+  });
+  REQUIRE(remote_subscription != nullptr);
 
   constexpr size_t kGpuBytes = 32 * 1024;
   auto gpu_backing = std::make_shared<std::vector<uint8_t>>(kGpuBytes, 0xA5);
@@ -163,8 +262,31 @@ TEST_CASE("ReplicaRuntime toggles GPU exports and chunk snapshots", "[runtime][r
   CHECK_FALSE(export_or->buffer_addresses.empty());
   CHECK(export_or->device_id == 0);
 
+  catalog.drain_events();
+  std::vector<RemoteAccessEvent> snapshot;
+  {
+    absl::MutexLock lock(&remote_mu);
+    snapshot = remote_events;
+    remote_events.clear();
+  }
+  REQUIRE_FALSE(snapshot.empty());
+  const auto& enable_payload = snapshot.back();
+  CHECK(enable_payload.enabled);
+  CHECK(enable_payload.key.artifact_id == "gpu_artifact");
+
   auto disable_status = runtime.disable_remote_replica_access(gpu_key, MemoryLocation::GPU);
   CHECK(disable_status.ok());
+
+  catalog.drain_events();
+  {
+    absl::MutexLock lock(&remote_mu);
+    snapshot = remote_events;
+    remote_events.clear();
+  }
+  REQUIRE_FALSE(snapshot.empty());
+  const auto& disable_payload = snapshot.back();
+  CHECK_FALSE(disable_payload.enabled);
+  CHECK(disable_payload.key.artifact_id == "gpu_artifact");
 
   auto gpu_chunk_states = runtime.get_chunk_states_for_device("gpu_artifact", 0);
   REQUIRE_FALSE(gpu_chunk_states.empty());

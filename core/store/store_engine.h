@@ -13,15 +13,15 @@
 #include "absl/types/span.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/components/registration/registration_facade.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
-#include "core/store/runtime/artifact_ingress_manager.h"
-#include "core/store/runtime/global_metadata_gateway.h"
-#include "core/store/runtime/replica_info.h"
-#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/ingestion/ingestion_runtime.h"
+#include "core/store/runtime/metadata/metadata_gateway.h"
+#include "core/store/runtime/metadata/metadata_types.h"
+#include "core/store/runtime/replica/replica_info.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/runtime/runtime_env.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
@@ -93,16 +93,16 @@ class StoreEngine {
       const loader::ViewPlan& plan,
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
-  using ViewPlacement = components::ViewPlacement;
-  using CanonicalRange = components::CanonicalRange;
-  using ViewRegistration = components::ViewRegistration;
+  using ViewPlacement = runtime::metadata::ViewPlacement;
+  using CanonicalRange = runtime::metadata::CanonicalRange;
+  using ViewRegistration = runtime::metadata::ViewRegistration;
 
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
 
-  using ArtifactRegistration = components::ArtifactRegistration;
-  using RegistrationBeginResult = components::RegistrationBeginResult;
+  using ArtifactRegistration = runtime::metadata::ArtifactRegistration;
+  using RegistrationBeginResult = runtime::metadata::RegistrationBeginResult;
 
   /**
    * @brief Begin registering an in-memory tensor dict replica.
@@ -119,7 +119,7 @@ class StoreEngine {
    * registering the memory replica with Global Store.  On success, memory
    * ownership remains with the daemon and becomes discoverable by peers.
    */
-  using RegistrationCommitResult = components::RegistrationCommitResult;
+  using RegistrationCommitResult = runtime::metadata::RegistrationCommitResult;
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
 
@@ -287,8 +287,8 @@ class StoreEngine {
 
   std::unique_ptr<runtime::RuntimeEnv> runtime_env_;
   std::unique_ptr<runtime::ReplicaRuntime> replica_runtime_;
-  std::unique_ptr<runtime::GlobalMetadataGateway> metadata_gateway_;
-  std::unique_ptr<runtime::ArtifactIngressManager> ingress_manager_;
+  std::unique_ptr<runtime::metadata::MetadataGateway> metadata_gateway_;
+  std::unique_ptr<runtime::IngestionRuntime> ingestion_runtime_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
       const loading::InlineBufferSource& source,
@@ -304,7 +304,7 @@ class StoreEngine {
       uint32_t grpc_port,
       uint32_t p2p_port) {
     if (runtime_env_) {
-      runtime_env_->UpdateWorkerIdentity(
+      runtime_env_->update_worker_identity(
           std::move(worker_id), std::move(node_id), std::move(node_address), grpc_port, p2p_port);
     }
     if (metadata_gateway_) {

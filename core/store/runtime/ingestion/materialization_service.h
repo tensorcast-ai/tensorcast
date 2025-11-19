@@ -16,7 +16,7 @@
 #include "core/store/replica/replica.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::materialization::control {
+namespace tensorcast::store::runtime::ingestion {
 
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializationRequest;
@@ -66,4 +66,4 @@ class MaterializationService {
       std::shared_future<absl::Status> ready_future) const;
 };
 
-} // namespace tensorcast::store::materialization::control
+} // namespace tensorcast::store::runtime::ingestion

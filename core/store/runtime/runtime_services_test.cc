@@ -11,9 +11,8 @@
 #include "core/common/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/replica_config.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/replica_runtime.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 #include "gsl/pointers"
@@ -24,9 +23,8 @@ using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::loading::InlineBufferSource;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::replica::ReplicaConfig;
-using tensorcast::store::runtime::ComponentCatalog;
 using tensorcast::store::runtime::ReplicaRuntime;
-using tensorcast::store::runtime::RuntimeEventHub;
+using tensorcast::store::runtime::RuntimeContext;
 
 namespace {
 
@@ -44,33 +42,32 @@ StoreEngineOptions MakeTestOptions() {
   return opts;
 }
 
-TEST_CASE("ComponentCatalog start/stop preserves pinned pool", "[component_catalog]") {
+TEST_CASE("RuntimeContext start/stop preserves pinned pool", "[runtime_context]") {
   SKIP_IF_NO_CUDA();
   auto opts = MakeTestOptions();
-  ComponentCatalog catalog(opts);
+  RuntimeContext context(opts);
 
-  auto pool_before = catalog.pinned_buffer_pool();
+  auto pool_before = context.pinned_buffer_pool();
   REQUIRE(pool_before != nullptr);
   REQUIRE(pool_before->slice_bytes() == opts.tx_slice_bytes);
 
-  CHECK_OK(catalog.start());
-  auto pool_after = catalog.pinned_buffer_pool();
+  CHECK_OK(context.start());
+  auto pool_after = context.pinned_buffer_pool();
   REQUIRE(pool_after == pool_before);
-  REQUIRE(catalog.communication_manager() != nullptr);
-  REQUIRE(catalog.communication_manager()->is_enabled());
-  REQUIRE(catalog.options().p2p_port != 0);
+  REQUIRE(context.communication_manager() != nullptr);
+  REQUIRE(context.communication_manager()->is_enabled());
+  REQUIRE(context.options().p2p_port != 0);
 
-  catalog.shutdown();
-  REQUIRE(catalog.communication_manager() == nullptr);
+  context.shutdown();
+  REQUIRE(context.communication_manager() == nullptr);
 }
 
 TEST_CASE("ReplicaRuntime handles inline CPU replicas", "[replica_runtime]") {
   SKIP_IF_NO_CUDA();
   auto opts = MakeTestOptions();
-  ComponentCatalog catalog(opts);
-  CHECK_OK(catalog.start());
-  RuntimeEventHub event_hub;
-  ReplicaRuntime service(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &event_hub});
+  RuntimeContext context(opts);
+  CHECK_OK(context.start());
+  ReplicaRuntime service(ReplicaRuntime::Config{.runtime_context = &context});
 
   constexpr size_t kBufferBytes = 8 * 1024;
   auto backing = std::make_shared<std::vector<uint8_t>>(kBufferBytes, 0xAB);
@@ -82,8 +79,8 @@ TEST_CASE("ReplicaRuntime handles inline CPU replicas", "[replica_runtime]") {
       .artifact_identifier = "inline_artifact",
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
-      .pinned_buffer_pool = gsl::not_null<std::shared_ptr<PinnedBufferPool>>{catalog.pinned_buffer_pool()},
-      .artifact_chunk_bytes = catalog.artifact_chunk_bytes(),
+      .pinned_buffer_pool = gsl::not_null<std::shared_ptr<PinnedBufferPool>>{context.pinned_buffer_pool()},
+      .artifact_chunk_bytes = context.artifact_chunk_bytes(),
       .expected_artifact_size = kBufferBytes};
   config.max_buffer_bytes = kBufferBytes;
   config.pinned_memory_timeout = std::chrono::milliseconds(0);
@@ -104,7 +101,7 @@ TEST_CASE("ReplicaRuntime handles inline CPU replicas", "[replica_runtime]") {
 
   REQUIRE(service.clear_mem() == 0);
   REQUIRE(service.get_resident_devices("inline_artifact").empty());
-  catalog.shutdown();
+  context.shutdown();
 }
 
 } // namespace

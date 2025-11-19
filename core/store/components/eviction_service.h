@@ -30,7 +30,8 @@ absl::Status evict_for_cpu(
     ReplicaRegistry& registry,
     tensorcast::common::memory::PinnedBufferPool& memory_pool,
     MetricsCollector& metrics,
-    size_t required_pinned_pool_bytes);
+    size_t required_pinned_pool_bytes,
+    absl::FunctionRef<void(const loading::ReplicaKey&)> on_evicted);
 
 namespace detail {
 

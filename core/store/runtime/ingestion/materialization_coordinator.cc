@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/materialization/control/materialization_coordinator.h"
+#include "core/store/runtime/ingestion/materialization_coordinator.h"
 
 #include <string_view>
 #include <utility>
@@ -9,14 +9,14 @@
 #include "core/store/materialization/control/materialize_orchestrator.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::materialization::control {
+namespace tensorcast::store::runtime::ingestion {
 
 MaterializationCoordinator::MaterializationCoordinator(Config config)
     : config_(std::move(config)), materialization_service_(make_deps()) {}
 
 MaterializationDeps MaterializationCoordinator::make_deps() const {
   auto& registry = config_.replica_runtime->registry();
-  auto pool = config_.component_catalog->pinned_buffer_pool();
+  auto pool = config_.runtime_context->pinned_buffer_pool();
   auto* backend = const_cast<MaterializationCoordinator*>(this);
   MaterializationDeps deps(
       gsl::not_null<components::ReplicaRegistry*>{&registry},
@@ -31,14 +31,14 @@ MaterializationDeps MaterializationCoordinator::make_deps() const {
                               const loading::MaterializeHints& hints) {
     return config_.pipeline->ingest_from_disk(artifact_identifier, source, target, hints);
   };
-  deps.view_hash_computer = config_.component_catalog->view_hash_computer();
+  deps.view_hash_computer = config_.runtime_context->view_hash_computer();
   deps.run_auto = [this,
                    backend](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
-    auto client = config_.component_catalog->global_store_client();
+    auto client = config_.runtime_context->global_store_client();
     if (!client || !client->is_connected()) {
       return absl::FailedPreconditionError("GlobalStoreClient not connected");
     }
-    MaterializeOrchestrator orchestrator(
+    materialization::control::MaterializeOrchestrator orchestrator(
         gsl::not_null<MaterializationBackend*>{backend}, gsl::not_null<components::IGlobalStoreClient*>{client.get()});
     return orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
   };
@@ -77,11 +77,12 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationCoordinator::ingest_from_d
 
 absl::Status MaterializationCoordinator::register_replica_with_global_store(
     const loading::ReplicaKey& key,
-    std::string_view artifact_id_override) {
+    std::string_view artifact_id_override,
+    std::string_view publish_context_id) {
   if (config_.metadata_gateway == nullptr) {
-    return absl::FailedPreconditionError("GlobalMetadataGateway not initialized");
+    return absl::FailedPreconditionError("MetadataGateway not initialized");
   }
-  return config_.metadata_gateway->register_replica(key, artifact_id_override);
+  return config_.metadata_gateway->register_replica(key, artifact_id_override, publish_context_id);
 }
 
-} // namespace tensorcast::store::materialization::control
+} // namespace tensorcast::store::runtime::ingestion

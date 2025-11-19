@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/runtime/replica_runtime.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 
 #include <limits>
 #include <optional>
@@ -17,11 +17,13 @@
 
 namespace tensorcast::store::runtime {
 
-ReplicaRuntime::ReplicaRuntime(gsl::not_null<ComponentCatalog*> catalog)
-    : ReplicaRuntime(Config{.component_catalog = catalog}) {}
+ReplicaRuntime::ReplicaRuntime(gsl::not_null<RuntimeContext*> context)
+    : ReplicaRuntime(Config{.runtime_context = context}) {}
 
-ReplicaRuntime::ReplicaRuntime(Config config) : catalog_(config.component_catalog), event_hub_(config.event_hub) {
-  subscribe_to_events();
+ReplicaRuntime::ReplicaRuntime(Config config) : context_(config.runtime_context) {
+  if (context_ != nullptr) {
+    event_publisher_ = context_->event_publisher();
+  }
 }
 
 size_t ReplicaRuntime::get_available_memory() const {
@@ -192,6 +194,10 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
   }
 
   const auto& replica = replica_or.value();
+  size_t replica_size = 0;
+  if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
+    replica_size = *size_or;
+  }
   common::memory::MemoryLocation loc =
       (key.device.type == DeviceType::CPU) ? common::memory::MemoryLocation::CPU : common::memory::MemoryLocation::GPU;
 
@@ -237,6 +243,9 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
             << ": unload failed with " << release_status;
   }
 
+  if (release_status.ok()) {
+    publish_replica_event(RuntimeEventType::kReplicaEvicted, key, replica_size);
+  }
   return release_status.ok() ? 0 : -1;
 }
 
@@ -288,7 +297,11 @@ absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
-  return replica_or.value()->enable_remote_memory_access(location, comm->get_engine());
+  auto registration_or = replica_or.value()->enable_remote_memory_access(location, comm->get_engine());
+  if (registration_or.ok()) {
+    publish_remote_access_event(key, location, true);
+  }
+  return registration_or;
 }
 
 absl::Status ReplicaRuntime::disable_remote_replica_access(
@@ -302,11 +315,18 @@ absl::Status ReplicaRuntime::disable_remote_replica_access(
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
-  return replica_or.value()->disable_remote_memory_access(location, comm->get_engine());
+  absl::Status status = replica_or.value()->disable_remote_memory_access(location, comm->get_engine());
+  if (status.ok()) {
+    publish_remote_access_event(key, location, false);
+  }
+  return status;
 }
 
 absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) {
-  return tensorcast::store::components::evict_for_cpu(registry(), *pinned_pool(), metrics(), required_size);
+  return tensorcast::store::components::evict_for_cpu(
+      registry(), *pinned_pool(), metrics(), required_size, [this](const loading::ReplicaKey& evicted_key) {
+        publish_replica_event(RuntimeEventType::kReplicaEvicted, evicted_key, get_replica_size_or_zero(evicted_key));
+      });
 }
 
 std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
@@ -371,16 +391,27 @@ int ReplicaRuntime::clear_mem() {
   std::vector<absl::Status> errors;
 
   for (const auto& [inst_key, replica] : replicas) {
+    size_t replica_size = 0;
+    if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
+      replica_size = *size_or;
+    }
+    bool published = false;
+
     auto cpu_status = replica->release_memory(common::memory::MemoryLocation::CPU);
     if (!cpu_status.ok()) {
       LOG(WARNING) << "Failed to release CPU memory for " << inst_key << ": " << cpu_status.message();
       errors.push_back(cpu_status);
+    } else {
+      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
+      published = true;
     }
 
     auto gpu_status = replica->release_memory(common::memory::MemoryLocation::GPU);
     if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
       LOG(WARNING) << "Failed to release GPU memory for " << inst_key << ": " << gpu_status.message();
       errors.push_back(gpu_status);
+    } else if (gpu_status.ok() && !published) {
+      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
     }
   }
 
@@ -463,7 +494,7 @@ absl::StatusOr<size_t> ReplicaRuntime::get_device_free_memory(int device_id) con
 }
 
 void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) {
-  auto& metrics = catalog_->metrics_collector();
+  auto& metrics = context_->metrics_collector();
   const bool success = event.status.ok();
   const bool from_p2p = event.source == IngestionSource::kP2P;
 
@@ -483,69 +514,84 @@ void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) 
 
   if (success) {
     update_memory_pool_metrics();
+    if (event.replica_key.has_value()) {
+      publish_replica_event(
+          RuntimeEventType::kReplicaLoaded, *event.replica_key, get_replica_size_or_zero(*event.replica_key));
+    }
   }
 }
 
 ReplicaRegistry& ReplicaRuntime::registry() {
-  return catalog_->replica_registry();
+  return context_->replica_registry();
 }
 
 const ReplicaRegistry& ReplicaRuntime::registry() const {
-  return catalog_->replica_registry();
+  return context_->replica_registry();
 }
 
 DeviceManager& ReplicaRuntime::device_manager() {
-  return catalog_->device_manager();
+  return context_->device_manager();
 }
 
 const DeviceManager& ReplicaRuntime::device_manager() const {
-  return catalog_->device_manager();
+  return context_->device_manager();
 }
 
 std::shared_ptr<common::memory::PinnedBufferPool> ReplicaRuntime::pinned_pool() const {
-  return catalog_->pinned_buffer_pool();
+  return context_->pinned_buffer_pool();
 }
 
 std::shared_ptr<CommunicationManager> ReplicaRuntime::communication_manager() const {
-  return catalog_->communication_manager();
+  return context_->communication_manager();
 }
 
 MetricsCollector& ReplicaRuntime::metrics() {
-  return catalog_->metrics_collector();
+  return context_->metrics_collector();
 }
 
 const MetricsCollector& ReplicaRuntime::metrics() const {
-  return catalog_->metrics_collector();
+  return context_->metrics_collector();
 }
 
-void ReplicaRuntime::subscribe_to_events() {
-  if (event_hub_ == nullptr) {
+void ReplicaRuntime::publish_replica_event(RuntimeEventType type, const loading::ReplicaKey& key, size_t size_bytes)
+    const {
+  if (!event_publisher_) {
     return;
   }
-  ingress_subscription_ = event_hub_->subscribe([this](const RuntimeEvent& event) {
-    switch (event.type) {
-      case RuntimeEventType::kIngressCompleted: {
-        const auto* payload = std::get_if<IngestionResultEvent>(&event.payload);
-        if (payload == nullptr) {
-          return;
-        }
-        record_ingestion_result(*payload);
-        break;
-      }
-      case RuntimeEventType::kRegistrationCommitted:
-      case RuntimeEventType::kRegistrationAborted: {
-        const auto* registration = std::get_if<RegistrationEvent>(&event.payload);
-        if (registration == nullptr) {
-          return;
-        }
-        // Registration completion or abort modifies UMA allocations, so refresh metrics.
-        update_memory_pool_metrics();
-        break;
-      }
-      default:
-        break;
-    }
-  });
+  RuntimeEvent event;
+  event.type = type;
+  ReplicaLifecycleEvent payload;
+  payload.key = key;
+  payload.size_bytes = size_bytes;
+  event.payload = std::move(payload);
+  event_publisher_.publish(std::move(event));
+}
+
+void ReplicaRuntime::publish_remote_access_event(
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation location,
+    bool enabled) const {
+  if (!event_publisher_) {
+    return;
+  }
+  RuntimeEvent event;
+  event.type = RuntimeEventType::kRemoteAccessToggled;
+  RemoteAccessEvent payload;
+  payload.key = key;
+  payload.location = location;
+  payload.enabled = enabled;
+  event.payload = std::move(payload);
+  event_publisher_.publish(std::move(event));
+}
+
+size_t ReplicaRuntime::get_replica_size_or_zero(const loading::ReplicaKey& key) const {
+  auto size_or = get_replica_size(key);
+  if (!size_or.ok()) {
+    VLOG(1) << "ReplicaRuntime could not determine size for artifact=" << key.artifact_id
+            << " device=" << key.device.ordinal << ": " << size_or.status();
+    return 0;
+  }
+  return *size_or;
 }
 
 } // namespace tensorcast::store::runtime
