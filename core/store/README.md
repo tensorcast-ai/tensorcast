@@ -23,9 +23,14 @@ Key files:
   - VerificationService: core/store/materialization/dataplane/verification/verification_utils.{h,cc}
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
-  - Runtime catalog + services:
-    - ComponentCatalog: core/store/components/runtime/component_catalog.{h,cc} (bootstraps DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, PinnedBufferPool, and the optional Global Store client with a single lifecycle).
-    - ReplicaService: core/store/components/runtime/replica_service.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, and remote access toggles; StoreEngine now queries replicas exclusively through this facade).
+  - Runtime catalog + services (core/store/runtime/**):
+    - ComponentCatalog: core/store/runtime/component_catalog.{h,cc} (initializes the shared PinnedBufferPool, DeviceManager, ReplicaRegistry, MetricsCollector, and instantiates a default `components::CommunicationManager` when `StoreEngineOptions` does not supply one so P2P rendezvous stays consistent).
+    - RuntimeEnv: core/store/runtime/runtime_env.{h,cc} (bootstraps ComponentCatalog, owns worker identity, and provides the RuntimeEventHub for intra-runtime signals).
+    - ReplicaRuntime: core/store/runtime/replica_runtime.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, and remote access toggles; StoreEngine now queries replicas exclusively through this facade).
+    - Ingestion events: core/store/runtime/ingestion_events.h (canonical definitions for runtime ingestion hooks shared by ReplicaRuntime, RuntimeEventHub, and ArtifactIngressManager).
+    - GlobalMetadataGateway: core/store/runtime/global_metadata_gateway.{h,cc} (the sole publisher for Global Store replica metadata, variant updates, and key-mapping CRUD; hides the Global Store client from higher layers).
+    - ArtifactIngressManager: core/store/runtime/artifact_ingress_manager.{h,cc} (orchestrates ingestion pipelines, registration flows, and delegates UMA allocations to ReplicaRuntime).
+    - RuntimeEventHub: core/store/runtime/runtime_event_hub.{h,cc} (synchronous event fan-out for replica lifecycle, ingress completion, and metadata churn).
 - Components: core/store/components/*
 - Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
@@ -89,7 +94,8 @@ graph TB
   TS --> PUMP
 ```
 
-Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime facade. Construction now builds a `components::runtime::ComponentCatalog`, which sequentially validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `components::runtime::ReplicaService`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `components::runtime::GlobalStorePublisher` is the sole component that talks to Global Store; `StoreEngine`, the ingestion pipeline, and the registration facade emit events and the publisher translates them into register/unregister/key-mapping RPCs. `components::runtime::TelemetryService` consumes the same events and the replica service snapshots to keep metrics and daemon-facing queries consistent without duplicating logic in the facade. This keeps the ingestion/materialization logic focused on orchestration while the catalog/services encapsulate ownership and telemetry.
+`StoreEngine` is treated as a thin runtime facade. Construction delegates to `runtime::RuntimeEnv`, which validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, owns worker identity, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `runtime::ReplicaRuntime`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `runtime::GlobalMetadataGateway` is the sole component that talks to Global Store; `StoreEngine`, the ingestion pipeline, and the registration facade emit events and the gateway translates them into register/unregister/key-mapping RPCs. `runtime::ArtifactIngressManager` unifies ingestion (disk, P2P, inline) and registration flows while emitting structured events through `RuntimeEventHub`, keeping orchestration focused on intent while dedicated modules encapsulate lifecycle, telemetry, and metadata ownership. ReplicaRuntime and GlobalMetadataGateway now subscribe to these ingress notifications via `RuntimeEventHub`, so UMA telemetry updates and Global Store registration happen automatically once an ingestion finishes—StoreEngine no longer makes direct calls in the façade methods. Memory-registration commits and aborts emit their own RuntimeEventHub payloads; ArtifactIngressManager publishes `RegistrationCommitted` / `RegistrationAborted` events with replica metadata, ReplicaRuntime refreshes UMA metrics in response, and downstream metrics/log exporters observe the same ordered stream instead of ad-hoc `StoreEngine` callbacks.
+
 ## UMA V3 Cutover (single ledger)
 
 - Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
@@ -121,9 +127,10 @@ Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime fa
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
     - Allocates target GPU memory via a temporary `Replica` and returns a CUDA IPC handle so the caller can write directly.
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
-    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, and registers with Global Store.
+    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, registers with Global Store, and emits a `RegistrationCommitted` RuntimeEventHub notification. The returned `RegistrationCommitResult` now includes a `DeviceKey device` describing the committed residency alongside `device_id` for ABI compatibility.
   - `abort_registered_artifact(string_view registration_id)`
-  - Implementation is provided by `components::RegistrationFacade`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events. Global Store publication is delegated to `components::runtime::GlobalStorePublisher` so the facade never reaches into the Global Store client directly.
+    - Releases UMA allocations for the pending session, refreshes UMA telemetry via ReplicaRuntime, and emits a `RegistrationAborted` RuntimeEventHub event (including error status when the abort is triggered by failures instead of clients).
+  - Implementation is provided by `components::RegistrationFacade`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events. Global Store publication is delegated to `runtime::GlobalMetadataGateway` so the facade never reaches into the Global Store client directly.
 
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`

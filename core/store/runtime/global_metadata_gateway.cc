@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/runtime/global_store_publisher.h"
+#include "core/store/runtime/global_metadata_gateway.h"
 
 #include <string>
 #include <utility>
@@ -10,7 +10,7 @@
 #include "absl/strings/match.h"
 #include "core/store/materialization/control/replica_registration_helper.h"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
 namespace {
 
@@ -28,21 +28,35 @@ absl::StatusOr<std::string> canonical_artifact_id(
 
 } // namespace
 
-GlobalStorePublisher::GlobalStorePublisher(Config config)
+GlobalMetadataGateway::GlobalMetadataGateway(Config config)
     : component_catalog_(gsl::not_null<ComponentCatalog*>{config.component_catalog}),
-      replica_service_(gsl::not_null<ReplicaService*>{config.replica_service}) {}
+      replica_runtime_(gsl::not_null<ReplicaRuntime*>{config.replica_runtime}),
+      event_hub_(config.event_hub) {
+  if (event_hub_ != nullptr) {
+    ingress_subscription_ = event_hub_->subscribe([this](const RuntimeEvent& event) {
+      if (event.type != RuntimeEventType::kIngressCompleted) {
+        return;
+      }
+      const auto* ingress = std::get_if<IngestionResultEvent>(&event.payload);
+      if (ingress == nullptr) {
+        return;
+      }
+      handle_ingestion_result(*ingress);
+    });
+  }
+}
 
-bool GlobalStorePublisher::is_connected() const {
+bool GlobalMetadataGateway::is_connected() const {
   auto client = override_client_ ? override_client_ : component_catalog_->global_store_client();
   return client != nullptr && client->is_connected();
 }
 
-void GlobalStorePublisher::set_client_override(std::shared_ptr<components::IGlobalStoreClient> client) {
+void GlobalMetadataGateway::set_client_override(std::shared_ptr<components::IGlobalStoreClient> client) {
   override_client_ = std::move(client);
   refresh_override_endpoint();
 }
 
-void GlobalStorePublisher::refresh_override_endpoint() {
+void GlobalMetadataGateway::refresh_override_endpoint() {
   if (!override_client_) {
     return;
   }
@@ -51,7 +65,7 @@ void GlobalStorePublisher::refresh_override_endpoint() {
       identity.node_id, identity.node_address, identity.grpc_port, identity.p2p_port);
 }
 
-void GlobalStorePublisher::handle_ingestion_result(const IngestionResultEvent& event) {
+void GlobalMetadataGateway::handle_ingestion_result(const IngestionResultEvent& event) {
   if (!is_connected() || !event.publish_to_global_store) {
     return;
   }
@@ -67,7 +81,7 @@ void GlobalStorePublisher::handle_ingestion_result(const IngestionResultEvent& e
   }
 }
 
-absl::Status GlobalStorePublisher::register_replica(
+absl::Status GlobalMetadataGateway::register_replica(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override) {
   auto client_or = get_connected_client();
@@ -77,11 +91,11 @@ absl::Status GlobalStorePublisher::register_replica(
   auto client = std::move(*client_or);
 
   if (key.view_id.has_value()) {
-    VLOG(1) << "GlobalStorePublisher registering variant view_id=" << *key.view_id
+    VLOG(1) << "GlobalMetadataGateway registering variant view_id=" << *key.view_id
             << " (canonical_artifact_id=" << key.artifact_id << ")";
   }
 
-  auto size_or = replica_service_->get_replica_size(key);
+  auto size_or = replica_runtime_->get_replica_size(key);
   if (!size_or.ok()) {
     return size_or.status();
   }
@@ -119,7 +133,7 @@ absl::Status GlobalStorePublisher::register_replica(
   return register_status;
 }
 
-absl::Status GlobalStorePublisher::unregister_replica(std::string_view artifact_id, int device_id) {
+absl::Status GlobalMetadataGateway::unregister_replica(std::string_view artifact_id, int device_id) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
@@ -129,7 +143,7 @@ absl::Status GlobalStorePublisher::unregister_replica(std::string_view artifact_
       artifact_id, worker_id(), common::memory::MemoryLocation::GPU, static_cast<uint32_t>(device_id));
 }
 
-absl::StatusOr<components::KeyMapping> GlobalStorePublisher::resolve_key_mapping(std::string_view key) const {
+absl::StatusOr<components::KeyMapping> GlobalMetadataGateway::resolve_key_mapping(std::string_view key) const {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
@@ -137,7 +151,7 @@ absl::StatusOr<components::KeyMapping> GlobalStorePublisher::resolve_key_mapping
   return (*client_or)->resolve_key_mapping(key);
 }
 
-absl::StatusOr<std::string> GlobalStorePublisher::get_canonical_index(std::string_view artifact_id) const {
+absl::StatusOr<std::string> GlobalMetadataGateway::get_canonical_index(std::string_view artifact_id) const {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
@@ -145,7 +159,7 @@ absl::StatusOr<std::string> GlobalStorePublisher::get_canonical_index(std::strin
   return (*client_or)->get_artifact_index_by_id(artifact_id);
 }
 
-absl::Status GlobalStorePublisher::upsert_key_mapping(
+absl::Status GlobalMetadataGateway::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
     std::string_view disk_path,
@@ -157,7 +171,7 @@ absl::Status GlobalStorePublisher::upsert_key_mapping(
   return (*client_or)->upsert_key_mapping(key, artifact_id, disk_path, ttl);
 }
 
-absl::Status GlobalStorePublisher::revoke_key_mapping(std::string_view key) {
+absl::Status GlobalMetadataGateway::revoke_key_mapping(std::string_view key) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
@@ -165,7 +179,7 @@ absl::Status GlobalStorePublisher::revoke_key_mapping(std::string_view key) {
   return (*client_or)->revoke_key_mapping(key);
 }
 
-absl::Status GlobalStorePublisher::publish_registration(const RegistrationPublication& publication) {
+absl::Status GlobalMetadataGateway::publish_registration(const RegistrationPublication& publication) {
   if (!is_connected()) {
     return absl::OkStatus();
   }
@@ -194,7 +208,7 @@ absl::Status GlobalStorePublisher::publish_registration(const RegistrationPublic
   return absl::OkStatus();
 }
 
-absl::Status GlobalStorePublisher::update_variant_view(const components::VariantViewUpdate& update) {
+absl::Status GlobalMetadataGateway::update_variant_view(const components::VariantViewUpdate& update) {
   if (!is_connected()) {
     return absl::OkStatus();
   }
@@ -205,12 +219,12 @@ absl::Status GlobalStorePublisher::update_variant_view(const components::Variant
   return (*client_or)->update_artifact_view_state(update);
 }
 
-std::string GlobalStorePublisher::worker_id() const {
+std::string GlobalMetadataGateway::worker_id() const {
   const auto& identity = component_catalog_->worker_identity();
   return identity.worker_id.empty() ? std::string("local") : identity.worker_id;
 }
 
-absl::StatusOr<std::shared_ptr<components::IGlobalStoreClient>> GlobalStorePublisher::get_connected_client() const {
+absl::StatusOr<std::shared_ptr<components::IGlobalStoreClient>> GlobalMetadataGateway::get_connected_client() const {
   auto client = override_client_ ? override_client_ : component_catalog_->global_store_client();
   if (!client || !client->is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
@@ -218,4 +232,4 @@ absl::StatusOr<std::shared_ptr<components::IGlobalStoreClient>> GlobalStorePubli
   return client;
 }
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime

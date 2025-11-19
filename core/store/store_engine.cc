@@ -9,20 +9,17 @@
 #include <cstring>
 #include <filesystem>
 #include <memory>
+#include <utility>
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/misc/common.h"
-#include "core/store/components/eviction_service.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
-#include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/replica/memory_state.h"
-#include "core/store/replica/replica_config.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store {
@@ -31,7 +28,6 @@ using common::memory::MemoryLocation;
 using loading::ReplicaHandle;
 using loading::ReplicaKey;
 using replica::MemoryState;
-using replica::Replica;
 
 // (hashing utilities moved to core/common/artifact_hash.*)
 // GPU eviction helper kept internal to this translation unit.
@@ -50,7 +46,7 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       num_thread_(opts.num_thread),
       tx_slice_bytes_(opts.tx_slice_bytes),
       pinned_memory_timeout_(opts.pinned_memory_timeout),
-      component_catalog_(std::make_unique<components::runtime::ComponentCatalog>(opts)) {
+      runtime_env_(std::make_unique<runtime::RuntimeEnv>(opts)) {
   LOG(INFO) << "Initializing StoreEngine with unified Options constructor";
   LOG(INFO) << "Storage path: "
             << (storage_path_.empty() ? "<empty - artifact_identifier will be full path>" : storage_path_.string());
@@ -58,85 +54,53 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
   LOG(INFO) << "I/O threads: " << num_thread_ << ", tx_slice_bytes: " << tx_slice_bytes_ / communicator::misc::MB
             << "MB";
 
-  auto catalog_status = component_catalog_->start();
-  CHECK(catalog_status.ok()) << "Failed to initialize ComponentCatalog: " << catalog_status;
-  replica_service_ = std::make_unique<components::runtime::ReplicaService>(component_catalog_.get());
-  global_store_publisher_ =
-      std::make_unique<components::runtime::GlobalStorePublisher>(components::runtime::GlobalStorePublisher::Config{
-          .component_catalog = component_catalog_.get(), .replica_service = replica_service_.get()});
-  telemetry_service_ =
-      std::make_unique<components::runtime::TelemetryService>(components::runtime::TelemetryService::Config{
-          .component_catalog = component_catalog_.get(), .replica_service = replica_service_.get()});
-  materialization::runtime::pipeline::IngestionPipeline::Config pipeline_config{
+  auto init_status = runtime_env_->Initialize();
+  CHECK(init_status.ok()) << "Failed to initialize RuntimeEnv: " << init_status;
+
+  auto& catalog = runtime_env_->component_catalog();
+  auto* event_hub = &runtime_env_->event_hub();
+  runtime::ReplicaRuntime::Config replica_config{
+      .component_catalog = &catalog,
+      .event_hub = event_hub,
+  };
+  replica_runtime_ = std::make_unique<runtime::ReplicaRuntime>(replica_config);
+  metadata_gateway_ = std::make_unique<runtime::GlobalMetadataGateway>(runtime::GlobalMetadataGateway::Config{
+      .component_catalog = &catalog,
+      .replica_runtime = replica_runtime_.get(),
+      .event_hub = event_hub,
+  });
+  runtime::ArtifactIngressManager::Config ingress_config{
+      .env = runtime_env_.get(),
+      .replica_runtime = replica_runtime_.get(),
+      .metadata_gateway = metadata_gateway_.get(),
       .storage_path = storage_path_,
-      .num_threads = num_thread_,
-      .artifact_chunk_bytes = artifact_chunk_bytes_,
-      .pinned_memory_timeout = pinned_memory_timeout_,
-      .engine_options = &options_,
-      .replica_service = replica_service_.get(),
-      .component_catalog = component_catalog_.get(),
-      .telemetry_service = telemetry_service_.get(),
-      .global_store_publisher = global_store_publisher_.get(),
-  };
-  ingestion_pipeline_ =
-      std::make_unique<materialization::runtime::pipeline::IngestionPipeline>(std::move(pipeline_config));
-  materialization::control::MaterializationCoordinator::Config coordinator_config{
-      .replica_service = replica_service_.get(),
-      .pipeline = ingestion_pipeline_.get(),
-      .component_catalog = component_catalog_.get(),
-      .global_store_publisher = global_store_publisher_.get(),
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .pinned_memory_timeout = pinned_memory_timeout_,
       .num_threads = num_thread_,
+      .options = &options_,
   };
-  materialization_coordinator_ =
-      std::make_unique<materialization::control::MaterializationCoordinator>(std::move(coordinator_config));
+  ingress_manager_ = std::make_unique<runtime::ArtifactIngressManager>(std::move(ingress_config));
 
-  {
-    auto* device_manager_ptr = &component_catalog_->device_manager();
-    auto* replica_registry_ptr = &replica_service_->registry();
-    auto* metrics_collector_ptr = &component_catalog_->metrics_collector();
-    components::RegistrationResources registration_resources{
-        .device_manager = gsl::not_null<components::DeviceManager*>{device_manager_ptr},
-        .replica_registry = gsl::not_null<components::ReplicaRegistry*>{replica_registry_ptr},
-        .metrics_collector = gsl::not_null<components::MetricsCollector*>{metrics_collector_ptr},
-        .memory_pool =
-            gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{component_catalog_->pinned_buffer_pool()},
-        .communication_manager = component_catalog_->communication_manager()};
-    components::ReplicaFactory replica_factory =
-        [](const replica::ReplicaConfig& config) -> absl::StatusOr<std::shared_ptr<replica::Replica>> {
-      auto create_or = Replica::create(config);
-      if (!create_or.ok()) {
-        return create_or.status();
-      }
-      return std::shared_ptr<replica::Replica>(std::move(create_or.value()));
-    };
-    registration_facade_ = std::make_unique<components::RegistrationFacade>(
-        std::move(registration_resources),
-        std::move(replica_factory),
-        artifact_chunk_bytes_,
-        pinned_memory_timeout_,
-        global_store_publisher_.get());
-  }
-
-  component_catalog_->metrics_collector().update_all_metrics(
-      *component_catalog_->pinned_buffer_pool(), replica_service_->registry(), component_catalog_->device_manager());
+  catalog.metrics_collector().update_all_metrics(
+      *catalog.pinned_buffer_pool(), replica_runtime_->registry(), catalog.device_manager());
 }
 
 StoreEngine::~StoreEngine() {
   LOG(INFO) << "Shutting down StoreEngine";
-  if (replica_service_) {
-    replica_service_->clear_mem();
+  if (replica_runtime_) {
+    replica_runtime_->clear_mem();
   }
-  if (component_catalog_) {
-    component_catalog_->shutdown();
+  if (runtime_env_) {
+    runtime_env_->Shutdown();
   }
 }
 
 void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
-  component_catalog_->set_global_store_client_for_testing(client);
-  if (global_store_publisher_) {
-    global_store_publisher_->set_client_override(std::move(client));
+  if (runtime_env_) {
+    runtime_env_->set_global_store_client_for_testing(client);
+  }
+  if (metadata_gateway_) {
+    metadata_gateway_->set_client_override(std::move(client));
   }
 }
 
@@ -145,19 +109,19 @@ void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components
 // ═══════════════════════════════════════════════════════════════════════════
 
 size_t StoreEngine::get_available_memory() const {
-  return telemetry_service_->get_available_memory();
+  return replica_runtime_->get_available_memory();
 }
 
 void StoreEngine::update_memory_pool_metrics() {
-  telemetry_service_->update_memory_pool_metrics();
+  replica_runtime_->update_memory_pool_metrics();
 }
 
 std::vector<StoreEngine::ReplicaInfo> StoreEngine::get_all_replicas_info() const {
-  return telemetry_service_->get_all_replicas_info();
+  return replica_runtime_->get_all_replicas_info();
 }
 
 absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(std::string_view artifact_id) const {
-  return telemetry_service_->get_unique_gpu_residency(artifact_id);
+  return replica_runtime_->get_unique_gpu_residency(artifact_id);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
@@ -165,7 +129,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
     const P2PSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return ingestion_pipeline_->ingest_from_p2p(artifact_identifier, source, target, hints);
+  return ingress_manager_->ingest_from_p2p(artifact_identifier, source, target, hints);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk(
@@ -173,7 +137,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk(
     const loading::DiskSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return ingestion_pipeline_->ingest_from_disk(artifact_identifier, source, target, hints);
+  return ingress_manager_->ingest_from_disk(artifact_identifier, source, target, hints);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
@@ -192,11 +156,11 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
 // Query helpers
 // ---------------------------------------------------------------------------
 std::vector<DeviceKey> StoreEngine::get_resident_devices(std::string_view artifact_id) const {
-  return telemetry_service_->get_resident_devices(artifact_id);
+  return replica_runtime_->get_resident_devices(artifact_id);
 }
 
 std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& device) const {
-  return telemetry_service_->list_device_replicas(device);
+  return replica_runtime_->list_device_replicas(device);
 }
 
 // ---------------------------------------------------------------------------
@@ -204,33 +168,33 @@ std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& devic
 // ---------------------------------------------------------------------------
 
 int StoreEngine::wait_replica_ready(const ReplicaKey& key) {
-  return replica_service_->wait_replica_ready(key);
+  return replica_runtime_->wait_replica_ready(key);
 }
 
 int StoreEngine::unload_replica(const ReplicaKey& key) {
-  return replica_service_->unload_replica(key);
+  return replica_runtime_->unload_replica(key);
 }
 
 MemoryState StoreEngine::get_replica_state(const ReplicaKey& key, DeviceType memory_type) const {
-  return replica_service_->get_replica_state(key, memory_type);
+  return replica_runtime_->get_replica_state(key, memory_type);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_replica_gpu_ptr(const ReplicaKey& key) {
-  return replica_service_->get_replica_gpu_ptr(key);
+  return replica_runtime_->get_replica_gpu_ptr(key);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_replica_size(const ReplicaKey& key) {
-  return replica_service_->get_replica_size(key);
+  return replica_runtime_->get_replica_size(key);
 }
 
 absl::StatusOr<ExportRegistration> StoreEngine::enable_remote_replica_access(
     const ReplicaKey& key,
     MemoryLocation location) {
-  return replica_service_->enable_remote_replica_access(key, location);
+  return replica_runtime_->enable_remote_replica_access(key, location);
 }
 
 absl::Status StoreEngine::disable_remote_replica_access(const ReplicaKey& key, MemoryLocation location) {
-  return replica_service_->disable_remote_replica_access(key, location);
+  return replica_runtime_->disable_remote_replica_access(key, location);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -238,14 +202,14 @@ absl::Status StoreEngine::disable_remote_replica_access(const ReplicaKey& key, M
 // ═══════════════════════════════════════════════════════════════════════════
 
 int StoreEngine::clear_mem() {
-  return replica_service_->clear_mem();
+  return replica_runtime_->clear_mem();
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
     const loading::MaterializeHints& hints) {
-  return materialization_coordinator_->Materialize(target_device, mode, hints);
+  return ingress_manager_->materialize_replica(target_device, mode, hints);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -255,11 +219,11 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
 absl::Status StoreEngine::register_replica_with_global_store(
     const ReplicaKey& key,
     std::string_view artifact_id_override) {
-  return materialization_coordinator_->register_replica_with_global_store(key, artifact_id_override);
+  return ingress_manager_->register_replica_with_global_store(key, artifact_id_override);
 }
 
 absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view artifact_id, int device_id) {
-  return global_store_publisher_->unregister_replica(artifact_id, device_id);
+  return metadata_gateway_->unregister_replica(artifact_id, device_id);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -267,11 +231,11 @@ absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view 
 // ═══════════════════════════════════════════════════════════════════════════
 
 absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {
-  return global_store_publisher_->resolve_key_mapping(key);
+  return metadata_gateway_->resolve_key_mapping(key);
 }
 
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
-  return global_store_publisher_->get_canonical_index(artifact_id);
+  return metadata_gateway_->get_canonical_index(artifact_id);
 }
 
 absl::Status StoreEngine::upsert_key_mapping(
@@ -279,11 +243,11 @@ absl::Status StoreEngine::upsert_key_mapping(
     std::string_view artifact_id,
     std::string_view disk_path,
     absl::Duration ttl) {
-  return global_store_publisher_->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+  return metadata_gateway_->upsert_key_mapping(key, artifact_id, disk_path, ttl);
 }
 
 absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
-  return global_store_publisher_->revoke_key_mapping(key);
+  return metadata_gateway_->revoke_key_mapping(key);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -292,75 +256,57 @@ absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
 
 absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact(
     const ArtifactRegistration& reg) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->begin(reg);
+  return ingress_manager_->begin_registration(reg);
 }
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
     std::string_view registration_id) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->commit(registration_id);
+  return ingress_manager_->commit_registration(registration_id);
 }
 
 absl::Status StoreEngine::ingest_view_registration_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
     absl::Span<const std::byte> data) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->ingest_view_chunk(registration_id, view_offset, data);
+  return ingress_manager_->ingest_view_chunk(registration_id, view_offset, data);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_view_registration_ingested_bytes(std::string_view registration_id) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->get_view_ingested_bytes(registration_id);
+  return ingress_manager_->get_view_ingested_bytes(registration_id);
 }
 
 absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->keep_alive(registration_id, ttl_ms);
+  return ingress_manager_->keep_alive_registration(registration_id, ttl_ms);
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {
-  if (!registration_facade_) {
-    return absl::FailedPreconditionError("registration manager is not initialized");
-  }
-  return registration_facade_->abort(registration_id);
+  return ingress_manager_->abort_registration(registration_id);
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_telemetry(std::string_view artifact_id) const {
-  return telemetry_service_->get_chunk_states_telemetry(artifact_id);
+  return replica_runtime_->get_chunk_states_telemetry(artifact_id);
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_for_device(std::string_view artifact_id, int device_id)
     const {
-  return telemetry_service_->get_chunk_states_for_device(artifact_id, device_id);
+  return replica_runtime_->get_chunk_states_for_device(artifact_id, device_id);
 }
 
 // GPU device queries (exposed for status/health reporting)
 absl::StatusOr<size_t> StoreEngine::get_device_total_memory(int device_id) const {
-  return telemetry_service_->get_device_total_memory(device_id);
+  return replica_runtime_->get_device_total_memory(device_id);
 }
 
 absl::StatusOr<size_t> StoreEngine::get_device_free_memory(int device_id) const {
-  return telemetry_service_->get_device_free_memory(device_id);
+  return replica_runtime_->get_device_free_memory(device_id);
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_cpu_uma(std::string_view artifact_id) const {
-  return telemetry_service_->get_chunk_states_cpu_uma(artifact_id);
+  return replica_runtime_->get_chunk_states_cpu_uma(artifact_id);
 }
 
 gsl::not_null<std::shared_ptr<components::CommunicationManager>> StoreEngine::get_shared_comm_manager() const {
-  auto comm_mgr = component_catalog_->communication_manager();
+  auto comm_mgr = runtime_env_->component_catalog().communication_manager();
   CHECK(comm_mgr != nullptr) << "StoreEngine ComponentCatalog returned null CommunicationManager";
   return gsl::not_null<std::shared_ptr<components::CommunicationManager>>{comm_mgr};
 }

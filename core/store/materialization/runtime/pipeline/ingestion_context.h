@@ -12,15 +12,17 @@
 #include "absl/status/status.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/replica_service.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
+
+namespace store_runtime = tensorcast::store::runtime;
 
 enum class SourceType { kDisk, kP2P };
 
@@ -62,8 +64,8 @@ struct IngestionContext {
   int num_threads{0};
   std::chrono::milliseconds pinned_memory_timeout{0};
   const StoreEngineOptions* options{nullptr};
-  components::runtime::ReplicaService* replica_service{nullptr};
-  components::runtime::ComponentCatalog* component_catalog{nullptr};
+  store_runtime::ReplicaRuntime* replica_runtime{nullptr};
+  store_runtime::ComponentCatalog* component_catalog{nullptr};
 
   DiskSourceMetadata disk;
   P2PSourceMetadata p2p;

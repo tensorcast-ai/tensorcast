@@ -7,7 +7,7 @@
 
 #include "core/common/memory/memory_location.h"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
 struct ReplicaInfo {
   std::string artifact_id;
@@ -21,4 +21,4 @@ struct ReplicaInfo {
   std::chrono::time_point<std::chrono::system_clock> load_time;
 };
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime

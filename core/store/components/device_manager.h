@@ -84,7 +84,7 @@ class DeviceManager {
    * @param device_id GPU device ID
    * @return Free memory in bytes or error
    */
-  absl::StatusOr<size_t> get_free_memory(int device_id);
+  absl::StatusOr<size_t> get_free_memory(int device_id) const;
 
   // ------------------------------------------------------------------
   // Testing helpers
@@ -95,7 +95,7 @@ class DeviceManager {
 
  private:
   int num_gpus_ = 0;
-  std::unordered_map<int, GpuInfo> gpu_info_map_;
+  mutable std::unordered_map<int, GpuInfo> gpu_info_map_;
 
   // OTel meter and ObservableGauge registrations for GPU memory metrics
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;

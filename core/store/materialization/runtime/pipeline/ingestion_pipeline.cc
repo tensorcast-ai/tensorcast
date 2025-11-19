@@ -13,6 +13,8 @@
 
 namespace tensorcast::store::materialization::runtime::pipeline {
 
+namespace store_runtime = tensorcast::store::runtime;
+
 namespace otel = opentelemetry;
 
 namespace {
@@ -49,12 +51,13 @@ void emit_ingestion_event(
     const IngestionContext& ctx,
     const absl::Status& status,
     const loading::ReplicaHandle* handle) {
-  if (!config.telemetry_service && !config.global_store_publisher) {
+  const bool has_event_hub = config.event_hub != nullptr;
+  if (!has_event_hub && !config.replica_runtime && !config.metadata_gateway) {
     return;
   }
-  components::runtime::IngestionResultEvent event;
-  event.source = ctx.source_type == SourceType::kP2P ? components::runtime::IngestionSource::kP2P
-                                                     : components::runtime::IngestionSource::kDisk;
+  store_runtime::IngestionResultEvent event;
+  event.source = ctx.source_type == SourceType::kP2P ? store_runtime::IngestionSource::kP2P
+                                                     : store_runtime::IngestionSource::kDisk;
   event.artifact_id = ctx.artifact_identifier;
   event.target_device = ctx.target_device;
   event.target_location = ctx.target_location;
@@ -71,11 +74,18 @@ void emit_ingestion_event(
   }
   event.publish_to_global_store = ctx.publish_to_global_store;
 
-  if (config.telemetry_service) {
-    config.telemetry_service->record_ingestion_result(event);
+  if (has_event_hub) {
+    store_runtime::RuntimeEvent runtime_event;
+    runtime_event.type = store_runtime::RuntimeEventType::kIngressCompleted;
+    runtime_event.payload = event;
+    config.event_hub->publish(runtime_event);
+    return;
   }
-  if (status.ok() && handle != nullptr && ctx.publish_to_global_store && config.global_store_publisher) {
-    config.global_store_publisher->handle_ingestion_result(event);
+  if (config.replica_runtime) {
+    config.replica_runtime->record_ingestion_result(event);
+  }
+  if (status.ok() && handle != nullptr && ctx.publish_to_global_store && config.metadata_gateway) {
+    config.metadata_gateway->handle_ingestion_result(event);
   }
 }
 
@@ -96,7 +106,7 @@ absl::Status initialize_context(
   ctx.num_threads = config.num_threads;
   ctx.pinned_memory_timeout = config.pinned_memory_timeout;
   ctx.options = config.engine_options;
-  ctx.replica_service = config.replica_service;
+  ctx.replica_runtime = config.replica_runtime;
   ctx.component_catalog = config.component_catalog;
   ctx.target_device = target.location.to_device_key();
   ctx.target_is_gpu = ctx.target_device.type == DeviceType::GPU;
@@ -104,14 +114,14 @@ absl::Status initialize_context(
   ctx.target_device_id = ctx.target_device.ordinal;
   ctx.publish_to_global_store = publish_to_global_store;
   if (ctx.target_is_gpu && !ctx.target_device.uuid.empty()) {
-    auto device_result = ctx.replica_service->device_manager().find_device_by_uuid(ctx.target_device.uuid);
+    auto device_result = ctx.replica_runtime->device_manager().find_device_by_uuid(ctx.target_device.uuid);
     if (!device_result.ok()) {
       return device_result.status();
     }
     ctx.target_device_id = device_result.value();
   }
   if (ctx.target_is_gpu) {
-    const int num_gpus = ctx.replica_service->device_manager().get_num_gpus();
+    const int num_gpus = ctx.replica_runtime->device_manager().get_num_gpus();
     if (ctx.target_device_id < 0 || ctx.target_device_id >= num_gpus) {
       return absl::InvalidArgumentError(
           absl::StrCat("Invalid GPU device ordinal: ", ctx.target_device_id, " (", num_gpus, " devices available)"));
@@ -124,7 +134,7 @@ absl::Status initialize_context(
 
 IngestionPipeline::IngestionPipeline(Config config) : config_(std::move(config)) {
   ABSL_DCHECK(config_.engine_options != nullptr);
-  ABSL_DCHECK(config_.replica_service != nullptr);
+  ABSL_DCHECK(config_.replica_runtime != nullptr);
   ABSL_DCHECK(config_.component_catalog != nullptr);
 }
 

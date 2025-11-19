@@ -25,9 +25,10 @@
 #include "core/store/components/device_manager.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/components/runtime/global_store_publisher.h"
+#include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/global_metadata_gateway.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
 
@@ -71,6 +72,7 @@ struct RegistrationCommitResult {
   std::string registration_id;
   std::string artifact_id;
   int device_id{0};
+  DeviceKey device;
   uint64_t size_bytes{0};
   bool existed{false};
   std::string index_multihash;
@@ -102,7 +104,7 @@ class RegistrationFacade {
       ReplicaFactory replica_factory,
       size_t artifact_chunk_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
-      components::runtime::GlobalStorePublisher* global_store_publisher);
+      runtime::GlobalMetadataGateway* metadata_gateway);
 
   RegistrationFacade(const RegistrationFacade&) = delete;
   RegistrationFacade& operator=(const RegistrationFacade&) = delete;
@@ -138,7 +140,7 @@ class RegistrationFacade {
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};
   std::shared_ptr<CommunicationManager> communication_manager_;
-  components::runtime::GlobalStorePublisher* global_store_publisher_;
+  runtime::GlobalMetadataGateway* metadata_gateway_;
 
   mutable std::mutex pending_mutex_;
   absl::flat_hash_map<std::string, std::shared_ptr<PendingRegistrationContext>> pending_regs_;

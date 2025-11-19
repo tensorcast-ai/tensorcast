@@ -57,8 +57,8 @@ absl::Status retry_gpu_load_with_eviction(
   }
 
   auto evict_status = components::evict_for_gpu(
-      ctx.replica_service->registry(),
-      ctx.replica_service->device_manager(),
+      ctx.replica_runtime->registry(),
+      ctx.replica_runtime->device_manager(),
       ctx.component_catalog->metrics_collector(),
       ctx.target_device_id,
       required_bytes);
@@ -106,7 +106,7 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
   }
   auto config = std::move(*config_or);
 
-  ctx.replica = ctx.replica_service->get_or_create_replica(ctx.artifact_identifier, config);
+  ctx.replica = ctx.replica_runtime->get_or_create_replica(ctx.artifact_identifier, config);
   if (!ctx.replica) {
     return absl::InternalError("Failed to create replica");
   }
@@ -120,7 +120,7 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
     if (!status.ok()) {
       if (absl::IsResourceExhausted(status)) {
         LOG(WARNING) << "Resource exhausted, attempting memory eviction for P2P load";
-        auto evict_status = ctx.replica_service->try_evict_memory_for_replica(ctx.p2p.source.size_bytes);
+        auto evict_status = ctx.replica_runtime->try_evict_memory_for_replica(ctx.p2p.source.size_bytes);
         if (evict_status.ok()) {
           ctx.load_future = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
           status = ctx.load_future.get();

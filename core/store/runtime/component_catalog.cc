@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/runtime/component_catalog.h"
+#include "core/store/runtime/component_catalog.h"
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -9,7 +9,7 @@ namespace {
 constexpr char kDefaultP2PHost[] = "0.0.0.0";
 } // namespace
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
 ComponentCatalog::ComponentCatalog(const StoreEngineOptions& options)
     : options_(options),
@@ -18,14 +18,14 @@ ComponentCatalog::ComponentCatalog(const StoreEngineOptions& options)
                                             : options.artifact_chunk_bytes),
       memory_pool_(
           std::make_shared<common::memory::PinnedBufferPool>(options.memory_pool_size, options.tx_slice_bytes)),
-      device_manager_(std::make_unique<DeviceManager>()),
-      replica_registry_(std::make_unique<ReplicaRegistry>()),
-      metrics_collector_(std::make_unique<MetricsCollector>()),
+      device_manager_(std::make_unique<components::DeviceManager>()),
+      replica_registry_(std::make_unique<components::ReplicaRegistry>()),
+      metrics_collector_(std::make_unique<components::MetricsCollector>()),
       view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})) {
   if (options_.comm_manager) {
     comm_manager_ = options_.comm_manager;
   } else {
-    comm_manager_ = std::make_shared<CommunicationManager>();
+    comm_manager_ = std::make_shared<components::CommunicationManager>();
   }
 }
 
@@ -65,19 +65,19 @@ void ComponentCatalog::shutdown() {
   comm_manager_.reset();
 }
 
-DeviceManager& ComponentCatalog::device_manager() {
+components::DeviceManager& ComponentCatalog::device_manager() {
   return *device_manager_;
 }
 
-ReplicaRegistry& ComponentCatalog::replica_registry() {
+components::ReplicaRegistry& ComponentCatalog::replica_registry() {
   return *replica_registry_;
 }
 
-MetricsCollector& ComponentCatalog::metrics_collector() {
+components::MetricsCollector& ComponentCatalog::metrics_collector() {
   return *metrics_collector_;
 }
 
-void ComponentCatalog::set_global_store_client_for_testing(std::shared_ptr<IGlobalStoreClient> client) {
+void ComponentCatalog::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
   global_store_client_ = std::move(client);
   if (global_store_client_) {
     global_store_client_->update_local_endpoint(
@@ -85,7 +85,7 @@ void ComponentCatalog::set_global_store_client_for_testing(std::shared_ptr<IGlob
   }
 }
 
-void ComponentCatalog::set_worker_identity(WorkerIdentity identity) {
+void ComponentCatalog::set_worker_identity(components::WorkerIdentity identity) {
   worker_identity_ = std::move(identity);
   if (global_store_client_) {
     global_store_client_->update_local_endpoint(
@@ -118,7 +118,7 @@ absl::Status ComponentCatalog::initialize_communication_manager() {
       return absl::OkStatus();
     }
   } else {
-    comm_manager_ = std::make_shared<CommunicationManager>();
+    comm_manager_ = std::make_shared<components::CommunicationManager>();
   }
 
   const std::string listen_host =
@@ -161,4 +161,4 @@ absl::Status ComponentCatalog::initialize_global_store_client() {
   return absl::OkStatus();
 }
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime

@@ -58,7 +58,7 @@ struct ReplicaConfig {
 
   // Future runtime configurations can be added here:
   // - Variant residency metadata (view identifiers)
-  std::optional<std::string> view_id;
+  std::optional<std::string> view_id = std::nullopt;
   // - View execution plan metadata for variant-aware replicas
   std::optional<loader::ViewPlan> view_plan;
   // - Transform placement preference (server/client)

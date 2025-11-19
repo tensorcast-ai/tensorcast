@@ -1,6 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
-#include "core/store/components/runtime/replica_service.h"
+#include "core/store/runtime/replica_runtime.h"
 
 #include <limits>
 #include <optional>
@@ -15,19 +15,24 @@
 #include "core/common/cuda_api.h"
 #include "core/store/components/eviction_service.h"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
-ReplicaService::ReplicaService(gsl::not_null<ComponentCatalog*> catalog) : catalog_(catalog) {}
+ReplicaRuntime::ReplicaRuntime(gsl::not_null<ComponentCatalog*> catalog)
+    : ReplicaRuntime(Config{.component_catalog = catalog}) {}
 
-size_t ReplicaService::get_available_memory() const {
+ReplicaRuntime::ReplicaRuntime(Config config) : catalog_(config.component_catalog), event_hub_(config.event_hub) {
+  subscribe_to_events();
+}
+
+size_t ReplicaRuntime::get_available_memory() const {
   return pinned_pool()->get_available_size();
 }
 
-void ReplicaService::update_memory_pool_metrics() {
+void ReplicaRuntime::update_memory_pool_metrics() {
   metrics().update_all_metrics(*pinned_pool(), registry(), device_manager());
 }
 
-std::vector<ReplicaInfo> ReplicaService::get_all_replicas_info() const {
+std::vector<ReplicaInfo> ReplicaRuntime::get_all_replicas_info() const {
   std::vector<ReplicaInfo> result;
 
   const auto replica_keys = registry().get_lru_instances();
@@ -89,7 +94,7 @@ std::vector<ReplicaInfo> ReplicaService::get_all_replicas_info() const {
   return result;
 }
 
-std::vector<DeviceKey> ReplicaService::get_resident_devices(std::string_view artifact_id) const {
+std::vector<DeviceKey> ReplicaRuntime::get_resident_devices(std::string_view artifact_id) const {
   absl::flat_hash_set<DeviceKey, DeviceKeyHash> unique_devices;
   std::vector<DeviceKey> devices;
 
@@ -122,7 +127,24 @@ std::vector<DeviceKey> ReplicaService::get_resident_devices(std::string_view art
   return devices;
 }
 
-std::vector<loading::ReplicaKey> ReplicaService::list_device_replicas(const DeviceKey& device) const {
+absl::StatusOr<int> ReplicaRuntime::get_unique_gpu_residency(std::string_view artifact_id) const {
+  int unique_gpu_device = -2; // -2: unknown, -1: none, >=0: unique device
+  for (const auto& info : get_all_replicas_info()) {
+    if (info.artifact_id == artifact_id && info.gpu_state == common::memory::MemoryLocation::GPU) {
+      if (unique_gpu_device == -2) {
+        unique_gpu_device = info.gpu_device_id;
+      } else if (unique_gpu_device != info.gpu_device_id) {
+        return absl::InvalidArgumentError("ambiguous artifact residency across multiple GPUs; device_id required");
+      }
+    }
+  }
+  if (unique_gpu_device == -2) {
+    return -1;
+  }
+  return unique_gpu_device;
+}
+
+std::vector<loading::ReplicaKey> ReplicaRuntime::list_device_replicas(const DeviceKey& device) const {
   std::vector<loading::ReplicaKey> list;
   const auto inst_keys = registry().find_by_device(device);
   for (const auto& key : inst_keys) {
@@ -149,7 +171,7 @@ std::vector<loading::ReplicaKey> ReplicaService::list_device_replicas(const Devi
   return list;
 }
 
-int ReplicaService::wait_replica_ready(const loading::ReplicaKey& key) const {
+int ReplicaRuntime::wait_replica_ready(const loading::ReplicaKey& key) const {
   auto replica_or = registry().find(key);
   if (!replica_or.ok()) {
     return 1;
@@ -161,10 +183,10 @@ int ReplicaService::wait_replica_ready(const loading::ReplicaKey& key) const {
   return st.ok() ? 0 : 1;
 }
 
-int ReplicaService::unload_replica(const loading::ReplicaKey& key) const {
+int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
   auto replica_or = registry().find(key);
   if (!replica_or.ok()) {
-    VLOG(1) << "ReplicaService::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
             << " not found in registry: " << replica_or.status();
     return 1;
   }
@@ -187,7 +209,7 @@ int ReplicaService::unload_replica(const loading::ReplicaKey& key) const {
     }
 
     if (observed_state <= replica::MemoryState::UNALLOCATED) {
-      VLOG(1) << "ReplicaService::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
               << ": no allocation observed after probe window; treating as no-op unload.";
       return -1;
     }
@@ -202,7 +224,7 @@ int ReplicaService::unload_replica(const loading::ReplicaKey& key) const {
     absl::Status wait_status = replica->wait_until_loaded(loc, kUnloadRetryTimeout);
 
     if (!wait_status.ok() && !absl::IsFailedPrecondition(wait_status)) {
-      VLOG(1) << "ReplicaService::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
               << ": wait for load completion returned " << wait_status;
       return -1;
     }
@@ -211,14 +233,14 @@ int ReplicaService::unload_replica(const loading::ReplicaKey& key) const {
   }
 
   if (!release_status.ok()) {
-    VLOG(1) << "ReplicaService::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
             << ": unload failed with " << release_status;
   }
 
   return release_status.ok() ? 0 : -1;
 }
 
-replica::MemoryState ReplicaService::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {
+replica::MemoryState ReplicaRuntime::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {
   auto replica_or = registry().find(key);
   if (!replica_or.ok()) {
     return replica::MemoryState::UNINITIALIZED;
@@ -228,7 +250,7 @@ replica::MemoryState ReplicaService::get_replica_state(const loading::ReplicaKey
   return replica_or.value()->get_memory_state(loc);
 }
 
-absl::StatusOr<uint64_t> ReplicaService::get_replica_gpu_ptr(const loading::ReplicaKey& key) const {
+absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_gpu_ptr(const loading::ReplicaKey& key) const {
   if (key.device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("ReplicaKey does not reference a GPU device");
   }
@@ -243,7 +265,7 @@ absl::StatusOr<uint64_t> ReplicaService::get_replica_gpu_ptr(const loading::Repl
   return reinterpret_cast<uint64_t>(ptrs[0]);
 }
 
-absl::StatusOr<uint64_t> ReplicaService::get_replica_size(const loading::ReplicaKey& key) const {
+absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_size(const loading::ReplicaKey& key) const {
   auto replica_or = registry().find(key);
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
@@ -255,7 +277,7 @@ absl::StatusOr<uint64_t> ReplicaService::get_replica_size(const loading::Replica
   return *size_or;
 }
 
-absl::StatusOr<ExportRegistration> ReplicaService::enable_remote_replica_access(
+absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location) const {
   auto comm = communication_manager();
@@ -269,7 +291,7 @@ absl::StatusOr<ExportRegistration> ReplicaService::enable_remote_replica_access(
   return replica_or.value()->enable_remote_memory_access(location, comm->get_engine());
 }
 
-absl::Status ReplicaService::disable_remote_replica_access(
+absl::Status ReplicaRuntime::disable_remote_replica_access(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location) const {
   auto comm = communication_manager();
@@ -283,11 +305,11 @@ absl::Status ReplicaService::disable_remote_replica_access(
   return replica_or.value()->disable_remote_memory_access(location, comm->get_engine());
 }
 
-absl::Status ReplicaService::try_evict_memory_for_replica(size_t required_size) {
+absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) {
   return tensorcast::store::components::evict_for_cpu(registry(), *pinned_pool(), metrics(), required_size);
 }
 
-std::shared_ptr<replica::Replica> ReplicaService::get_or_create_replica(
+std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
     const std::string& artifact_identifier,
     const replica::ReplicaConfig& config) {
   DeviceKey device_key;
@@ -344,7 +366,7 @@ std::shared_ptr<replica::Replica> ReplicaService::get_or_create_replica(
   return replica;
 }
 
-int ReplicaService::clear_mem() {
+int ReplicaRuntime::clear_mem() {
   auto replicas = registry().clear_all();
   std::vector<absl::Status> errors;
 
@@ -372,11 +394,11 @@ int ReplicaService::clear_mem() {
   return 0;
 }
 
-std::vector<replica::ChunkState> ReplicaService::get_chunk_states_telemetry(std::string_view artifact_id) const {
+std::vector<replica::ChunkState> ReplicaRuntime::get_chunk_states_telemetry(std::string_view artifact_id) const {
   return get_chunk_states_cpu_uma(artifact_id);
 }
 
-std::vector<replica::ChunkState> ReplicaService::get_chunk_states_for_device(
+std::vector<replica::ChunkState> ReplicaRuntime::get_chunk_states_for_device(
     std::string_view artifact_id,
     int device_id) const {
   std::vector<replica::ChunkState> out;
@@ -395,7 +417,7 @@ std::vector<replica::ChunkState> ReplicaService::get_chunk_states_for_device(
   return out;
 }
 
-std::vector<replica::ChunkState> ReplicaService::get_chunk_states_cpu_uma(std::string_view artifact_id) const {
+std::vector<replica::ChunkState> ReplicaRuntime::get_chunk_states_cpu_uma(std::string_view artifact_id) const {
   std::vector<replica::ChunkState> out;
   auto keys = registry().find_by_artifact(artifact_id);
   if (keys.empty()) {
@@ -428,36 +450,102 @@ std::vector<replica::ChunkState> ReplicaService::get_chunk_states_cpu_uma(std::s
   return mm.get_chunk_states_uma(common::memory::MemoryLocation::CPU);
 }
 
-ReplicaRegistry& ReplicaService::registry() {
+absl::StatusOr<size_t> ReplicaRuntime::get_device_total_memory(int device_id) const {
+  auto info_or = device_manager().get_gpu_info(device_id);
+  if (!info_or.ok()) {
+    return info_or.status();
+  }
+  return static_cast<size_t>((*info_or)->total_memory);
+}
+
+absl::StatusOr<size_t> ReplicaRuntime::get_device_free_memory(int device_id) const {
+  return device_manager().get_free_memory(device_id);
+}
+
+void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) {
+  auto& metrics = catalog_->metrics_collector();
+  const bool success = event.status.ok();
+  const bool from_p2p = event.source == IngestionSource::kP2P;
+
+  if (from_p2p) {
+    metrics.record_p2p_transfer(success ? event.bytes_transferred : 0, success);
+  }
+
+  metrics.record_operation(from_p2p ? "load_from_p2p" : "load_from_disk", event.duration_seconds);
+
+  const std::string device_scope = (event.target_device.type == DeviceType::GPU) ? "gpu" : "cpu";
+  std::optional<std::string_view> view_scope;
+  if (event.view_id.has_value()) {
+    view_scope = std::string_view(*event.view_id);
+  }
+  metrics.record_artifact_load(
+      from_p2p ? "remote" : "disk", device_scope, success ? "finalize" : "error", event.duration_seconds, view_scope);
+
+  if (success) {
+    update_memory_pool_metrics();
+  }
+}
+
+ReplicaRegistry& ReplicaRuntime::registry() {
   return catalog_->replica_registry();
 }
 
-const ReplicaRegistry& ReplicaService::registry() const {
+const ReplicaRegistry& ReplicaRuntime::registry() const {
   return catalog_->replica_registry();
 }
 
-DeviceManager& ReplicaService::device_manager() {
+DeviceManager& ReplicaRuntime::device_manager() {
   return catalog_->device_manager();
 }
 
-const DeviceManager& ReplicaService::device_manager() const {
+const DeviceManager& ReplicaRuntime::device_manager() const {
   return catalog_->device_manager();
 }
 
-std::shared_ptr<common::memory::PinnedBufferPool> ReplicaService::pinned_pool() const {
+std::shared_ptr<common::memory::PinnedBufferPool> ReplicaRuntime::pinned_pool() const {
   return catalog_->pinned_buffer_pool();
 }
 
-std::shared_ptr<CommunicationManager> ReplicaService::communication_manager() const {
+std::shared_ptr<CommunicationManager> ReplicaRuntime::communication_manager() const {
   return catalog_->communication_manager();
 }
 
-MetricsCollector& ReplicaService::metrics() {
+MetricsCollector& ReplicaRuntime::metrics() {
   return catalog_->metrics_collector();
 }
 
-const MetricsCollector& ReplicaService::metrics() const {
+const MetricsCollector& ReplicaRuntime::metrics() const {
   return catalog_->metrics_collector();
 }
 
-} // namespace tensorcast::store::components::runtime
+void ReplicaRuntime::subscribe_to_events() {
+  if (event_hub_ == nullptr) {
+    return;
+  }
+  ingress_subscription_ = event_hub_->subscribe([this](const RuntimeEvent& event) {
+    switch (event.type) {
+      case RuntimeEventType::kIngressCompleted: {
+        const auto* payload = std::get_if<IngestionResultEvent>(&event.payload);
+        if (payload == nullptr) {
+          return;
+        }
+        record_ingestion_result(*payload);
+        break;
+      }
+      case RuntimeEventType::kRegistrationCommitted:
+      case RuntimeEventType::kRegistrationAborted: {
+        const auto* registration = std::get_if<RegistrationEvent>(&event.payload);
+        if (registration == nullptr) {
+          return;
+        }
+        // Registration completion or abort modifies UMA allocations, so refresh metrics.
+        update_memory_pool_metrics();
+        break;
+      }
+      default:
+        break;
+    }
+  });
+}
+
+} // namespace tensorcast::store::runtime

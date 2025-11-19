@@ -176,7 +176,7 @@ void DeviceManager::update_gpu_metrics() {
   }
 }
 
-absl::StatusOr<size_t> DeviceManager::get_free_memory(int device_id) {
+absl::StatusOr<size_t> DeviceManager::get_free_memory(int device_id) const {
   auto info_result = get_gpu_info(device_id);
   if (!info_result.ok()) {
     return info_result.status();

@@ -11,7 +11,7 @@
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
 enum class IngestionSource {
   kDisk = 0,
@@ -31,4 +31,4 @@ struct IngestionResultEvent {
   bool publish_to_global_store{true};
 };
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime

@@ -16,29 +16,43 @@
 #include "core/store/components/device_manager.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/replica_info.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/component_catalog.h"
+#include "core/store/runtime/ingestion_events.h"
+#include "core/store/runtime/replica_info.h"
+#include "core/store/runtime/runtime_event_hub.h"
 #include "gsl/pointers"
 
-namespace tensorcast::store::components::runtime {
+namespace tensorcast::store::runtime {
 
-class ReplicaService {
+using components::CommunicationManager;
+using components::DeviceManager;
+using components::MetricsCollector;
+using components::ReplicaRegistry;
+
+class ReplicaRuntime {
  public:
-  explicit ReplicaService(gsl::not_null<ComponentCatalog*> catalog);
-  ~ReplicaService() = default;
+  struct Config {
+    gsl::not_null<ComponentCatalog*> component_catalog;
+    RuntimeEventHub* event_hub = nullptr;
+  };
 
-  ReplicaService(const ReplicaService&) = delete;
-  ReplicaService& operator=(const ReplicaService&) = delete;
+  explicit ReplicaRuntime(gsl::not_null<ComponentCatalog*> catalog);
+  explicit ReplicaRuntime(Config config);
+  ~ReplicaRuntime() = default;
+
+  ReplicaRuntime(const ReplicaRuntime&) = delete;
+  ReplicaRuntime& operator=(const ReplicaRuntime&) = delete;
 
   size_t get_available_memory() const;
   void update_memory_pool_metrics();
   std::vector<ReplicaInfo> get_all_replicas_info() const;
 
   std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
+  absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
   std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;
 
   int wait_replica_ready(const loading::ReplicaKey& key) const;
@@ -64,6 +78,9 @@ class ReplicaService {
   std::vector<replica::ChunkState> get_chunk_states_telemetry(std::string_view artifact_id) const;
   std::vector<replica::ChunkState> get_chunk_states_for_device(std::string_view artifact_id, int device_id) const;
   std::vector<replica::ChunkState> get_chunk_states_cpu_uma(std::string_view artifact_id) const;
+  absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
+  absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
+  void record_ingestion_result(const IngestionResultEvent& event);
 
   ReplicaRegistry& registry();
   const ReplicaRegistry& registry() const;
@@ -77,7 +94,11 @@ class ReplicaService {
   const MetricsCollector& metrics() const;
 
  private:
+  void subscribe_to_events();
+
   gsl::not_null<ComponentCatalog*> catalog_;
+  RuntimeEventHub* event_hub_{nullptr};
+  std::unique_ptr<RuntimeEventHub::Subscription> ingress_subscription_;
 };
 
-} // namespace tensorcast::store::components::runtime
+} // namespace tensorcast::store::runtime
