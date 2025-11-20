@@ -5,15 +5,12 @@
 #include <memory>
 #include <string>
 #include <utility>
-#include <vector>
 
-#include "absl/functional/any_invocable.h"
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/worker_identity.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/context/runtime_context.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::runtime {
@@ -26,15 +23,13 @@ class RuntimeEnv {
   RuntimeEnv(const RuntimeEnv&) = delete;
   RuntimeEnv& operator=(const RuntimeEnv&) = delete;
 
-  absl::Status Initialize();
-  void Shutdown();
+  absl::Status initialize();
+  void shutdown();
 
-  ComponentCatalog& component_catalog();
-  const ComponentCatalog& component_catalog() const;
-  RuntimeEventHub& event_hub();
-  const RuntimeEventHub& event_hub() const;
+  RuntimeContext& runtime_context();
+  const RuntimeContext& runtime_context() const;
 
-  void UpdateWorkerIdentity(
+  void update_worker_identity(
       std::string worker_id,
       std::string node_id,
       std::string node_address,
@@ -43,19 +38,14 @@ class RuntimeEnv {
 
   const components::WorkerIdentity& worker_identity() const;
 
-  void RegisterShutdownDependency(std::string name, absl::AnyInvocable<void()> hook);
   void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
 
  private:
-  void RunShutdownHooks();
-
   StoreEngineOptions options_;
-  std::unique_ptr<ComponentCatalog> component_catalog_;
-  std::unique_ptr<RuntimeEventHub> event_hub_;
+  std::unique_ptr<RuntimeContext> context_;
 
   mutable absl::Mutex lifecycle_mu_;
   bool started_ ABSL_GUARDED_BY(lifecycle_mu_) = false;
-  std::vector<std::pair<std::string, absl::AnyInvocable<void()>>> shutdown_hooks_ ABSL_GUARDED_BY(lifecycle_mu_);
 };
 
 } // namespace tensorcast::store::runtime

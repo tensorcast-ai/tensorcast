@@ -4,25 +4,21 @@
 
 #include <utility>
 
-#include "absl/log/log.h"
-
 namespace tensorcast::store::runtime {
 
 RuntimeEnv::RuntimeEnv(StoreEngineOptions options)
-    : options_(std::move(options)),
-      component_catalog_(std::make_unique<ComponentCatalog>(options_)),
-      event_hub_(std::make_unique<RuntimeEventHub>()) {}
+    : options_(std::move(options)), context_(std::make_unique<RuntimeContext>(options_)) {}
 
 RuntimeEnv::~RuntimeEnv() {
-  Shutdown();
+  shutdown();
 }
 
-absl::Status RuntimeEnv::Initialize() {
+absl::Status RuntimeEnv::initialize() {
   absl::MutexLock lock(&lifecycle_mu_);
   if (started_) {
     return absl::OkStatus();
   }
-  auto status = component_catalog_->start();
+  auto status = context_->start();
   if (!status.ok()) {
     return status;
   }
@@ -30,51 +26,29 @@ absl::Status RuntimeEnv::Initialize() {
   return absl::OkStatus();
 }
 
-void RuntimeEnv::Shutdown() {
-  std::vector<absl::AnyInvocable<void()>> hooks;
+void RuntimeEnv::shutdown() {
   {
     absl::MutexLock lock(&lifecycle_mu_);
     if (!started_) {
       return;
     }
     started_ = false;
-    for (auto it = shutdown_hooks_.rbegin(); it != shutdown_hooks_.rend(); ++it) {
-      hooks.push_back(std::move(it->second));
-    }
-    shutdown_hooks_.clear();
   }
 
-  for (auto& hook : hooks) {
-    if (hook) {
-      hook();
-    }
-  }
-
-  if (event_hub_) {
-    event_hub_->drain();
-  }
-  if (component_catalog_) {
-    component_catalog_->shutdown();
+  if (context_) {
+    context_->shutdown();
   }
 }
 
-ComponentCatalog& RuntimeEnv::component_catalog() {
-  return *component_catalog_;
+RuntimeContext& RuntimeEnv::runtime_context() {
+  return *context_;
 }
 
-const ComponentCatalog& RuntimeEnv::component_catalog() const {
-  return *component_catalog_;
+const RuntimeContext& RuntimeEnv::runtime_context() const {
+  return *context_;
 }
 
-RuntimeEventHub& RuntimeEnv::event_hub() {
-  return *event_hub_;
-}
-
-const RuntimeEventHub& RuntimeEnv::event_hub() const {
-  return *event_hub_;
-}
-
-void RuntimeEnv::UpdateWorkerIdentity(
+void RuntimeEnv::update_worker_identity(
     std::string worker_id,
     std::string node_id,
     std::string node_address,
@@ -87,20 +61,15 @@ void RuntimeEnv::UpdateWorkerIdentity(
       .grpc_port = grpc_port,
       .p2p_port = p2p_port,
   };
-  component_catalog_->set_worker_identity(std::move(identity));
+  context_->set_worker_identity(std::move(identity));
 }
 
 const components::WorkerIdentity& RuntimeEnv::worker_identity() const {
-  return component_catalog_->worker_identity();
-}
-
-void RuntimeEnv::RegisterShutdownDependency(std::string name, absl::AnyInvocable<void()> hook) {
-  absl::MutexLock lock(&lifecycle_mu_);
-  shutdown_hooks_.emplace_back(std::move(name), std::move(hook));
+  return context_->worker_identity();
 }
 
 void RuntimeEnv::set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client) {
-  component_catalog_->set_global_store_client_for_testing(std::move(client));
+  context_->set_global_store_client_for_testing(std::move(client));
 }
 
 } // namespace tensorcast::store::runtime

@@ -21,7 +21,7 @@ namespace tensorcast::store::materialization::runtime::pipeline {
 namespace {
 
 absl::StatusOr<std::string> fetch_canonical_index(
-    tensorcast::store::runtime::ComponentCatalog& catalog,
+    tensorcast::store::runtime::RuntimeContext& catalog,
     std::string_view artifact_id) {
   auto client = catalog.global_store_client();
   if (!client || !client->is_connected()) {
@@ -240,7 +240,7 @@ absl::Status MetadataStage::process(IngestionContext& ctx) {
     }
   } else {
     if (!ctx.verification.canonical_index_json.has_value() && ctx.hints.variant.has_value()) {
-      auto idx_or = fetch_canonical_index(*ctx.component_catalog, ctx.artifact_identifier);
+      auto idx_or = fetch_canonical_index(*ctx.runtime_context, ctx.artifact_identifier);
       if (!idx_or.ok()) {
         return idx_or.status();
       }

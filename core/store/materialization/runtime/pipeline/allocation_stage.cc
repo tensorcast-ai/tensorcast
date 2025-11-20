@@ -23,7 +23,7 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
       .device_type = ctx.target_is_gpu ? DeviceType::GPU : DeviceType::CPU,
       .local_device_id = ctx.target_is_gpu ? ctx.target_device_id : -1,
       .pinned_buffer_pool =
-          gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{ctx.component_catalog->pinned_buffer_pool()},
+          gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{ctx.runtime_context->pinned_buffer_pool()},
       .artifact_chunk_bytes = ctx.artifact_chunk_bytes,
       .expected_artifact_size = std::nullopt};
   config.pinned_memory_timeout =
@@ -59,7 +59,7 @@ absl::Status retry_gpu_load_with_eviction(
   auto evict_status = components::evict_for_gpu(
       ctx.replica_runtime->registry(),
       ctx.replica_runtime->device_manager(),
-      ctx.component_catalog->metrics_collector(),
+      ctx.runtime_context->metrics_collector(),
       ctx.target_device_id,
       required_bytes);
 

@@ -24,11 +24,11 @@ void maybe_compute_view_hash(IngestionContext& ctx) {
   if (!ctx.resolved_view_plan.has_value() || ctx.resolved_view_plan->is_identity) {
     return;
   }
-  auto catalog = ctx.component_catalog;
-  if (catalog == nullptr) {
+  auto context = ctx.runtime_context;
+  if (context == nullptr) {
     return;
   }
-  auto hasher = catalog->view_hash_computer();
+  auto hasher = context->view_hash_computer();
   if (!hasher) {
     return;
   }

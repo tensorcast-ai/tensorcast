@@ -54,23 +54,23 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
   LOG(INFO) << "I/O threads: " << num_thread_ << ", tx_slice_bytes: " << tx_slice_bytes_ / communicator::misc::MB
             << "MB";
 
-  auto init_status = runtime_env_->Initialize();
+  auto init_status = runtime_env_->initialize();
   CHECK(init_status.ok()) << "Failed to initialize RuntimeEnv: " << init_status;
 
-  auto& catalog = runtime_env_->component_catalog();
-  auto* event_hub = &runtime_env_->event_hub();
+  auto& context = runtime_env_->runtime_context();
   runtime::ReplicaRuntime::Config replica_config{
-      .component_catalog = &catalog,
-      .event_hub = event_hub,
+      .runtime_context = &context,
   };
   replica_runtime_ = std::make_unique<runtime::ReplicaRuntime>(replica_config);
-  metadata_gateway_ = std::make_unique<runtime::GlobalMetadataGateway>(runtime::GlobalMetadataGateway::Config{
-      .component_catalog = &catalog,
+  metadata_gateway_ = std::make_unique<runtime::metadata::MetadataGateway>(runtime::metadata::MetadataGateway::Config{
+      .runtime_context = &context,
       .replica_runtime = replica_runtime_.get(),
-      .event_hub = event_hub,
+      .artifact_chunk_bytes = artifact_chunk_bytes_,
+      .pinned_memory_timeout = pinned_memory_timeout_,
+      .replica_factory = {},
   });
-  runtime::ArtifactIngressManager::Config ingress_config{
-      .env = runtime_env_.get(),
+  runtime::IngestionRuntime::Config ingestion_config{
+      .runtime_context = &context,
       .replica_runtime = replica_runtime_.get(),
       .metadata_gateway = metadata_gateway_.get(),
       .storage_path = storage_path_,
@@ -79,10 +79,10 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       .num_threads = num_thread_,
       .options = &options_,
   };
-  ingress_manager_ = std::make_unique<runtime::ArtifactIngressManager>(std::move(ingress_config));
+  ingestion_runtime_ = std::make_unique<runtime::IngestionRuntime>(std::move(ingestion_config));
 
-  catalog.metrics_collector().update_all_metrics(
-      *catalog.pinned_buffer_pool(), replica_runtime_->registry(), catalog.device_manager());
+  context.metrics_collector().update_all_metrics(
+      *context.pinned_buffer_pool(), replica_runtime_->registry(), context.device_manager());
 }
 
 StoreEngine::~StoreEngine() {
@@ -91,7 +91,7 @@ StoreEngine::~StoreEngine() {
     replica_runtime_->clear_mem();
   }
   if (runtime_env_) {
-    runtime_env_->Shutdown();
+    runtime_env_->shutdown();
   }
 }
 
@@ -129,7 +129,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
     const P2PSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return ingress_manager_->ingest_from_p2p(artifact_identifier, source, target, hints);
+  return ingestion_runtime_->ingest_from_p2p(artifact_identifier, source, target, hints);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk(
@@ -137,7 +137,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_disk(
     const loading::DiskSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints) {
-  return ingress_manager_->ingest_from_disk(artifact_identifier, source, target, hints);
+  return ingestion_runtime_->ingest_from_disk(artifact_identifier, source, target, hints);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
@@ -209,7 +209,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
     const loading::MaterializeHints& hints) {
-  return ingress_manager_->materialize_replica(target_device, mode, hints);
+  return ingestion_runtime_->materialize_replica(target_device, mode, hints);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -219,7 +219,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
 absl::Status StoreEngine::register_replica_with_global_store(
     const ReplicaKey& key,
     std::string_view artifact_id_override) {
-  return ingress_manager_->register_replica_with_global_store(key, artifact_id_override);
+  return ingestion_runtime_->register_replica_with_global_store(key, artifact_id_override);
 }
 
 absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view artifact_id, int device_id) {
@@ -256,31 +256,31 @@ absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
 
 absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact(
     const ArtifactRegistration& reg) {
-  return ingress_manager_->begin_registration(reg);
+  return metadata_gateway_->begin_registration(reg);
 }
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(
     std::string_view registration_id) {
-  return ingress_manager_->commit_registration(registration_id);
+  return metadata_gateway_->commit_registration(registration_id);
 }
 
 absl::Status StoreEngine::ingest_view_registration_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
     absl::Span<const std::byte> data) {
-  return ingress_manager_->ingest_view_chunk(registration_id, view_offset, data);
+  return metadata_gateway_->ingest_view_chunk(registration_id, view_offset, data);
 }
 
 absl::StatusOr<uint64_t> StoreEngine::get_view_registration_ingested_bytes(std::string_view registration_id) {
-  return ingress_manager_->get_view_ingested_bytes(registration_id);
+  return metadata_gateway_->get_view_ingested_bytes(registration_id);
 }
 
 absl::Status StoreEngine::keep_alive_registered_artifact(std::string_view registration_id, uint32_t ttl_ms) {
-  return ingress_manager_->keep_alive_registration(registration_id, ttl_ms);
+  return metadata_gateway_->keep_alive_registration(registration_id, ttl_ms);
 }
 
 absl::Status StoreEngine::abort_registered_artifact(std::string_view registration_id) {
-  return ingress_manager_->abort_registration(registration_id);
+  return metadata_gateway_->abort_registration(registration_id);
 }
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_telemetry(std::string_view artifact_id) const {
@@ -306,8 +306,8 @@ std::vector<replica::ChunkState> StoreEngine::get_chunk_states_cpu_uma(std::stri
 }
 
 gsl::not_null<std::shared_ptr<components::CommunicationManager>> StoreEngine::get_shared_comm_manager() const {
-  auto comm_mgr = runtime_env_->component_catalog().communication_manager();
-  CHECK(comm_mgr != nullptr) << "StoreEngine ComponentCatalog returned null CommunicationManager";
+  auto comm_mgr = runtime_env_->runtime_context().communication_manager();
+  CHECK(comm_mgr != nullptr) << "RuntimeContext returned null CommunicationManager";
   return gsl::not_null<std::shared_ptr<components::CommunicationManager>>{comm_mgr};
 }
 

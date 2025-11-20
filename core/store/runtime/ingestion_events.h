@@ -13,13 +13,26 @@
 
 namespace tensorcast::store::runtime {
 
-enum class IngestionSource {
+enum class IngestionSource : std::uint8_t {
   kDisk = 0,
   kP2P = 1,
 };
 
-struct IngestionResultEvent {
+struct IngestionStartedEvent {
+  std::string request_id;
+  std::string artifact_id;
   IngestionSource source{IngestionSource::kDisk};
+  loading::ReplicaTarget target;
+  loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
+  bool publish_to_global_store{true};
+  std::string publish_context_id;
+  std::optional<std::string> view_id;
+};
+
+struct IngestionResultEvent {
+  std::string request_id;
+  IngestionSource source{IngestionSource::kDisk};
+  loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
   std::string artifact_id;
   DeviceKey target_device;
   common::memory::MemoryLocation target_location{common::memory::MemoryLocation::CPU};
@@ -29,6 +42,9 @@ struct IngestionResultEvent {
   std::optional<loading::ReplicaKey> replica_key;
   std::optional<std::string> view_id;
   bool publish_to_global_store{true};
+  std::string publish_context_id;
 };
+
+using IngestionCompletedEvent = IngestionResultEvent;
 
 } // namespace tensorcast::store::runtime

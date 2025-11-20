@@ -12,9 +12,8 @@
 #include "core/communicator/engine/engine.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/replica_runtime.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
@@ -28,8 +27,8 @@ using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
 using tensorcast::store::loading::ReplicaTarget;
-using tensorcast::store::runtime::ComponentCatalog;
 using tensorcast::store::runtime::ReplicaRuntime;
+using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::testing::find_available_port;
 using tensorcast::testing::make_tcp_communicator_config;
 
@@ -45,9 +44,8 @@ std::vector<uint8_t> MakePattern(size_t n, uint8_t seed) {
 
 std::unique_ptr<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline> MakePipeline(
     const StoreEngineOptions& opts,
-    ComponentCatalog& catalog,
-    ReplicaRuntime& runtime,
-    tensorcast::store::runtime::RuntimeEventHub* event_hub) {
+    RuntimeContext& catalog,
+    ReplicaRuntime& runtime) {
   tensorcast::store::materialization::runtime::pipeline::IngestionPipeline::Config cfg{
       .storage_path = fs::path(opts.storage_path),
       .num_threads = opts.num_thread,
@@ -55,9 +53,7 @@ std::unique_ptr<tensorcast::store::materialization::runtime::pipeline::Ingestion
       .pinned_memory_timeout = opts.pinned_memory_timeout,
       .engine_options = &opts,
       .replica_runtime = &runtime,
-      .component_catalog = &catalog,
-      .metadata_gateway = nullptr,
-      .event_hub = event_hub,
+      .runtime_context = &catalog,
   };
   return std::make_unique<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline>(cfg);
 }
@@ -119,11 +115,10 @@ TEST_CASE("P2P ingest fails when verification metadata mismatches", "[pipeline][
   opts.p2p_port = comm_port;
   opts.comm_manager = comm_manager;
 
-  ComponentCatalog catalog(opts);
+  RuntimeContext catalog(opts);
   CHECK_OK(catalog.start());
-  tensorcast::store::runtime::RuntimeEventHub event_hub;
-  ReplicaRuntime runtime(ReplicaRuntime::Config{.component_catalog = &catalog, .event_hub = &event_hub});
-  auto pipeline = MakePipeline(opts, catalog, runtime, &event_hub);
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.runtime_context = &catalog});
+  auto pipeline = MakePipeline(opts, catalog, runtime);
 
   P2PSource p2p_src;
   p2p_src.size_bytes = artifact_size;

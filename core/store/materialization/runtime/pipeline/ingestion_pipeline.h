@@ -14,11 +14,9 @@
 #include "core/store/materialization/runtime/pipeline/metadata_stage.h"
 #include "core/store/materialization/runtime/pipeline/source_adapter.h"
 #include "core/store/materialization/runtime/pipeline/verification_stage.h"
-#include "core/store/runtime/component_catalog.h"
-#include "core/store/runtime/global_metadata_gateway.h"
+#include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion_events.h"
-#include "core/store/runtime/replica_runtime.h"
-#include "core/store/runtime/runtime_event_hub.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
@@ -34,26 +32,31 @@ class IngestionPipeline {
     std::chrono::milliseconds pinned_memory_timeout;
     const StoreEngineOptions* engine_options;
     store_runtime::ReplicaRuntime* replica_runtime;
-    store_runtime::ComponentCatalog* component_catalog;
-    store_runtime::GlobalMetadataGateway* metadata_gateway;
-    store_runtime::RuntimeEventHub* event_hub;
+    store_runtime::RuntimeContext* runtime_context;
   };
 
   explicit IngestionPipeline(Config config);
+  virtual ~IngestionPipeline() = default;
 
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
+  virtual absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
-      bool publish_to_global_store = true);
+      bool publish_to_global_store = true,
+      store_runtime::IngestionResultEvent* event_out = nullptr,
+      std::string request_id = {},
+      std::string publish_context_id = {});
 
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
+  virtual absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
-      bool publish_to_global_store = true);
+      bool publish_to_global_store = true,
+      store_runtime::IngestionResultEvent* event_out = nullptr,
+      std::string request_id = {},
+      std::string publish_context_id = {});
 
  private:
   Config config_;

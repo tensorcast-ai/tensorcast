@@ -23,6 +23,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
 #include "nlohmann/json.hpp"
 
@@ -33,6 +34,9 @@ using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::loading::ReplicaKeyHash;
+
+using tensorcast::store::testing::MakeRecordingGlobalStoreClient;
+using tensorcast::store::testing::RecordingGlobalStoreClient;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper utilities
@@ -161,6 +165,8 @@ TEST_CASE("StoreEngine commit reports MI2 identity", "[store_engine][registratio
   auto storage = fs::temp_directory_path() / "store-engine-mi2";
   fs::create_directories(storage);
   StoreEngine engine = make_store(storage);
+  auto stub_client = MakeRecordingGlobalStoreClient();
+  engine.set_global_store_client_for_testing(stub_client);
 
   tensorcast::store::StoreEngine::ArtifactRegistration reg;
   reg.artifact_id = "temp-reg-mi2";
@@ -172,6 +178,7 @@ TEST_CASE("StoreEngine commit reports MI2 identity", "[store_engine][registratio
   REQUIRE(begin_or.ok());
 
   auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
+  INFO("commit status (mi2): " << commit_or.status());
   REQUIRE(commit_or.ok());
   const auto& result = commit_or.value();
   REQUIRE(result.id_kind == tensorcast::common::ArtifactIdKind::kMi2);
@@ -183,6 +190,8 @@ TEST_CASE("StoreEngine commit honours CGID", "[store_engine][registration]") {
   auto storage = fs::temp_directory_path() / "store-engine-cgid";
   fs::create_directories(storage);
   StoreEngine engine = make_store(storage);
+  auto stub_client = MakeRecordingGlobalStoreClient();
+  engine.set_global_store_client_for_testing(stub_client);
 
   tensorcast::store::StoreEngine::ArtifactRegistration reg;
   reg.artifact_id = "temp-reg-cgid";
@@ -195,6 +204,7 @@ TEST_CASE("StoreEngine commit honours CGID", "[store_engine][registration]") {
   REQUIRE(begin_or.ok());
 
   auto commit_or = engine.commit_registered_artifact(begin_or->registration_id);
+  INFO("commit status (cgid): " << commit_or.status());
   REQUIRE(commit_or.ok());
   const auto& result = commit_or.value();
   REQUIRE(result.id_kind == tensorcast::common::ArtifactIdKind::kCgid);
@@ -208,187 +218,6 @@ static absl::Status wait_ready(
     absl::Duration timeout = absl::Seconds(60)) {
   return handle.wait_ready(std::chrono::milliseconds(absl::ToInt64Milliseconds(timeout)));
 }
-
-class RecordingGlobalStoreClient final : public tensorcast::store::components::IGlobalStoreClient {
- public:
-  bool connected{true};
-  std::vector<std::string> view_requests;
-  std::vector<std::string> replica_requests;
-  std::vector<std::string> registered_replicas;
-  std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
-  std::vector<tensorcast::store::components::VariantViewUpdate> view_updates;
-
-  absl::Status initialize() override {
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<std::string> register_worker(
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      uint32_t,
-      uint64_t,
-      uint64_t,
-      bool,
-      std::string_view) override {
-    return absl::UnimplementedError("register_worker not supported in test stub");
-  }
-
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not supported in test stub");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
-      std::string_view,
-      uint64_t,
-      bool,
-      uint64_t,
-      std::string_view,
-      const std::vector<std::string>&,
-      int64_t,
-      tensorcast::global_store::v1::ConnectionStatus) override {
-    return absl::UnimplementedError("send_heartbeat_enhanced not supported in test stub");
-  }
-
-  absl::Status unregister_worker(std::string_view, bool) override {
-    return absl::UnimplementedError("unregister_worker not supported in test stub");
-  }
-
-  absl::StatusOr<std::string> register_replica(
-      std::string_view artifact_id,
-      std::string_view,
-      const tensorcast::store::DeviceKey&,
-      tensorcast::common::memory::MemoryLocation,
-      uint64_t,
-      uint32_t) override {
-    registered_replicas.emplace_back(artifact_id);
-    return std::string("replica-0");
-  }
-
-  absl::Status record_variant_residency(
-      std::string_view canonical_artifact_id,
-      std::string_view view_id,
-      uint64_t view_size_bytes,
-      std::optional<std::string_view>) override {
-    recorded_variants.emplace_back(std::string(canonical_artifact_id), std::string(view_id), view_size_bytes);
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<std::string> register_memory_replica(
-      std::string_view,
-      std::string_view,
-      const tensorcast::store::DeviceKey&,
-      uint64_t,
-      std::string_view,
-      const std::vector<std::string>&,
-      const std::vector<uint64_t>&,
-      const std::optional<std::string>&,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const std::optional<std::string>&) override {
-    return absl::UnimplementedError("register_memory_replica not supported in test stub");
-  }
-
-  absl::Status unregister_replica(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("unregister_replica not supported in test stub");
-  }
-
-  absl::Status unregister_replica_by_worker(
-      std::string_view,
-      std::string_view,
-      std::optional<tensorcast::common::memory::MemoryLocation>,
-      std::optional<uint32_t>) override {
-    return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
-  }
-
-  absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate& update) override {
-    view_requests.emplace_back(update.view_id);
-    view_updates.push_back(update);
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
-      std::string_view artifact_id,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const tensorcast::store::DeviceKey&,
-      uint32_t) override {
-    replica_requests.emplace_back(artifact_id);
-    return absl::UnavailableError("canonical replica unavailable");
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_view_transport(
-      std::string_view,
-      std::string_view view_id,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const tensorcast::store::DeviceKey&,
-      uint32_t) override {
-    view_requests.emplace_back(view_id);
-    return absl::NotFoundError("variant not registered");
-  }
-
-  absl::Status complete_replica_transport(std::string_view) override {
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::RemoteReplicaInfo>> get_artifact_replicas(
-      std::string_view) override {
-    return absl::UnimplementedError("get_artifact_replicas not supported in test stub");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ChunkLocationInfo>> query_chunk_locations(
-      std::string_view,
-      const std::vector<uint32_t>&) override {
-    return absl::UnimplementedError("query_chunk_locations not supported in test stub");
-  }
-
-  absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
-      bool,
-      std::vector<tensorcast::global_store::v1::StateChange>*) override {
-    return absl::UnimplementedError("synchronize_worker_state not supported in test stub");
-  }
-
-  absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      std::vector<tensorcast::common::v1::ReplicaInfo>*) override {
-    return absl::UnimplementedError("request_full_state_sync not supported in test stub");
-  }
-
-  bool is_connected() const override {
-    return connected;
-  }
-
-  absl::Status batch_update_chunk_states(
-      std::string_view,
-      std::string_view,
-      const std::vector<tensorcast::store::components::ChunkStateUpdate>&) override {
-    return absl::UnimplementedError("batch_update_chunk_states not supported in test stub");
-  }
-
-  absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view) override {
-    return absl::UnimplementedError("resolve_key_mapping not supported in test stub");
-  }
-
-  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
-    return absl::UnimplementedError("get_artifact_index_by_id not supported in test stub");
-  }
-
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
-    return absl::UnimplementedError("upsert_key_mapping not supported in test stub");
-  }
-
-  absl::Status revoke_key_mapping(std::string_view) override {
-    return absl::UnimplementedError("revoke_key_mapping not supported in test stub");
-  }
-
-  void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test case 1: Basic CPU → GPU workflow using materialize_replica()
