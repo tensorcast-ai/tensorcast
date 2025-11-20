@@ -36,7 +36,7 @@ graph TB
         VHC[ViewHashComputer]
     end
     subgraph "Materialization & Registration"
-        MCoor[MaterializationCoordinator]
+        MF[MaterializationFacade]
         IP[IngestionPipeline]
         RB[RegistrationBackend]
         MG[MetadataGateway]
@@ -69,12 +69,13 @@ graph TB
     CC --> PB
     CC --> GSC
     CC --> VHC
-    IR --> MCoor
-    IR --> IP
+    IR --> MF
+    MF --> IP
+    MF --> MG
     IR --> RF
-    MCoor --> MZ
+    MF --> MZ
     MZ --> IP
-    MZ --> MO
+    MF --> MO
     MO --> MG
     IP --> RR
     RR --> RLC
@@ -107,8 +108,8 @@ StoreEngine owns only construction-time wiring. Runtime services expose narrow, 
 | RuntimeContext | `core/store/runtime/context/runtime_context.{h,cc}` | Constructs `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, `CommunicationManager`, `PinnedBufferPool`, `IGlobalStoreClient`, `ViewHashComputer`, propagates worker identity, and embeds the event dispatcher. | `StoreEngineOptions`, `WorkerIdentity` |
 | RuntimeContextEvents | `core/store/runtime/context/runtime_context_events.{h,cc}`, `core/store/runtime/ingestion_events.h` | Folly MPMC queue with publisher/subscription handles for ingestion, registration, and key-mapping events; runtimes register callbacks at boot and the dispatcher drains before shutdown. | Self-contained dispatcher |
 | ReplicaRuntime | `core/store/runtime/replica/replica_runtime.{h,cc}` | Replica lifecycle (get/create, wait, eviction retries, unload), UMA-aware telemetry, remote access toggles, and publishes `replica_loaded`/`replica_evicted`/`remote_access_toggled` events for other runtimes. | `ReplicaRegistry`, `DeviceManager`, `MetricsCollector` |
-| IngestionRuntime | `core/store/runtime/ingestion/ingestion_runtime.{h,cc}` | Routes disk/P2P/materialize flows, wires `IngestionPipeline`/`MaterializationCoordinator`, publishes ingestion events, and exposes `IngestionRuntimeDependencies` so tests can install fake pipelines/coordinators, override `IngestionEventSink`, or register structured test hooks. Completion now notifies `ReplicaRuntime` and `MetadataGateway` directly while still emitting events for observers. | `RuntimeContext`, `ReplicaRuntime`, `ingestion::MaterializationCoordinator`, `metadata::MetadataGateway` |
-| MaterializationCoordinator | `core/store/runtime/ingestion/materialization_coordinator.{h,cc}` | Builds `MaterializationRequest`s, selects AUTO strategies, bridges to `MaterializationService`, `IngestionPipeline`, and `MaterializeOrchestrator`. | `MaterializationService`, `MaterializationBackend`, `MaterializeOrchestrator` |
+| IngestionRuntime | `core/store/runtime/ingestion/ingestion_runtime.{h,cc}` | Routes disk/P2P/materialize flows exclusively through `MaterializationFacade`, hands off publish-context bookkeeping, and exposes `IngestionRuntimeDependencies` so tests can swap facade hooks without touching production wiring. Completion still notifies `ReplicaRuntime` and `MetadataGateway` through the shared `MaterializationFacade`. | `RuntimeContext`, `ReplicaRuntime`, `ingestion::MaterializationFacade`, `metadata::MetadataGateway` |
+| MaterializationFacade | `core/store/runtime/ingestion/materialization_facade.{h,cc}` | Owns planner orchestration, wires `IngestionPipeline`, `MaterializationService`, and `MaterializeOrchestrator`, publishes ingestion events, records publish contexts, and brokers `MetadataGateway` registrations. Implements `MaterializationBackend` so AUTO flows share the same disk/P2P primitives. | `MaterializationService`, `MaterializationBackend`, `MaterializeOrchestrator`, `MetadataGateway`, `RuntimeContextEvents` |
 | MaterializationService & MaterializationDeps | `core/store/runtime/ingestion/materialization_service.{h,cc}` | Resident reuse, chunk planning, pinned-memory budgeting, handle construction helpers reused across runtime services. | `ReplicaRuntime`, `ChunkAwareLoadingStrategy`, `TransferService`, `PinnedBufferPool` |
 | MaterializeOrchestrator & MaterializationBackend | `core/store/materialization/control/materialize_orchestrator.{h,cc}`, `core/store/materialization/control/materialization_backend.h` | Negotiates remote transports, disk fallback, registration publication, and `MaterializeMode::AUTO` policies. | `metadata::MetadataGateway`, `IGlobalStoreClient`, `CommunicationManager` |
 | RegistrationBackend | `core/store/runtime/metadata/registration_backend.{h,cc}`, `core/store/materialization/control/replica_registration_helper.{h,cc}` | GPU-first begin/commit/abort/keep-alive APIs, CUDA IPC export, verification metadata, TTL refresh helpers, emits registration events via MetadataGateway. | `DeviceManager`, `ReplicaRegistry`, `PinnedBufferPool`, `MemoryExportRegistry`, `RegistrationPublisher` |
@@ -118,20 +119,19 @@ StoreEngine owns only construction-time wiring. Runtime services expose narrow, 
 
 `IngestionRuntime::Config` carries a shared `IngestionRuntimeDependencies` bundle (`core/store/runtime/ingestion/ingestion_runtime.h`) so unit tests can exercise the full ingestion stack without wiring an entire `StoreEngine`.
 
-- **Composable factories** — `PipelineFactory` and `CoordinatorFactory` let tests inject fakes such as `core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h`, while production still builds the real `IngestionPipeline` and `MaterializationCoordinator`.
-- **Structured hooks** — `IngestionTestHooks` provide `before_pipeline_start`, `mutate_completion_event`, and `override_result` callbacks, enabling deterministic success/failure paths without resurrecting the old `test_disk_result_status` flags.
-- **Event sinks** — `IngestionEventSink` abstracts event publication; `RuntimeContextEventSink` publishes into `RuntimeContextEvents` for production, whereas `core/store/runtime/ingestion/testing/recording_event_sink.h` captures ordered `IngestionResultEvent`s for assertions.
+- **MaterializationHooks** — Tests populate `MaterializationHooks` (`core/store/runtime/ingestion/materialization_facade.h`) to inject fake pipelines (e.g. `core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h`), intercept `register_replica_with_global_store`, or install structured callbacks such as `before_pipeline_start`, `mutate_completion_event`, and `override_result`.
+- **Event hub** — `IngestionEventHub` (`core/store/runtime/ingestion/ingestion_event_hub.{h,cc}`) wraps `RuntimeContextEvents` with typed ingestion channels so ReplicaRuntime, MetadataGateway, and observability subscribers receive identical started/completed notifications. Tests subscribe directly to the hub (see `core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h`) to capture ordered events.
 - **Harness utilities** — `core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h` spins up `RuntimeEnv`, `ReplicaRuntime`, and `metadata::MetadataGateway`, then hands back a ready-to-use `IngestionRuntime::Config` so tests can instantiate an `IngestionRuntime` with custom dependencies.
 
 ## Materialization & Registration Flow
 
-Materialization uses a staged ingestion pipeline, orchestrated by `MaterializationCoordinator`, to normalize sources, verify data, and publish success. Registration piggybacks on the same events so metadata is published exactly once.
+Materialization uses a staged ingestion pipeline, orchestrated by `MaterializationFacade`, to normalize sources, verify data, and publish success. Registration piggybacks on the same events so metadata is published exactly once.
 
 ### Materialization Stack (API + Orchestrators)
 
 | Component | Sources | Description |
 | --- | --- | --- |
-| IngestionPipeline | `core/store/materialization/runtime/pipeline/ingestion_pipeline.{h,cc}` | Stage-based ingestion reused for disk, inline-buffer, and P2P sources; produces `IngestionResultEvent`s, feeds ReplicaRuntime/MetadataGateway directly, and still emits `ingestion_started`/`completed`/`failed` events (each carrying `publish_context_id`) for observers. |
+| IngestionPipeline | `core/store/materialization/runtime/pipeline/ingestion_pipeline.{h,cc}` | Stage-based ingestion reused for disk, inline-buffer, and P2P sources; produces `IngestionResultEvent`s that are forwarded through the `IngestionEventHub` rather than calling other runtime services directly. |
 | Contracts | `core/store/materialization/contracts/materialization_request.{h,cc}`, `loading_spec.h` | Typed payloads for StoreEngine APIs, replica keys, device hints, and returned `loading::ReplicaHandle`s. |
 | MaterializationDeps | `core/store/runtime/ingestion/materialization_service.{h,cc}` | Dependency bundle containing `ReplicaRuntime`, pinned pools, planner heuristics, and verification helpers. |
 | ReplicaRegistrationHelper | `core/store/materialization/control/replica_registration_helper.{h,cc}` | Encapsulates view hash calculation, verification metadata writes, and registration retries. |
@@ -210,7 +210,7 @@ UMA V3 keeps a single ledger for CPU virtual address space, GPU memory, and CUDA
 | Device & Metrics | `core/store/components/{device_manager,replica_registry,metrics_collector,worker_identity}.cc`, `core/store/device_registry.{h,cc}`, `core/store/device_types.h`, `core/store/materialization/common/view_hash_utils.{h,cc}` | GPU discovery, registry helpers, metrics emission, deterministic hashing. |
 | Communication & Metadata | `core/store/components/communication_manager.{h,cc}`, `core/store/components/global_store_client.{h,cc}`, `tensorcast/global_store/v1/*.proto`, `tensorcast/communicator/v1/communicator_config.proto` | Communicator wiring, Global Store RPC client, control-plane schemas. |
 | Planning & View Execution | `core/store/materialization/planning/chunk_aware_strategy.{h,cc}`, `core/store/materialization/dataplane/view/*`, `core/store/materialization/dataplane/metadata/*` | Load plan computation, variant/view planning, deterministic metadata assembly. |
-| Runtime Testing Utilities | `core/store/runtime/ingestion/testing/{fake_ingestion_pipeline,recording_event_sink,scoped_ingestion_runtime_test_harness}.h` | Deterministic ingestion pipelines, event sinks, and harness helpers for runtime unit tests. |
+| Runtime Testing Utilities | `core/store/runtime/ingestion/testing/{fake_ingestion_pipeline,scoped_ingestion_runtime_test_harness}.h` | Deterministic ingestion pipelines and harness helpers for runtime unit tests; tests subscribe to `IngestionEventHub` for lifecycle assertions. |
 | Observability & Events | `core/store/runtime/ingestion_events.h`, `core/store/runtime/context/runtime_context_events.{h,cc}`, `metrics_collector` gauges, `tc_ex_*` export counters | Structured events, synchronous delivery, and metric names consumed by dashboards. |
 
 ## Core Flows
@@ -223,7 +223,7 @@ sequenceDiagram
     participant SE as StoreEngine
     participant IR as IngestionRuntime
     participant RC as RuntimeContext
-    participant MC as MaterializationCoordinator
+    participant MC as MaterializationFacade
     participant IP as IngestionPipeline
     participant RR as ReplicaRuntime
     participant RLC as ReplicaLoadController

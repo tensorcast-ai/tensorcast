@@ -45,6 +45,15 @@ sc_header_only_library(
     ],
 )
 
+sc_header_only_library(
+    name = "testing_recording_global_store_client",
+    hdrs = ["testing/recording_global_store_client.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":global_store_client",
+    ],
+)
+
 # UMA target is canonical: depend on //core/store/replica:unified_memory_authority
 
 # ========== Core store components ==========
@@ -285,6 +294,7 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
+        ":testing_recording_global_store_client",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",
@@ -314,6 +324,7 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
+        ":testing_recording_global_store_client",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",

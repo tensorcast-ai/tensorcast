@@ -60,6 +60,7 @@ using RuntimeEventPayload = std::variant<
     std::monostate,
     ReplicaLifecycleEvent,
     RegistrationEvent,
+    IngestionStartedEvent,
     IngestionResultEvent,
     KeyMappingEvent,
     RemoteAccessEvent>;

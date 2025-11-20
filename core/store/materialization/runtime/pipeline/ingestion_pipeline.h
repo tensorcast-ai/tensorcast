@@ -16,14 +16,12 @@
 #include "core/store/materialization/runtime/pipeline/verification_stage.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion_events.h"
-#include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
 
 namespace store_runtime = tensorcast::store::runtime;
-namespace metadata = tensorcast::store::runtime::metadata;
 
 class IngestionPipeline {
  public:
@@ -35,8 +33,6 @@ class IngestionPipeline {
     const StoreEngineOptions* engine_options;
     store_runtime::ReplicaRuntime* replica_runtime;
     store_runtime::RuntimeContext* runtime_context;
-    metadata::MetadataGateway* metadata_gateway;
-    store_runtime::RuntimeContextEvents::Publisher event_publisher;
   };
 
   explicit IngestionPipeline(Config config);

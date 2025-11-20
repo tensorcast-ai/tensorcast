@@ -76,32 +76,15 @@ store_runtime::IngestionResultEvent make_ingestion_result_event(
 }
 
 void emit_ingestion_event(
-    const IngestionPipeline::Config& config,
+    const IngestionPipeline::Config& /*config*/,
     const IngestionContext& ctx,
     const absl::Status& status,
     const loading::ReplicaHandle* handle,
     store_runtime::IngestionResultEvent* event_out) {
-  const bool has_publisher = static_cast<bool>(config.event_publisher);
-  if (!has_publisher && !config.replica_runtime && !config.metadata_gateway && event_out == nullptr) {
+  if (event_out == nullptr) {
     return;
   }
-  store_runtime::IngestionResultEvent event = make_ingestion_result_event(ctx, status, handle);
-  if (config.replica_runtime) {
-    config.replica_runtime->record_ingestion_result(event);
-  }
-  if (status.ok() && handle != nullptr && ctx.publish_to_global_store && config.metadata_gateway) {
-    config.metadata_gateway->handle_ingestion_result(event);
-  }
-  if (event_out != nullptr) {
-    *event_out = event;
-    return;
-  }
-  if (has_publisher) {
-    store_runtime::RuntimeEvent runtime_event;
-    runtime_event.type = store_runtime::RuntimeEventType::kIngestionCompleted;
-    runtime_event.payload = event;
-    config.event_publisher.publish(std::move(runtime_event));
-  }
+  *event_out = make_ingestion_result_event(ctx, status, handle);
 }
 
 absl::Status initialize_context(

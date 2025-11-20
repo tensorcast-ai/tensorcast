@@ -107,6 +107,7 @@ class MetadataGateway {
   ReplicaFactory replica_factory_;
   mutable absl::Mutex publish_context_mu_;
   mutable absl::flat_hash_map<std::string, PublishContextRecord> publish_contexts_ ABSL_GUARDED_BY(publish_context_mu_);
+  std::unique_ptr<RuntimeContextEvents::Subscription> ingestion_event_subscription_;
 };
 
 } // namespace tensorcast::store::runtime::metadata

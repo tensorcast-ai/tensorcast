@@ -51,8 +51,6 @@ struct PipelineHarness {
         .engine_options = &opts,
         .replica_runtime = replica_runtime.get(),
         .runtime_context = &catalog,
-        .metadata_gateway = nullptr,
-        .event_publisher = catalog.event_publisher(),
     };
     pipeline = std::make_unique<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline>(cfg);
   }

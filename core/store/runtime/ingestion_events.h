@@ -18,6 +18,17 @@ enum class IngestionSource : std::uint8_t {
   kP2P = 1,
 };
 
+struct IngestionStartedEvent {
+  std::string request_id;
+  std::string artifact_id;
+  IngestionSource source{IngestionSource::kDisk};
+  loading::ReplicaTarget target;
+  loading::MaterializeMode materialize_mode{loading::MaterializeMode::AUTO};
+  bool publish_to_global_store{true};
+  std::string publish_context_id;
+  std::optional<std::string> view_id;
+};
+
 struct IngestionResultEvent {
   std::string request_id;
   IngestionSource source{IngestionSource::kDisk};
@@ -33,5 +44,7 @@ struct IngestionResultEvent {
   bool publish_to_global_store{true};
   std::string publish_context_id;
 };
+
+using IngestionCompletedEvent = IngestionResultEvent;
 
 } // namespace tensorcast::store::runtime

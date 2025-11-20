@@ -33,6 +33,7 @@ sc_cc_library(
         "//core/store:store_engine_options",
         "//core/store:worker_identity",
         "//core/store/materialization/common:view_hash_utils",
+        "//core/store/runtime/ingestion:ingestion_event_hub",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",

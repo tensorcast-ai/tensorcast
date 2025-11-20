@@ -16,6 +16,7 @@
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/runtime/context/runtime_context_events.h"
+#include "core/store/runtime/ingestion/ingestion_event_hub.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::runtime {
@@ -79,6 +80,8 @@ class RuntimeContext {
   std::unique_ptr<RuntimeContextEvents::Subscription> subscribe_to_events(RuntimeContextEvents::Callback callback);
   void drain_events();
   [[nodiscard]] std::string mint_publish_context_id();
+  ingestion::IngestionEventHub* ingestion_event_hub();
+  const ingestion::IngestionEventHub* ingestion_event_hub() const;
 
  private:
   void validate_options() const;
@@ -96,6 +99,7 @@ class RuntimeContext {
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
   std::unique_ptr<RuntimeContextEvents> events_;
+  std::unique_ptr<ingestion::IngestionEventHub> ingestion_event_hub_;
   components::WorkerIdentity worker_identity_;
   std::atomic<uint64_t> publish_context_counter_{1};
   bool started_{false};

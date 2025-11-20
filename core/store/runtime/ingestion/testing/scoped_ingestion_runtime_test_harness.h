@@ -93,7 +93,6 @@ class ScopedIngestionRuntimeTestHarness {
         .runtime_context = context,
         .replica_runtime = replica_runtime_.get(),
         .metadata_gateway = metadata_gateway_.get(),
-        .event_publisher = context->event_publisher(),
         .storage_path = std::filesystem::path(options_.storage_path),
         .artifact_chunk_bytes = options_.artifact_chunk_bytes,
         .pinned_memory_timeout = options_.pinned_memory_timeout,

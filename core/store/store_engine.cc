@@ -73,7 +73,6 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       .runtime_context = &context,
       .replica_runtime = replica_runtime_.get(),
       .metadata_gateway = metadata_gateway_.get(),
-      .event_publisher = context.event_publisher(),
       .storage_path = storage_path_,
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .pinned_memory_timeout = pinned_memory_timeout_,

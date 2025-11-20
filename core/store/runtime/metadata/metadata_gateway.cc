@@ -109,6 +109,10 @@ MetadataGateway::MetadataGateway(Config config)
       artifact_chunk_bytes_,
       pinned_memory_timeout_,
       registration_publisher_.get());
+  if (runtime_context_->ingestion_event_hub() != nullptr) {
+    ingestion_event_subscription_ = runtime_context_->ingestion_event_hub()->subscribe_completed(
+        [this](const IngestionCompletedEvent& event) { handle_ingestion_result(event); });
+  }
 }
 
 MetadataGateway::~MetadataGateway() = default;

@@ -77,7 +77,7 @@ sequenceDiagram
 
 ### Runtime Events and Publish Context IDs
 
-- The daemon-side Store constructs a `publish_context_id` for every ingestion request via `RuntimeContext::mint_publish_context_id()` before the pipeline starts. IngestionRuntime emits `ingestion_started`, `ingestion_completed`, and `ingestion_failed` runtime events with that identifier plus the request metadata (ingestion source, target device, `request_id`, and any resolved view hints).
+- The daemon-side Store constructs a `publish_context_id` for every ingestion request via `RuntimeContext::mint_publish_context_id()` before the pipeline starts. `MaterializationFacade` publishes typed `IngestionStartedEvent`/`IngestionCompletedEvent` payloads through `IngestionEventHub` so subscribers receive identical metadata (ingestion source, target device, `request_id`, publish context, and any resolved view hints).
 - MetadataGateway subscribes to `ingestion_completed` events and reuses the `publish_context_id` to dedupe synchronous publish requests against auto-publish flows—whichever arrives first performs the Global Store RPC, and the later call becomes a no-op/TTL refresh.
 - ReplicaRuntime also listens for the same events to keep UMA telemetry in sync and to attribute pipeline metrics (bytes, duration, success/failure) to the correct request id.
 

@@ -101,6 +101,7 @@ class ReplicaRuntime {
 
   gsl::not_null<RuntimeContext*> context_;
   RuntimeContextEvents::Publisher event_publisher_;
+  std::unique_ptr<RuntimeContextEvents::Subscription> ingestion_event_subscription_;
 };
 
 } // namespace tensorcast::store::runtime

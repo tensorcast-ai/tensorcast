@@ -23,6 +23,10 @@ ReplicaRuntime::ReplicaRuntime(gsl::not_null<RuntimeContext*> context)
 ReplicaRuntime::ReplicaRuntime(Config config) : context_(config.runtime_context) {
   if (context_ != nullptr) {
     event_publisher_ = context_->event_publisher();
+    if (context_->ingestion_event_hub() != nullptr) {
+      ingestion_event_subscription_ = context_->ingestion_event_hub()->subscribe_completed(
+          [this](const IngestionCompletedEvent& event) { record_ingestion_result(event); });
+    }
   }
 }
 

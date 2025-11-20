@@ -46,7 +46,6 @@ sc_cc_library(
         "//core/store/materialization/dataplane:view_planner",
         "//core/store/runtime:ingestion_events",
         "//core/store/runtime/context:runtime_context",
-        "//core/store/runtime/metadata:metadata_gateway",
         "//core/store/runtime/replica:replica_runtime",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",

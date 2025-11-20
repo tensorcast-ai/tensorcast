@@ -54,8 +54,6 @@ std::unique_ptr<tensorcast::store::materialization::runtime::pipeline::Ingestion
       .engine_options = &opts,
       .replica_runtime = &runtime,
       .runtime_context = &catalog,
-      .metadata_gateway = nullptr,
-      .event_publisher = catalog.event_publisher(),
   };
   return std::make_unique<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline>(cfg);
 }

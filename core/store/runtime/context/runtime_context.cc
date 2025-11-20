@@ -29,7 +29,8 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
       replica_registry_(std::make_unique<components::ReplicaRegistry>()),
       metrics_collector_(std::make_unique<components::MetricsCollector>()),
       view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})),
-      events_(std::make_unique<RuntimeContextEvents>()) {
+      events_(std::make_unique<RuntimeContextEvents>()),
+      ingestion_event_hub_(std::make_unique<ingestion::IngestionEventHub>(events_.get())) {
   if (options_.comm_manager) {
     comm_manager_ = options_.comm_manager;
   } else {
@@ -131,6 +132,14 @@ std::string RuntimeContext::mint_publish_context_id() {
   const absl::string_view worker =
       worker_identity_.worker_id.empty() ? absl::string_view("local") : absl::string_view(worker_identity_.worker_id);
   return absl::StrCat("pubctx_", worker, "_", timestamp, "_", sequence);
+}
+
+ingestion::IngestionEventHub* RuntimeContext::ingestion_event_hub() {
+  return ingestion_event_hub_.get();
+}
+
+const ingestion::IngestionEventHub* RuntimeContext::ingestion_event_hub() const {
+  return ingestion_event_hub_.get();
 }
 
 void RuntimeContext::validate_options() const {

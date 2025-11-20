@@ -7,7 +7,6 @@ sc_header_only_library(
     testonly = True,
     hdrs = [
         "fake_ingestion_pipeline.h",
-        "recording_event_sink.h",
         "scoped_ingestion_runtime_test_harness.h",
     ],
     visibility = ["//visibility:public"],
