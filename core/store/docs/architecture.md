@@ -72,7 +72,6 @@ graph TB
     IR --> MF
     MF --> IP
     MF --> MG
-    IR --> RF
     MF --> MZ
     MZ --> IP
     MF --> MO
@@ -115,6 +114,43 @@ StoreEngine owns only construction-time wiring. Runtime services expose narrow, 
 | RegistrationBackend | `core/store/runtime/metadata/registration_backend.{h,cc}`, `core/store/materialization/control/replica_registration_helper.{h,cc}` | GPU-first begin/commit/abort/keep-alive APIs, CUDA IPC export, verification metadata, TTL refresh helpers, emits registration events via MetadataGateway. | `DeviceManager`, `ReplicaRegistry`, `PinnedBufferPool`, `MemoryExportRegistry`, `RegistrationPublisher` |
 | MetadataGateway | `core/store/runtime/metadata/metadata_gateway.{h,cc}` | All Global Store RPCs, worker registration, key-mapping CRUD, direct ingestion callbacks for Global Store publication, registration event fan-out, and UMA metric refresh for commit/abort. | `core/store/components/global_store_client.{h,cc}`, `RuntimeContext`, `WorkerIdentity`, `RegistrationBackend`, `ReplicaRuntime` |
 
+### Facade wiring & runtime boundaries
+
+```mermaid
+flowchart TD
+  SE[StoreEngine facade] --> RE[RuntimeEnv]
+  RE --> RC[RuntimeContext]
+  SE --> RR[ReplicaRuntime]
+  SE --> IR[IngestionRuntime]
+  SE --> MG[MetadataGateway]
+  RC --> DM[DeviceManager]
+  RC --> REG[ReplicaRegistry]
+  RC --> MC[MetricsCollector]
+  RC --> COMM[CommunicationManager]
+  RC --> PB[PinnedBufferPool]
+  RC --> GSC[GlobalStoreClient]
+  RC --> IEH[IngestionEventHub]
+  IR --> MF[MaterializationFacade]
+  MF --> MS[MaterializationService]
+  MF --> IP[IngestionPipeline]
+  MF --> IEH
+  IEH --> RR
+  IEH --> MG
+  MG --> RB[RegistrationBackend]
+  RB --> GSC
+```
+
+`StoreEngine` constructs each runtime exactly once. `RuntimeEnv::start()` boots `RuntimeContext`, validates `StoreEngineOptions`, wires communicator/listen ports, and initializes the shared catalog (`DeviceManager`, `ReplicaRegistry`, `PinnedBufferPool`, metrics, and Global Store client). `RuntimeEnv::shutdown()` calls `RuntimeContext::drain_events()` before tearing down dependencies so every ingestion/registration callback finishes while the shared pools are still alive. `RuntimeEnv::update_worker_identity()` pushes node metadata into the context so `MetadataGateway`, the communicator, and Global Store client keep a consistent view of the worker.
+
+### API ownership map
+
+| StoreEngine API surface | Owning runtime | Responsibilities today |
+| --- | --- | --- |
+| `materialize_replica`, `ingest_from_disk`, `ingest_from_p2p` | `IngestionRuntime` + `MaterializationFacade` | Validates requests via `MaterializationService`, mints `publish_context_id`s through `RuntimeContext`, orchestrates AUTO/disk/P2P loaders, publishes `ingestion_started/completed` through `IngestionEventHub`, and hands back `loading::ReplicaHandle`s. |
+| `wait_replica_ready`, `get_resident_devices`, `list_device_replicas`, `get_chunk_states_*`, `enable/disable_remote_replica_access`, `unload_replica` | `ReplicaRuntime` | Owns `ReplicaRegistry`, UMA snapshots, eviction retries, remote-access toggles, and ingestion result bookkeeping driven by `IngestionEventHub` subscriptions. |
+| `begin_register_artifact`, `commit_registered_artifact`, `abort_registered_artifact`, `keep_alive_registration`, `ingest_view_registration_chunk`, `register_replica_with_global_store` | `metadata::MetadataGateway` + `RegistrationBackend` | Maintains TTL-scoped `PendingRegistrationContext`s, exposes CUDA IPC handles for writers, finalizes view plans, computes canonical hashes, exports communicator keys, and publishes registration events/dedupe state to Global Store. |
+| `set_worker_identity`, `shutdown`, `get_metrics_snapshot` | `RuntimeEnv` + `RuntimeContext` | Validates options, updates communicator/endpoints, refreshes metrics via `MetricsCollector`, and drains Folly-backed events before tearing down shared infrastructure. |
+
 ### Testing & Overrides
 
 `IngestionRuntime::Config` carries a shared `IngestionRuntimeDependencies` bundle (`core/store/runtime/ingestion/ingestion_runtime.h`) so unit tests can exercise the full ingestion stack without wiring an entire `StoreEngine`.
@@ -137,6 +173,16 @@ Materialization uses a staged ingestion pipeline, orchestrated by `Materializati
 | ReplicaRegistrationHelper | `core/store/materialization/control/replica_registration_helper.{h,cc}` | Encapsulates view hash calculation, verification metadata writes, and registration retries. |
 | View tooling | `core/store/view_utils.{h,cc}`, `core/store/materialization/common/view_hash_utils.{h,cc}` | Deterministic variant/view identifiers shared between ingestion and registration. |
 | View execution | `core/store/materialization/dataplane/view/{view_planner,view_plan_source,view_ingest_executor,view_transform_executor}.{h,cc}` | Plan and stream incremental view chunks for registration keep-alive APIs. |
+
+### Materialization modes & request validation
+
+`MaterializationService` centralizes the logic that used to live inside `StoreEngine::materialize_replica`:
+
+- Requests are validated via `loading::MaterializationRequest::Create`, which normalizes `MaterializeHints`, resolves `VariantRequest` data, and checks that CPU/GPU device IDs map to known `DeviceKey`s before any UMA allocations occur.
+- `MaterializeMode::AUTO` first calls `MaterializeOrchestrator::run()` to negotiate a remote transport with Global Store (via `CommunicationManager`). When a transport session is granted the request flows through `ingest_from_p2p`; if not, the service only falls back to disk when `hints.disk_path` is populated.
+- `MaterializeMode::LOAD_ONLY` requires a disk path and never attempts P2P; `MaterializeMode::COPY_ONLY` copies from an already resident GPU replica, reusing UMA metadata.
+- View-aware hints (`MaterializeHints::variant`) propagate canonical + view identifiers into the ingestion pipeline so the resulting `ReplicaKey` encodes `view_id`, and verification helpers recompute `view_data_hash` via `ViewHashComputer`.
+- Dependencies are injected with `MaterializationDeps`: `ReplicaRuntime` for reuse/allocation, the shared `PinnedBufferPool`, `ChunkAwareLoadingStrategy`, `TransferService`, and planner utilities. Tests override these via `MaterializationHooks` to inject fake pipelines, mutate completion events, or short-circuit results without touching production wiring.
 
 ### Ingestion Pipeline Stages
 
@@ -171,6 +217,14 @@ Materialization uses a staged ingestion pipeline, orchestrated by `Materializati
 - `set_client_override()` plus `refresh_override_endpoint()` let integration tests supply stubbed `IGlobalStoreClient` implementations while still reusing worker identity data propagated through `RuntimeContext`.
 - Registration lifecycle APIs (`begin_registration`, `commit_registration`, `abort_registration`, `keep_alive_registration`, `ingest_view_chunk`) are delegated to `RegistrationBackend`; results are re-published onto `RuntimeContextEvents` so other runtimes can observe commits/aborts without calling Global Store directly.
 
+#### RegistrationBackend internals
+
+- `RegistrationBackend` receives a `RegistrationResources` bundle (DeviceManager, ReplicaRegistry, MetricsCollector, `PinnedBufferPool`, optional `CommunicationManager`) and a `ReplicaFactory`. `begin()` validates schema/version hints, computes optional bidirectional view plans, and uses `ReplicaFactory` to allocate GPU memory plus CUDA IPC handles before inserting the pending replica into `ReplicaRegistry`.
+- Each pending registration is represented by `PendingRegistrationContext`, which stores TTL deadlines, view ingest metadata, CUDA IPC handles, UMA residency pointers, and (when requested) canonical ranges for partial views. Contexts live in an `absl::flat_hash_map` guarded by `pending_mutex_`; the backend updates `MetricsCollector::record_registration_pending` whenever entries are added or removed.
+- TTL is enforced at `commit()` time: expired contexts are dropped, UMA memory is released, and the caller receives `DeadlineExceeded`. `keep_alive()` extends the expiry, while `abort()` removes the entry and runs the same cleanup paths used when errors occur.
+- View ingestion (`ingest_view_registration_chunk`) streams bytes through a `ViewIngestExecutor` for SERVER placements so transforms/finalization stay on GPU. `get_view_ingested_bytes()` offers progress reporting to the daemon.
+- `commit()` recomputes canonical/index multihashes, optionally finalizes SERVER-side view executors, exports communicator keys when P2P is enabled, and calls a `RegistrationPublisher` (backed by `GlobalStoreRegistrationPublisher`) so Global Store receives the authoritative `RegistrationCommitResult` with the committed `DeviceKey`. Successful commits update `MetricsCollector::record_registration_commit`, and UMA memory is released only after publication succeeds or returns a terminal error.
+
 ## Replica, Memory, and Device Management
 
 UMA V3 keeps a single ledger for CPU virtual address space, GPU memory, and CUDA IPC exports. Replica lifecycle helpers wrap UMA so higher layers reason about handles instead of raw buffers.
@@ -203,8 +257,8 @@ UMA V3 keeps a single ledger for CPU virtual address space, GPU memory, and CUDA
 | Category | Modules | Notes |
 | --- | --- | --- |
 | External Interfaces & Config | `core/store/store_engine.{h,cc}`, `core/store/store_engine_options.{h,cc}`, `daemon/` Store daemon targets, `tensorcast/global_store/` Python control plane | Public API surface, configuration validation, and out-of-process control plane. |
-| Runtime & Coordination | `core/store/runtime/{runtime_env,replica/replica_runtime,metadata/metadata_gateway}.cc`, `core/store/runtime/ingestion/{ingestion_runtime,materialization_coordinator,materialization_service}.cc`, `core/store/runtime/context/{runtime_context,runtime_context_events}.cc`, `core/store/runtime/runtime_services_test.cc` | Runtime orchestration, worker identity, ingestion/registration fan-out, regression coverage. |
-| Materialization & Contracts | `core/store/runtime/ingestion/{ingestion_runtime,materialization_coordinator,materialization_service}.cc`, `core/store/materialization/control/{materialization_backend,materialize_orchestrator,replica_registration_helper}.cc`, `core/store/materialization/contracts/{materialization_request,loading_spec}.h`, `core/store/view_utils.{h,cc}` | Materialize API surface, runtime orchestration, strategy selection, registration helpers, and typed contracts. |
+| Runtime & Coordination | `core/store/runtime/{runtime_env,replica/replica_runtime,metadata/metadata_gateway}.cc`, `core/store/runtime/ingestion/{ingestion_runtime,materialization_facade,materialization_service}.cc`, `core/store/runtime/context/{runtime_context,runtime_context_events}.cc`, `core/store/runtime/runtime_services_test.cc` | Runtime orchestration, worker identity, ingestion/registration fan-out, regression coverage. |
+| Materialization & Contracts | `core/store/runtime/ingestion/{ingestion_runtime,materialization_facade,materialization_service}.cc`, `core/store/materialization/control/{materialization_backend,materialize_orchestrator,replica_registration_helper}.cc`, `core/store/materialization/contracts/{materialization_request,loading_spec}.h`, `core/store/view_utils.{h,cc}` | Materialize API surface, runtime orchestration, strategy selection, registration helpers, and typed contracts. |
 | Pipeline & Data Plane | `core/store/materialization/runtime/pipeline/*`, `core/store/materialization/dataplane/{contracts,loaders,sources,sinks,metadata,view}`, `core/store/materialization/dataplane/runtime/pump.{h,cc}` | Source normalization, staged ingestion, streaming pump, verification metadata, view execution. |
 | Replica & Memory | `core/store/replica/{replica,replica_load_controller,transfer_service,transfer_helpers,unified_memory_authority,memory_export_registry}.cc`, `core/common/memory/{pinned_buffer_pool,streaming_pinned_buffer,gpu_device_memory,virtual_address_space}.cc`, `core/store/components/eviction_service.{h,cc}` | UMA ledger, transfers, IPC exports, pinned memory pools, eviction policy. |
 | Device & Metrics | `core/store/components/{device_manager,replica_registry,metrics_collector,worker_identity}.cc`, `core/store/device_registry.{h,cc}`, `core/store/device_types.h`, `core/store/materialization/common/view_hash_utils.{h,cc}` | GPU discovery, registry helpers, metrics emission, deterministic hashing. |
@@ -222,8 +276,9 @@ sequenceDiagram
     participant Client
     participant SE as StoreEngine
     participant IR as IngestionRuntime
-    participant RC as RuntimeContext
-    participant MC as MaterializationFacade
+    participant MF as MaterializationFacade
+    participant RC as RuntimeContext/IEH
+    participant MZ as MaterializationService
     participant IP as IngestionPipeline
     participant RR as ReplicaRuntime
     participant RLC as ReplicaLoadController
@@ -231,17 +286,20 @@ sequenceDiagram
 
     Client->>SE: materialize_replica(artifact_id, device, mode)
     SE->>IR: forward request
-    IR->>RC: mint_publish_context_id()
-    RC-->>IR: publish_context_id
-    IR->>RC: emit ingestion_started (publish_context_id)
-    IR->>MC: build MaterializationRequest
-    MC->>RR: get_or_create_replica()
-    RR->>IP: ensure_loaded_async(location)
+    IR->>MF: delegate materialize call
+    MF->>RC: mint_publish_context_id()
+    RC-->>MF: publish_context_id
+    MF->>RC: publish ingestion_started via IngestionEventHub
+    MF->>MZ: execute MaterializationRequest
+    MZ->>RR: reuse/create replica & planner state
+    MZ->>IP: drive ingestion pipeline
     IP->>RLC: allocate/load via UMA & TransferService
     RLC-->>IP: ReplicaHandle + chunk states
-    IP-->>IR: IngestionResultEvent (publish)
-    IR->>RC: emit ingestion_completed (publish_context_id)
-    IR->>MG: publish success when requested
+    IP-->>MF: IngestionResultEvent (publish)
+    MF->>RC: publish ingestion_completed via IngestionEventHub
+    RC-->>RR: telemetry + chunk updates
+    RC-->>MG: auto-publish when requested
+    MF-->>IR: ReplicaHandle
     IR-->>SE: ReplicaHandle
     SE-->>Client: ReplicaHandle + readiness future
 ```
@@ -252,34 +310,42 @@ sequenceDiagram
 sequenceDiagram
     participant Client
     participant IR as IngestionRuntime
-    participant RC as RuntimeContext
+    participant MF as MaterializationFacade
+    participant RC as RuntimeContext/IEH
     participant IP as IngestionPipeline
     participant Loader as P2PLoader/RemoteKeySource
     participant COMM as CommunicationManager
     participant TS as TransferService
     participant UMA as UnifiedMemoryAuthority
+    participant RR as ReplicaRuntime
+    participant MG as MetadataGateway
 
     Client->>IR: ingest_from_p2p(p2p_config)
-    IR->>RC: mint_publish_context_id()
-    RC-->>IR: publish_context_id
-    IR->>RC: emit ingestion_started (publish_context_id)
-    IR->>IP: prepare P2P request
+    IR->>MF: delegate P2P ingestion
+    MF->>RC: mint_publish_context_id()
+    RC-->>MF: publish_context_id
+    MF->>RC: publish ingestion_started via IngestionEventHub
+    MF->>IP: prepare P2P request
     IP->>Loader: open_source()
     Loader->>COMM: register remote exports
     Loader-->>IP: SeekableSource(RemoteKeySource)
     IP->>TS: pump_ranges(source -> sink)
     TS->>UMA: commit chunk states
     UMA-->>IP: residency snapshot
-    IP-->>IR: ingestion result + metrics
-    IR->>RC: emit ingestion_completed/failed (publish_context_id)
+    IP-->>MF: ingestion result + metrics
+    MF->>RC: publish ingestion_completed/failed via IngestionEventHub
+    RC-->>RR: telemetry + residency updates
+    RC-->>MG: auto-register when requested
+    MF-->>IR: ReplicaHandle / status
 ```
 
 ## Observability & Extension Points
 
 - `MetricsCollector` exposes UMA pool gauges, ingestion latency, registration throughput, communicator export counters, and transfer bandwidth (`tc_store_evictions_total`, `tc_ingest_seconds`, `tc_ex_registrations_total`, `tc_ex_keepalive_gauge`, `tc_tx_inflight_copies_gauge`).
-- `IngestionRuntime` emits structured `ingestion_started`, `ingestion_completed`, and `ingestion_failed` events for every disk/P2P/materialize request; each event carries the `request_id`, ingest source, and the `publish_context_id` minted via `RuntimeContext::mint_publish_context_id()`. The same completion payload is sent directly to ReplicaRuntime (telemetry) and MetadataGateway (auto-publish), so publish dedupe no longer depends on subscribing to RuntimeContext events.
-- `IngestionRuntime` caches each replica’s most recent `publish_context_id` so that synchronous `register_replica_with_global_store` calls forward the same identifier to `MetadataGateway`, guaranteeing later ingestion events collapse into no-ops instead of issuing duplicate Global Store RPCs.
+- `MaterializationFacade` emits structured `ingestion_started`, `ingestion_completed`, and `ingestion_failed` events for every disk/P2P/materialize request via `IngestionEventHub`; each payload includes the `request_id`, ingest source, and the `publish_context_id` minted through `RuntimeContext::mint_publish_context_id()`. ReplicaRuntime and MetadataGateway both subscribe to the hub, so telemetry and auto-publish stay in lock-step without bespoke callbacks.
+- `MaterializationFacade` caches each replica’s most recent `publish_context_id` (when auto-publish is enabled) before calling into `MetadataGateway::register_replica`, ensuring synchronous registration APIs reuse the same identifier that event subscribers observe and preventing duplicate Global Store RPCs.
 - `RuntimeContextEvents::drain()` is called during shutdown so no event handler can outlive shared dependencies; all ingestion/registration publishers must keep handlers lightweight.
+- `RuntimeEnv::shutdown()` always invokes `RuntimeContext::drain_events()` before tearing down `CommunicationManager`, pinned pools, or registries, ensuring that `ReplicaRuntime`, `MetadataGateway`, and observability subscribers finish their callbacks while UMA/metrics state is still valid.
 - `WorkerIdentity` updates immediately propagate to the `GlobalStoreClient`, communicator endpoints, and registration payloads.
 - Extension points follow strict interfaces: implement `IArtifactLoader` for new loaders, extend `ArtifactSource` for new source types, add planner strategies via `ChunkAwareLoadingStrategy`, and use `MaterializationDeps` to inject experimental services without touching StoreEngine.
 
