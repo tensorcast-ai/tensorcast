@@ -31,25 +31,25 @@ def _timestamp_to_datetime(timestamp: Timestamp | None) -> datetime | None:
         return None
 
 
-def _memory_type_to_str(memory_type: int) -> str:
+def _memory_type_to_str(memory_type: common_pb2.MemoryType) -> str:
     mapping = {
         common_pb2.MemoryType.MEMORY_TYPE_RAM: "RAM",
         common_pb2.MemoryType.MEMORY_TYPE_GPU: "GPU",
         common_pb2.MemoryType.MEMORY_TYPE_DISK: "DISK",
     }
-    return mapping.get(common_pb2.MemoryType(memory_type), "UNSPECIFIED")
+    return mapping.get(memory_type, "UNSPECIFIED")
 
 
-def _connection_status_to_str(status: int) -> str:
+def _connection_status_to_str(status: global_store_pb2.ConnectionStatus) -> str:
     mapping = {
         global_store_pb2.ConnectionStatus.CONNECTION_STATUS_CONNECTED: "CONNECTED",
         global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED: "DISCONNECTED",
         global_store_pb2.ConnectionStatus.CONNECTION_STATUS_RECONNECTING: "RECONNECTING",
     }
-    return mapping.get(global_store_pb2.ConnectionStatus(status), "UNSPECIFIED")
+    return mapping.get(status, "UNSPECIFIED")
 
 
-def _chunk_state_to_str(state: int) -> str:
+def _chunk_state_to_str(state: global_store_pb2.ChunkState) -> str:
     mapping = {
         global_store_pb2.ChunkState.CHUNK_STATE_LOCKED_TX: "LOCKED_TX",
         global_store_pb2.ChunkState.CHUNK_STATE_COPIED_GPU: "COPIED_GPU",
@@ -63,15 +63,15 @@ def _chunk_state_to_str(state: int) -> str:
 def _artifact_id_kind_to_str(kind: int | None) -> str | None:
     if kind is None:
         return None
-    mapping = {
-        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2: ArtifactIdKind.MI2.value,
-        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID: ArtifactIdKind.CGID.value,
-    }
     try:
-        enum_value = common_pb2.ArtifactIdKind(kind)
+        enum_name = common_pb2.ArtifactIdKind.Name(kind)
     except ValueError:
         return None
-    return mapping.get(enum_value)
+    mapping = {
+        "ARTIFACT_ID_KIND_MI2": ArtifactIdKind.MI2.value,
+        "ARTIFACT_ID_KIND_CGID": ArtifactIdKind.CGID.value,
+    }
+    return mapping.get(enum_name)
 
 
 def _infer_kind_from_artifact_id(artifact_id: str) -> str | None:
