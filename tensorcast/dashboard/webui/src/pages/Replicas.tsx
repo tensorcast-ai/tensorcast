@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { api, type ReplicasResponse } from '@/utils/api';
+import { api, type ReplicaRow } from '@/utils/api';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatBytes } from '@/utils/utils';
+import { formatBytes, formatDateTime } from '@/utils/utils';
 import { NavLink, useSearchParams } from 'react-router-dom';
 
-type Row = ReplicasResponse['replicas'][number];
+type Row = ReplicaRow;
 
 export default function Replicas() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -184,12 +183,13 @@ export default function Replicas() {
         <TableHeader>
           <TableRow>
             <TableHead>Artifact</TableHead>
-            <TableHead>Replica</TableHead>
+            <TableHead>Kind</TableHead>
             <TableHead>Node</TableHead>
             <TableHead>Device</TableHead>
             <TableHead>Memory</TableHead>
             <TableHead>Bytes</TableHead>
-            <TableHead>State</TableHead>
+            <TableHead>Created</TableHead>
+            <TableHead>Expires</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -197,7 +197,7 @@ export default function Replicas() {
             <>
               {Array.from({ length: 3 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: 7 }).map((__, j) => (
+                  {Array.from({ length: 8 }).map((__, j) => (
                     <TableCell key={j}><Skeleton className="h-4 w-full max-w-[160px]" /></TableCell>
                   ))}
                 </TableRow>
@@ -205,7 +205,7 @@ export default function Replicas() {
             </>
           ) : rows.length === 0 ? (
             <TableRow>
-              <TableCell className="p-3 text-muted-foreground" colSpan={7}>无数据</TableCell>
+              <TableCell className="p-3 text-muted-foreground" colSpan={8}>无数据</TableCell>
             </TableRow>
           ) : (
             rows.map((r) => (
@@ -215,15 +215,18 @@ export default function Replicas() {
                     {r.artifact_id}
                   </NavLink>
                 </TableCell>
-                <TableCell className="font-mono">{`${r.node_id}:${r.memory_type}:${r.device_id ?? '-'}`}</TableCell>
+                <TableCell>{r.id_kind ?? '—'}</TableCell>
                 <TableCell>
                   {r.node_address} <span className="text-muted-foreground">({r.node_id})</span>
                 </TableCell>
                 <TableCell>{r.device_id ?? '—'}</TableCell>
                 <TableCell>{r.memory_type}</TableCell>
                 <TableCell>{formatBytes(r.bytes)}</TableCell>
-                <TableCell>
-                  <Badge>{r.state ?? '—'}</Badge>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {r.created_ts ? formatDateTime(r.created_ts) : '—'}
+                </TableCell>
+                <TableCell className="font-mono text-xs text-muted-foreground">
+                  {r.expires_at ? formatDateTime(r.expires_at) : '—'}
                 </TableCell>
               </TableRow>
             ))

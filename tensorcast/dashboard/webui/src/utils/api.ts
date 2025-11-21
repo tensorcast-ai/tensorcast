@@ -16,36 +16,57 @@ export type WorkersResponse = {
   }>;
 };
 
+export type ReplicaRow = {
+  artifact_id: string;
+  node_id: string;
+  node_address: string;
+  device_id: number | null;
+  memory_type: 'RAM' | 'GPU' | 'DISK' | string;
+  bytes: number;
+  state?: string | null;
+  created_ts?: string | null;
+  expires_at?: string | null;
+  id_kind?: string | null;
+};
+
 export type ReplicasResponse = {
-  replicas: Array<{
-    artifact_id: string;
-    node_id: string;
-    node_address: string;
-    device_id: number | null;
-    memory_type: 'RAM' | 'GPU' | 'DISK' | string;
-    bytes: number;
-    state?: string | null; // READY|... (may be null/absent)
-    created_ts?: string | null; // RFC3339 (may be null)
-  }>;
+  replicas: Array<ReplicaRow>;
   page_info?: { next_page_token?: string | null } | null;
 };
 
 export type ArtifactDetailResponse = {
   artifact_id: string;
+  artifact_kind?: string | null;
+  descriptor?: {
+    artifact_id: string;
+    id_kind?: string | null;
+    index_multihash?: string | null;
+    data_multihash?: string | null;
+    schema_version?: string | null;
+    encoding?: string | null;
+    total_size?: number | null;
+  } | null;
   replicas?: Array<{
-    replica_id: string;
     node_id: string;
-    node_address?: string;
+    node_address: string;
+    device_id: number | null;
     memory_type: 'RAM' | 'GPU' | 'DISK' | string;
-    state: string;
+    bytes: number;
+    created_ts?: string | null;
+    expires_at?: string | null;
   }>;
   view_meta?: {
-    view_id: string;
-    total_leaves: number;
-    schema_version: number;
+    view_spec_json: string;
+    view_size: number;
+    view_data_hash: string;
+    verified_at?: string | null;
   } | null;
-  leaves?: Array<{ index: number; size: number }> | null;
-  partial_coverage?: { covered?: number[]; missing?: number[] } | null;
+  leaves?: Array<{ index: number; digest_b64: string }> | null;
+  partial_coverage?: Array<{
+    space_kind: string;
+    space_id: string;
+    missing: Array<{ offset: number; length: number }>;
+  }> | null;
 };
 
 function withApiBase(path: string): string {
@@ -103,5 +124,4 @@ export const api = {
     return getJson(`/api/artifacts/${encodeURIComponent(artifactId)}?${search.toString()}`);
   },
 };
-
 

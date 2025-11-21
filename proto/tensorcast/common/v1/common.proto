@@ -53,6 +53,7 @@ message MemoryInfo {
   // Optional verification metadata (JSON). When present, receivers may perform
   // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
   string verification_json = 14;
+  google.protobuf.Timestamp expires_at = 15;
 }
 
 message ReplicaRef {

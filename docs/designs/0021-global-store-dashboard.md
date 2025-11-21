@@ -88,7 +88,9 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
 
 - `GET /api/replicas?artifact_id=&node_id=&node_address=&memory_type=&device_id=&page_token=&page_size=`
   - Maps to `ListReplicasV2` with filter fields and pagination.
-  - Returns `{ replicas: [...], page_info: { next_page_token, total_size? } }`.
+  - Returns `{ replicas: [...], page_info: { next_page_token, total_size? } }`. Each
+    replica row surfaces `id_kind` (MI2 vs CGID) inferred from `artifact_id` and, when
+    Global Store provides it, an RFC3339 `expires_at` timestamp.
 
 - `GET /api/artifacts/{artifact_id}?include=replicas,view,leaves&space=canonical|view&view_id=&leaf_indices=1,2,...`
   - Maps to `GetArtifactInfoById`.
@@ -97,7 +99,10 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
     - `space=canonical|view` selects index space.
     - `view_id` optional when `space=view`.
     - `leaf_indices=1,2,...` optional selection for leaves.
-  - Returns selected `replicas`, `view_meta`, `leaves`, and `partial_coverage`.
+  - Returns selected `replicas`, `view_meta`, `leaves`, and `partial_coverage`. When the
+    Global Store has recorded descriptor metadata, the response also includes
+    `descriptor` with `id_kind`, hashes, schema, and encoding, plus a derived
+    `artifact_kind` helper to simplify UI rendering.
 
 - `GET /api/chunks?artifact_id=&chunk_indices=1,2,...`
   - Maps to `QueryChunkLocations`.
@@ -119,18 +124,18 @@ Notes
 
 - Backend: Python + FastAPI + Pydantic models for strict request/response schemas. Uses the existing Global Store gRPC stubs.
 - Frontend: React + TypeScript + Vite + Tailwind (shadcn/ui) under `tensorcast/dashboard/webui`.
-  - Router `basename` 与 Vite `base` 通过 `BASE_PATH`/`VITE_BASE_PATH` 对齐，支持子路径部署。
-  - 不直接读取 Prometheus；Metrics 页面仅在 `GRAFANA_*` 配置存在时显示嵌入面板。
-  - 前端运行时以 `import.meta.env.BASE_URL` 作为 Router `basename`，构建时由 `VITE_BASE_PATH` 写入 Vite `base`。
-- Packaging: 后端随 Python wheel 分发；前端构建产物位于 `tensorcast/dashboard/static`（Vite build 的 outDir 指向该目录）。
-- Entry point: ASGI 应用 `tensorcast.dashboard.api:app`（使用 Uvicorn 等 ASGI 服务器启动）。
+  - Router `basename` and Vite `base` stay aligned through `BASE_PATH`/`VITE_BASE_PATH`, so the UI can run under a sub-path.
+  - The frontend never reads Prometheus directly; the Metrics page shows embedded panels only when `GRAFANA_*` configuration is provided.
+  - At runtime the frontend uses `import.meta.env.BASE_URL` as the Router `basename`, and during build `VITE_BASE_PATH` writes the Vite `base`.
+- Packaging: the backend ships with the Python wheel; frontend build artifacts live in `tensorcast/dashboard/static` (Vite's `outDir` points to this directory).
+- Entry point: ASGI application `tensorcast.dashboard.api:app` (served via Uvicorn or another ASGI server).
 
 Directory sketch (non-normative):
 - `tensorcast/dashboard/api.py` — FastAPI app and routers
 - `tensorcast/dashboard/schemas.py` — Pydantic models
 - `tensorcast/dashboard/gs_client.py` — thin gRPC client wrapping GS RPCs
 - `tensorcast/dashboard/webui/` — web UI source (React/Vite/Tailwind/shadcn)
-- `tensorcast/dashboard/static/` — compiled frontend (Vite build 输出)
+- `tensorcast/dashboard/static/` — compiled frontend (Vite build output)
 
 ## API Contracts & Error Semantics
 
@@ -164,7 +169,7 @@ Error body (uniform)
 }
 ```
 
-Endpoints — request/response examples（与 `tensorcast/dashboard/schemas.py` 对齐）
+Endpoints — request/response examples (aligned with `tensorcast/dashboard/schemas.py`)
 
 - GET `/api/health`
   - Response 200
@@ -206,7 +211,9 @@ Endpoints — request/response examples（与 `tensorcast/dashboard/schemas.py` 
         "device_id": 0,
         "memory_type": "GPU",
         "bytes": 1048576,
-        "created_ts": "2025-01-24T12:01:00Z"
+        "created_ts": "2025-01-24T12:01:00Z",
+        "expires_at": "2025-01-24T13:01:00Z",
+        "id_kind": "MI2"
       }
     ],
     "page_info": {
@@ -220,6 +227,15 @@ Endpoints — request/response examples（与 `tensorcast/dashboard/schemas.py` 
   ```json
   {
     "artifact_id": "af-001",
+    "artifact_kind": "MI2",
+    "descriptor": {
+      "artifact_id": "af-001",
+      "id_kind": "MI2",
+      "index_multihash": "index-abc",
+      "data_multihash": "data-xyz",
+      "schema_version": "v3",
+      "encoding": "json"
+    },
     "replicas": [
       {
         "node_id": "n-1",
@@ -227,7 +243,8 @@ Endpoints — request/response examples（与 `tensorcast/dashboard/schemas.py` 
         "device_id": 0,
         "memory_type": "GPU",
         "bytes": 1048576,
-        "created_ts": "2025-01-24T12:01:00Z"
+        "created_ts": "2025-01-24T12:01:00Z",
+        "expires_at": "2025-01-24T13:01:00Z"
       }
     ],
     "view_meta": {
@@ -303,7 +320,7 @@ Future (non‑MVP)
 - No built‑in authentication in the dashboard. Rely on internal network controls and/or reverse proxy policies if access restriction is needed.
 - TLS: serve HTTPS directly (cert/key) or terminate at the reverse proxy.
 - CORS: configurable allowlist via `CORS_ALLOWED_ORIGINS` (comma‑separated). Default is disabled (no cross‑origin access).
-- CSP: 后端当前未默认设置 CSP 标头；建议在反向代理侧设置严格的 `Content-Security-Policy`（当启用 Grafana 嵌入时仅允许相应 `frame-src`）。后续可在后端增设可配置的 CSP 中间件。
+- CSP: the backend does not set CSP headers by default; configure a strict `Content-Security-Policy` at the reverse proxy (when Grafana embedding is enabled, allow only the required `frame-src` targets). A configurable CSP middleware can be added in the backend later.
 - Do not expose Grafana tokens to the browser. Prefer anonymous viewer mode, or terminate Grafana auth at the reverse proxy and allow only panel paths from the dashboard origin.
 - Path prefix: support hosting under a subpath (e.g., `/tensorcast-dashboard`) via `BASE_PATH`.
 - Health probes:

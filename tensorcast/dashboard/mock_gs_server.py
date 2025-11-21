@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
@@ -26,6 +26,12 @@ def _ts_now() -> Timestamp:
     ts = Timestamp()
     now = datetime.now(tz=timezone.utc)
     ts.FromDatetime(now)
+    return ts
+
+
+def _ts_future(seconds: int) -> Timestamp:
+    ts = Timestamp()
+    ts.FromDatetime(datetime.now(tz=timezone.utc) + timedelta(seconds=seconds))
     return ts
 
 
@@ -88,6 +94,7 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
                 memory_size=128 * 1024**2,
                 creation_ts=_ts_now(),
+                expires_at=_ts_future(3600),
             )
             records.append(
                 global_store_pb2.ArtifactReplicaRecord(
@@ -113,6 +120,7 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
                 memory_size=64 * 1024**2,
                 creation_ts=_ts_now(),
+                expires_at=_ts_future(1800),
             )
         ]
         leaves = [
@@ -135,12 +143,22 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
             view_data_hash="hash123",
             verified_at=_ts_now(),
         )
+        descriptor = common_pb2.ArtifactDescriptor(
+            artifact_id=request.artifact_id or "artifact-0",
+            index_multihash="mh-index",
+            data_multihash="mh-data",
+            schema_version="v3",
+            encoding="json",
+            total_size=64 * 1024**2,
+            id_kind=common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2,
+        )
         return global_store_pb2.GetArtifactInfoByIdResponse(
             status=global_store_pb2.Status.STATUS_OK,
             replicas=replicas,
             leaves=leaves,
             partial_coverage=coverage,
             view_meta=view_meta,
+            descriptor=descriptor,
         )
 
     async def QueryChunkLocations(

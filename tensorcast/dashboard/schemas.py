@@ -12,6 +12,7 @@ from typing import Iterable
 from google.protobuf.timestamp_pb2 import Timestamp
 from pydantic import BaseModel, Field
 
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -57,6 +58,25 @@ def _chunk_state_to_str(state: int) -> str:
         global_store_pb2.ChunkState.CHUNK_STATE_HOT: "HOT",
     }
     return mapping.get(global_store_pb2.ChunkState(state), "UNSPECIFIED")
+
+
+def _artifact_id_kind_to_str(kind: int | None) -> str | None:
+    if kind is None:
+        return None
+    mapping = {
+        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2: ArtifactIdKind.MI2.value,
+        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID: ArtifactIdKind.CGID.value,
+    }
+    try:
+        enum_value = common_pb2.ArtifactIdKind(kind)
+    except ValueError:
+        return None
+    return mapping.get(enum_value)
+
+
+def _infer_kind_from_artifact_id(artifact_id: str) -> str | None:
+    kind = infer_artifact_id_kind(artifact_id)
+    return kind.value if kind else None
 
 
 class HealthStatus(str, Enum):
@@ -138,6 +158,30 @@ class PageInfo(BaseModel):
         )
 
 
+class ArtifactDescriptorEntry(BaseModel):
+    artifact_id: str
+    id_kind: str | None = None
+    index_multihash: str | None = None
+    data_multihash: str | None = None
+    schema_version: str | None = None
+    encoding: str | None = None
+    total_size: int | None = None
+
+    @classmethod
+    def from_proto(
+        cls, descriptor: common_pb2.ArtifactDescriptor
+    ) -> "ArtifactDescriptorEntry":
+        return cls(
+            artifact_id=descriptor.artifact_id,
+            id_kind=_artifact_id_kind_to_str(descriptor.id_kind),
+            index_multihash=descriptor.index_multihash or None,
+            data_multihash=descriptor.data_multihash or None,
+            schema_version=descriptor.schema_version or None,
+            encoding=descriptor.encoding or None,
+            total_size=int(descriptor.total_size) if descriptor.total_size else None,
+        )
+
+
 class ReplicaEntry(BaseModel):
     artifact_id: str
     node_id: str
@@ -147,6 +191,8 @@ class ReplicaEntry(BaseModel):
     bytes: int
     state: str | None = None
     created_ts: datetime | None = None
+    expires_at: datetime | None = None
+    id_kind: str | None = None
 
     @classmethod
     def from_proto(
@@ -162,6 +208,10 @@ class ReplicaEntry(BaseModel):
             bytes=memory_info.memory_size,
             state=None,
             created_ts=_timestamp_to_datetime(memory_info.creation_ts),
+            expires_at=_timestamp_to_datetime(
+                memory_info.expires_at if memory_info.HasField("expires_at") else None
+            ),
+            id_kind=_infer_kind_from_artifact_id(record.artifact_id),
         )
 
 
@@ -191,6 +241,7 @@ class ArtifactReplica(BaseModel):
     memory_type: str
     bytes: int
     created_ts: datetime | None
+    expires_at: datetime | None
 
     @classmethod
     def from_memory_info(cls, info: common_pb2.MemoryInfo) -> "ArtifactReplica":
@@ -201,6 +252,9 @@ class ArtifactReplica(BaseModel):
             memory_type=_memory_type_to_str(info.memory_type),
             bytes=info.memory_size,
             created_ts=_timestamp_to_datetime(info.creation_ts),
+            expires_at=_timestamp_to_datetime(
+                info.expires_at if info.HasField("expires_at") else None
+            ),
         )
 
 
@@ -262,6 +316,8 @@ class ViewMetaEntry(BaseModel):
 
 class ArtifactDetailResponse(BaseModel):
     artifact_id: str
+    artifact_kind: str | None = None
+    descriptor: ArtifactDescriptorEntry | None = None
     replicas: list[ArtifactReplica] = Field(default_factory=list)
     leaves: list[LeafEntry] = Field(default_factory=list)
     partial_coverage: list[PartialCoverageEntry] = Field(default_factory=list)
@@ -279,6 +335,16 @@ class ArtifactDetailResponse(BaseModel):
             PartialCoverageEntry.from_proto(detail)
             for detail in response.partial_coverage
         ]
+        descriptor_entry = (
+            ArtifactDescriptorEntry.from_proto(response.descriptor)
+            if response.HasField("descriptor")
+            else None
+        )
+        artifact_kind = (
+            descriptor_entry.id_kind
+            if descriptor_entry and descriptor_entry.id_kind
+            else _infer_kind_from_artifact_id(artifact_id)
+        )
         view_meta = (
             ViewMetaEntry.from_proto(response.view_meta)
             if response.HasField("view_meta")
@@ -286,6 +352,8 @@ class ArtifactDetailResponse(BaseModel):
         )
         return cls(
             artifact_id=artifact_id,
+            artifact_kind=artifact_kind,
+            descriptor=descriptor_entry,
             replicas=replicas,
             leaves=leaves,
             partial_coverage=coverage,
