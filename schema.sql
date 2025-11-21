@@ -41,11 +41,12 @@ CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
 -- Artifacts: content-addressed artifact IDs (design-0007)
 CREATE TABLE IF NOT EXISTS artifacts (
     artifact_id TEXT PRIMARY KEY,          -- "mi2:<index_multihash>:<data_multihash>"
-    index_multihash TEXT NOT NULL,         -- Multibase over multihash (sha2-256), base32
-    data_multihash TEXT NOT NULL,          -- Multibase over multihash (sha2-256 root), base32
+    index_multihash TEXT NULL,         -- Multibase over multihash (sha2-256), base32
+    data_multihash TEXT NULL,          -- Multibase over multihash (sha2-256 root), base32
     schema_version TEXT NOT NULL DEFAULT 'v3',          -- canonical index schema version
     encoding TEXT NOT NULL,                -- e.g., "json" or future "cbor"
     hash_params_json TEXT NULL,            -- JSON string for hashing params (e.g., chunk_size, fanout)
+    id_kind TEXT NOT NULL DEFAULT 'MI2',   -- Identity kind (MI2 or CGID)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS artifact_replicas (
     is_memory_replica BOOLEAN DEFAULT FALSE,
     tensor_index_key TEXT NULL,
     source_process_id TEXT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );

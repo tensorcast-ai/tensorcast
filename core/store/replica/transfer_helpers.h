@@ -8,7 +8,6 @@
 #include "absl/status/status.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
@@ -29,7 +28,6 @@ namespace tensorcast::store::replica {
  * @param total_size Total bytes to copy
  * @param stream CUDA stream for async operations
  * @param va_space_base Base pointer to VS CPU memory
- * @param virtual_addr_space VS instance for chunk operations
  * @param uma UMA coordinator for chunk state management
  * @param ikey Instance key for UMA operations
  * @return Status indicating success or failure
@@ -41,7 +39,6 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     gsl::not_null<void*> gpu_ptr,
     size_t total_size,
     gsl::not_null<void*> vs_base,
-    const std::shared_ptr<common::memory::VirtualAddressSpace>& virtual_addr_space,
     const std::shared_ptr<UnifiedMemoryAuthority>& uma,
     const loading::ReplicaKey& ikey);
 
@@ -59,7 +56,7 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
  * @param total_size Total bytes to copy
  * @param stream CUDA stream for async operations
  * @param va_space_base Base pointer to VS CPU memory
- * @param virtual_addr_space VS instance for write operations
+ * @param uma UMA coordinator for CPU write operations
  * @return Status indicating success or failure
  */
 absl::Status perform_copy_gpu_to_cpu_streaming(
@@ -69,6 +66,7 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     gsl::not_null<void*> gpu_ptr,
     size_t total_size,
     gsl::not_null<void*> vs_base,
-    const std::shared_ptr<common::memory::VirtualAddressSpace>& virtual_addr_space);
+    const std::shared_ptr<UnifiedMemoryAuthority>& uma,
+    const loading::ReplicaKey& ikey);
 
 } // namespace tensorcast::store::replica

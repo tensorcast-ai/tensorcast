@@ -23,6 +23,7 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode
 
+from tensorcast._C import get_cuda_memory_handle
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._device import resolve_device
@@ -36,6 +37,12 @@ from tensorcast.api._io_disk import load_dict_from_disk
 from tensorcast.api._materialize import (
     MaterializedArtifact,
     materialize_artifact,
+)
+from tensorcast.api._region_cache import (
+    register_region as _cache_register_region,
+)
+from tensorcast.api._region_cache import (
+    unregister_region as _cache_unregister_region,
 )
 from tensorcast.api._register import (
     RegisteredArtifact as _RegisterHandle,
@@ -55,7 +62,7 @@ from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.store_session_registry import StoreSessionRecord, write_record
-from tensorcast.types import ServerConfig
+from tensorcast.types import DeregisterArtifactOutcome, ServerConfig, VramRegionHandle
 
 T = TypeVar("T")
 
@@ -686,8 +693,10 @@ class Store:
     def _canonical_index_from_result(
         self, result: RegistrationResult
     ) -> CanonicalIndex:
+        avbs_hash = result.descriptor.data_multihash or ""
         return self._canonical_index_from_bytes(
-            result.index_bytes, avbs_hash=result.descriptor.data_multihash
+            result.index_bytes,
+            avbs_hash=avbs_hash,
         )
 
     @staticmethod
@@ -821,6 +830,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None,
         key: str | None,
         plan: PlanType,
         cancel_event: threading.Event | None = None,
@@ -860,6 +870,9 @@ class Store:
                 lease_in_place=plan is PlanType.VRAM_LEASED,
                 key=resolved_key,
             )
+        normalized_artifact_id = artifact_id.strip() if artifact_id else None
+        if normalized_artifact_id == "":
+            normalized_artifact_id = None
         ttl_ms = (
             ttl_override
             if ttl_override is not None
@@ -879,6 +892,7 @@ class Store:
                 options=options,
                 device_id=device_id,
                 ttl_ms=ttl_ms,
+                client_artifact_id=normalized_artifact_id,
                 force_lease_in_place=plan is PlanType.VRAM_LEASED,
                 prevalidate_disk=self._should_prevalidate_disk(options),
                 client=self._ensure_client(),
@@ -947,6 +961,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None = None,
         key: str | None,
         plan: PlanType,
         cancel_event: threading.Event | None = None,
@@ -963,6 +978,7 @@ class Store:
             "tc.store.session_id": self._session_id,
             "tc.store.plan": plan.value,
             "tc.store.key_present": bool(key),
+            "tc.store.client_artifact_id": artifact_id or "",
         }
         policy = self._retry_policies.get(method)
         attempt = 1
@@ -991,6 +1007,7 @@ class Store:
                 try:
                     result = self._attempt_registration(
                         tensors,
+                        artifact_id=artifact_id,
                         key=key,
                         plan=plan,
                         cancel_event=cancel_event,
@@ -2073,12 +2090,14 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None = None,
         key: str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
     ) -> RegisteredArtifact:
         return self._perform_registration(
             tensors,
+            artifact_id=artifact_id,
             key=key,
             plan=PlanType.VRAM_LEASED,
             options_override=options,
@@ -2089,6 +2108,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None = None,
         key: str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
@@ -2105,6 +2125,7 @@ class Store:
             try:
                 return self._perform_registration(
                     tensors,
+                    artifact_id=artifact_id,
                     key=key,
                     plan=PlanType.VRAM_LEASED,
                     cancel_event=cancel_event,
@@ -2233,12 +2254,14 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None = None,
         key: str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
         return self._perform_registration(
             tensors,
+            artifact_id=artifact_id,
             key=key,
             plan=PlanType.VRAM_COALESCED,
             options_override=options,
@@ -2249,6 +2272,7 @@ class Store:
         self,
         tensors: TensorDict,
         *,
+        artifact_id: str | None = None,
         key: str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
@@ -2265,6 +2289,7 @@ class Store:
             try:
                 return self._perform_registration(
                     tensors,
+                    artifact_id=artifact_id,
                     key=key,
                     plan=PlanType.VRAM_COALESCED,
                     cancel_event=cancel_event,
@@ -2622,6 +2647,67 @@ class Store:
         finally:
             self._release_materialized(materialized, client)
 
+    # ---------------------- Region-backed Registration ----------------------
+    def register_vram_region(
+        self,
+        *,
+        device_id: int,
+        base_ptr: int,
+        size_bytes: int,
+        ttl_ms: int,
+        name: str | None = None,
+    ) -> VramRegionHandle:
+        client = self._ensure_client()
+        handle_bytes = get_cuda_memory_handle(int(device_id), int(base_ptr))
+        handle = client.register_vram_region(
+            device_id=int(device_id),
+            size_bytes=int(size_bytes),
+            ttl_ms=int(ttl_ms),
+            cuda_ipc_handle=handle_bytes,
+            region_name=name,
+        )
+        # Update client-side region cache for region-backed registration
+        try:
+            _cache_register_region(
+                region_id=handle.region_id,
+                device_id=int(device_id),
+                base_ptr=int(base_ptr),
+                size_bytes=int(size_bytes),
+                ttl_ms=int(ttl_ms),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("store.region_cache_register_failed", exc_info=True)
+        return handle
+
+    def unregister_vram_region(
+        self, region_id: str, *, force: bool | None = None
+    ) -> bool:
+        client = self._ensure_client()
+        released = client.unregister_vram_region(region_id, force=force)
+        if released:
+            with contextlib.suppress(Exception):
+                _cache_unregister_region(region_id)
+        return released
+
+    def deregister_artifact(
+        self,
+        artifact_id: str,
+        *,
+        wait: bool = True,
+        drain_timeout_s: float | None = None,
+        extend_ttl_ms: int | None = None,
+        device_id: int | None = None,
+    ) -> DeregisterArtifactOutcome:
+        client = self._ensure_client()
+        drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
+        return client.deregister_artifact(
+            artifact_id,
+            wait_for_drain=bool(wait),
+            drain_timeout_ms=drain_ms,
+            extend_ttl_ms=extend_ttl_ms,
+            device_id=device_id,
+        )
+
 
 _GLOBAL_STORE_LOCK = threading.RLock()
 _GLOBAL_STORE: Store | None = None
@@ -2727,25 +2813,55 @@ def _coerce_store() -> Store:
 def register(
     tensors: TensorDict,
     *,
+    artifact_id: str | None = None,
     key: str | None = None,
     options: RegisterArtifactOptions | None = None,
     ttl_ms: int | None = None,
 ) -> RegisteredArtifact:
-    return _coerce_store().register(tensors, key=key, options=options, ttl_ms=ttl_ms)
+    return _coerce_store().register(
+        tensors,
+        artifact_id=artifact_id,
+        key=key,
+        options=options,
+        ttl_ms=ttl_ms,
+    )
 
 
 def register_async(
     tensors: TensorDict,
     *,
+    artifact_id: str | None = None,
     key: str | None = None,
     options: RegisterArtifactOptions | None = None,
     ttl_ms: int | None = None,
 ) -> ArtifactFuture[RegisteredArtifact]:
     return _coerce_store().register_async(
         tensors,
+        artifact_id=artifact_id,
         key=key,
         options=options,
         ttl_ms=ttl_ms,
+    )
+
+
+def register_kv_block(
+    tensor: torch.Tensor,
+    block_hash: str,
+    *,
+    ttl_ms: int | None = None,
+) -> RegisteredArtifact:
+    """Register a single KV block using region-backed LIP under cgid:kv:<hash>.
+
+    This convenience helper ensures the client-provided artifact id format and
+    uses lease-in-place for optimal KV cache registration.
+    """
+    artifact_id = f"cgid:kv:{block_hash}"
+    opts = RegisterArtifactOptions(
+        plan=PlanType.VRAM_LEASED,
+        lease_in_place=True,
+    )
+    return _coerce_store().register(
+        {"kv": tensor}, artifact_id=artifact_id, options=opts, ttl_ms=ttl_ms
     )
 
 
@@ -2779,22 +2895,31 @@ def register_view(
 def put(
     tensors: TensorDict,
     *,
+    artifact_id: str | None = None,
     key: str | None = None,
     options: RegisterArtifactOptions | None = None,
     device: int | torch.device | None = None,
 ) -> RegisteredArtifact:
-    return _coerce_store().put(tensors, key=key, options=options, device=device)
+    return _coerce_store().put(
+        tensors,
+        artifact_id=artifact_id,
+        key=key,
+        options=options,
+        device=device,
+    )
 
 
 def put_async(
     tensors: TensorDict,
     *,
+    artifact_id: str | None = None,
     key: str | None = None,
     options: RegisterArtifactOptions | None = None,
     device: int | torch.device | None = None,
 ) -> ArtifactFuture[RegisteredArtifact]:
     return _coerce_store().put_async(
         tensors,
+        artifact_id=artifact_id,
         key=key,
         options=options,
         device=device,

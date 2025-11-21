@@ -4,7 +4,7 @@ title: Content-Addressed Artifact ID (mi2)
 links:
   plan: ../plans/0007-content-addressed-artifact-id.md
 related_code:
-  - core/store/loader/**
+  - core/store/materialization/dataplane/**
   - core/store/replica/**
   - daemon/**
   - tensorcast/global_store/**
@@ -132,5 +132,5 @@ Acceptance criteria
 # References
 
 - Architecture: [Architecture Overview](../architecture/architecture-overview.md), [P2P Transfer Strategies](../architecture/p2p-transfer-strategies.md), [Artifact Loading Workflow](../internals/model-loading.md).
-- Related implementations: `core/store/loader/*`, `core/store/replica/*`, `daemon/*`, `tensorcast/global_store/*`, `tensorcast/api/*`.
+- Related implementations: `core/store/materialization/dataplane/*`, `core/store/replica/*`, `daemon/*`, `tensorcast/global_store/*`, `tensorcast/api/*`.
  

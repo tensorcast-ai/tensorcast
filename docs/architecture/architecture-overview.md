@@ -61,6 +61,8 @@ graph TD
 - **Technology**: C++ service with gRPC interface (high-performance StoreEngine core)
 - **Key Feature**: Zero-copy GPU memory sharing via CUDA IPC
 - **Implementation Notes**: Thin gRPC layer over `StoreEngine`; manages sessions, PID references, and transport locks; exports CUDA IPC handles to clients
+- **Registration Path**: The RFC-0006 lifecycle (Begin → TTL → Commit/Abort) lives in the Runtime metadata stack (`core/store/runtime/metadata/registration_backend.*`), which maintains pending state, view ingestion, hashes, and emits registration events. `runtime::metadata::MetadataGateway` consumes those callbacks along with direct ingestion completions to publish replicas and variant metadata to Global Store without routing through `StoreEngine`, deduping auto-publish and synchronous calls via the shared `publish_context_id`.
+- **Runtime Modules**: `RuntimeEnv` owns lifecycle wiring and worker identity; `RuntimeContext` initializes shared services plus the event dispatcher; `ReplicaRuntime` encapsulates replica lifecycle APIs; `IngestionRuntime` unifies ingestion + registration flows; and `MetadataGateway` is the only component touching the Global Store client. `StoreEngine` now delegates to these modules instead of manually orchestrating catalog/telemetry wiring.
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
 
 > See also: [Store Daemon (C++) Internals](../../daemon/README.md) — thin gRPC layer over the StoreEngine with session/ref tracking, transport locks, lifecycle management, and background sweepers.

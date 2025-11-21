@@ -62,6 +62,7 @@ Design (docs/designs/<slug>.md)
 - Interfaces and schemas (include diffs against `schema.sql` when applicable)
 - Invariants and error model
 - Alternatives and rationale
+- Any new interface/API proposed in a design (or its paired plan) must document how it adheres to the repository’s language-specific style guides (C++ rules in `AGENTS.md` and `core/` READMEs, Python rules in `tensorcast/` docs). For C++ APIs, include a short `Naming Compliance` call-out (table or bullet list) that explicitly proves each function/method is `snake_case`, each class/struct is `PascalCase`, and constants/macros are `ALL_CAPS`. Designs that skip this check or knowingly violate the conventions must be rejected. Do not introduce interfaces whose naming, error handling, or packaging violates those standards.
 - Risks, success criteria, and compatibility
 - Cross‑links: owning code, related plans, and guides
  - Visualization: Prefer Mermaid diagrams for structured, graphical, flow, and hierarchical information (e.g., flowcharts, sequence diagrams, class diagrams, state diagrams, ER/graph diagrams).
@@ -82,6 +83,7 @@ Design (docs/designs/<slug>.md)
       ```
 
 Plan (docs/plans/<slug>.md)
+- Grounding: summarize current state and link concrete code references; declare baseline
 - Phases/milestones and tasks
 - Acceptance checks, test plan, rollout/backout
 - Risk tracking and owner checklist
@@ -165,6 +167,11 @@ Required Philosophy Anchors (inherit from root AGENTS.md)
 - Link each milestone to owning code/tests where applicable.
 - Keep tasks small, actionable, and verifiable.
 
+- Plans must be deeply grounded in the project’s current state (code, data, infra). Do a brief discovery pass first: read owning README/AGENTS.md, key modules, and tests.
+- Be targeted: map each phase and milestone to concrete code locations or tests; add code references using the repository’s code‑reference format.
+- Capture a short "Current State" summary: constraints, feature flags, tech debt, active migrations, and relevant configurations with links to code/docs.
+- Treat the plan as a living document: adjust during execution as you learn. Record meaningful changes, keep acceptance criteria aligned with the design, and update the design when intent materially changes.
+
 # Templates (Authoring Aids)
 
 Design (minimal)
@@ -201,6 +208,10 @@ links:
 
 # Objective
 
+# Current State & Grounding
+- Key constraints observed in current code/data
+- Code references to owning modules/tests/docs
+
 # Phases & Milestones
 
 - [ ] Phase 1: <name>
@@ -221,4 +232,3 @@ links:
 - Should we add an `internal: true|false` flag in frontmatter for possible external publishing later?
 - Do we want a repo script to auto‑generate design/plan indexes and badges by status?
 - What’s the exact ownership for `schema.sql` across teams (single team, or joint ownership with codeowners by table)?
-

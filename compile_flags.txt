@@ -14,6 +14,7 @@
 -Iproto/gen/cc
 -Itests/cpp
 -Ibazel-bin/external/catch2+
+-Ibazel-bin/external/folly+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
@@ -21,6 +22,7 @@
 -Iexternal/grpc+/include
 -Iexternal/catch2+/src
 -Iexternal/gsl+
+-Iexternal/folly+
 -Iexternal/yaml-cpp+/include
 -Iexternal/opentelemetry-cpp+/api/include
 -Iexternal/opentelemetry-cpp+/sdk/include

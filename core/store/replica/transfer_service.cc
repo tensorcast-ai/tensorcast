@@ -16,13 +16,13 @@
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
-#include "core/store/loader/cpu_va_sink.h"
-#include "core/store/loader/file_partition_source.h"
-#include "core/store/loader/gpu_memory_sink.h"
-#include "core/store/loader/multi_safetensors_source.h"
-#include "core/store/loader/pump.h"
-#include "core/store/loader/safetensors_source.h"
-#include "core/store/loader/streaming_buffer_adapter.h"
+#include "core/store/materialization/dataplane/runtime/pump.h"
+#include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
+#include "core/store/materialization/dataplane/sinks/cpu_va_sink.h"
+#include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
+#include "core/store/materialization/dataplane/sources/file_partition_source.h"
+#include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
+#include "core/store/materialization/dataplane/sources/safetensors_source.h"
 #include "core/store/replica/transfer_helpers.h"
 // OpenTelemetry metrics (inflight copy gauge)
 #include "opentelemetry/common/attribute_value.h"
@@ -142,12 +142,10 @@ absl::Status synchronize_gpu_after_transfer(int device_id, absl::string_view con
 
 TransferService::TransferService(
     const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
-    const gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>>& virtual_addr_space,
     const gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>& uma,
     loading::ReplicaKey replica_key,
     Config cfg)
     : pinned_pool_(pinned_pool),
-      va_space_(virtual_addr_space),
       uma_(uma),
       replica_key_(std::move(replica_key)),
       cfg_(cfg),
@@ -191,7 +189,6 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
       gpu_ptr,
       total_bytes,
       gsl::not_null<void*>{vs_base},
-      va_space_,
       uma_,
       replica_key_);
 }
@@ -214,7 +211,14 @@ absl::Status TransferService::copy_gpu_to_cpu_streaming(
     return absl::FailedPreconditionError("CPU base not available via UMA");
   }
   return perform_copy_gpu_to_cpu_streaming(
-      replica_key_.artifact_id, device_id, spb, gpu_ptr, total_bytes, gsl::not_null<void*>{vs_base}, va_space_);
+      replica_key_.artifact_id,
+      device_id,
+      spb,
+      gpu_ptr,
+      total_bytes,
+      gsl::not_null<void*>{vs_base},
+      uma_,
+      replica_key_);
 }
 
 std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
@@ -238,12 +242,9 @@ std::unique_ptr<loader::PositionedSink> TransferService::build_sink_(
     return sink;
   }
   // CPU sink writes into VS region via PositionedSink
-  auto region_or = va_space_->open(replica_key_.artifact_id);
-  if (!region_or.ok()) {
-    return nullptr;
-  }
   loader::CpuVaSink::Options opts;
-  opts.region = *region_or;
+  opts.uma = uma_;
+  opts.replica_key = replica_key_;
   opts.total_size = uma_->get_artifact_size(replica_key_).ok() ? *uma_->get_artifact_size(replica_key_) : 0;
   opts.plan_direct_write_fn =
       [uma = uma_, key = replica_key_](absl::Span<const VaRange> ranges) -> absl::StatusOr<DirectWriteGrant> {

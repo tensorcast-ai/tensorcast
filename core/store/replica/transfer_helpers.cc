@@ -12,9 +12,10 @@
 #include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_copy_manager.h"
+#include "core/common/const/granularity.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/streaming_chunk_guard.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/replica/chunk_state.h"
 
 namespace tensorcast::store::replica {
 
@@ -25,7 +26,6 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     gsl::not_null<void*> gpu_ptr,
     size_t total_size,
     gsl::not_null<void*> vs_base,
-    const std::shared_ptr<common::memory::VirtualAddressSpace>& virtual_addr_space,
     const std::shared_ptr<UnifiedMemoryAuthority>& uma,
     const loading::ReplicaKey& ikey) {
   // Required components must be present – enforce via CHECKKs
@@ -40,8 +40,7 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     }
   }
   if (va_chunk == 0) {
-    va_chunk =
-        virtual_addr_space ? virtual_addr_space->chunk_size() : common::memory::VirtualAddressSpace::kDefaultChunkSize;
+    va_chunk = common::consts::kArtifactChunkDefault;
   }
   const size_t copy_chunk = streaming_buf->chunk_size();
 
@@ -147,8 +146,9 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     const std::shared_ptr<common::memory::StreamingPinnedBuffer>& streaming_buf,
     gsl::not_null<void*> gpu_ptr,
     size_t total_size,
-    gsl::not_null<void*> va_space_base,
-    const std::shared_ptr<common::memory::VirtualAddressSpace>& virtual_addr_space) {
+    gsl::not_null<void*> /*va_space_base*/,
+    const std::shared_ptr<UnifiedMemoryAuthority>& uma,
+    const loading::ReplicaKey& ikey) {
   ABSL_CHECK(streaming_buf) << "StreamingPinnedBuffer must not be null";
   ABSL_CHECK_GT(total_size, 0) << "Total size must be positive";
 
@@ -195,8 +195,9 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
     common::CopyOptions opts{
         .tracing_stage = "D2H/Copy",
         .callbacks = {
-            .on_copy_done = [virtual_addr_space,
+            .on_copy_done = [uma,
                              artifact_id,
+                             ikey,
                              streaming_buf,
                              slot_id,
                              host_ptr,
@@ -206,7 +207,8 @@ absl::Status perform_copy_gpu_to_cpu_streaming(
                              first_error_mu,
                              pending_callbacks](absl::Status copy_status) {
               if (copy_status.ok()) {
-                absl::Status st = virtual_addr_space->write_at(artifact_id, chunk_offset, host_ptr, current_chunk_size);
+                absl::Status st = uma ? uma->write_cpu_span(ikey, chunk_offset, host_ptr, current_chunk_size)
+                                      : absl::FailedPreconditionError("UMA unavailable for GPU→CPU copy");
                 if (!st.ok()) {
                   absl::MutexLock lk(first_error_mu.get());
                   if (first_error->ok()) {

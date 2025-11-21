@@ -78,7 +78,8 @@ absl::Status evict_for_cpu(
     ReplicaRegistry& registry,
     tensorcast::common::memory::PinnedBufferPool& memory_pool,
     MetricsCollector& metrics,
-    size_t required_pinned_pool_bytes) {
+    size_t required_pinned_pool_bytes,
+    absl::FunctionRef<void(const loading::ReplicaKey&)> on_evicted) {
   return detail::evict_core(
       [&] { return registry.get_lru_instances(); },
       [&](const loading::ReplicaKey& key) -> absl::Status {
@@ -94,6 +95,7 @@ absl::Status evict_for_cpu(
         LOG(INFO) << "Evicted replica " << key.artifact_id
                   << " (device=" << (key.device.type == DeviceType::CPU ? "CPU" : "GPU") << ":" << key.device.ordinal
                   << ") from CPU memory";
+        on_evicted(key);
       });
 }
 

@@ -101,6 +101,64 @@ class ArtifactService:
             logger.warning(f"Failed to unregister replica {replica_id}")
         return success
 
+    def unregister_by_worker(
+        self,
+        *,
+        worker_id: str,
+        artifact_id: str,
+        memory_type: MemoryType | None = None,
+        device_id: int | None = None,
+    ) -> bool:
+        """Unregister a replica by worker identity and artifact id.
+
+        Optionally disambiguate by memory_type and device_id.
+        """
+        try:
+            replicas = self.replica_repository.get_replicas_by_worker(worker_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to query replicas for worker_id=%s", worker_id)
+            return False
+
+        candidates = [r for r in replicas if r.artifact_id == artifact_id]
+        if memory_type is not None:
+            candidates = [r for r in candidates if r.memory_type == memory_type]
+        if device_id is not None:
+            candidates = [r for r in candidates if r.device_id == device_id]
+
+        if not candidates:
+            logger.warning(
+                "No replica found for artifact_id=%s worker_id=%s device_id=%s memory_type=%s",
+                artifact_id,
+                worker_id,
+                device_id,
+                memory_type.value if memory_type else "",
+            )
+            return False
+
+        # Choose the most specific candidate (prefer GPU over others by priority, then latest created)
+        candidates.sort(key=lambda r: (r.memory_type.priority, r.created_at or 0))
+        chosen = candidates[0]
+        ok = self.replica_repository.delete(chosen.replica_id, artifact_id)
+        if ok:
+            logger.info(
+                "Unregistered replica by worker: artifact_id=%s replica_id=%s worker_id=%s device_id=%s memory_type=%s",
+                artifact_id,
+                chosen.replica_id,
+                worker_id,
+                chosen.device_id,
+                chosen.memory_type.value,
+            )
+            inc_replica_unregister(artifact_id, chosen.memory_type.value)
+            self._update_replica_gauges()
+        else:
+            logger.warning(
+                "Failed to unregister replica by worker: artifact_id=%s replica_id=%s worker_id=%s",
+                artifact_id,
+                chosen.replica_id,
+                worker_id,
+            )
+        return ok
+
     def get_artifact_replicas(self, artifact_id: str) -> List[Replica]:
         """Get all available replicas for an artifact."""
         replicas = self.replica_repository.find_by_filters(artifact_id=artifact_id)

@@ -21,7 +21,7 @@ using tensorcast::store::loading::ReplicaKey;
 TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
@@ -50,7 +50,7 @@ TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lif
 TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
@@ -83,7 +83,7 @@ TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][li
 TEST_CASE("Lifecycle load: mass renewal prevents stale expiries", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;

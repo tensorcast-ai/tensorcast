@@ -41,7 +41,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 ```
 
 ### Core Components
-- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine provides VS/UMA memory model (VirtualAddressSpace + UnifiedMemoryAuthority), replica lifecycle, loaders (disk and P2P), and CUDA IPC export for clients.
+- **C++ Core** (`/core/`): Store Engine, Checkpoint, and Communicator. The Store Engine uses a UnifiedMemoryAuthority (UMA) single-ledger memory model, replica lifecycle helpers, loaders (disk and P2P), and CUDA IPC export for clients.
 - **Store Daemon (C++)** (`/daemon`): Thin gRPC service over `StoreEngine` that manages sessions, PID refs, and transport locks. Binary target `//daemon:tensorcast_daemon` (also shipped with the Python wheel).
 - **Global Store (Python)** (`/tensorcast/global_store`): Central metadata and coordination service backed by DuckDB; exposes gRPC APIs and Prometheus metrics.
 - **Protocol Buffers** (`/proto/`): gRPC surfaces for daemon and control plane.
@@ -119,7 +119,7 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 # Examples:
 bazel test //core/store:store_engine_test
 bazel test //core/communicator/engine:tcp_engine_test
-bazel test //core/store/loader:disk_loader_streaming_buffer_test
+bazel test //core/store/materialization/dataplane:disk_loader_streaming_buffer_test
 ```
 
 #### Bazel Quiet / Reduced Output
@@ -245,12 +245,13 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **Classes/Structs**: `PascalCase`
 - **Constants/Macros**: `ALL_CAPS`
 - **Files/Directories**: `snake_case`
+- Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs
 - **Consistent naming** - Use `_lib` suffix for libraries, `_test` for tests, `_binary` for binaries
-- Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (includes absl/log, absl/status, absl/status:statusor)
+- Always use `sc_cc_library` and `sc_header_only_library` instead of `cc_library` (sc_cc_library has already included the common dependencies of absl/log, absl/status, absl/status:statusor)
 - **Resolve missing headers via BUILD deps first** - When a header appears "missing", fix the Bazel BUILD dependencies by adding the precise library that exports the header to the target's `deps`. Do not rely on global include paths or accidental transitive includes; wire dependencies explicitly in BUILD files.
 
 ### Build & Dependencies

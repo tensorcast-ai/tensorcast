@@ -39,6 +39,12 @@ graph TB
     SD1 -->|8. RegisterReplica| REG
 ```
 
+## Runtime Events & Publish Context Tracking
+
+- P2P loads route through IngestionRuntime which still emits `ingestion_started`, `ingestion_completed`, and `ingestion_failed` events for every transfer. RuntimeContext mints a `publish_context_id` per request and the completion payload is delivered directly to MetadataGateway, so auto-publish dedupes against any synchronous `register_replica_with_global_store` calls without relying on RuntimeContext subscriptions.
+- The completion payload includes request metadata (artifact id, source, target device, bytes transferred, duration) so load-balancing heuristics and UMA telemetry can attribute work to the correct pipeline stage even when the transport fails.
+- MetadataGateway treats a completion event that shares a `publish_context_id` with an already-issued publish RPC as a lightweight TTL refresh. When the event arrives first it performs the Global Store RPC and later synchronous publish calls detect the shared context and skip duplicate registration.
+
 ## Unified Staging Flow Control
 
 All transports now use a common staging controller to guarantee progress even when artifacts are larger than the staging pool:
@@ -191,10 +197,11 @@ cursor.execute("""
 
 ### Materialization Behavior (current implementation)
 
-- **AUTO mode orchestration**: `MaterializeOrchestrator::run()` first requests a transport from Global Store. If granted, it builds a `P2PSource` and calls `StoreEngine::ingest_from_p2p_internal()`; otherwise it falls back to disk via `ingest_from_disk_internal()`.
-- **P2P path (synchronous in engine)**: `ingest_from_p2p_internal()` performs the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
-- **Disk path**: `ingest_from_disk_internal()` starts an async load and waits until the target memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
-- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and registers the local replica via the StoreEngine helper.
+- **AUTO mode orchestration**: `MaterializeOrchestrator::run()` first requests a transport from Global Store. If granted, it builds a `P2PSource` and calls the backend’s `ingest_from_p2p()` implementation (StoreEngine now implements the `loading::MaterializationBackend` interface); otherwise it falls back to disk via `ingest_from_disk()`.
+- **P2P path (synchronous in engine)**: `ingest_from_p2p()` now flows through `materialization::runtime::pipeline::IngestionPipeline`, performing the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
+- **Disk path**: `ingest_from_disk()` shares the same pipeline stages and starts an async load that blocks until the requested memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
+- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and the ingestion pipeline emits an event. `runtime::metadata::MetadataGateway` consumes that event via the RuntimeContext dispatcher and registers the local replica, so the orchestrator/ingestion runtime never invoke the registration helper directly.
+- **Telemetry**: The same RuntimeContext notification is consumed by `runtime::ReplicaRuntime`, which refreshes UMA metrics and ingestion histograms so `StoreEngine::get_available_memory()` and metrics exporters stay consistent without explicit callbacks inside the façade.
 - **Lease-in-place payloads**: Registration feeds now include `storage_entries` and `tensor_aliases` so the daemon can rebuild the canonical tensor index without reopening CUDA IPC handles for every tensor. Metrics (`tc_register_storage_count`, `tc_register_tensor_count`) expose the number of unique storages and logical tensors processed per commit to validate deduplication.
 - **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
 
@@ -230,7 +237,7 @@ sequenceDiagram
         GSC-->>PO: TransportSession{transport_id, remote_replica}
 
         Note over PO: Build P2PSource from remote_replica
-        PO->>CS: ingest_from_p2p_internal(artifact_id, p2p_source, target, hints)
+        PO->>CS: ingest_from_p2p(artifact_id, p2p_source, target, hints)
 
         CS->>SD_Source: P2P data transfer (RDMA/TCP)
         SD_Source-->>CS: Artifact data
@@ -244,7 +251,7 @@ sequenceDiagram
         CS->>GSC: gRPC RegisterReplica
     else No replica available / transport failed
         Note over PO: Disk fallback
-        PO->>CS: ingest_from_disk_internal(artifact_id, disk_source, target, hints)
+        PO->>CS: ingest_from_disk(artifact_id, disk_source, target, hints)
         CS-->>PO: ReplicaHandle
 
         PO->>CS: register_replica_with_global_store(handle.key())
@@ -264,10 +271,9 @@ sequenceDiagram
 #### C++ Core Components
 - **StoreEngine** (`core/store/store_engine.h/cc`)
   - `materialize_replica()`: Entry point that delegates to MaterializeOrchestrator for AUTO mode
-  - `ingest_from_p2p_internal()`: Internal method for P2P transfers
-  - `ingest_from_disk_internal()`: Internal method for disk loading
+  - `materialization::runtime::pipeline::IngestionPipeline`: Consolidated staged flow for disk and P2P ingestion
 
-- **MaterializeOrchestrator** (`core/store/loading/materialize_orchestrator.h/cc`)
+- **MaterializeOrchestrator** (`core/store/materialization/control/materialize_orchestrator.h/cc`)
   - `run()`: Implements the decision tree (P2P first, disk fallback)
   - Coordinates with GlobalStoreClient for transport management
   - Handles replica registration after successful load
@@ -277,7 +283,7 @@ sequenceDiagram
   - `complete_replica_transport()`: Mark transport as complete
   - `register_replica()`: Register local (disk/P2P-loaded) replica with Global Store
 
-- **ReplicaRegistrationHelper** (`core/store/loading/replica_registration_helper.h/cc`)
+- **ReplicaRegistrationHelper** (`core/store/materialization/control/replica_registration_helper.h/cc`)
   - `register_local_replica()`: Helper to register replicas with Global Store
 
 
@@ -379,6 +385,7 @@ max_workers: 10                          # Max gRPC worker threads
 enable_p2p_access: true                  # Require artifact registration before load
 enable_p2p_engine: true                  # Enable communication manager
 enable_rdma: false                       # Toggle RDMA support independently
+p2p_listen_host: 0.0.0.0                # Interface advertised via StoreEngineOptions::p2p_listen_host
 p2p_port: 9090                          # RDMA/TCP communication port (must be non-zero)
 grpc_port: 50052                        # Local gRPC port
 

@@ -1,662 +1,361 @@
 ---
 title: Architecture Design
-description: Layered architectural design with clear responsibility boundaries
+description: Layered runtime for StoreEngine with UMA and event-driven services
 sidebar_position: 2
 ---
 
 # Architecture Design
 
-## System Architecture
+## Overview
+TensorCast StoreEngine is a UMA-driven artifact runtime that materializes, registers, and exports replicas across CPU and GPU devices. Each worker daemon embeds a StoreEngine facade that orchestrates replica lifecycle, ingestion, registration, and metadata publication without exposing UMA internals to callers.
 
-The Core Store module adopts a layered architectural design with clear responsibility boundaries from external interfaces to low-level memory management. The architecture has evolved to support multi-device binding, a Virtual Address Space (VS), and unified type systems for replica sources and targets.
+The goal of this document is to capture the November 2025 implementation snapshot, highlight how responsibilities are split, and provide a concise index of every module that participates in the StoreEngine runtime.
 
-> Notes for readers:
-> - In code, the CPU location is named `MemoryLocation::CPU` (file: `core/common/memory/memory_location.h`). There is no transitional alias in the current codebase; use `MemoryLocation::CPU` explicitly.
-
-## Overall Architecture Diagram
+## Layered Topology
 
 ```mermaid
 graph TB
-    subgraph "External Interface Layer"
-        CS[StoreEngine]
-        PO[MaterializeOrchestrator]
+    subgraph "Interface"
+        SE[StoreEngine facade]
     end
-
-    subgraph "Core Components"
-        MR[ReplicaRegistry]
+    subgraph "Runtime Services"
+        RE[RuntimeEnv]
+        IR[IngestionRuntime]
+        RR[ReplicaRuntime]
+        MG[MetadataGateway]
+        EH[RuntimeContext events]
+    end
+    subgraph "Shared Infrastructure"
+        CC[RuntimeContext]
         DM[DeviceManager]
-        GSC[GlobalStoreClient]
+        REG[ReplicaRegistry]
         MC[MetricsCollector]
+        COMM[CommunicationManager]
+        PB[PinnedBufferPool]
+        GSC[GlobalStoreClient]
+        VHC[ViewHashComputer]
     end
-
-    subgraph "Replica Layer"
-        M[Replica]
-        MCF[ReplicaConfig]
-        IK[ReplicaKey]
+    subgraph "Materialization & Registration"
+        MF[MaterializationFacade]
+        IP[IngestionPipeline]
+        RB[RegistrationBackend]
+        MG[MetadataGateway]
+        MZ[MaterializationService]
+        MO[MaterializeOrchestrator]
     end
-
-    subgraph "Memory Management"
-        MM[ReplicaLoadController]
+    subgraph "Replica & Memory"
+        RLC[ReplicaLoadController]
+        UMA[UnifiedMemoryAuthority]
+        MER[MemoryExportRegistry]
         TS[TransferService]
-        CES[MemoryExportRegistry]
-        MS[MemoryState]
-        ML[MemoryLocation]
     end
-
-    subgraph "Data Loading Layer"
-        IL[IArtifactLoader]
+    subgraph "Data Plane"
         DL[DiskLoader]
         PL[P2PLoader]
-        SS[SeekableSource]
-        P[Pump]
+        RKS[RemoteKeySource]
+        Pump[Pump]
+        Sink[Cpu/Gpu Sinks]
     end
-
-    subgraph "Memory Pools"
-        PMP[PinnedBufferPool]
-        VS[VirtualAddressSpace]
-        SPB[StreamingPinnedBuffer]
-    end
-
-    subgraph "GPU Memory"
-        CM[GpuDeviceMemory]
-        IPC[IPC Handle]
-    end
-
-    subgraph "Communication Layer"
-        CMN[CommunicationManager]
-        CE[Communicator]
-        CRI[ExportRegistration]
-    end
-
-    CS --> PO
-    CS --> MR
-    CS --> DM
-    CS --> GSC
-    CS --> MC
-    PO --> GSC
-    PO --> MR
-
-    MR --> M
-    M --> IK
-    M --> MM
-    M --> IL
-    M --> MCF
-
-    MM --> TS
-    MM --> CES
-    MM --> MS
-    MM --> ML
-    MM --> PMP
-    MM --> VS
-    MM --> SPB
-    MM --> CM
-
-    IL --> DL
-    IL --> PL
-    DL --> SS
-    PL --> SS
-    SS --> P
-
-    CES --> CMN
-    CMN --> CE
-    CE --> CRI
-
-    CM --> IPC
+    SE --> RE
+    RE --> IR
+    RE --> RR
+    RE --> MG
+    RE --> EH
+    RE --> CC
+    CC --> DM
+    CC --> REG
+    CC --> MC
+    CC --> COMM
+    CC --> PB
+    CC --> GSC
+    CC --> VHC
+    IR --> MF
+    MF --> IP
+    MF --> MG
+    MF --> MZ
+    MZ --> IP
+    MF --> MO
+    MO --> MG
+    IP --> RR
+    RR --> RLC
+    RLC --> UMA
+    RLC --> TS
+    RLC --> MER
+    IP --> DL
+    IP --> PL
+    PL --> RKS
+    DL --> Pump
+    RKS --> Pump
+    Pump --> Sink
+    MG --> GSC
+    MG --> EH
+    EH --> RR
+    EH --> IR
+    EH --> MG
 ```
 
-## Layer Details
+The facade wires each collaborator once during construction, then forwards API calls so runtime services share identical catalog state, UMA pools, and telemetry.
 
-### 1. External Interface Layer
+## Runtime Facade & Shared Services
 
-**StoreEngine** is the entry point of the entire system, providing:
+StoreEngine owns only construction-time wiring. Runtime services expose narrow, testable APIs and share infrastructure through `RuntimeContext`. The following matrix summarizes the key services.
 
-- Replica registration and management via ReplicaRegistry
-- GPU device management via DeviceManager
-- Global resource coordination through GlobalStoreClient
-- High-level API encapsulation with materialize_replica() method
-- Metrics collection through MetricsCollector
+| Service | Sources | What it owns | Shared dependencies |
+| --- | --- | --- | --- |
+| StoreEngine | `core/store/store_engine.{h,cc}` | Validates `StoreEngineOptions`, wires runtime services exactly once, forwards all public APIs. | `RuntimeEnv`, `IngestionRuntime`, `ReplicaRuntime`, `metadata::MetadataGateway` |
+| RuntimeEnv | `core/store/runtime/runtime_env.{h,cc}` | Boots/shuts `RuntimeContext`, stores worker identity, and forwards event publishers/subscriptions to runtimes. | `RuntimeContext` |
+| RuntimeContext | `core/store/runtime/context/runtime_context.{h,cc}` | Constructs `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, `CommunicationManager`, `PinnedBufferPool`, `IGlobalStoreClient`, `ViewHashComputer`, propagates worker identity, and embeds the event dispatcher. | `StoreEngineOptions`, `WorkerIdentity` |
+| RuntimeContextEvents | `core/store/runtime/context/runtime_context_events.{h,cc}`, `core/store/runtime/ingestion_events.h` | Folly MPMC queue with publisher/subscription handles for ingestion, registration, and key-mapping events; runtimes register callbacks at boot and the dispatcher drains before shutdown. | Self-contained dispatcher |
+| ReplicaRuntime | `core/store/runtime/replica/replica_runtime.{h,cc}` | Replica lifecycle (get/create, wait, eviction retries, unload), UMA-aware telemetry, remote access toggles, and publishes `replica_loaded`/`replica_evicted`/`remote_access_toggled` events for other runtimes. | `ReplicaRegistry`, `DeviceManager`, `MetricsCollector` |
+| IngestionRuntime | `core/store/runtime/ingestion/ingestion_runtime.{h,cc}` | Routes disk/P2P/materialize flows exclusively through `MaterializationFacade`, hands off publish-context bookkeeping, and exposes `IngestionRuntimeDependencies` so tests can swap facade hooks without touching production wiring. Completion still notifies `ReplicaRuntime` and `MetadataGateway` through the shared `MaterializationFacade`. | `RuntimeContext`, `ReplicaRuntime`, `ingestion::MaterializationFacade`, `metadata::MetadataGateway` |
+| MaterializationFacade | `core/store/runtime/ingestion/materialization_facade.{h,cc}` | Owns planner orchestration, wires `IngestionPipeline`, `MaterializationService`, and `MaterializeOrchestrator`, publishes ingestion events, records publish contexts, and brokers `MetadataGateway` registrations. Implements `MaterializationBackend` so AUTO flows share the same disk/P2P primitives. | `MaterializationService`, `MaterializationBackend`, `MaterializeOrchestrator`, `MetadataGateway`, `RuntimeContextEvents` |
+| MaterializationService & MaterializationDeps | `core/store/runtime/ingestion/materialization_service.{h,cc}` | Resident reuse, chunk planning, pinned-memory budgeting, handle construction helpers reused across runtime services. | `ReplicaRuntime`, `ChunkAwareLoadingStrategy`, `TransferService`, `PinnedBufferPool` |
+| MaterializeOrchestrator & MaterializationBackend | `core/store/materialization/control/materialize_orchestrator.{h,cc}`, `core/store/materialization/control/materialization_backend.h` | Negotiates remote transports, disk fallback, registration publication, and `MaterializeMode::AUTO` policies. | `metadata::MetadataGateway`, `IGlobalStoreClient`, `CommunicationManager` |
+| RegistrationBackend | `core/store/runtime/metadata/registration_backend.{h,cc}`, `core/store/materialization/control/replica_registration_helper.{h,cc}` | GPU-first begin/commit/abort/keep-alive APIs, CUDA IPC export, verification metadata, TTL refresh helpers, emits registration events via MetadataGateway. | `DeviceManager`, `ReplicaRegistry`, `PinnedBufferPool`, `MemoryExportRegistry`, `RegistrationPublisher` |
+| MetadataGateway | `core/store/runtime/metadata/metadata_gateway.{h,cc}` | All Global Store RPCs, worker registration, key-mapping CRUD, direct ingestion callbacks for Global Store publication, registration event fan-out, and UMA metric refresh for commit/abort. | `core/store/components/global_store_client.{h,cc}`, `RuntimeContext`, `WorkerIdentity`, `RegistrationBackend`, `ReplicaRuntime` |
 
-- Source: `core/store/store_engine.h`, `core/store/store_engine.cc`
-
-**MaterializeOrchestrator** handles the materialize_replica() API workflow:
-
-- Remote replica selection from Global Store
-- P2P transport setup and coordination
-- Disk fallback when P2P unavailable
-- Replica registration after successful loading
-
-- Source: `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/components/global_store_client.{h,cc}`
-
-```cpp
-class StoreEngine {
-public:
-    // Multi-device binding API
-    absl::StatusOr<ReplicaHandle> materialize_replica(
-        std::string_view artifact_id,
-        const DeviceKey& target_device,
-        MaterializeMode mode = MaterializeMode::AUTO,
-        const MaterializeHints& hints = {});
-
-    // Instance-based management
-    int wait_replica_ready(const ReplicaKey& key);
-    int unload_replica(const ReplicaKey& key);
-
-    // Note: VS lock APIs are removed in UMA V3; UMA is the sole ledger.
-    // UMA legacy helpers lock_chunks_for_transfer/update_chunk_states have been removed;
-    // use UMA plan_load(...), execute transfer, then commit()/abort().
-};
-```
-
-- Definitions: `ReplicaKey`, `ReplicaHandle`, `MaterializeHints` in `core/store/loading/loading_spec.h`
-- Device key: `DeviceKey` in `core/store/device_types.h`
-
-### 2. Replica Management Layer
-
-**Replica** class encapsulates the complete lifecycle of a single replica instance bound to a specific device:
-
-- Source: `core/store/replica/replica.{h,cc}`
+### Facade wiring & runtime boundaries
 
 ```mermaid
-graph LR
-    subgraph "Replica Internal Architecture"
-        M[Replica] --> MM[ReplicaLoadController]
-        M --> IL[IArtifactLoader]
-        M --> CF[CPU Future]
-        M --> GF[GPU Future]
-
-        MM --> PM[PinnedMemory]
-        MM --> CM[GpuDeviceMemory]
-
-        IL --> DL[DiskLoader]
-        IL --> RL[P2PLoader]
-    end
+flowchart TD
+  SE[StoreEngine facade] --> RE[RuntimeEnv]
+  RE --> RC[RuntimeContext]
+  SE --> RR[ReplicaRuntime]
+  SE --> IR[IngestionRuntime]
+  SE --> MG[MetadataGateway]
+  RC --> DM[DeviceManager]
+  RC --> REG[ReplicaRegistry]
+  RC --> MC[MetricsCollector]
+  RC --> COMM[CommunicationManager]
+  RC --> PB[PinnedBufferPool]
+  RC --> GSC[GlobalStoreClient]
+  RC --> IEH[IngestionEventHub]
+  IR --> MF[MaterializationFacade]
+  MF --> MS[MaterializationService]
+  MF --> IP[IngestionPipeline]
+  MF --> IEH
+  IEH --> RR
+  IEH --> MG
+  MG --> RB[RegistrationBackend]
+  RB --> GSC
 ```
 
-**Design Features**:
-- Factory pattern with `Replica::create()` for instance creation
-- Each Replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
-- Asynchronous operation management via `std::shared_future` — `Replica::ensure_loaded_async()` in `core/store/replica/replica.{h,cc}`
-- Supports device copies via `Replica::copy_from()` and `ReplicaLoadController::copy_from_peer()` — `core/store/replica/replica.h`, `core/store/replica/replica_load_controller.h`
-- Integrated replica verification — `core/common/artifact_verification.{h,cc}`, used by loaders and `Replica`
+`StoreEngine` constructs each runtime exactly once. `RuntimeEnv::start()` boots `RuntimeContext`, validates `StoreEngineOptions`, wires communicator/listen ports, and initializes the shared catalog (`DeviceManager`, `ReplicaRegistry`, `PinnedBufferPool`, metrics, and Global Store client). `RuntimeEnv::shutdown()` calls `RuntimeContext::drain_events()` before tearing down dependencies so every ingestion/registration callback finishes while the shared pools are still alive. `RuntimeEnv::update_worker_identity()` pushes node metadata into the context so `MetadataGateway`, the communicator, and Global Store client keep a consistent view of the worker.
 
-### 3. Data Loading Layer
+### API ownership map
 
-Adopts strategy pattern design with pump-based streaming architecture:
+| StoreEngine API surface | Owning runtime | Responsibilities today |
+| --- | --- | --- |
+| `materialize_replica`, `ingest_from_disk`, `ingest_from_p2p` | `IngestionRuntime` + `MaterializationFacade` | Validates requests via `MaterializationService`, mints `publish_context_id`s through `RuntimeContext`, orchestrates AUTO/disk/P2P loaders, publishes `ingestion_started/completed` through `IngestionEventHub`, and hands back `loading::ReplicaHandle`s. |
+| `wait_replica_ready`, `get_resident_devices`, `list_device_replicas`, `get_chunk_states_*`, `enable/disable_remote_replica_access`, `unload_replica` | `ReplicaRuntime` | Owns `ReplicaRegistry`, UMA snapshots, eviction retries, remote-access toggles, and ingestion result bookkeeping driven by `IngestionEventHub` subscriptions. |
+| `begin_register_artifact`, `commit_registered_artifact`, `abort_registered_artifact`, `keep_alive_registration`, `ingest_view_registration_chunk`, `register_replica_with_global_store` | `metadata::MetadataGateway` + `RegistrationBackend` | Maintains TTL-scoped `PendingRegistrationContext`s, exposes CUDA IPC handles for writers, finalizes view plans, computes canonical hashes, exports communicator keys, and publishes registration events/dedupe state to Global Store. |
+| `set_worker_identity`, `shutdown`, `get_metrics_snapshot` | `RuntimeEnv` + `RuntimeContext` | Validates options, updates communicator/endpoints, refreshes metrics via `MetricsCollector`, and drains Folly-backed events before tearing down shared infrastructure. |
 
-- Sources: `core/store/loader/loader.h`, `core/store/loader/disk_loader.{h,cc}`, `core/store/loader/p2p_loader.{h,cc}`
-- Streaming: `core/store/loader/source.h`, `core/store/loader/pump.{h,cc}`, `core/store/loader/buffer_pool.h`
-- Remote: `core/store/loader/remote_key_source.{h,cc}`, `core/store/loader/mux_seekable_source.{h,cc}`
+### Testing & Overrides
 
-```mermaid
-classDiagram
-    class IArtifactLoader {
-        <<interface>>
-        +initialize() Status
-        +get_artifact_size() StatusOr~uint64_t~
-        +open_source() StatusOr~SeekableSource~
-    }
+`IngestionRuntime::Config` carries a shared `IngestionRuntimeDependencies` bundle (`core/store/runtime/ingestion/ingestion_runtime.h`) so unit tests can exercise the full ingestion stack without wiring an entire `StoreEngine`.
 
-    class DiskLoader {
-        -source_: DiskSource
-        +open_source() StatusOr~SeekableSource~
-    }
+- **MaterializationHooks** — Tests populate `MaterializationHooks` (`core/store/runtime/ingestion/materialization_facade.h`) to inject fake pipelines (e.g. `core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h`), intercept `register_replica_with_global_store`, or install structured callbacks such as `before_pipeline_start`, `mutate_completion_event`, and `override_result`.
+- **Event hub** — `IngestionEventHub` (`core/store/runtime/ingestion/ingestion_event_hub.{h,cc}`) wraps `RuntimeContextEvents` with typed ingestion channels so ReplicaRuntime, MetadataGateway, and observability subscribers receive identical started/completed notifications. Tests subscribe directly to the hub (see `core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h`) to capture ordered events.
+- **Harness utilities** — `core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h` spins up `RuntimeEnv`, `ReplicaRuntime`, and `metadata::MetadataGateway`, then hands back a ready-to-use `IngestionRuntime::Config` so tests can instantiate an `IngestionRuntime` with custom dependencies.
 
-    class P2PLoader {
-        -source_: P2PSource
-        +open_source() StatusOr~SeekableSource~
-    }
+## Materialization & Registration Flow
 
-    IArtifactLoader <|-- DiskLoader
-    IArtifactLoader <|-- P2PLoader
-```
+Materialization uses a staged ingestion pipeline, orchestrated by `MaterializationFacade`, to normalize sources, verify data, and publish success. Registration piggybacks on the same events so metadata is published exactly once.
 
-**DiskLoader Workflow**:
-1. Scan partition files (`tensor.data`, `tensor.data_<n>`) — `core/store/loader/disk_loader.cc`
-2. Create `FilePartitionSource` implementing `SeekableSource` — `core/store/loader/file_partition_source.{h,cc}`
-3. Return source handle for pump-based streaming — `DiskLoader::open_source()`
-4. Actual loading handled by `ReplicaLoadController::load_async_from_source()` using `TransferService` + `pump_ranges()`
-5. Data flows: FilePartitionSource → Pump → MemorySink (`CpuVaSink` for CPU or `GpuMemorySink` for GPU). For GPU targets, the pump detects sinks that implement `AsyncPositionedSink` and uses `AsyncCopyManager` to submit H2D copies. `TransferService` replays `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` before returning to ensure the GPU buffer is fully materialised prior to verification and metadata persistence.
+### Materialization Stack (API + Orchestrators)
 
-**P2PLoader Workflow**:
-1. Validate `P2PSource` configuration (IP, port, memory keys) — `core/store/loader/p2p_loader.{h,cc}`
-2. Create `RemoteKeySource` that wraps remote memory via `Communicator` — `core/store/loader/remote_key_source.{h,cc}`
-3. Optional disk fallback via `MuxSeekableSource` — `core/store/loader/mux_seekable_source.{h,cc}`
-4. Uses the same `load_async_from_source()` path to target CPU (CPU, previously CPU) or GPU
-5. Optional checksum or direct-write support depends on communicator — see `RemoteKeySource::supports_direct_write()`
+| Component | Sources | Description |
+| --- | --- | --- |
+| IngestionPipeline | `core/store/materialization/runtime/pipeline/ingestion_pipeline.{h,cc}` | Stage-based ingestion reused for disk, inline-buffer, and P2P sources; produces `IngestionResultEvent`s that are forwarded through the `IngestionEventHub` rather than calling other runtime services directly. |
+| Contracts | `core/store/materialization/contracts/materialization_request.{h,cc}`, `loading_spec.h` | Typed payloads for StoreEngine APIs, replica keys, device hints, and returned `loading::ReplicaHandle`s. |
+| MaterializationDeps | `core/store/runtime/ingestion/materialization_service.{h,cc}` | Dependency bundle containing `ReplicaRuntime`, pinned pools, planner heuristics, and verification helpers. |
+| ReplicaRegistrationHelper | `core/store/materialization/control/replica_registration_helper.{h,cc}` | Encapsulates view hash calculation, verification metadata writes, and registration retries. |
+| View tooling | `core/store/view_utils.{h,cc}`, `core/store/materialization/common/view_hash_utils.{h,cc}` | Deterministic variant/view identifiers shared between ingestion and registration. |
+| View execution | `core/store/materialization/dataplane/view/{view_planner,view_plan_source,view_ingest_executor,view_transform_executor}.{h,cc}` | Plan and stream incremental view chunks for registration keep-alive APIs. |
 
-### 4. Memory Management Layer
+### Materialization modes & request validation
 
-**ReplicaLoadController** manages memory for a single replica instance at both CPU (CPU, previously CPU) and GPU locations, integrating with VS for pageable CPU memory:
+`MaterializationService` centralizes the logic that used to live inside `StoreEngine::materialize_replica`:
 
-- Source: `core/store/replica/replica_load_controller.{h,cc}`
-- UMA (Unified Memory): `core/store/replica/unified_memory_authority.{h,cc}`
-- Transfers: `core/store/replica/transfer_service.{h,cc}`, `core/store/replica/transfer_helpers.{h,cc}`
-- States: `core/store/replica/memory_state.h`, Locations: `core/common/memory/memory_location.h`
-- GPU unloads are strictly state-protected: if the target is in `LOADING`, `release_memory()` immediately returns `FailedPrecondition`. Callers must wait for completion (typically via `wait_for_state(..., LOADED)`). This prevents concurrent unloads from tearing down VRAM before the replica has finished loading.
-- When accessing a GPU buffer, use `ReplicaLoadController::get_gpu_allocation_view()` to obtain both the base address and the UMA-owned `std::shared_ptr<GpuDeviceMemory>` in one call, ensuring the GPU allocation is not released prematurely during subsequent validation or hashing.
+- Requests are validated via `loading::MaterializationRequest::Create`, which normalizes `MaterializeHints`, resolves `VariantRequest` data, and checks that CPU/GPU device IDs map to known `DeviceKey`s before any UMA allocations occur.
+- `MaterializeMode::AUTO` first calls `MaterializeOrchestrator::run()` to negotiate a remote transport with Global Store (via `CommunicationManager`). When a transport session is granted the request flows through `ingest_from_p2p`; if not, the service only falls back to disk when `hints.disk_path` is populated.
+- `MaterializeMode::LOAD_ONLY` requires a disk path and never attempts P2P; `MaterializeMode::COPY_ONLY` copies from an already resident GPU replica, reusing UMA metadata.
+- View-aware hints (`MaterializeHints::variant`) propagate canonical + view identifiers into the ingestion pipeline so the resulting `ReplicaKey` encodes `view_id`, and verification helpers recompute `view_data_hash` via `ViewHashComputer`.
+- Dependencies are injected with `MaterializationDeps`: `ReplicaRuntime` for reuse/allocation, the shared `PinnedBufferPool`, `ChunkAwareLoadingStrategy`, `TransferService`, and planner utilities. Tests override these via `MaterializationHooks` to inject fake pipelines, mutate completion events, or short-circuit results without touching production wiring.
 
-```mermaid
-stateDiagram-v2
-    [*] --> UNINITIALIZED
-    UNINITIALIZED --> UNALLOCATED: init_with_pool
-    UNALLOCATED --> ALLOCATED: allocate_memory
-    ALLOCATED --> LOADING: start_load
-    LOADING --> LOADED: load_success
-    LOADING --> FAILED: load_failed
-    LOADED --> UNALLOCATED: release_memory
-    ALLOCATED --> UNALLOCATED: release_memory
-    FAILED --> UNALLOCATED: release_memory
-```
+### Ingestion Pipeline Stages
 
-**Memory Transfer Support**:
-- CPU (CPU) ↔ GPU: Asynchronous copy via dedicated CUDA stream — `ReplicaLoadController::copy_data_async()`
-- DISK → CPU/GPU: Pump-based streaming via `load_async_from_source()` and `TransferService::load_from_source()`
-- REMOTE → CPU/GPU: Same pump-based streaming using `RemoteKeySource` and `CpuVaSink`/`GpuMemorySink`
-- GPU ↔ GPU: Direct peer copy via `ReplicaLoadController::copy_from_peer()`
+| Stage | Sources | Responsibilities |
+| --- | --- | --- |
+| SourceAdapter | `source_adapter.{h,cc}` | Normalizes `DiskSource` and `P2PSource`, validates manifests, prepares `IngestionContext`. |
+| MetadataStage | `metadata_stage.{h,cc}` | Resolves canonical index JSON, view plans, verification payloads. |
+| AllocationStage | `allocation_stage.{h,cc}` | Negotiates UMA reservations via `ReplicaRuntime`, triggers evictions through `EvictionService`, captures staging buffers. |
+| VerificationStage | `verification_stage.{h,cc}` | Streams data through dataplane hashing, compares against `ArtifactVerificationInfo`. |
+| HandleStage | `handle_stage.{h,cc}` | Builds `loading::ReplicaHandle`, IPC metadata, publishes success/failure events. |
+| Shared context | `ingestion_context.{h,cc}` | Thread-safe exchange object that stages share for options, buffers, and result metadata. |
 
-### 5. Memory Implementation Layer
+### Data Plane & Loaders
 
-The memory implementation layer provides the low-level memory management and data transfer mechanisms:
+- Loaders implement `IArtifactLoader` (`core/store/materialization/dataplane/contracts/loader.h`) with concrete `DiskLoader` and `P2PLoader` (`dataplane/loaders/*.cc`) plus dispatcher utilities.
+- Sources conform to `SeekableSource` (`dataplane/contracts/source.h`) via helpers such as `FilePartitionSource`, `RemoteKeySource`, and `MuxSeekableSource`.
+- Streaming is orchestrated by `pump_ranges()` (`dataplane/runtime/pump.{h,cc}`) atop buffer abstractions (`dataplane/contracts/buffer_pool.h`).
+- Sinks include `CpuVaSink` and `GpuMemorySink` (`dataplane/sinks/*.cc`), both of which integrate with `AsyncCopyManager` for overlapped H2D copies.
+- Metadata helpers (`dataplane/metadata/*.cc`) cover canonical index normalization, multi-file manifests, deterministic directory hashing, and verification payload management.
 
-- CPU Memory: `core/common/memory/pinned_buffer_pool.h`, `core/common/memory/pinned_buffer_pool.cc`, `core/common/memory/streaming_pinned_buffer.{h,cc}`
-- VS: `core/common/memory/virtual_address_space.{h,cc}`
-- GPU Memory: `core/common/memory/cuda_memory.{h,cc}`
-- Sinks/Sources: `core/store/loader/cpu_va_sink.{h,cc}`, `core/store/loader/gpu_memory_sink.{h,cc}`
-- Pump: `core/store/loader/pump.{h,cc}` (`pump_ranges`), `core/store/loader/buffer_pool.h`
+### Registration & Metadata Publication
 
-```mermaid
-graph TB
-    subgraph "CPU Memory Management"
-        PMP[PinnedBufferPool]
-        VS[VirtualAddressSpace]
-        SPB[StreamingPinnedBuffer]
+- `RegistrationBackend` exposes begin/ingest/commit/abort/keep-alive APIs and bridges UMA allocations back to metadata via `MetadataGateway`.
+- `MetadataGateway` calls into `IGlobalStoreClient` to register workers, replicas, and variant views, and consumes RuntimeContext notifications for automatic publication.
+- `CommunicationManager` (`core/store/components/communication_manager.{h,cc}`) registers UMA allocations with the communicator engine and supplies remote key metadata to `RemoteKeySource`.
+- Protos under `tensorcast/global_store/v1/*.proto` and `tensorcast/communicator/v1/communicator_config.proto` define the control-plane and communicator contracts consumed by both C++ and Python services.
 
-        PMP -->|Allocates chunks| SPB
-        VS -->|Virtual pages| UMA[UMA Space]
-    end
+#### MetadataGateway Behavior
 
-    subgraph "GPU Memory Management"
-        CM[GpuDeviceMemory]
-        CS[CUDA Stream]
-        IPC[IPC Handle]
+- `core/store/runtime/metadata/metadata_gateway.{h,cc}` now receives ingestion completions directly from the pipeline, so successful loads immediately invoke `register_replica()` when `publish_to_global_store` is set without waiting on RuntimeContext events.
+- Publish dedupe relies on a bounded map of `PublishContextRecord`s (1 024 entries, 10-minute TTL) keyed by `publish_context_id`, preventing duplicate publishes when both ingestion events and explicit APIs fire for the same replica key.
+- `set_client_override()` plus `refresh_override_endpoint()` let integration tests supply stubbed `IGlobalStoreClient` implementations while still reusing worker identity data propagated through `RuntimeContext`.
+- Registration lifecycle APIs (`begin_registration`, `commit_registration`, `abort_registration`, `keep_alive_registration`, `ingest_view_chunk`) are delegated to `RegistrationBackend`; results are re-published onto `RuntimeContextEvents` so other runtimes can observe commits/aborts without calling Global Store directly.
 
-        CM -->|Manages| CS
-        CM -->|Exports| IPC
-    end
+#### RegistrationBackend internals
 
-    subgraph "Data Transfer Components"
-        SS[SeekableSource]
-        Sink[MemorySink\n(AsyncPositionedSink for GPU)]
-        P[Pump]
-        BP[BufferPool]
+- `RegistrationBackend` receives a `RegistrationResources` bundle (DeviceManager, ReplicaRegistry, MetricsCollector, `PinnedBufferPool`, optional `CommunicationManager`) and a `ReplicaFactory`. `begin()` validates schema/version hints, computes optional bidirectional view plans, and uses `ReplicaFactory` to allocate GPU memory plus CUDA IPC handles before inserting the pending replica into `ReplicaRegistry`.
+- Each pending registration is represented by `PendingRegistrationContext`, which stores TTL deadlines, view ingest metadata, CUDA IPC handles, UMA residency pointers, and (when requested) canonical ranges for partial views. Contexts live in an `absl::flat_hash_map` guarded by `pending_mutex_`; the backend updates `MetricsCollector::record_registration_pending` whenever entries are added or removed.
+- TTL is enforced at `commit()` time: expired contexts are dropped, UMA memory is released, and the caller receives `DeadlineExceeded`. `keep_alive()` extends the expiry, while `abort()` removes the entry and runs the same cleanup paths used when errors occur.
+- View ingestion (`ingest_view_registration_chunk`) streams bytes through a `ViewIngestExecutor` for SERVER placements so transforms/finalization stay on GPU. `get_view_ingested_bytes()` offers progress reporting to the daemon.
+- `commit()` recomputes canonical/index multihashes, optionally finalizes SERVER-side view executors, exports communicator keys when P2P is enabled, and calls a `RegistrationPublisher` (backed by `GlobalStoreRegistrationPublisher`) so Global Store receives the authoritative `RegistrationCommitResult` with the committed `DeviceKey`. Successful commits update `MetricsCollector::record_registration_commit`, and UMA memory is released only after publication succeeds or returns a terminal error.
 
-    SS -->|Reads from| P
-    P -->|Writes to| Sink
-    P -->|Uses| BP
-    Sink -->|Schedules H2D via ACM| CS
-    end
+## Replica, Memory, and Device Management
 
-    subgraph "Service Layer"
-        TS[TransferService]
-        CES[MemoryExportRegistry]
-        UMA[UnifiedMemoryAuthority]
+UMA V3 keeps a single ledger for CPU virtual address space, GPU memory, and CUDA IPC exports. Replica lifecycle helpers wrap UMA so higher layers reason about handles instead of raw buffers.
 
-        TS -->|Orchestrates| P
-        CES -->|Manages| ER[ExportRegistration]
-        UMA -->|Authorizes & Coordinates| TS
-    end
-```
+### Memory & Replica Components
 
-**GPU Memory Features**:
-- CUDA allocation and stream management — `core/common/memory/cuda_memory.{h,cc}`
-- Cross-process memory sharing via `ReplicaLoadController::get_ipc_handle()` — `core/store/replica/replica_load_controller.h`
-- Device-bound memory management (via `ReplicaKey`) — `core/store/loading/loading_spec.h`
+| Component | Sources | Description |
+| --- | --- | --- |
+| Replica | `core/store/replica/replica.{h,cc}` | Owns loader selection, async futures, remote access toggles, and per-location states. |
+| ReplicaLoadController | `core/store/replica/replica_load_controller.{h,cc}` | State machine for CPU/GPU locations; allocate/load/release, pump data, export memory handles. |
+| UnifiedMemoryAuthority | `core/store/replica/unified_memory_authority.{h,cc}`, `core/common/memory/virtual_address_space.{h,cc}` | Ledger for UMA chunks, VA leases, plan/commit/abort flows, and GPU allocation reuse. |
+| TransferService & helpers | `core/store/replica/transfer_service.{h,cc}`, `transfer_helpers.{h,cc}` | Streams data from loaders to UMA via `pump_ranges`, manages async copy scheduling, enforces synchronization. |
+| MemoryExportRegistry | `core/store/replica/memory_export_registry.h` | Tracks CUDA IPC/RDMA exports, coalesces chunk ranges, and maintains telemetry for remote access. |
+| PinnedBufferPool | `core/common/memory/pinned_buffer_pool.{h,cc}` | Supplies aligned pinned memory and reports availability to ReplicaRuntime & TransferService. |
+| StreamingPinnedBuffer | `core/common/memory/streaming_pinned_buffer.{h,cc}` | Ring buffer abstraction for overlapped disk/transfer workloads. |
+| GpuDeviceMemory | `core/common/memory/gpu_device_memory.{h,cc}` | RAII wrapper for CUDA allocations; exposes device id, IPC handle export, and keep-alive semantics. |
+| VirtualAddressSpace | `core/common/memory/virtual_address_space.{h,cc}` | Stable VA ranges shared across replicas, supports direct-write entitlements for P2P writers. |
+| EvictionService | `core/store/components/eviction_service.{h,cc}` | Policy owner for UMA and GPU memory reclamation invoked by ReplicaRuntime, RegistrationBackend, and MaterializationService. |
 
-## Memory Transfer Mechanism
+### Device & Telemetry Components
 
-### Disk to CPU Loading Mechanism
+- `DeviceManager`, `DeviceRegistry`, and `core/store/device_types.h` map GPU UUIDs to `DeviceKey`s, manage CUDA streams/events, and capture residency metadata.
+- `ReplicaRegistry` (`core/store/components/replica_registry.{h,cc}`) is the authoritative container for live replicas and UMA state snapshots.
+- `MetricsCollector` (`core/store/components/metrics_collector.{h,cc}`) publishes UMA pool utilization, transfer throughput, ingestion counters, and registration latency (`tc_store_*`, `tc_ingest_*`, `tc_register_*`).
+- `WorkerIdentity` (`core/store/components/worker_identity.h`) plus `ViewHashComputer` keep worker metadata and deterministic hashes synced through the catalog.
+- `Runtime replica info` (`core/store/runtime/replica/replica_info.h`) and `direct_write_grant` (`core/store/replica/types/direct_write_grant.h`) provide typed snapshots and CPU VA grant contracts for clients.
 
-Updated to reflect `TransferService` + `pump_ranges` orchestration:
+## Component Inventory (2025 Q4)
+
+| Category | Modules | Notes |
+| --- | --- | --- |
+| External Interfaces & Config | `core/store/store_engine.{h,cc}`, `core/store/store_engine_options.{h,cc}`, `daemon/` Store daemon targets, `tensorcast/global_store/` Python control plane | Public API surface, configuration validation, and out-of-process control plane. |
+| Runtime & Coordination | `core/store/runtime/{runtime_env,replica/replica_runtime,metadata/metadata_gateway}.cc`, `core/store/runtime/ingestion/{ingestion_runtime,materialization_facade,materialization_service}.cc`, `core/store/runtime/context/{runtime_context,runtime_context_events}.cc`, `core/store/runtime/runtime_services_test.cc` | Runtime orchestration, worker identity, ingestion/registration fan-out, regression coverage. |
+| Materialization & Contracts | `core/store/runtime/ingestion/{ingestion_runtime,materialization_facade,materialization_service}.cc`, `core/store/materialization/control/{materialization_backend,materialize_orchestrator,replica_registration_helper}.cc`, `core/store/materialization/contracts/{materialization_request,loading_spec}.h`, `core/store/view_utils.{h,cc}` | Materialize API surface, runtime orchestration, strategy selection, registration helpers, and typed contracts. |
+| Pipeline & Data Plane | `core/store/materialization/runtime/pipeline/*`, `core/store/materialization/dataplane/{contracts,loaders,sources,sinks,metadata,view}`, `core/store/materialization/dataplane/runtime/pump.{h,cc}` | Source normalization, staged ingestion, streaming pump, verification metadata, view execution. |
+| Replica & Memory | `core/store/replica/{replica,replica_load_controller,transfer_service,transfer_helpers,unified_memory_authority,memory_export_registry}.cc`, `core/common/memory/{pinned_buffer_pool,streaming_pinned_buffer,gpu_device_memory,virtual_address_space}.cc`, `core/store/components/eviction_service.{h,cc}` | UMA ledger, transfers, IPC exports, pinned memory pools, eviction policy. |
+| Device & Metrics | `core/store/components/{device_manager,replica_registry,metrics_collector,worker_identity}.cc`, `core/store/device_registry.{h,cc}`, `core/store/device_types.h`, `core/store/materialization/common/view_hash_utils.{h,cc}` | GPU discovery, registry helpers, metrics emission, deterministic hashing. |
+| Communication & Metadata | `core/store/components/communication_manager.{h,cc}`, `core/store/components/global_store_client.{h,cc}`, `tensorcast/global_store/v1/*.proto`, `tensorcast/communicator/v1/communicator_config.proto` | Communicator wiring, Global Store RPC client, control-plane schemas. |
+| Planning & View Execution | `core/store/materialization/planning/chunk_aware_strategy.{h,cc}`, `core/store/materialization/dataplane/view/*`, `core/store/materialization/dataplane/metadata/*` | Load plan computation, variant/view planning, deterministic metadata assembly. |
+| Runtime Testing Utilities | `core/store/runtime/ingestion/testing/{fake_ingestion_pipeline,scoped_ingestion_runtime_test_harness}.h` | Deterministic ingestion pipelines and harness helpers for runtime unit tests; tests subscribe to `IngestionEventHub` for lifecycle assertions. |
+| Observability & Events | `core/store/runtime/ingestion_events.h`, `core/store/runtime/context/runtime_context_events.{h,cc}`, `metrics_collector` gauges, `tc_ex_*` export counters | Structured events, synchronous delivery, and metric names consumed by dashboards. |
+
+## Core Flows
+
+### Materialize Replica
 
 ```mermaid
 sequenceDiagram
-    participant DL as DiskLoader
-    participant MM as ReplicaLoadController
+    participant Client
+    participant SE as StoreEngine
+    participant IR as IngestionRuntime
+    participant MF as MaterializationFacade
+    participant RC as RuntimeContext/IEH
+    participant MZ as MaterializationService
+    participant IP as IngestionPipeline
+    participant RR as ReplicaRuntime
+    participant RLC as ReplicaLoadController
+    participant MG as MetadataGateway
+
+    Client->>SE: materialize_replica(artifact_id, device, mode)
+    SE->>IR: forward request
+    IR->>MF: delegate materialize call
+    MF->>RC: mint_publish_context_id()
+    RC-->>MF: publish_context_id
+    MF->>RC: publish ingestion_started via IngestionEventHub
+    MF->>MZ: execute MaterializationRequest
+    MZ->>RR: reuse/create replica & planner state
+    MZ->>IP: drive ingestion pipeline
+    IP->>RLC: allocate/load via UMA & TransferService
+    RLC-->>IP: ReplicaHandle + chunk states
+    IP-->>MF: IngestionResultEvent (publish)
+    MF->>RC: publish ingestion_completed via IngestionEventHub
+    RC-->>RR: telemetry + chunk updates
+    RC-->>MG: auto-publish when requested
+    MF-->>IR: ReplicaHandle
+    IR-->>SE: ReplicaHandle
+    SE-->>Client: ReplicaHandle + readiness future
+```
+
+### P2P Ingestion
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant IR as IngestionRuntime
+    participant MF as MaterializationFacade
+    participant RC as RuntimeContext/IEH
+    participant IP as IngestionPipeline
+    participant Loader as P2PLoader/RemoteKeySource
+    participant COMM as CommunicationManager
     participant TS as TransferService
-    participant SRC as FilePartitionSource
-    participant SNK as CpuVaSink
+    participant UMA as UnifiedMemoryAuthority
+    participant RR as ReplicaRuntime
+    participant MG as MetadataGateway
 
-    DL->>DL: initialize()
-    DL->>DL: get_artifact_size()
-    DL->>DL: open_source()
-    DL-->>MM: return SeekableSource (SRC)
-
-    MM->>MM: allocate_memory(CPU)
-    MM->>MM: set_state(CPU, LOADING)
-    MM->>TS: load_from_source(SRC, CPU, concurrency)
-    TS->>SNK: build CpuVaSink via VA::open()
-    TS->>TS: build_ranges(chunk_indices or full)
-    TS->>TS: pump_ranges(SRC, SNK, buffer_pool, ranges)
-    TS-->>MM: return OkStatus
-    MM->>UMA: commit(session_id, CPU, committed_chunks)
-    MM->>MM: set_state(CPU, LOADED)
+    Client->>IR: ingest_from_p2p(p2p_config)
+    IR->>MF: delegate P2P ingestion
+    MF->>RC: mint_publish_context_id()
+    RC-->>MF: publish_context_id
+    MF->>RC: publish ingestion_started via IngestionEventHub
+    MF->>IP: prepare P2P request
+    IP->>Loader: open_source()
+    Loader->>COMM: register remote exports
+    Loader-->>IP: SeekableSource(RemoteKeySource)
+    IP->>TS: pump_ranges(source -> sink)
+    TS->>UMA: commit chunk states
+    UMA-->>IP: residency snapshot
+    IP-->>MF: ingestion result + metrics
+    MF->>RC: publish ingestion_completed/failed via IngestionEventHub
+    RC-->>RR: telemetry + residency updates
+    RC-->>MG: auto-register when requested
+    MF-->>IR: ReplicaHandle / status
 ```
 
-- Source: `ReplicaLoadController::load_async_from_source()` and `TransferService::load_from_source()`
-
-### CPU to GPU Transfer Mechanism
-
-```mermaid
-graph TB
-    subgraph "CPU (CPU)"
-        VA[VA Base Ptr]
-    end
-
-    subgraph "CUDA Operations"
-        Stream[CUDA Stream]
-        Copy["cudaMemcpyAsync (H2D) Streaming"]
-        Sync[cudaStreamSynchronize]
-    end
-
-    subgraph "GPU Buffer"
-        GPU[Contiguous GPU Buffer]
-    end
-
-    VA --> Copy
-    Copy --> GPU
-    Copy --> Stream
-    Stream --> Sync
-```
-
-- Source: `TransferService::copy_cpu_to_gpu_streaming()`
-
-### GPU to CPU Transfer Mechanism
-
-```mermaid
-graph TB
-    subgraph "Reverse Transfer Flow"
-        direction TB
-
-        subgraph "GPU Buffer"
-            GPU2[Contiguous GPU Buffer]
-        end
-
-        subgraph "CUDA Operations"
-            Stream2[CUDA Stream]
-            RCopy[cudaMemcpyAsync (D2H) Streaming]
-            Sync2[cudaStreamSynchronize]
-        end
-
-        subgraph "CPU (CPU)"
-            VSBase[VS Base Ptr]
-        end
-
-        GPU2 --> RCopy
-        RCopy --> VSBase
-        RCopy --> Stream2
-        Stream2 --> Sync2
-    end
-```
-
-- Source: `TransferService::copy_gpu_to_cpu_streaming()`
-
-### P2P Transfer Support
-
-P2P transfer strategies based on memory layouts, via `RemoteKeySource` + `pump_ranges` and appropriate sinks:
-
-```mermaid
-graph TB
-    subgraph "P2P Transfer Scenarios"
-
-        subgraph "CPU to CPU (Supported)"
-            direction LR
-            RemoteCPU[Remote CPU<br/>Chunks]
-            LocalCPU[Local CPU<br/>VS]
-            RemoteCPU -->|RemoteKeySource.read_at| LocalCPU
-        end
-
-        subgraph "GPU to GPU (Supported)"
-            direction LR
-            RemoteGPU[Remote GPU<br/>Buffer]
-            LocalGPU[Local GPU<br/>Buffer]
-            RemoteGPU -->|RemoteKeySource.read_at| LocalGPU
-        end
-
-        subgraph "CPU to GPU (Supported)"
-            direction LR
-            RemoteCPU2[Remote CPU<br/>Chunks]
-            LocalGPU2[Local GPU<br/>Buffer]
-            RemoteCPU2 -->|read_at → GpuMemorySink.write_at| LocalGPU2
-        end
-
-        subgraph "GPU to CPU (Supported)"
-            direction LR
-            RemoteGPU2[Remote GPU<br/>Buffer]
-            LocalCPU2[Local CPU<br/>VS]
-            RemoteGPU2 -->|read_at → CpuVaSink.write_at| LocalCPU2
-        end
-    end
-```
-
-- Sources: `core/store/loader/remote_key_source.{h,cc}`, `core/store/loader/gpu_memory_sink.{h,cc}`, `core/store/loader/cpu_va_sink.{h,cc}`, `core/store/loader/pump.{h,cc}`
-
-### Transfer Failure Handling
-
-```mermaid
-stateDiagram-v2
-    [*] --> TransferStart
-
-    TransferStart --> CheckStates: Verify source/destination state
-    CheckStates --> SetLoading: State check passed
-    CheckStates --> TransferFailed: State check failed
-
-    SetLoading --> CapturePointers: Capture memory pointers
-    CapturePointers --> LaunchAsync: Launch async task
-
-    LaunchAsync --> Transferring: Execute transfer operation
-
-    Transferring --> ValidateResult: Transfer completed
-    Transferring --> TransferError: Transfer error
-
-    ValidateResult --> SetLoaded: Validation succeeded
-    ValidateResult --> TransferError: Validation failed
-
-    TransferError --> SetFailed: Set failed state
-    SetLoaded --> TransferComplete
-    SetFailed --> TransferComplete
-    TransferFailed --> TransferComplete
-
-    TransferComplete --> [*]
-```
-
-- Sources: `core/store/replica/replica_load_controller.{h,cc}` (`set_state`, `finalize_load`, error paths)
-
-## Core Interaction Flows
-
-### New Unified Loading Flow with materialize_replica() API
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant CS as StoreEngine
-    participant PO as MaterializeOrchestrator
-    participant MR as ReplicaRegistry
-    participant M as Replica
-    participant MM as ReplicaLoadController
-    participant L as Loader
-    participant VS
-
-    User->>CS: materialize_replica(artifact_id, target_device)
-    CS->>PO: orchestrate loading
-    PO->>MR: get_or_create_replica(replica_key)
-
-    alt Replica not exists
-        MR->>M: Replica::create(config)
-        M->>L: create appropriate loader
-        M->>MM: initialize VS dependencies
-        MM->>VS: reserve virtual address space
-    end
-
-    PO->>M: ensure_loaded_async(target_location)
-    M->>MM: allocate_memory(location)
-    M->>L: open_source()
-    L-->>M: return SeekableSource
-    M->>MM: load_async_from_source(source)
-
-    MM->>MM: setup streaming buffers (via TransferService)
-    MM->>MM: pump data from source
-    MM->>MM: finalize_load_state(LOADED)
-
-    M-->>PO: return future
-    PO->>CS: return ReplicaHandle
-    CS->>User: ReplicaHandle{replica_key, ready_future}
-```
-
-- Sources: `core/store/store_engine.{h,cc}`, `core/store/loading/materialize_orchestrator.{h,cc}`, `core/store/replica/replica.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
-
-### P2P Loading Flow with Communicator
-
-P2P transfers leverage the `Communicator` for remote memory access with `RemoteKeySource`:
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant CS as StoreEngine
-    participant M as Replica
-    participant MM as ReplicaLoadController
-    participant RL as P2PLoader
-    participant CM as CommunicationManager
-
-    User->>CS: load_model(p2p_config)
-    CS->>M: create(P2PModelSource)
-
-    Note over M: Select target (CPU/GPU) and open_source()
-    M->>RL: open_source()
-    RL-->>M: SeekableSource(RemoteKeySource)
-    M->>MM: load_async_from_source(source, target)
-
-    alt Target = CPU
-        MM->>MM: allocate_memory(CPU)
-    else Target = GPU
-        MM->>MM: allocate_memory(GPU)
-    end
-
-    MM->>MM: set_state(target, LOADING)
-    MM->>MM: pump via TransferService
-    MM->>MM: finalize and set_state(target, LOADED)
-
-    M->>CS: return success/error
-```
-
-- Sources: `core/store/loader/p2p_loader.{h,cc}`, `core/store/loader/remote_key_source.{h,cc}`, `core/store/replica/replica_load_controller.{h,cc}`
-
-### IPC Memory Sharing Flow
-
-GPU memory can be shared between processes through IPC handles:
-
-```mermaid
-sequenceDiagram
-    participant P1 as Process1(Owner)
-    participant P2 as Process2(User)
-    participant MM1 as Orchestrator1
-    participant MM2 as Orchestrator2
-    participant CUDA as CUDA_Runtime
-
-    P1->>MM1: allocate_memory(GPU)
-    MM1->>CUDA: cudaMalloc(artifact_size)
-    P1->>MM1: load_model_data()
-    MM1->>MM1: state = LOADED
-
-    P1->>MM1: get_ipc_handle()
-    MM1->>CUDA: cudaIpcGetMemHandle(gpu_ptr)
-    CUDA->>MM1: return ipc_handle
-    MM1->>P1: return ipc_handle
-
-    P1->>P2: share ipc_handle + size + device_id
-    P2->>P2: Use ipc_handle for CUDA operations
-```
-
-- Source: `core/store/replica/replica_load_controller.h` (`get_ipc_handle()`)
-
-## Performance Optimization
-
-### 1. Concurrency Strategy
-- Multi-threaded parallel disk reading (via `pump_ranges` concurrency)
-- CPU-GPU transfer pipeline
-- Overlapped execution of async operations
-
-### 2. Memory Optimization
-- Pre-allocated memory pools
-- CUDA pinned memory improves transfer speed
-- Zero-copy IPC sharing
-
-### 3. Caching Strategy
-- VS-assisted CPU eviction policies (UMA-owned policy; VS issues advisories)
-- Intelligent location selection based on device capabilities
-- Locality-aware data access with NUMA optimization
-- Chunk locking mechanism to prevent eviction during transfers
-
-## Observability (UMA V3 additions)
-
-- Export path: `tc_ex_registrations_total{location}` and `tc_ex_keepalive_gauge` report P2P export activity and UMA‑owned CPU VS export leases.
-- UMA VA pin leases: `tc_va_pin_leases_total{reason}` increments when UMA obtains VS leases (e.g., reason="Export").
-- GPU copy scheduler: `tc_tx_inflight_copies_gauge{gpu}` reflects per‑GPU in‑flight copy slots held by the scheduler gate.
-
-## Security Considerations
-
-### 1. Memory Safety
-- Smart pointers prevent memory leaks
-- Boundary checks avoid out-of-bounds access
-- CUDA error checking
-
-### 2. Thread Safety
-- Fine-grained lock design
-- Lock-free data structures
-- Condition variable synchronization
-
-### 3. Resource Isolation
-- Memory isolation between processes
-- Exclusive access to GPU devices
-- Secure management of network resources
-
-## Extension Points
-
-The system is designed with multiple extension points to support future requirements:
-
-1. **New Loader Types**: Implement `IArtifactLoader` interface and provide `SeekableSource`
-2. **New Source Types**: Add variants to `ArtifactSource` (e.g., S3Source, AzureBlobSource)
-3. **New Memory Types**: Extend `ReplicaLoadController` and `MemoryLocation` enum
-4. **New Transfer Protocols**: Extend `Communicator` implementations
-5. **New Verification Methods**: Extend `ArtifactVerificationInfo` framework
-6. **Custom Device Types**: Extend `DeviceKey` and device registry
-
-## Key Implementation Details
-
-### Multi-Device Binding
-- Each replica instance is uniquely identified by `ReplicaKey` (artifact_id + device + replica) — `core/store/loading/loading_spec.h`
-- Supports multiple replicas of the same replica on different devices
-- Device abstraction via `DeviceKey` for stable device references — `core/store/device_types.h`
-
-### Virtual Address Space (VS)
-- System-wide virtual address space management — `core/common/memory/virtual_address_space.{h,cc}`
-- Chunk-based virtual layout with lazy physical page binding; telemetry only (non‑authoritative)
-- Provides pin leases to protect ranges during transfers (no explicit lock/unlock APIs)
-- Enables efficient memory sharing across processes (stable VA + CUDA IPC)
-
-- ### Unified Type System
-- `ArtifactSource` / `ArtifactTarget` / `MaterializeHints` — `core/store/loading/loading_spec.h`
-- `ReplicaHandle`: returned from loading operations with instance info — `core/store/loading/loading_spec.h`
-
-### Service Architecture
-- **TransferService**: Manages data transfers between locations — `core/store/replica/transfer_service.{h,cc}`
-- **MemoryExportRegistry**: Handles P2P memory registration/export — `core/store/replica/memory_export_registry.h`
-- **MaterializeOrchestrator**: Coordinates the materialize_replica() API workflow — `core/store/loading/materialize_orchestrator.{h,cc}`
-- **MetricsCollector**: Tracks performance and resource usage — `core/store/components/metrics_collector.{h,cc}`
-- **Verification Metadata Coordination**: `core/store/loader/verification_utils.{h,cc}` provides the per-artifact `VerificationMetadataGuard`, in-process metadata cache, atomic write helper (`open` → `write` → `fsync` → `rename` + directory sync), and structured logging hooks (`verification_metadata_write_{succeeded,failed}`). `core/store/replica/transfer_service.cc` synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so verification always runs on fully materialised GPU buffers. Regression coverage lives in `core/store/loader:verification_utils_test` and `core/store:multi_gpu_verification_race_test`.
-
-## Related Guides
-
-- **Device Registry**: Learn how GPUs are mapped to logical `DeviceKey`s in the [Device Registry guide](./device-registry.md).
-- **Communicator Internals**: See communication engine details in `../communicator/README.md`.
-- **StoreEngine API**: High-level usage patterns are documented in `../checkpoint/README.md`.
-- **DeviceManager** — runtime GPU enumeration and streams ([Device Manager](./device-manager.md))
+## Observability & Extension Points
+
+- `MetricsCollector` exposes UMA pool gauges, ingestion latency, registration throughput, communicator export counters, and transfer bandwidth (`tc_store_evictions_total`, `tc_ingest_seconds`, `tc_ex_registrations_total`, `tc_ex_keepalive_gauge`, `tc_tx_inflight_copies_gauge`).
+- `MaterializationFacade` emits structured `ingestion_started`, `ingestion_completed`, and `ingestion_failed` events for every disk/P2P/materialize request via `IngestionEventHub`; each payload includes the `request_id`, ingest source, and the `publish_context_id` minted through `RuntimeContext::mint_publish_context_id()`. ReplicaRuntime and MetadataGateway both subscribe to the hub, so telemetry and auto-publish stay in lock-step without bespoke callbacks.
+- `MaterializationFacade` caches each replica’s most recent `publish_context_id` (when auto-publish is enabled) before calling into `MetadataGateway::register_replica`, ensuring synchronous registration APIs reuse the same identifier that event subscribers observe and preventing duplicate Global Store RPCs.
+- `RuntimeContextEvents::drain()` is called during shutdown so no event handler can outlive shared dependencies; all ingestion/registration publishers must keep handlers lightweight.
+- `RuntimeEnv::shutdown()` always invokes `RuntimeContext::drain_events()` before tearing down `CommunicationManager`, pinned pools, or registries, ensuring that `ReplicaRuntime`, `MetadataGateway`, and observability subscribers finish their callbacks while UMA/metrics state is still valid.
+- `WorkerIdentity` updates immediately propagate to the `GlobalStoreClient`, communicator endpoints, and registration payloads.
+- Extension points follow strict interfaces: implement `IArtifactLoader` for new loaders, extend `ArtifactSource` for new source types, add planner strategies via `ChunkAwareLoadingStrategy`, and use `MaterializationDeps` to inject experimental services without touching StoreEngine.
+
+## Related Documentation
+
+- `docs/architecture/architecture-overview.md` — Cross-component system view.
+- `core/store/README.md` — StoreEngine internals and usage patterns.
+- `docs/designs/0028-store-engine-facade-refactor.md` — Facade and runtime service split.
+- `docs/designs/0029-store-runtime-rearchitecture.md` — Runtime layering and dependency graph.
+- `core/store/docs/state-management.md` — UMA/VS state transitions.
+- `core/store/docs/device-manager.md` & `core/store/docs/device-registry.md` — Device discovery and registry semantics.
+- `docs/architecture/p2p-transfer-strategies.md` — Communicator and P2P topology guidance.
+- `docs/internals/model-loading.md` & `docs/internals/adding-metrics.md` — Loading flows and observability hooks.

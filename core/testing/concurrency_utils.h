@@ -17,7 +17,7 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/cuda_api.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"
 

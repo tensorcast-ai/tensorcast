@@ -94,7 +94,7 @@ struct BidirectionalViewPlan {
 
 ### 1.2 Ingest Executor
 
-Add `core/store/loader/view_ingest_executor.{h,cc}`:
+Add `core/store/materialization/dataplane/view/view_ingest_executor.{h,cc}`:
 
 - Mirrors `view_plan_source` but performs writes.
 - Input: `BidirectionalViewPlan`, `SeekableSink` (wrapper over canonical backing buffer or DMA writer), pointer to view staging buffer.
@@ -204,7 +204,7 @@ The infrastructure already exists; we need minor additions:
 
 # Validation Strategy
 
-- **Unit tests:** new Catch2 suite `//core/store/loader:view_ingest_executor_test` verifying narrow + transpose ingestion (CPU + fake CUDA).
+- **Unit tests:** new Catch2 suite `//core/store/materialization/dataplane:view_ingest_executor_test` verifying narrow + transpose ingestion (CPU + fake CUDA).
 - **Integration tests:** extend `//core/store:store_engine_test` and Python `tests/python/test_store_view_api.py` with end-to-end `register_view` flows (slice + transpose).
 - **Global Store tests:** add coverage in `tests/python/global_store/test_services.py` for variant upsert during registration.
 - **Perf smoke:** measure registration throughput vs canonical baseline; ensure slice registration reduces bytes transferred and CPU time remains within +5%.

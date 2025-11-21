@@ -9,8 +9,10 @@
 #include <vector>
 
 #include "daemon/cuda_ipc_raii.h"
+#include "daemon/ipc_region_registry.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "core/common/artifact_identity.h"
 
 namespace tensorcast::daemon {
 
@@ -32,6 +34,7 @@ struct LeaseSegMeta {
   uint64_t base_offset{0}; // offset within mapped handle
   uint64_t length{0};
   uint64_t dst_offset{0}; // destination offset in coalesced buffer
+  std::string storage_id; // optional ref to RegisterStorageMeta
 };
 
 struct RegisterStorageMeta {
@@ -39,6 +42,16 @@ struct RegisterStorageMeta {
   int device_id{0};
   std::string handle_bytes;
   uint64_t storage_length{0};
+  std::string region_id;
+  uint64_t region_base_offset{0};
+
+  [[nodiscard]] bool has_region() const {
+    return !region_id.empty();
+  }
+
+  [[nodiscard]] bool has_handle() const {
+    return !handle_bytes.empty();
+  }
 };
 
 struct RegisterTensorAliasMeta {
@@ -55,6 +68,8 @@ struct RegisterTensorAliasMeta {
 struct LipLeaseEntry {
   std::string registration_id; // original registration id for keepalive/revoke
   std::string artifact_id;
+  std::string client_artifact_id;
+  tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
   int device_id{0};
   int owner_pid{0};
   uint32_t ttl_ms{0};
@@ -74,6 +89,11 @@ struct LipExportRecord {
   int device_id{0};
   std::vector<CudaIpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
+  // Region lease ownership for region-backed storages used by this export.
+  // These references are acquired explicitly at staging time and must be
+  // released when the staged export is released.
+  IpcRegionRegistry* region_registry{nullptr};
+  absl::flat_hash_map<std::string, uint32_t> held_region_refs; // region_id -> refcount
 };
 
 // Result of committing a LIP in-place registration: descriptor fields and
@@ -86,6 +106,7 @@ struct CommitLeaseResult {
   std::string encoding; // e.g., "json"
   uint64_t total_size{0};
   std::string verification_json; // optional JSON payload
+  tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
 };
 
 } // namespace tensorcast::daemon

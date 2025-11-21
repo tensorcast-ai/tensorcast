@@ -4,18 +4,19 @@
 
 #include <chrono>
 #include <memory>
+#include <numeric>
 #include <variant>
 
 #include "absl/functional/overload.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
-#include "core/store/loader/disk_loader.h"
-#include "core/store/loader/inline_buffer_loader.h"
-#include "core/store/loader/loader.h"
-#include "core/store/loader/p2p_loader.h"
-#include "core/store/loader/view_plan_source.h"
-#include "core/store/loader/view_transform_executor.h"
+#include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
+#include "core/store/materialization/dataplane/contracts/loader.h"
+#include "core/store/materialization/dataplane/loaders/disk_loader.h"
+#include "core/store/materialization/dataplane/loaders/p2p_loader.h"
+#include "core/store/materialization/dataplane/view/view_plan_source.h"
+#include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
 
 namespace tensorcast::store::replica {
@@ -126,7 +127,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.artifact_identifier,
       config.local_device_id,
       config.pinned_buffer_pool,
-      config.virtual_addr_space,
+      config.artifact_chunk_bytes,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
       effective_size,
@@ -466,7 +467,8 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
     if (gpu_state == MemoryState::LOADED) {
       return common::memory::MemoryLocation::GPU;
     } // Check if original source is valid for loading to CPU
-    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
+    if (original_source_type_ == common::memory::MemoryLocation::DISK ||
+        original_source_type_ == common::memory::MemoryLocation::CPU) {
       return common::memory::MemoryLocation::DISK;
     }
     if (original_source_type_ == common::memory::MemoryLocation::REMOTE) {
@@ -481,7 +483,8 @@ absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_tar
       return common::memory::MemoryLocation::CPU;
     } // Can load from DISK (via CPU staging implicitly handled by DiskLoader->copy)
     // or directly from REMOTE if P2P->GPU is supported.
-    if (original_source_type_ == common::memory::MemoryLocation::DISK) {
+    if (original_source_type_ == common::memory::MemoryLocation::DISK ||
+        original_source_type_ == common::memory::MemoryLocation::CPU) {
       // Need to ensure CPU is loaded first, then copy.
       // This logic is handled within ensure_loaded_async by calling itself recursively or chaining.
       // Let's simplify: if CPU not loaded, source is DISK (implying DISK->CPU->GPU path)
@@ -553,13 +556,10 @@ absl::StatusOr<ExportRegistration> Replica::enable_remote_memory_access(
     tensorcast::communicator::engine::Communicator& comm_engine) {
   absl::MutexLock lock(&mutex_);
 
-  // Build full chunk list using VS metadata snapshot.
-  absl::Span<const ChunkMeta> meta = memory_manager_->chunk_telemetry_snapshot();
-  std::vector<uint32_t> chunks;
-  chunks.reserve(meta.size());
-  for (uint32_t i = 0; i < meta.size(); ++i) {
-    chunks.push_back(i);
-  }
+  // Build full chunk list using UMA snapshot size as the authoritative chunk count.
+  const auto chunk_states = memory_manager_->get_chunk_states_uma(common::memory::MemoryLocation::CPU);
+  std::vector<uint32_t> chunks(chunk_states.size());
+  std::iota(chunks.begin(), chunks.end(), 0);
 
   // Delegate to chunk-scoped export (also handles GPU with coalesced ranges)
   return memory_manager_->export_chunks_for_p2p(location, chunks, comm_engine);

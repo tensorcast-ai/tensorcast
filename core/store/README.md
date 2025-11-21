@@ -16,15 +16,23 @@ This document explains the internal implementation of the C++ Store Engine based
 Key files:
 - StoreEngine: core/store/store_engine.h, core/store/store_engine.cc
 - Replica + ReplicaLoadController: core/store/replica/*
-- Loaders and pump: core/store/loader/*
-- View planning + execution: core/store/loader/view_planner.{h,cc}, core/store/loader/view_plan_source.{h,cc}
+- Loaders and pump: core/store/materialization/dataplane/*
+- View planning + execution: core/store/materialization/dataplane/view/{view_planner,view_plan_source}.{h,cc}
 - Service helpers:
-  - IndexService: core/store/loader/index_reader.{h,cc}
-  - VerificationService: core/store/loader/verification_utils.{h,cc}
+  - IndexService: core/store/materialization/dataplane/metadata/index_reader.{h,cc}
+  - VerificationService: core/store/materialization/dataplane/verification/verification_utils.{h,cc}
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
+  - Runtime catalog + services (core/store/runtime/**):
+    - RuntimeContext: core/store/runtime/context/runtime_context.{h,cc} (initializes the shared PinnedBufferPool, DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, GlobalStoreClient, and ViewHashComputer, while embedding the Folly-backed event dispatcher used by the runtimes).
+    - RuntimeEnv: core/store/runtime/runtime_env.{h,cc} (bootstraps RuntimeContext, owns worker identity, and coordinates lifecycle/shutdown hooks for runtime services).
+    - ReplicaRuntime: core/store/runtime/replica/replica_runtime.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, publishes replica lifecycle events, and manages remote access toggles; StoreEngine now queries replicas exclusively through this facade).
+    - Ingestion events: core/store/runtime/ingestion_events.h (canonical definitions for runtime ingestion hooks shared by RuntimeContext’s dispatcher, ReplicaRuntime, and the ingestion/metadata runtimes).
+    - MetadataGateway: core/store/runtime/metadata/metadata_gateway.{h,cc} (merges the old GlobalMetadataGateway + RegistrationFacade responsibilities, acting as the sole publisher for Global Store metadata, registration CRUD, key-mapping operations, and TTL refreshes).
+    - IngestionRuntime: core/store/runtime/ingestion/ingestion_runtime.{h,cc} (delegates all ingestion/materialize flows to `MaterializationFacade` and exposes `IngestionRuntimeDependencies` so tests can inject facade hooks without touching production wiring; lifecycle events flow through `IngestionEventHub`).
+    - RuntimeContextEvents: core/store/runtime/context/runtime_context_events.{h,cc} (Folly MPMC queue used by observers/tests; runtimes now publish ingestion/replica/registration updates after performing their own work so event consumers remain optional).
 - Components: core/store/components/*
-- Types: core/store/loading/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
+- Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
 ## High-level Architecture
 
@@ -50,7 +58,6 @@ graph TB
   end
 
   subgraph Memory
-    VS[VirtualAddressSpace]
     PMP[PinnedBufferPool]
     SPB[StreamingPinnedBuffer]
     CUMEM[GpuDeviceMemory]
@@ -75,7 +82,6 @@ graph TB
   RR --> REP
   REP --> MM
   MM --> UMA
-  MM --> VS
   MM --> PMP
   MM --> SPB
   MM --> CUMEM
@@ -88,10 +94,12 @@ graph TB
   TS --> PUMP
 ```
 
-## UMA V3 Cutover (aliases and flags)
+`StoreEngine` is treated as a thin runtime facade. Construction delegates to `runtime::RuntimeEnv`, which validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, owns worker identity, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `runtime::ReplicaRuntime`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `runtime::metadata::MetadataGateway` is the sole component that talks to Global Store; all ingestion lifecycle notifications flow through `IngestionEventHub`, so `ReplicaRuntime`, `MetadataGateway`, and observability subscribers see the same typed events. `runtime::IngestionRuntime` forwards every disk/P2P/materialize request to `MaterializationFacade`, which wires the planner (`MaterializationService` + `MaterializeOrchestrator`), data plane (`IngestionPipeline`), and publishes started/completed events. Memory-registration commits and aborts still emit RuntimeContext payloads for observers, but MetadataGateway also refreshes UMA metrics inline so StoreEngine never needs to thread callbacks through the façade.
 
-- Final cutover (V3): alias headers removed; UnifiedMemoryAuthority/VirtualAddressSpace are the canonical names. Incremental rollout flags are removed; transactional Plan→Execute→Commit path and UMA-ledger authority are always enabled.
-- Canonical Bazel targets: `//core/store/replica:unified_memory_authority`, `//core/common:virtual_address_space_lib`, and `//core/store/replica:memory_export_registry`.
+## UMA V3 Cutover (single ledger)
+
+- Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
+- Canonical Bazel targets: `//core/store/replica:unified_memory_authority` and `//core/store/replica:memory_export_registry`.
 
 ### Release & Eviction (GPU)
 
@@ -100,16 +108,18 @@ graph TB
 ## Public API Surface (StoreEngine)
 
 - Construction: `StoreEngine::StoreEngine(const StoreEngineOptions& opts)`
-  - Configures `storage_path`, pinned pool size/chunk size, VS chunk size, and optional `CommunicationManager` and `GlobalStore` address.
+  - Configures `storage_path`, pinned pool size/chunk size, UMA chunk size, and optional `CommunicationManager` and `GlobalStore` address.
 
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
     - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
-    - `LOAD_ONLY`: Loads from disk only (rejects content-addressed IDs without `hints.disk_path`).
+    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path` (rejects content-addressed IDs without that path).
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
+  - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
+  - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
   Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (derived from key mapping). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 
@@ -117,32 +127,34 @@ graph TB
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
     - Allocates target GPU memory via a temporary `Replica` and returns a CUDA IPC handle so the caller can write directly.
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
-    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, and registers with Global Store.
+    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, registers with Global Store, and emits a `RegistrationCommitted` RuntimeContext notification. The returned `RegistrationCommitResult` now includes a `DeviceKey device` describing the committed residency alongside `device_id` for ABI compatibility.
   - `abort_registered_artifact(string_view registration_id)`
+    - Releases UMA allocations for the pending session, refreshes UMA telemetry via ReplicaRuntime, and emits a `RegistrationAborted` RuntimeContext event (including error status when the abort is triggered by failures instead of clients).
+  - Implementation is provided by `runtime::metadata::RegistrationBackend`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events through `MetadataGateway`. Global Store publication stays confined to `runtime::metadata::MetadataGateway`, so registration flows never reach into the Global Store client directly.
 
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
   - `get_resident_devices(artifact_id)`, `list_device_replicas(DeviceKey)`
-  - VS telemetry (read-only, non-authoritative): `get_chunk_states_telemetry(artifact_id)` returns VS `ChunkMeta.state`
-  - UMA states (authoritative):
+  - UMA telemetry (authoritative):
+    - `get_chunk_states_telemetry(artifact_id)` returns the UMA CPU snapshot (identical to `get_chunk_states_cpu_uma`)
     - GPU: `get_chunk_states_for_device(artifact_id, device_id)`
     - CPU (artifact-level convenience): `get_chunk_states_cpu_uma(artifact_id)`
       - Selection rule when multiple replicas exist: prefer a CPU instance if present; otherwise choose the GPU instance with the smallest device ordinal.
 
 - View registration (v1.5):
-  - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/loader::ViewPlanner`.
+  - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/materialization/dataplane/view::ViewPlanner`.
   - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
   - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
 
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`
-  - `register_replica_with_global_store(ReplicaKey, artifact_id_override)`
+  - `register_replica_with_global_store(ReplicaKey[, canonical_mi2_override])`
 
 ### Variant-Aware Views (v1)
 
 - `StoreEngine::compute_view_plan(canonical_index_json, ViewSpec)` constructs a deterministic `ViewPlan` by delegating to the loader `ViewPlanner`. v1 supports single-dimension `narrow` (slice) operations.
-- `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when the plan is contiguous and segment-aligned.
-- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` streams the canonical byte space through a loader `ViewPlanSource` and computes the variant `view_data_hash` using the standard TreeHash pipeline.
+- `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when (and only when) the selection is contiguous, segment-aligned, and no transforms are required.
+- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the variant `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
 
 These helpers intentionally operate on generic `SeekableSource` instances; the daemon sends either a GPU-backed `LinearizedGpuPlanSource` or a disk-backed source to the hash helper, which keeps verification logic unified across transports.
 
@@ -178,7 +190,7 @@ sequenceDiagram
   MO->>GS: request_replica_transport()
   alt transport granted
     GS-->>MO: TransportSession(remote replica)
-    MO->>SE: ingest_from_p2p_internal(...)
+    MO->>SE: ingest_from_p2p(...)
     SE->>REP: ensure_loaded_async(GPU/CPU)
     REP->>REP: load_async_from_source(P2P)
     REP-->>SE: ready_future (LOADED)
@@ -186,7 +198,7 @@ sequenceDiagram
     SE->>GS: register_replica_with_global_store()
   else no transport
     MO-->>SE: fallback to disk
-    SE->>SE: ingest_from_disk_internal(...)
+    SE->>SE: ingest_from_disk(...)
   end
   SE-->>Client: ReplicaHandle
 ```
@@ -237,7 +249,7 @@ sequenceDiagram
 
 ## Memory Model and State Machines
 
-Store Engine uses VS (VirtualAddressSpace) for contiguous per-replica CPU virtual address space and UMA (UnifiedMemoryAuthority) for unified CPU/GPU chunk bookkeeping. ReplicaLoadController orchestrates allocation, state transitions, and transfers.
+Store Engine relies on UMA (UnifiedMemoryAuthority) for contiguous per-replica CPU virtual address space, chunk bookkeeping, and export management. ReplicaLoadController orchestrates allocation, state transitions, and transfers.
 
 ### ReplicaLoadController Location States
 
@@ -395,15 +407,15 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 ## Key Types and Contracts
 
 - `DeviceKey` (core/store/device_types.h): logical device id `{type, ordinal, uuid}` used across APIs.
-- `ReplicaKey` (core/store/loading/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
+- `ReplicaKey` (core/store/materialization/contracts/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
 - `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `CPU`, `DISK`, `REMOTE`.
 - `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, optional view metadata, and a `ready_future`.
 
 ## Test Coverage (selected)
 
 - Disk → GPU: core/store/store_engine_test.cc
-- P2P (TCP) → GPU with communicator: core/store/store_engine_p2p_loader_test.cc
-- Streaming and sinks: core/store/loader/*_test.cc
+- P2P (TCP) → GPU with communicator: core/store/materialization/runtime/pipeline/tests/p2p_ingestion_test.cc and p2p_verification_fail_test.cc
+- Streaming and sinks: core/store/materialization/dataplane/**/tests/*_test.cc
 - UMA/VS chunk semantics and locking: exercised through ReplicaLoadController and loaders
 
 ## Notes and Limitations
@@ -415,7 +427,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - Variant replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_variant_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
-- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; `StoreEngine::ingest_from_p2p_internal()` parses it and performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
+- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; the backend `ingest_from_p2p()` path now flows through the runtime pipeline, which performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
 - Debug visibility: enabling `--v=1` (or higher) now emits the key-point triplet and artifact size whenever verification metadata is regenerated or reused. These logs include the active CUDA device id so stale metadata vs. stale GPU residency issues can be distinguished quickly when diagnosing DataLoss failures.
 ## Granularity Terminology and Invariants
 

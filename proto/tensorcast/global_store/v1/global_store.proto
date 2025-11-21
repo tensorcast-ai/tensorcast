@@ -14,6 +14,11 @@ service GlobalStoreService {
 
   rpc UnregisterReplica(UnregisterReplicaRequest) returns (UnregisterReplicaResponse) {}
 
+  // Deregister a replica using worker identity rather than replica_id.
+  // Useful when the caller does not track replica_id but knows (artifact_id, worker_id)
+  // and optionally device or memory type to disambiguate.
+  rpc UnregisterReplicaByWorker(UnregisterReplicaByWorkerRequest) returns (UnregisterReplicaByWorkerResponse) {}
+
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
 
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
@@ -365,6 +370,19 @@ message UnregisterReplicaRequest {
 }
 
 message UnregisterReplicaResponse {
+  Status status = 1;
+}
+
+// Unregister a replica by worker identity (and optional device/memory filters)
+message UnregisterReplicaByWorkerRequest {
+  string artifact_id = 1;
+  string worker_id = 2;
+  // Optional selectors to disambiguate when multiple replicas exist for a worker
+  optional tensorcast.common.v1.MemoryType memory_type = 3;
+  optional uint32 device_id = 4;
+}
+
+message UnregisterReplicaByWorkerResponse {
   Status status = 1;
 }
 

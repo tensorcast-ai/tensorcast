@@ -24,11 +24,12 @@ class ArtifactRepository(BaseRepository):
         self,
         *,
         artifact_id: str,
-        index_multihash: str,
-        data_multihash: str,
+        index_multihash: str | None,
+        data_multihash: str | None,
         schema_version: str,
         encoding: str,
         hash_params_json: Optional[str] = None,
+        id_kind: str = "MI2",
     ) -> None:
         """Create or update an artifact descriptor row by primary key `artifact_id`.
 
@@ -43,14 +44,16 @@ class ArtifactRepository(BaseRepository):
                 data_multihash,
                 schema_version,
                 encoding,
-                hash_params_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                hash_params_json,
+                id_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (artifact_id) DO UPDATE SET
                 index_multihash = EXCLUDED.index_multihash,
                 data_multihash = EXCLUDED.data_multihash,
                 schema_version = EXCLUDED.schema_version,
                 encoding = EXCLUDED.encoding,
-                hash_params_json = EXCLUDED.hash_params_json
+                hash_params_json = EXCLUDED.hash_params_json,
+                id_kind = EXCLUDED.id_kind
             """,
             [
                 artifact_id,
@@ -59,6 +62,7 @@ class ArtifactRepository(BaseRepository):
                 schema_version,
                 encoding,
                 hash_params_json,
+                id_kind,
             ],
         )
 
@@ -67,7 +71,7 @@ class ArtifactRepository(BaseRepository):
         cursor = self.get_cursor()
         row = cursor.execute(
             """
-            SELECT artifact_id, index_multihash, data_multihash, schema_version, encoding, hash_params_json, created_at
+            SELECT artifact_id, index_multihash, data_multihash, schema_version, encoding, hash_params_json, id_kind, created_at
             FROM artifacts WHERE artifact_id = ?
             """,
             [artifact_id],
@@ -81,5 +85,6 @@ class ArtifactRepository(BaseRepository):
             "schema_version": row[3],
             "encoding": row[4],
             "hash_params_json": row[5],
-            "created_at": row[6],
+            "created_at": row[7],
+            "id_kind": row[6],
         }

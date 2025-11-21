@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "core/common/cuda_api.h" // Use unified CUDA API
-#include "core/common/memory/virtual_address_space.h"
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 
@@ -26,7 +25,7 @@
 #include "core/common/artifact_verification.h" // Add verification support
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/loading/loading_spec.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/memory_types.h" // For MB definition
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
@@ -105,7 +104,6 @@ struct TestResources {
   bool is_cuda_available = false;
   int device_count = 0;
   size_t pinned_pool_chunk_size_bytes = 0; // Store the chunk size used
-  std::shared_ptr<tensorcast::common::memory::VirtualAddressSpace> virtual_addr_space;
 
   bool setup(int gpu_id, size_t artifact_size) {
     actual_artifact_size = artifact_size;
@@ -129,13 +127,6 @@ struct TestResources {
       return false;
     }
     LOG(INFO) << "PinnedBufferPool created with chunk size: " << pinned_pool_chunk_size_bytes << " bytes.";
-
-    // Create VS and StreamingPinnedBuffer
-    virtual_addr_space = std::make_shared<tensorcast::common::memory::VirtualAddressSpace>();
-    if (!virtual_addr_space) {
-      LOG(ERROR) << "Failed to create VirtualAddressSpace";
-      return false;
-    }
 
     // Check for CUDA devices and create pool if available
     absl::Status status = tensorcast::cuda::get_device_count(&device_count);
@@ -273,7 +264,6 @@ class P2PTestServer {
             (register_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU : ::tensorcast::DeviceType::CPU,
         .local_device_id = (register_location == MemoryLocation::GPU) ? gpu_id : -1,
         .pinned_buffer_pool = resources.pinned_pool,
-        .virtual_addr_space = resources.virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -538,7 +528,6 @@ class P2PTestClient {
                                                                        : ::tensorcast::DeviceType::CPU,
         .local_device_id = (client_target_location == MemoryLocation::GPU) ? static_cast<int>(gpu_id) : -1,
         .pinned_buffer_pool = resources.pinned_pool,
-        .virtual_addr_space = resources.virtual_addr_space,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 

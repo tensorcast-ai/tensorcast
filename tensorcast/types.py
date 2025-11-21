@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal, Union
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
+from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.proto.daemon.v1 import (
     store_daemon_pb2 as store_daemon_pb2,
 )
@@ -71,11 +73,43 @@ class ArtifactDescriptor(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     artifact_id: str
-    index_multihash: str
-    data_multihash: str
-    schema_version: str
-    encoding: str
+    index_multihash: str | None = None
+    data_multihash: str | None = None
+    schema_version: str | None = None
+    encoding: str | None = None
     total_size: int
+    id_kind: ArtifactIdKind = ArtifactIdKind.MI2
+
+    @field_validator(
+        "index_multihash",
+        "data_multihash",
+        "schema_version",
+        "encoding",
+        mode="before",
+    )
+    @classmethod
+    def _empty_str_is_none(cls, value: object) -> object:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @field_validator("id_kind", mode="before")
+    @classmethod
+    def _coerce_id_kind(cls, value: object) -> ArtifactIdKind:
+        if isinstance(value, ArtifactIdKind):
+            return value
+        if isinstance(value, str):
+            upper = value.upper()
+            if upper == "MI2":
+                return ArtifactIdKind.MI2
+            if upper == "CGID":
+                return ArtifactIdKind.CGID
+        if isinstance(value, int):
+            if value == 1:
+                return ArtifactIdKind.MI2
+            if value == 2:
+                return ArtifactIdKind.CGID
+        raise ValueError(f"Unsupported artifact id kind: {value!r}")
 
 
 class CanonicalRange(BaseModel):
@@ -167,10 +201,19 @@ class LeaseSegment(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     device_id: int
-    cuda_ipc_handle: bytes
+    cuda_ipc_handle: bytes | None = None
     base_addr: int = 0
     length: int
     dst_offset: int
+    storage_id: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> "LeaseSegment":
+        if self.cuda_ipc_handle is None and not self.storage_id:
+            raise ValueError(
+                "LeaseSegment requires either cuda_ipc_handle or storage_id"
+            )
+        return self
 
 
 class RegisterStorage(BaseModel):
@@ -180,8 +223,24 @@ class RegisterStorage(BaseModel):
 
     storage_id: str
     device_id: int
-    cuda_ipc_handle: bytes
+    cuda_ipc_handle: bytes | None = None
     storage_length: int
+    vram_region_id: str | None = None
+    region_base_offset: int | None = None
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> "RegisterStorage":
+        has_handle = self.cuda_ipc_handle is not None
+        has_region = self.vram_region_id is not None
+        if has_handle == has_region:
+            raise ValueError(
+                "RegisterStorage requires exactly one of cuda_ipc_handle or vram_region_id"
+            )
+        if has_region and self.region_base_offset is None:
+            raise ValueError(
+                "RegisterStorage.region_base_offset is required when vram_region_id is set"
+            )
+        return self
 
 
 class RegisterTensorAlias(BaseModel):
@@ -196,6 +255,27 @@ class RegisterTensorAlias(BaseModel):
     shape: list[int]
     stride: list[int]
     dtype: str
+
+
+class VramRegionHandle(BaseModel):
+    """Registered VRAM region descriptor returned by the daemon."""
+
+    model_config = ConfigDict(frozen=True)
+
+    region_id: str
+    ttl_ms: int
+    expires_at: datetime | None = None
+
+
+class DeregisterArtifactOutcome(BaseModel):
+    """Result of a deregister_artifact invocation."""
+
+    model_config = ConfigDict(frozen=True)
+
+    drained: bool
+    removed: bool
+    released_region_ids: tuple[str, ...] = ()
+    message: str | None = None
 
 
 __all__ = [
@@ -214,4 +294,6 @@ __all__ = [
     "LeaseSegment",
     "RegisterStorage",
     "RegisterTensorAlias",
+    "VramRegionHandle",
+    "DeregisterArtifactOutcome",
 ]

@@ -7,46 +7,28 @@
 #include <string>
 #include <vector>
 
-#include <mutex>
-#include <optional>
 #include <string_view>
-#include <unordered_map>
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "core/common/memory/pinned_buffer_pool.h"
-#include "core/common/memory/virtual_address_space.h"
 #include "core/store/components/communication_manager.h"
-#include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
-#include "core/store/components/metrics_collector.h"
-#include "core/store/components/replica_registry.h"
-#include "core/store/loading/loading_spec.h"
-#include "core/store/replica/chunk_meta.h"
+#include "core/store/components/worker_identity.h"
+#include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
-#include "core/store/replica/replica.h"
+#include "core/store/runtime/ingestion/ingestion_runtime.h"
+#include "core/store/runtime/metadata/metadata_gateway.h"
+#include "core/store/runtime/metadata/metadata_types.h"
+#include "core/store/runtime/replica/replica_info.h"
+#include "core/store/runtime/replica/replica_runtime.h"
+#include "core/store/runtime/runtime_env.h"
 #include "core/store/store_engine_options.h"
-#include "core/store/view_utils.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store {
 
-namespace loading {
-class MaterializeOrchestrator;
-} // namespace loading
-
-namespace loader {
-struct ViewPlan;
-struct ViewSpec;
-struct ViewWritePlan;
-struct BidirectionalViewPlan;
-class ViewIngestExecutor;
-class SeekableSource;
-} // namespace loader
-
 class StoreEngine {
-  friend class loading::MaterializeOrchestrator;
-
  public:
   // ═══════════════════════════════════════════════════════════════════════════
   // Type Definitions (using new unified type system)
@@ -55,17 +37,7 @@ class StoreEngine {
   // Legacy AsyncLoadResult and load() interface have been fully removed;
   // callers should use ReplicaHandle returned from materialize_replica().
 
-  struct ReplicaInfo {
-    std::string artifact_id;
-    uint64_t size_bytes;
-    common::memory::MemoryLocation cpu_state;
-    common::memory::MemoryLocation gpu_state;
-    int gpu_device_id;
-    std::string gpu_device_uuid;
-    bool is_registered_for_comm;
-    std::chrono::time_point<std::chrono::system_clock> last_access_time;
-    std::chrono::time_point<std::chrono::system_clock> load_time;
-  };
+  using ReplicaInfo = runtime::ReplicaInfo;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
@@ -83,7 +55,7 @@ class StoreEngine {
   // New materialize_replica() API (multi-device binding)
   // ─────────────────────────────────────────────────────────────────────────
 
-  enum class MaterializeMode : uint8_t { AUTO, COPY_ONLY, LOAD_ONLY };
+  using MaterializeMode = loading::MaterializeMode;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Lightweight handle that callers receive from materialize_replica().
@@ -97,6 +69,18 @@ class StoreEngine {
       MaterializeMode mode = MaterializeMode::AUTO,
       const loading::MaterializeHints& hints = {});
 
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
+      const std::string& artifact_identifier,
+      const P2PSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints);
+
+  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
+      const std::string& artifact_identifier,
+      const loading::DiskSource& source,
+      const loading::ReplicaTarget& target,
+      const loading::MaterializeHints& hints);
+
   // View planning/execution helpers (variant-aware path)
   static absl::StatusOr<loader::ViewPlan> compute_view_plan(
       std::string_view canonical_index_json,
@@ -109,42 +93,16 @@ class StoreEngine {
       const loader::ViewPlan& plan,
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
-  enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
-
-  using CanonicalRange = view::CanonicalRange;
-
-  struct ViewRegistration {
-    std::string view_id;
-    loader::ViewSpec spec;
-    ViewPlacement placement{ViewPlacement::kUnspecified};
-    uint64_t canonical_size_bytes{0};
-    std::vector<CanonicalRange> canonical_ranges;
-    bool allow_partial{false};
-  };
+  using ViewPlacement = runtime::metadata::ViewPlacement;
+  using CanonicalRange = runtime::metadata::CanonicalRange;
+  using ViewRegistration = runtime::metadata::ViewRegistration;
 
   // ------------------------------------------------------------------------
   // Memory Artifact Registration (coalesced) – Phase A (RFC-0006)
   // ------------------------------------------------------------------------
 
-  struct ArtifactRegistration {
-    std::string artifact_id; // Logical artifact identifier (old artifact_id)
-    std::string tensor_index_key; // Canonical JSON SHA-256 hex (lowercase)
-    std::optional<std::string> tensor_index_data; // Optional canonical JSON bytes for UPSERT
-    std::string schema_version{"v3"}; // Data-format schema version
-    std::string encoding{"json"}; // Encoding of index_data (if provided)
-    int device_id{0}; // Local CUDA device ordinal
-    uint64_t total_size_bytes{0}; // Total coalesced byte size (8B-aligned)
-    bool enable_p2p{true}; // Whether to enable remote access
-    uint32_t ttl_ms{0}; // Optional TTL for Begin→Commit (0 = no TTL)
-    std::optional<ViewRegistration> view;
-  };
-
-  struct RegistrationBeginResult {
-    std::string registration_id; // Opaque id for Commit/Abort
-    std::array<std::byte, sizeof(cudaIpcMemHandle_t)> cuda_ipc_handle_bytes{}; // CUDA IPC handle
-    int device_id{0};
-    uint64_t size_bytes{0};
-  };
+  using ArtifactRegistration = runtime::metadata::ArtifactRegistration;
+  using RegistrationBeginResult = runtime::metadata::RegistrationBeginResult;
 
   /**
    * @brief Begin registering an in-memory tensor dict replica.
@@ -161,24 +119,7 @@ class StoreEngine {
    * registering the memory replica with Global Store.  On success, memory
    * ownership remains with the daemon and becomes discoverable by peers.
    */
-  struct RegistrationCommitResult {
-    std::string registration_id;
-    std::string artifact_id;
-    int device_id{0};
-    uint64_t size_bytes{0};
-    bool existed{false};
-    // RFC-0007: Expose content-address components for callers who need
-    // authoritative descriptor details without recomputation.
-    std::string index_multihash; // multibase(base32)-encoded multihash of canonical index
-    std::string data_multihash; // multibase(base32)-encoded multihash of tree-hash root
-    std::string schema_version; // e.g. "v3"
-    std::string encoding; // e.g. "json" or "cbor"
-    std::optional<std::string> view_id;
-    std::optional<std::string> view_data_multihash;
-    std::optional<std::string> view_index_json;
-    std::vector<CanonicalRange> canonical_ranges;
-    bool allow_partial{false};
-  };
+  using RegistrationCommitResult = runtime::metadata::RegistrationCommitResult;
 
   absl::StatusOr<RegistrationCommitResult> commit_registered_artifact(std::string_view registration_id);
 
@@ -216,7 +157,7 @@ class StoreEngine {
    *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
    *        when the artifact resides on multiple GPUs (ambiguous without a device).
    */
-  absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
 
   /**
    * @brief Inject a custom Global Store client (primarily for testing).
@@ -249,11 +190,15 @@ class StoreEngine {
       common::memory::MemoryLocation location);
 
   // Register a loaded replica with the Global Store if connected. When
-  // artifact_id_override is provided, it is used as the identifier (e.g.,
-  // content-addressed mi2:...); otherwise key.artifact_id is used.
+  // artifact_id_override is provided it must be a canonical `mi2:` identifier
+  // (e.g., disk-ingested replicas that computed hashes locally); otherwise the
+  // `ReplicaKey.artifact_id` is published.
   [[nodiscard]] absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override = {});
+
+  // Deregister a memory replica from Global Store using worker identity.
+  [[nodiscard]] absl::Status unregister_replica_from_global_store(std::string_view artifact_id, int device_id);
 
   // RFC-0014: Key-mapping wrappers delegating to Global Store client. These
   // avoid exposing the client to callers and ensure we always use the Engine's
@@ -285,7 +230,7 @@ class StoreEngine {
   // UMA/VS artifact chunk size (bytes). Public read-only accessor for daemon status APIs
   // and controllers that need the authoritative artifact granularity.
   [[nodiscard]] size_t get_artifact_chunk_bytes() const {
-    return va_space_->artifact_chunk_bytes();
+    return artifact_chunk_bytes_;
   }
 
   [[nodiscard]] size_t get_available_memory() const;
@@ -294,11 +239,11 @@ class StoreEngine {
 
   // GPU device queries (for status/health reporting)
   [[nodiscard]] int get_num_gpus() const {
-    return device_manager_->get_num_gpus();
+    return replica_runtime_->device_manager().get_num_gpus();
   }
 
-  absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
-  absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
+  [[nodiscard]] absl::StatusOr<size_t> get_device_total_memory(int device_id) const;
+  [[nodiscard]] absl::StatusOr<size_t> get_device_free_memory(int device_id) const;
 
   // VS chunk-state snapshot API for daemon observers (read-only, non-authoritative telemetry).
   [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_telemetry(std::string_view artifact_id) const;
@@ -321,9 +266,7 @@ class StoreEngine {
   // Expose the configured communication manager to daemon for P2P export paths
   // that are not bound to a loaded replica (e.g., LIP-backed staged transfers).
   // Always non-null; may be disabled (see is_enabled()).
-  [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const {
-    return comm_manager_;
-  }
+  [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const;
 
  private:
   // ═══════════════════════════════════════════════════════════════════════════
@@ -333,6 +276,7 @@ class StoreEngine {
   const StoreEngineOptions options_;
   const std::filesystem::path storage_path_;
   const size_t memory_pool_size_;
+  const size_t artifact_chunk_bytes_;
   const int num_thread_;
   const size_t tx_slice_bytes_;
   const std::chrono::milliseconds pinned_memory_timeout_;
@@ -341,90 +285,15 @@ class StoreEngine {
   // Core Components
   // ═══════════════════════════════════════════════════════════════════════════
 
-  gsl::not_null<std::unique_ptr<components::DeviceManager>> device_manager_;
-  gsl::not_null<std::unique_ptr<components::ReplicaRegistry>> replica_registry_;
-  gsl::not_null<std::unique_ptr<components::MetricsCollector>> metrics_collector_;
-  std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
-  gsl::not_null<std::shared_ptr<components::CommunicationManager>> comm_manager_;
-  gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
-  gsl::not_null<std::shared_ptr<common::memory::VirtualAddressSpace>> va_space_; // System-wide VS instance
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Internal Helper Methods
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  // Constructor helpers
-  void initialize_components();
-  void initialize_global_store(const StoreEngineOptions& opts);
-  void initialize_communication_manager(const StoreEngineOptions& opts);
-
-  // Replica loading helpers - using new unified types
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk_internal(
-      const std::string& artifact_identifier,
-      const loading::DiskSource& source,
-      const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints);
-
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p_internal(
-      const std::string& artifact_identifier,
-      const P2PSource& source,
-      const loading::ReplicaTarget& target,
-      const loading::MaterializeHints& hints);
-
+  std::unique_ptr<runtime::RuntimeEnv> runtime_env_;
+  std::unique_ptr<runtime::ReplicaRuntime> replica_runtime_;
+  std::unique_ptr<runtime::metadata::MetadataGateway> metadata_gateway_;
+  std::unique_ptr<runtime::IngestionRuntime> ingestion_runtime_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
       const std::string& artifact_identifier,
       const loading::InlineBufferSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
-
-  // Memory management helpers
-  absl::Status try_evict_memory_for_replica(size_t required_size);
-  std::shared_ptr<replica::Replica> get_or_create_replica(
-      const std::string& artifact_identifier,
-      const replica::ReplicaConfig& config);
-
-  // Utility methods
-  [[nodiscard]] size_t get_num_chunk_from_tensor_size(size_t tensor_size) const;
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Pending Memory Registration State (RFC-0006)
-  // ═══════════════════════════════════════════════════════════════════════════
-  struct PendingRegistrationEntry {
-    std::string registration_id;
-    std::string artifact_id;
-    int device_id{0};
-    uint64_t size_bytes{0};
-    std::string tensor_index_key;
-    std::optional<std::string> tensor_index_data;
-    std::string schema_version;
-    std::string encoding;
-    bool enable_p2p{true};
-    std::shared_ptr<replica::Replica> replica; // Backing replica for memory ownership
-    void* gpu_ptr{nullptr}; // Base GPU pointer (for diagnostics)
-    cudaIpcMemHandle_t ipc_handle{}; // CUDA IPC handle bytes
-    std::chrono::steady_clock::time_point expiry_time; // For TTL cleanup
-    enum class Plan : uint8_t { COALESCED = 0, CPU = 1 } plan{Plan::COALESCED};
-
-    struct ViewState {
-      ViewRegistration options;
-      loader::BidirectionalViewPlan plan;
-      std::unique_ptr<loader::ViewIngestExecutor> executor;
-      uint64_t expected_view_bytes{0};
-      uint64_t ingested_bytes{0};
-      bool finalized{false};
-    };
-
-    std::unique_ptr<ViewState> view_state;
-  };
-
-  std::mutex pending_mutex_;
-  std::unordered_map<std::string, std::shared_ptr<PendingRegistrationEntry>> pending_regs_;
-
-  // Worker identity (for Global Store registrations)
-  std::string worker_id_;
-  std::string node_id_;
-  std::string node_address_;
-  uint32_t grpc_port_{0};
-  uint32_t p2p_port_{0};
 
  public:
   // Inject worker identity after successful registration with Global Store
@@ -434,13 +303,12 @@ class StoreEngine {
       std::string node_address,
       uint32_t grpc_port,
       uint32_t p2p_port) {
-    worker_id_ = std::move(worker_id);
-    node_id_ = std::move(node_id);
-    node_address_ = std::move(node_address);
-    grpc_port_ = grpc_port;
-    p2p_port_ = p2p_port;
-    if (global_store_client_) {
-      global_store_client_->update_local_endpoint(node_id_, node_address_, grpc_port_, p2p_port_);
+    if (runtime_env_) {
+      runtime_env_->update_worker_identity(
+          std::move(worker_id), std::move(node_id), std::move(node_address), grpc_port, p2p_port);
+    }
+    if (metadata_gateway_) {
+      metadata_gateway_->refresh_override_endpoint();
     }
   }
 };
