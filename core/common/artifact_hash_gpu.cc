@@ -319,7 +319,7 @@ __device__ __forceinline__ WORD SIG1(WORD x) {
 struct TensorcastSha256Ctx {
   BYTE data[64];
   WORD datalen;
-  unsigned long long bitlen;
+  uint64_t bitlen;
   WORD state[8];
 };
 
@@ -383,20 +383,20 @@ __device__ __forceinline__ void tensorcast_sha256_init(TensorcastSha256Ctx* ctx)
 __device__ __forceinline__ void tensorcast_sha256_update(
     TensorcastSha256Ctx* ctx,
     const BYTE* data,
-    unsigned long long len) {
+    uint64_t len) {
   if (len == 0ULL) {
     return;
   }
 
-  unsigned long long offset = 0ULL;
+  uint64_t offset = 0ULL;
 
   if (ctx->datalen > 0) {
-    const unsigned long long available = 64ULL - static_cast<unsigned long long>(ctx->datalen);
-    const unsigned long long to_copy = len < available ? len : available;
-    for (unsigned long long i = 0; i < to_copy; ++i) {
+    const uint64_t available = 64ULL - static_cast<uint64_t>(ctx->datalen);
+    const uint64_t to_copy = len < available ? len : available;
+    for (uint64_t i = 0; i < to_copy; ++i) {
       ctx->data[ctx->datalen + i] = data[i];
     }
-    const unsigned long long new_length = static_cast<unsigned long long>(ctx->datalen) + to_copy;
+    const uint64_t new_length = static_cast<uint64_t>(ctx->datalen) + to_copy;
     ctx->datalen = static_cast<WORD>(new_length);
     offset += to_copy;
     if (ctx->datalen == 64) {
@@ -412,15 +412,15 @@ __device__ __forceinline__ void tensorcast_sha256_update(
     offset += 64ULL;
   }
 
-  const unsigned long long remaining = len - offset;
+  const uint64_t remaining = len - offset;
   if (remaining == 0ULL) {
     return;
   }
 
-  for (unsigned long long i = 0; i < remaining; ++i) {
+  for (uint64_t i = 0; i < remaining; ++i) {
     ctx->data[ctx->datalen + i] = data[offset + i];
   }
-  const unsigned long long tail_length = static_cast<unsigned long long>(ctx->datalen) + remaining;
+  const uint64_t tail_length = static_cast<uint64_t>(ctx->datalen) + remaining;
   ctx->datalen = static_cast<WORD>(tail_length);
 }
 
@@ -441,7 +441,7 @@ __device__ __forceinline__ void tensorcast_sha256_final(TensorcastSha256Ctx* ctx
     }
   }
 
-  ctx->bitlen += static_cast<unsigned long long>(ctx->datalen) * 8ULL;
+  ctx->bitlen += static_cast<uint64_t>(ctx->datalen) * 8ULL;
   ctx->data[63] = static_cast<BYTE>(ctx->bitlen);
   ctx->data[62] = static_cast<BYTE>(ctx->bitlen >> 8U);
   ctx->data[61] = static_cast<BYTE>(ctx->bitlen >> 16U);
@@ -466,25 +466,25 @@ __device__ __forceinline__ void tensorcast_sha256_final(TensorcastSha256Ctx* ctx
 
 extern "C" __global__ void tensorcast_sha256_leaf_kernel(
     const BYTE* base,
-    unsigned long long chunk_stride,
-    unsigned long long total_size,
+    uint64_t chunk_stride,
+    uint64_t total_size,
     BYTE* digests,
     unsigned int leaf_count) {
   for (unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
        idx < leaf_count;
        idx += blockDim.x * gridDim.x) {
-    const unsigned long long offset = static_cast<unsigned long long>(idx) * chunk_stride;
+    const uint64_t offset = static_cast<uint64_t>(idx) * chunk_stride;
     if (offset >= total_size) {
       continue;
     }
 
-    unsigned long long len = total_size - offset;
+    uint64_t len = total_size - offset;
     if (len > chunk_stride) {
       len = chunk_stride;
     }
 
     const BYTE* chunk = base + offset;
-    BYTE* out = digests + static_cast<unsigned long long>(idx) * 32ULL;
+    BYTE* out = digests + static_cast<uint64_t>(idx) * 32ULL;
 
     TensorcastSha256Ctx ctx;
     tensorcast_sha256_init(&ctx);
@@ -727,8 +727,8 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
 
   auto data_ptr = reinterpret_cast<CUdeviceptr>(device_base);
   auto digests_ptr = reinterpret_cast<CUdeviceptr>(device_digests);
-  auto stride = static_cast<unsigned long long>(chunk_size_bytes); // NOLINT(google-runtime-int)
-  auto total_size_param = static_cast<unsigned long long>(total_size); // NOLINT(google-runtime-int)
+  auto stride = static_cast<uint64_t>(chunk_size_bytes); // NOLINT(google-runtime-int)
+  auto total_size_param = static_cast<uint64_t>(total_size); // NOLINT(google-runtime-int)
 
   void* params[] = {&data_ptr, &stride, &total_size_param, &digests_ptr, &leaf_count};
 

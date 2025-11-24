@@ -94,6 +94,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
   }
   info.location = location;
   ExportRecord rec;
+  std::optional<UnifiedMemoryAuthority::StableLease> stable_lease;
 
   if (location == common::memory::MemoryLocation::CPU) {
     void* base_raw = uma_->get_cpu_base_ptr(key);
@@ -101,6 +102,10 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       return absl::FailedPreconditionError("CPU base not available");
     }
     gsl::not_null<void*> base{base_raw};
+    std::vector<uint32_t> normalized_indices(chunks.begin(), chunks.end());
+    std::sort(normalized_indices.begin(), normalized_indices.end());
+    normalized_indices.erase(
+        std::unique(normalized_indices.begin(), normalized_indices.end()), normalized_indices.end());
 
     info.device_id = kCpuDeviceId;
     info.comm_dev_type = communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
@@ -112,6 +117,15 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     }
     ranges = reg_or->chunk_ranges;
     rec.uma_keepalive = reg_or->keepalive; // Hold VS pin leases across registration lifetime
+    auto rollback_export = [&]() {
+      (void)uma_->set_exported(key, location, absl::MakeSpan(normalized_indices), /*on=*/false);
+    };
+    auto lease_or = uma_->acquire_stable_lease(key, absl::MakeSpan(normalized_indices));
+    if (!lease_or.ok()) {
+      rollback_export();
+      return lease_or.status();
+    }
+    stable_lease = std::move(*lease_or);
     // Derive chunk size from UMA layout to ensure alignment across VS/UMA
     uint64_t kChunk = static_cast<uint64_t>(uma_->get_artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {
@@ -143,6 +157,11 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
 
       auto ret = comm_engine.register_tensor_ex(tensor_key, addr, length, info.comm_dev_type, info.device_id, opts);
       if (!ret.ok()) {
+        if (stable_lease.has_value()) {
+          (void)uma_->release_stable_lease(*stable_lease);
+          stable_lease.reset();
+        }
+        rollback_export();
         return absl::InternalError("Failed to register CPU chunk-range tensor");
       }
       info.buffer_addresses.push_back(addr);
@@ -156,6 +175,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
       ExportKey rkey{.key = key, .location = location};
       rec.info = info;
       rec.ranges = ranges;
+      rec.stable_lease = std::move(stable_lease);
       records_[rkey] = std::move(rec);
     }
 
@@ -271,6 +291,9 @@ absl::Status MemoryExportRegistry::unexport_chunks(
     ExportKey rkey{.key = key, .location = info.location};
     auto it = records_.find(rkey);
     if (it != records_.end()) {
+      if (it->second.stable_lease.has_value()) {
+        (void)uma_->release_stable_lease(*(it->second.stable_lease));
+      }
       // Update UMA ledger on unexport (always enabled)
       std::vector<uint32_t> idx;
       for (const auto& re : it->second.ranges) {

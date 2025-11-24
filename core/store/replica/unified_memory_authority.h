@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/hash/hash.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
@@ -21,6 +22,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
 
@@ -55,6 +57,13 @@ class UnifiedMemoryAuthority {
     std::optional<DirectWriteGrant> cpu_direct_grant;
   };
 
+  struct StableLease {
+    loading::ReplicaKey key;
+    std::vector<uint32_t> chunk_indices;
+    uint64_t bytes{0};
+    uint64_t ledger_version{0};
+  };
+
   /**
    * @brief Chunk source information for loading operations.
    */
@@ -76,6 +85,7 @@ class UnifiedMemoryAuthority {
     ChunkState cpu{ChunkState::COLD};
     bool exported_cpu{false};
     uint32_t pin_refcnt{0};
+    uint32_t stable_lease_count{0};
     uint64_t last_access_ns{0};
     uint64_t version{0};
   };
@@ -196,6 +206,19 @@ class UnifiedMemoryAuthority {
       std::optional<int> device_id);
 
   absl::Status abort(uint64_t session_id);
+
+  // Stable lease management for CPU residency protection
+  absl::StatusOr<StableLease> acquire_stable_lease(
+      const loading::ReplicaKey& key,
+      absl::Span<const uint32_t> chunk_indices);
+  absl::Status release_stable_lease(const StableLease& lease);
+  absl::Status release_stable_lease(const loading::ReplicaKey& key, absl::Span<const uint32_t> chunk_indices);
+  absl::StatusOr<uint64_t> get_ledger_version(const loading::ReplicaKey& key) const;
+
+  // Optional node-level tier budget for telemetry and admission control.
+  void set_memory_tier_budget(std::shared_ptr<MemoryTierBudget> budget) {
+    memory_tier_budget_ = std::move(budget);
+  }
 
   // Export ledger and lease management (UMA‑owned export lifecycle)
   struct ExportRegistration {
@@ -326,6 +349,19 @@ class UnifiedMemoryAuthority {
 
   static std::vector<std::pair<uint32_t, uint32_t>> coalesce_runs_(absl::Span<const uint32_t> sorted);
 
+  struct ReplicaAllocation;
+
+  absl::Status mark_chunks_preemptible_locked_(ReplicaAllocation& alloc, absl::Span<const uint32_t> indices);
+  bool is_preemptible_resident_locked_(const ReplicaAllocation& alloc, uint32_t chunk_idx) const;
+  void record_preemptible_fault_locked_(const loading::ReplicaKey& key, uint32_t chunk_idx) const;
+  void maybe_record_rehydrate_latency_locked_(const loading::ReplicaKey& key, uint32_t chunk_idx);
+  void clear_rehydrate_records_for_key_(const loading::ReplicaKey& key);
+  static uint64_t chunk_bytes_for_index_(const ReplicaAllocation& alloc, uint64_t chunk_size_bytes, uint32_t idx);
+  static std::vector<uint32_t> normalize_chunk_indices_(absl::Span<const uint32_t> indices, size_t num_chunks);
+  static bool is_cpu_resident_state_(ChunkState state);
+  uint64_t compute_preemptible_bytes_locked_() const;
+  void update_preemptible_budget_locked_() const;
+
   struct ReplicaAllocation {
     struct CpuRegion {
       void* base{nullptr};
@@ -351,6 +387,8 @@ class UnifiedMemoryAuthority {
       std::unordered_map<DeviceKey, bool, DeviceKeyHash> exported_gpu;
       // UMA-managed CPU pin refcount for this chunk
       uint32_t pin_refcnt{0};
+      // Number of active stable leases guarding this chunk
+      uint32_t stable_lease_count{0};
       // Last access timestamp (ns since steady_clock epoch)
       uint64_t last_access_ns{0};
       // Monotonic version; incremented on state updates
@@ -366,6 +404,8 @@ class UnifiedMemoryAuthority {
     size_t num_chunks{0};
     // Per-device counter of chunks that are fully resident (HOT | COPIED_GPU).
     std::unordered_map<DeviceKey, size_t, DeviceKeyHash> loaded_chunk_counts;
+    // Monotonic ledger version (incremented on state transitions)
+    uint64_t ledger_version{0};
   };
 
   void record_cpu_write_locked_(ReplicaAllocation& alloc, uint64_t va_offset, uint64_t bytes);
@@ -406,10 +446,28 @@ class UnifiedMemoryAuthority {
   size_t chunk_size_bytes_;
   CpuArena cpu_arena_;
   std::unordered_map<loading::ReplicaKey, ReplicaAllocation, loading::ReplicaKeyHash> allocations_;
+  std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
 
   // Sessions for plan/commit/abort
   std::unordered_map<uint64_t, SessionRecord> sessions_;
   uint64_t next_session_id_{1};
+
+  struct PendingRehydrateKey {
+    loading::ReplicaKey key;
+    uint32_t chunk_idx{0};
+    bool operator==(const PendingRehydrateKey&) const = default;
+  };
+
+  struct PendingRehydrateKeyHash {
+    size_t operator()(const PendingRehydrateKey& k) const noexcept {
+      const size_t base = loading::ReplicaKeyHash{}(k.key);
+      return absl::HashOf(base, k.chunk_idx);
+    }
+  };
+
+  mutable std::mutex telemetry_mu_;
+  mutable std::unordered_map<PendingRehydrateKey, std::chrono::steady_clock::time_point, PendingRehydrateKeyHash>
+      pending_rehydrate_;
 };
 
 } // namespace tensorcast::store::replica

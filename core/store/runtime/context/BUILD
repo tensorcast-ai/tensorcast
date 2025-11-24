@@ -24,6 +24,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":runtime_context_events",
+        "//core/common:host_memory_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:communication_manager",
         "//core/store:device_manager",
@@ -36,6 +37,7 @@ sc_cc_library(
         "//core/store/runtime/ingestion:ingestion_event_hub",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
     ],
 )
@@ -45,8 +47,10 @@ cc_test(
     srcs = ["runtime_context_test.cc"],
     deps = [
         ":runtime_context",
+        "//core/store:memory_tier_budget",
         "//core/store:store_engine_options",
         "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/status:statusor",
         "@abseil-cpp//absl/synchronization",
         "@catch2//:catch2_main",

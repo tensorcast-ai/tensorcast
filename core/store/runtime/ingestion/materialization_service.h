@@ -6,6 +6,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <string>
 
 #include "absl/status/statusor.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -18,13 +19,13 @@
 
 namespace tensorcast::store::runtime::ingestion {
 
-using tensorcast::store::loading::DiskSource;
-using tensorcast::store::loading::MaterializationRequest;
-using tensorcast::store::loading::MaterializeHints;
-using tensorcast::store::loading::MaterializeMode;
-using tensorcast::store::loading::ReplicaHandle;
-using tensorcast::store::loading::ReplicaKey;
-using tensorcast::store::loading::ReplicaTarget;
+using loading::DiskSource;
+using loading::MaterializationRequest;
+using loading::MaterializeHints;
+using loading::MaterializeMode;
+using loading::ReplicaHandle;
+using loading::ReplicaKey;
+using loading::ReplicaTarget;
 
 struct MaterializationDeps {
   MaterializationDeps(
@@ -51,16 +52,16 @@ class MaterializationService {
  public:
   explicit MaterializationService(MaterializationDeps deps);
 
-  absl::StatusOr<ReplicaHandle> Execute(const MaterializationRequest& request);
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> execute(const MaterializationRequest& request);
 
  private:
   MaterializationDeps deps_;
 
-  [[nodiscard]] absl::StatusOr<ReplicaHandle> TryReuseReplica(const MaterializationRequest& request) const;
-  [[nodiscard]] absl::StatusOr<ReplicaHandle> CopyFromPeer(const MaterializationRequest& request) const;
-  [[nodiscard]] absl::StatusOr<ReplicaHandle> LoadFromDisk(const MaterializationRequest& request) const;
-  [[nodiscard]] absl::StatusOr<ReplicaHandle> RunAuto(const MaterializationRequest& request) const;
-  [[nodiscard]] ReplicaHandle BuildHandle(
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> try_reuse_replica(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> copy_from_peer(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> load_from_disk(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> run_auto(const MaterializationRequest& request) const;
+  [[nodiscard]] ReplicaHandle build_handle(
       const MaterializationRequest& request,
       const std::shared_ptr<replica::Replica>& replica,
       std::shared_future<absl::Status> ready_future) const;

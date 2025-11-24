@@ -21,6 +21,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
+#include "core/store/device_types.h"
 #include "core/store/replica/memory_export_registry.h"
 #include "core/store/replica/transfer_service.h"
 #include "core/store/replica/types/direct_write_grant.h"
@@ -32,18 +33,35 @@ using common::memory::MemoryLocation;
 using common::memory::PinnedBufferPool;
 using loading::ReplicaKey;
 
+namespace {
+
+DeviceKey normalize_device_key(DeviceKey key) {
+  if (key.type == DeviceType::GPU) {
+    key.ordinal = (key.ordinal >= 0) ? key.ordinal : 0;
+    return key;
+  }
+  key.type = DeviceType::CPU;
+  key.ordinal = -1;
+  key.uuid.clear();
+  return key;
+}
+
+} // namespace
+
 // V3 final cutover: plan/execute/commit path is always enabled (no flags)
 
 ReplicaLoadController::ReplicaLoadController(
     std::string artifact_identifier,
-    int local_device_id,
+    DeviceKey device_key,
     const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
     size_t artifact_chunk_bytes,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
     uint64_t artifact_size,
-    std::optional<std::string> view_id)
+    std::optional<std::string> view_id,
+    std::optional<MemoryTierConfig> memory_tier_config)
     : artifact_size_(artifact_size),
+      memory_tier_config_(std::move(memory_tier_config)),
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
@@ -56,7 +74,7 @@ ReplicaLoadController::ReplicaLoadController(
               ReplicaKey{
                   .artifact_id = artifact_identifier,
                   .view_id = view_id,
-                  .device = {.type = DeviceType::GPU, .ordinal = local_device_id, .uuid = ""},
+                  .device = normalize_device_key(device_key),
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
@@ -65,10 +83,10 @@ ReplicaLoadController::ReplicaLoadController(
           std::make_shared<MemoryExportRegistry>(
               gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_})) {
   // Populate replica_key_ using constructor inputs
+  const DeviceKey normalized_device = normalize_device_key(device_key);
   replica_key_.artifact_id = std::move(artifact_identifier);
   replica_key_.view_id = std::move(view_id);
-  replica_key_.device.type = DeviceType::GPU;
-  replica_key_.device.ordinal = local_device_id;
+  replica_key_.device = normalized_device;
   // Initialize services already done in initializer list
 
   {
@@ -785,15 +803,19 @@ absl::Status ReplicaLoadController::finalize_copy_state_(MemoryLocation destinat
 
     if (destination == MemoryLocation::GPU) {
       absl::MutexLock release_lock(&mutex_);
-      // Apply UMA post-GPU-load policy (EvictCPU by default)
-      auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(
-          replica_key_, artifact_size_, UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+      const auto policy = select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+      // Apply UMA post-GPU-load policy (EvictCPU by default unless preemptible is disabled)
+      auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(replica_key_, artifact_size_, policy);
       if (!uma_policy_st.ok()) {
         LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
                      << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
       }
       if (cpu_.state != MemoryState::FAILED) {
-        ABSL_CHECK_OK(set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED));
+        if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
+          (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
+        } else {
+          (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+        }
       }
     }
   }
@@ -939,15 +961,19 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
         ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADED));
         // Apply UMA post-GPU-load policy and optionally drop CPU facade state
         {
-          auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(
-              replica_key_, artifact_size_, UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+          const auto policy = select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+          auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(replica_key_, artifact_size_, policy);
           if (!uma_policy_st.ok()) {
             LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
                          << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
           }
           absl::MutexLock lk(&mutex_);
           if (cpu_.state != MemoryState::FAILED) {
-            (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+            if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
+              (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
+            } else {
+              (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+            }
           }
         }
         return absl::OkStatus();
@@ -1047,15 +1073,19 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
   }
   ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::LOADED));
   {
-    auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(
-        replica_key_, artifact_size_, UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+    const auto policy = select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+    auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(replica_key_, artifact_size_, policy);
     if (!uma_policy_st.ok()) {
       LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
                    << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
     }
     absl::MutexLock lk(&mutex_);
     if (cpu_.state != MemoryState::FAILED) {
-      (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+      if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
+        (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
+      } else {
+        (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+      }
     }
   }
   return absl::OkStatus();
@@ -1139,11 +1169,33 @@ absl::Status ReplicaLoadController::allocate_replica_memory() {
   return absl::OkStatus();
 }
 
+bool ReplicaLoadController::preemptible_enabled_locked_() const {
+  if (!memory_tier_config_.has_value()) {
+    // Legacy default: preemptible enabled unless explicitly disabled via config.
+    return true;
+  }
+  return memory_tier_config_->enable_preemptible_memory;
+}
+
+UnifiedMemoryAuthority::PostGpuLoadPolicy ReplicaLoadController::select_post_gpu_policy(
+    UnifiedMemoryAuthority::PostGpuLoadPolicy preferred) const {
+  if (!preemptible_enabled_locked_()) {
+    return UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep;
+  }
+  return preferred;
+}
+
 absl::Status ReplicaLoadController::mark_cpu_preemptible(float ratio) {
   absl::MutexLock lock(&mutex_);
 
   if (!memory_coordinator_->has_allocation(replica_key_)) {
     return absl::FailedPreconditionError("Unified memory not allocated for this replica");
+  }
+
+  if (!preemptible_enabled_locked_()) {
+    VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id
+            << "): Skipping preemptible marking because preemptible tier is disabled or not configured";
+    return absl::OkStatus();
   }
 
   if (ratio < 0.0F || ratio > 1.0F) {
@@ -1288,8 +1340,8 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
         }
         // Post policy for GPU; for CPU do nothing here
         if (target_location == MemoryLocation::GPU) {
-          auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(
-              replica_key_, artifact_size_, UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+          const auto policy = select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+          auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(replica_key_, artifact_size_, policy);
           if (!uma_policy_st.ok()) {
             LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
                          << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
@@ -1298,7 +1350,11 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
           {
             absl::MutexLock lk(&mutex_);
             if (cpu_.state != MemoryState::FAILED) {
-              (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+              if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
+                (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
+              } else {
+                (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+              }
             }
           }
         }

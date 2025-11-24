@@ -4,6 +4,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <optional>
 #include <utility>
@@ -13,11 +14,12 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
 #include "gsl/pointers"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::store::runtime::ingestion {
 
@@ -28,12 +30,57 @@ using loading::InlineBufferSource;
 using loading::TransformPlacement;
 using replica::MemoryState;
 
+absl::Status validate_mi2_descriptor_matches_request(const loading::MaterializationRequest& request) {
+  if (!absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
+    return absl::OkStatus();
+  }
+  if (!request.has_disk_path()) {
+    return absl::InvalidArgumentError(
+        "Content-addressed load requires MaterializeHints.disk_path so the descriptor can be validated");
+  }
+
+  const std::filesystem::path descriptor_path =
+      std::filesystem::path(request.hints().disk_path) / "artifact_descriptor.json";
+  std::error_code ec;
+  if (!std::filesystem::exists(descriptor_path, ec)) {
+    return absl::FailedPreconditionError(
+        absl::StrCat("artifact_descriptor.json required for content-addressed load: ", descriptor_path.string()));
+  }
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat descriptor at ", descriptor_path.string()));
+  }
+
+  try {
+    std::ifstream stream(descriptor_path);
+    if (!stream.is_open()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("Cannot open artifact_descriptor.json at ", descriptor_path.string()));
+    }
+    nlohmann::json desc;
+    stream >> desc;
+    if (!desc.contains("artifact_id") || !desc["artifact_id"].is_string()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("artifact_descriptor.json missing artifact_id at ", descriptor_path.string()));
+    }
+    const std::string descriptor_id = desc["artifact_id"].get<std::string>();
+    if (descriptor_id != request.canonical_artifact_id()) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "Descriptor artifact_id mismatch: expected ", request.canonical_artifact_id(), " got ", descriptor_id));
+    }
+  } catch (const std::exception& ex) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Failed to parse artifact_descriptor.json at ", descriptor_path.string(), ": ", ex.what()));
+  }
+  return absl::OkStatus();
+}
+
 } // namespace
 
 MaterializationService::MaterializationService(MaterializationDeps deps) : deps_(std::move(deps)) {}
 
-absl::StatusOr<ReplicaHandle> MaterializationService::Execute(const MaterializationRequest& request) {
-  auto existing_or = TryReuseReplica(request);
+absl::StatusOr<ReplicaHandle> MaterializationService::execute(const MaterializationRequest& request) {
+  auto existing_or = try_reuse_replica(request);
   if (existing_or.ok()) {
     return *existing_or;
   }
@@ -43,17 +90,17 @@ absl::StatusOr<ReplicaHandle> MaterializationService::Execute(const Materializat
 
   switch (request.mode()) {
     case MaterializeMode::COPY_ONLY:
-      return CopyFromPeer(request);
+      return copy_from_peer(request);
     case MaterializeMode::LOAD_ONLY:
-      return LoadFromDisk(request);
+      return load_from_disk(request);
     case MaterializeMode::AUTO:
-      return RunAuto(request);
+      return run_auto(request);
   }
 
   return absl::InternalError("Invalid MaterializeMode");
 }
 
-absl::StatusOr<ReplicaHandle> MaterializationService::TryReuseReplica(const MaterializationRequest& request) const {
+absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const MaterializationRequest& request) const {
   auto existing_or = deps_.replica_registry->find(request.replica_key());
   if (!existing_or.ok()) {
     return existing_or.status();
@@ -63,10 +110,10 @@ absl::StatusOr<ReplicaHandle> MaterializationService::TryReuseReplica(const Mate
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
   auto fut = replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
-  return BuildHandle(request, replica, fut);
+  return build_handle(request, replica, fut);
 }
 
-absl::StatusOr<ReplicaHandle> MaterializationService::CopyFromPeer(const MaterializationRequest& request) const {
+absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const MaterializationRequest& request) const {
   if (!request.target_is_gpu()) {
     return absl::InvalidArgumentError("COPY_ONLY mode requires a GPU target device");
   }
@@ -108,10 +155,11 @@ absl::StatusOr<ReplicaHandle> MaterializationService::CopyFromPeer(const Materia
         .local_device_id = request.target_device().ordinal,
         .pinned_buffer_pool = deps_.memory_pool,
         .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
-        .expected_artifact_size = expected_size};
+        .expected_artifact_size = expected_size,
+        .view_plan = src_replica->view_plan(),
+        .memory_tier_config = std::nullopt};
     cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
     cfg.view_id = request.requested_view_id();
-    cfg.view_plan = src_replica->view_plan();
     cfg.transform_placement =
         request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
 
@@ -133,7 +181,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::CopyFromPeer(const Materia
     absl::Status copy_st = dst_replica->copy_from(*src_replica);
     std::promise<absl::Status> p;
     p.set_value(copy_st);
-    return BuildHandle(request, dst_replica, p.get_future().share());
+    return build_handle(request, dst_replica, p.get_future().share());
   }
 
   return absl::FailedPreconditionError(
@@ -145,18 +193,22 @@ absl::StatusOr<ReplicaHandle> MaterializationService::CopyFromPeer(const Materia
           ")"));
 }
 
-absl::StatusOr<ReplicaHandle> MaterializationService::LoadFromDisk(const MaterializationRequest& request) const {
-  if (absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
-    return absl::FailedPreconditionError(
-        "LOAD_ONLY/disk fallback disabled for content-addressed artifact_id; Global Store routing required");
-  }
+absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const MaterializationRequest& request) const {
   if (!request.has_disk_path()) {
     return absl::InvalidArgumentError(
         "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
   }
+  if (absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
+    auto validate_st = validate_mi2_descriptor_matches_request(request);
+    if (!validate_st.ok()) {
+      return validate_st;
+    }
+  }
 
   DiskSource disk_src;
   disk_src.path = std::filesystem::path(request.hints().disk_path);
+  // Content-addressed (mi2) loads require descriptor + index for verification; CGID/local ids can stream without it.
+  disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(request.canonical_artifact_id());
 
   ReplicaTarget target;
   target.location.type =
@@ -166,7 +218,18 @@ absl::StatusOr<ReplicaHandle> MaterializationService::LoadFromDisk(const Materia
   return deps_.ingest_from_disk(request.canonical_artifact_id(), disk_src, target, request.hints());
 }
 
-absl::StatusOr<ReplicaHandle> MaterializationService::RunAuto(const MaterializationRequest& request) const {
+absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const MaterializationRequest& request) const {
+  const auto id_kind = tensorcast::common::infer_artifact_id_kind(request.canonical_artifact_id());
+  if (id_kind == tensorcast::common::ArtifactIdKind::kMi2 || id_kind == tensorcast::common::ArtifactIdKind::kCgid) {
+    auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id());
+    if (!id_kind_or.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "AUTO materialize_replica requires a canonical artifact_id starting with mi2: or cgid:. ",
+              "Provide MaterializeHints.artifact_id or VariantIdentity.canonical_artifact_id. Details: ",
+              id_kind_or.status().message()));
+    }
+  }
   if (deps_.run_auto) {
     auto orchestrated_or = deps_.run_auto(request);
     if (orchestrated_or.ok()) {
@@ -175,11 +238,15 @@ absl::StatusOr<ReplicaHandle> MaterializationService::RunAuto(const Materializat
     LOG(WARNING) << "Materialize AUTO callback failed: " << orchestrated_or.status() << "; falling back to disk load";
   }
 
+  if (request.has_disk_path()) {
+    return load_from_disk(request);
+  }
+
   return absl::FailedPreconditionError(
-      "AUTO materialize_replica requires a canonical artifact identifier (mi2:...) with Global Store routing or an explicit hints.disk_path");
+      "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit hints.disk_path");
 }
 
-ReplicaHandle MaterializationService::BuildHandle(
+ReplicaHandle MaterializationService::build_handle(
     const MaterializationRequest& request,
     const std::shared_ptr<replica::Replica>& replica,
     std::shared_future<absl::Status> ready_future) const {

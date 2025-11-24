@@ -14,17 +14,18 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 
 #include "core/communicator/engine/engine.h"
+#include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
 #include "core/store/replica/replica_load_controller.h"
 #include "core/testing/test_helpers.h"
 #include "gsl/pointers"
 
+using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
-using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_CPU;
 using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
 using tensorcast::communicator::engine::Communicator;
-using tensorcast::communicator::v1::CommunicatorConfig;
+using tensorcast::store::DeviceKey;
 using tensorcast::store::replica::ReplicaLoadController;
 using namespace tensorcast::store;
 using namespace tensorcast::testing;
@@ -119,9 +120,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 1 * 1024 * 1024; // 1MB chunks for streaming
     const std::size_t pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedBufferPool>(pool_size, chunk_size);
+    const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "test_artifact", // artifact_identifier
-        0, // local_device_id (GPU device 0)
+        gpu_device, // target device
         pinned_pool, // pinned_pool (needed for streaming buffer)
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
@@ -221,9 +223,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t chunk_size = 4 * 1024 * 1024; // 4MB chunks
     const std::size_t total_pool_size = 16 * chunk_size; // Ensure at least 16 chunks available
     auto pinned_pool = std::make_shared<PinnedBufferPool>(total_pool_size, chunk_size);
+    const DeviceKey cpu_device{DeviceType::CPU, -1, ""};
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "test_artifact", // artifact_identifier
-        -1, // local_device_id (-1 for CPU)
+        cpu_device, // CPU target
         pinned_pool, // pinned_pool
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
@@ -345,9 +348,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     const std::size_t pool_buffers = 20; // ensure enough slices for MTCP receive without exhausting host memory
     const std::size_t pool_size = pool_chunk_size * pool_buffers;
     auto pinned_pool = std::make_shared<PinnedBufferPool>(pool_size, pool_chunk_size);
+    const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
     auto mem_manager = std::make_shared<ReplicaLoadController>(
         "sub_chunk_artifact",
-        0,
+        gpu_device,
         pinned_pool,
         kArtifactChunkBytes,
         pool_size,
@@ -458,9 +462,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       // (TransferService defaults to 16 chunks when credit is saturated). Keep the pool large enough
       // so we validate the intended MTCP behaviour instead of exercising OOM fallbacks.
       auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 16, stage_chunk_bytes);
+      const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
       auto mem_manager = std::make_shared<ReplicaLoadController>(
           "credit_artifact",
-          0,
+          gpu_device,
           pinned_pool,
           kArtifactChunkBytes,
           1024 * 1024 * 1024,
@@ -569,9 +574,10 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
       // ReplicaLoadController pool intentionally remains undersized to trigger pinned OOM behaviour.
       auto pinned_pool = std::make_shared<PinnedBufferPool>(stage_chunk_bytes * 2, stage_chunk_bytes);
+      const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
       auto mem_manager = std::make_shared<ReplicaLoadController>(
           "credit_artifact_small_pool",
-          0,
+          gpu_device,
           pinned_pool,
           kArtifactChunkBytes,
           stage_chunk_bytes * 2,

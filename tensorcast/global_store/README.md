@@ -10,6 +10,15 @@ This document explains the internal implementation of the Global Store (central 
 - Runtime: Background maintenance thread (cleanup + VACUUM), batched heartbeats.
 - Artifact identity kinds: supports both MI2 (content-addressed) and CGID
   (client-supplied, hashless) descriptors.
+- Memory tiers: dedicated `MemoryTierService` gRPC surface plus DuckDB tables for
+  stable/preemptible telemetry and leases (see below). Daemons publish `MemoryTierStatus`
+  and replay `MemoryTierLease` records (pending → acquire+ACK, revoking → release+ACK) on
+  startup and heartbeats so DuckDB state and UMA stay in sync. ACKs must include
+  `artifact_id + chunk_ids + ledger_version` and are validated server-side; release ACKs
+  with empty `chunk_ids` are rejected to preserve the lease audit trail. Lease requests
+  are idempotent per `request_id` and are validated server-side for node/artifact IDs and
+  non-empty chunk ranges before creation. Telemetry
+  also feeds Prometheus gauges for stable/preemptible bytes and rehydration health.
 
 ## Configuration
 
@@ -25,6 +34,7 @@ This document explains the internal implementation of the Global Store (central 
 tensorcast/global_store/
 ├── __main__.py                 # CLI entry: bootstraps server and metrics
 ├── grpc_service.py             # gRPC facade + wiring + maintenance thread
+├── memory_tier_grpc_service.py # Memory tier gRPC facade (status + leases)
 ├── db_utils.py                 # Schema bootstrap (prefers repo-root schema.sql) + maintenance (VACUUM)
 ├── metrics.py                  # Prometheus metrics + gRPC interceptor
 ├── config/
@@ -32,6 +42,7 @@ tensorcast/global_store/
 ├── models/                     # Domain models
 │   ├── replica.py              # Replica (GPU/RAM/DISK) + concurrency/load
 │   ├── worker.py               # Worker (Store Daemon instance)
+│   ├── memory_tier.py          # Memory tier telemetry/lease models
 │   └── transport.py            # In-flight transport record
 ├── repositories/               # Data access layer (DuckDB cursors/transactions)
 │   ├── base.py                 # Thread-local cursor + transaction manager
@@ -41,14 +52,17 @@ tensorcast/global_store/
 │   ├── artifact_repository.py  # artifacts (content-addressed descriptors)
 │   ├── artifact_index_repository.py # artifact_indices (deduped tensor indices)
 │   ├── variant_repository.py   # variants (view metadata)
-│   └── leaf_repository.py      # leaves (TreeHash leaves for canonical/variant spaces)
+│   ├── leaf_repository.py      # leaves (TreeHash leaves for canonical/variant spaces)
+│   ├── memory_tier_snapshot_repository.py # memory_tier_snapshots
+│   └── memory_tier_lease_repository.py    # memory_tier_leases
 ├── services/                   # Business logic layer
 │   ├── artifact_service.py     # Register/List/Unregister replicas (+metrics)
 │   ├── transport_service.py    # Request/Complete transports (+cleanup)
 │   ├── worker_service.py       # Register/Heartbeat/List/Cleanup workers
 │   ├── recovery_service.py     # Startup recovery + state sync
 │   ├── chunk_service.py        # Chunk directory (distributed memory pool)
-│   └── view_state_service.py   # Variant metadata + leaf digest persistence
+│   ├── view_state_service.py   # Variant metadata + leaf digest persistence
+│   └── memory_tier_service.py  # Memory tier telemetry + lease lifecycle
 ```
 
 ## Architecture
@@ -89,6 +103,7 @@ erDiagram
   artifacts ||--o{ leaves : anchors
   chunk_directory }o--|| workers : located_on
   variants ||--o{ leaves : supplies
+  node_memory_tier_latest ||--|| workers : derived_from
 
   workers {
     TEXT worker_id PK
@@ -101,6 +116,19 @@ erDiagram
     BOOL accepting_new_requests
     TIMESTAMP registered_at
     TIMESTAMP last_heartbeat
+  }
+
+  node_memory_tier_latest {
+    TEXT node_id PK
+    BIGINT stable_total_bytes
+    BIGINT stable_used_bytes
+    BIGINT preemptible_total_bytes
+    BIGINT preemptible_marked_bytes
+    REAL faults_per_sec
+    BIGINT rehydrate_p99_ns
+    BOOLEAN enable_preemptible
+    TEXT memory_tier_config_json
+    BIGINT snapshot_epoch_ns
   }
 
   artifact_replicas {
@@ -187,7 +215,41 @@ erDiagram
     TIMESTAMP last_update_time
     FLOAT node_load_ratio
   }
+
+  memory_tier_snapshots {
+    TEXT node_id
+    BIGINT epoch_ns
+    BIGINT stable_total_bytes
+    BIGINT stable_used_bytes
+    BIGINT preemptible_total_bytes
+    BIGINT preemptible_marked_bytes
+    REAL faults_per_sec
+    BIGINT rehydrate_p99_ns
+    BOOLEAN enable_preemptible
+    TEXT memory_tier_config_json
+  }
+
+  memory_tier_leases {
+    TEXT lease_id
+    TEXT node_id
+    TEXT kind
+    TEXT artifact_id
+    JSON chunk_range
+    JSON chunk_ids
+    BIGINT ledger_version
+    BIGINT bytes
+    TEXT workload_id
+    TEXT state
+    TEXT request_id
+    BIGINT ack_epoch_ns
+    BIGINT issued_at_ns
+    BIGINT expires_at_ns
+  }
 ```
+
+Memory tier semantics:
+- `PublishMemoryTierStatus` writes telemetry into `memory_tier_snapshots`, then retention (time and `snapshot_max_rows`) keeps the table bounded. The `node_memory_tier_latest` view surfaces the freshest sample per `node_id`, so worker queries transparently include the most recent stable/preemptible bytes, telemetry, and `memory_tier_config_json` without duplicating mutable columns inside `workers`. Prometheus gauges are emitted via `metrics.observe_memory_tier_snapshot`.
+- Lease ACKs are validated by `lease_id + artifact_id` and must include `chunk_ids + ledger_version + bytes`; `revoking` leases are released the same way to keep UMA and DuckDB in lock-step.
 
 Note: `chunk_directory` has a composite primary key: `(artifact_id, device_uuid, replica, chunk_idx, node_id)`.
 
@@ -227,6 +289,10 @@ Replica selection is claimed atomically in SQL (`ReplicaRepository.find_availabl
   - IP validation: worker *and replica* registrations with loopback, unspecified, or `localhost` addresses are rejected. Use a routable interface IP; `127.0.0.1` and `0.0.0.0` are not allowed.
   - Heartbeats are batched: `WorkerService.heartbeat()` buffers `(worker_id, mem_pool_available_size, accepting_new_requests)`; a daemon thread flushes via `WorkerRepository.batch_update_heartbeats()` every ~100ms (and flushes immediately if the buffer grows).
   - Cleanup: `cleanup_inactive_workers()` deletes workers whose `last_heartbeat` is older than `GLOBAL_STORE_HEARTBEAT_TIMEOUT_MS` and marks their replicas `is_available = FALSE`.
+- MemoryTierService
+  - `publish_status()` persists telemetry to `memory_tier_snapshots`, prunes by retention/max-rows, feeds the `node_memory_tier_latest` view used by worker queries, and emits Prometheus gauges (`tensorcast_memory_tier_*`).
+  - `request_lease()` is idempotent by `(node_id, request_id)` and seeds leases with caller-supplied chunk hints.
+  - `acknowledge()` validates `lease_id + artifact_id`, requires `chunk_ids + ledger_version + bytes` for acquisitions, and updates lease rows for both `acquired` and `released` transitions to keep UMA/DuckDB replayable.
 
 - TransportService
   - `request_transport()` first checks whether *any* replicas exist for the artifact. If none are registered it returns `STATUS_NOT_FOUND` immediately (metrics label `status="not_found"`). Otherwise it loops until a replica can be claimed (or the caller's deadline elapses). On success it creates an `artifact_transports` row and updates metrics (`inc_transport_request`, `observe_transport_wait`, `inc_active_transports`).
@@ -349,6 +415,12 @@ Use the unified config fields in `examples/config/global_store_config.yaml`.
 - Transport: `tc_transport_requests_total{artifact_id,status}`, `tc_transport_wait_seconds{artifact_id}`, `tc_active_transports`.
   - `status` values: `success`, `timeout`, `error`, `not_found` (no replicas registered).
 - Recovery: `tc_state_sync_total{result}`, `tc_state_sync_seconds`.
+- Memory tiers: `tensorcast_memory_tier_stable_bytes{node,state=total|used}`,
+  `tensorcast_memory_tier_preemptible_bytes{node,state=total|marked}`,
+  `tensorcast_memory_tier_faults_per_sec{node}`,
+  `tensorcast_memory_tier_rehydrate_p99_ns{node}`,
+  `tensorcast_memory_tier_enable_preemptible{node,enable_preemptible}` driven by
+  `MemoryTierService.publish_status()`.
 
 ## Operational Threads
 

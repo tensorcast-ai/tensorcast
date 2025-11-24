@@ -15,7 +15,9 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
+#include "absl/time/clock.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "opentelemetry/metrics/provider.h"
@@ -150,6 +152,11 @@ absl::Status WorkerLifecycleManager::start() {
     LOG(WARNING) << "Initial RequestFullStateSync failed: " << full_or.status();
   }
 
+  memory_tier_enabled_ = engine_->get_memory_tier_config().has_value();
+  if (memory_tier_enabled_) {
+    reconcile_memory_tier_leases_once();
+  }
+
   stop_.store(false);
   hb_thread_ = std::thread(&WorkerLifecycleManager::heartbeat_loop, this);
   if (opts_.chunk_sync_interval_ms > 0) {
@@ -200,6 +207,16 @@ void WorkerLifecycleManager::stop() {
 void WorkerLifecycleManager::heartbeat_loop() {
   hb_alive_.store(true);
   const auto interval = std::chrono::milliseconds(opts_.heartbeat_interval_ms);
+  const auto memory_tier_cfg = engine_->get_memory_tier_config();
+  const bool publish_memory_tiers = memory_tier_cfg.has_value();
+  const std::string memory_tier_config_json = memory_tier_cfg.has_value()
+      ? absl::StrFormat(
+            R"({"enable_preemptible_memory":%s,"stable_bytes":%llu,"preemptible_limit_bytes":%llu,"preemptible_low_watermark_ratio":%.3f})",
+            memory_tier_cfg->enable_preemptible_memory ? "true" : "false",
+            static_cast<uint64_t>(memory_tier_cfg->stable_bytes),
+            static_cast<uint64_t>(memory_tier_cfg->preemptible_limit_bytes),
+            memory_tier_cfg->preemptible_low_watermark_ratio)
+      : "{}";
   try {
     while (!stop_.load()) {
       // Prepare enhanced heartbeat fields
@@ -400,6 +417,31 @@ void WorkerLifecycleManager::heartbeat_loop() {
           }
         }
       }
+      if (publish_memory_tiers) {
+        auto snap_opt = engine_->get_memory_tier_snapshot();
+        if (snap_opt.has_value()) {
+          const auto snap = *snap_opt;
+          store::components::MemoryTierStatusPayload payload;
+          payload.node_id = node_id_;
+          payload.worker_id = worker_id_;
+          payload.stable_total_bytes = snap.stable_total_bytes;
+          payload.stable_used_bytes = snap.stable_used_bytes;
+          payload.preemptible_total_bytes = snap.preemptible_total_bytes;
+          payload.preemptible_marked_bytes = snap.preemptible_marked_bytes;
+          payload.faults_per_sec = snap.faults_per_sec;
+          payload.rehydrate_p99_ns = snap.rehydrate_p99_ns;
+          payload.enable_preemptible = memory_tier_cfg->enable_preemptible_memory;
+          payload.memory_tier_config_json = memory_tier_config_json;
+          payload.epoch_ns = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
+          auto mt_status = global_store_->publish_memory_tier_status(payload);
+          if (!mt_status.ok()) {
+            LOG(WARNING) << "PublishMemoryTierStatus failed: " << mt_status;
+          }
+        }
+      }
+      if (memory_tier_enabled_) {
+        reconcile_memory_tier_leases_once();
+      }
       std::this_thread::sleep_for(interval);
       hb_ticks_.fetch_add(1);
     }
@@ -448,6 +490,90 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
   }
   return absl::OkStatus();
+}
+
+void WorkerLifecycleManager::reconcile_memory_tier_leases_once() {
+  if (!memory_tier_enabled_) {
+    return;
+  }
+  auto leases_or = global_store_->list_memory_tier_leases(node_id_);
+  if (!leases_or.ok()) {
+    VLOG(1) << "ListOutstandingLeases failed: " << leases_or.status();
+    return;
+  }
+  const uint64_t now_ns = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
+  for (auto lease : *leases_or) {
+    if (lease.kind != store::components::MemoryTierLeaseKind::kStable) {
+      VLOG(1) << "Skipping non-stable memory tier lease id=" << lease.lease_id;
+      continue;
+    }
+    if (lease.artifact_id.empty()) {
+      LOG(WARNING) << "Memory tier lease " << lease.lease_id << " missing artifact_id";
+      continue;
+    }
+    lease.node_id = lease.node_id.empty() ? node_id_ : lease.node_id;
+
+    // Active leases are reconciled idempotently but only ACKed when they were pending.
+    const bool should_ack_acquired =
+        lease.state == store::components::MemoryTierLeaseState::kPending || lease.ack_epoch_ns == 0;
+
+    if (lease.state == store::components::MemoryTierLeaseState::kRevoking) {
+      auto released_or = engine_->release_memory_tier_lease(lease);
+      if (!released_or.ok()) {
+        LOG(WARNING) << "Failed to release stable lease for " << lease.artifact_id << ": " << released_or.status();
+        continue;
+      }
+      store::components::MemoryTierLeaseAckPayload ack;
+      ack.lease_id = lease.lease_id;
+      ack.node_id = node_id_;
+      ack.action = store::components::MemoryTierAckAction::kReleased;
+      ack.artifact_id = lease.artifact_id;
+      ack.chunk_ids = released_or->chunk_ids;
+      ack.chunk_start =
+          lease.chunk_start != 0 ? lease.chunk_start : (ack.chunk_ids.empty() ? 0 : ack.chunk_ids.front());
+      ack.chunk_count = lease.chunk_count != 0 ? lease.chunk_count : static_cast<uint32_t>(ack.chunk_ids.size());
+      ack.ledger_version = released_or->ledger_version;
+      ack.bytes = released_or->bytes;
+      ack.request_id = lease.request_id.empty() ? absl::StrFormat("daemon-ack-%s", lease.lease_id) : lease.request_id;
+      ack.ack_epoch_ns = now_ns;
+      auto ack_or = global_store_->acknowledge_memory_tier_lease(ack);
+      if (!ack_or.ok()) {
+        LOG(WARNING) << "AcknowledgeMemoryTierLease(released) failed for lease_id=" << lease.lease_id << ": "
+                     << ack_or.status();
+      }
+      continue;
+    }
+
+    if (lease.state == store::components::MemoryTierLeaseState::kPending ||
+        lease.state == store::components::MemoryTierLeaseState::kActive) {
+      auto acquired_or = engine_->acquire_memory_tier_lease(lease);
+      if (!acquired_or.ok()) {
+        LOG(WARNING) << "Failed to acquire stable lease for " << lease.artifact_id << ": " << acquired_or.status();
+        continue;
+      }
+      if (!should_ack_acquired) {
+        continue;
+      }
+      store::components::MemoryTierLeaseAckPayload ack;
+      ack.lease_id = lease.lease_id;
+      ack.node_id = node_id_;
+      ack.action = store::components::MemoryTierAckAction::kAcquired;
+      ack.artifact_id = lease.artifact_id;
+      ack.chunk_ids = acquired_or->chunk_ids;
+      ack.chunk_start =
+          lease.chunk_start != 0 ? lease.chunk_start : (ack.chunk_ids.empty() ? 0 : ack.chunk_ids.front());
+      ack.chunk_count = lease.chunk_count != 0 ? lease.chunk_count : static_cast<uint32_t>(ack.chunk_ids.size());
+      ack.ledger_version = acquired_or->ledger_version;
+      ack.bytes = acquired_or->bytes;
+      ack.request_id = lease.request_id.empty() ? absl::StrFormat("daemon-ack-%s", lease.lease_id) : lease.request_id;
+      ack.ack_epoch_ns = now_ns;
+      auto ack_or = global_store_->acknowledge_memory_tier_lease(ack);
+      if (!ack_or.ok()) {
+        LOG(WARNING) << "AcknowledgeMemoryTierLease(acquired) failed for lease_id=" << lease.lease_id << ": "
+                     << ack_or.status();
+      }
+    }
+  }
 }
 
 void WorkerLifecycleManager::chunk_sync_loop() {

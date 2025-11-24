@@ -4,9 +4,11 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include "core/common/const/granularity.h"
 #include "core/store/components/communication_manager.h"
+#include "core/store/memory_tier_config.h"
 
 namespace tensorcast::store {
 
@@ -77,6 +79,10 @@ struct StoreEngineOptions {
   // Optional on-disk fallback directory for P2P loads. When set, P2PLoader
   // will mux remote source with the local disk partitions in this directory.
   std::string p2p_fallback_disk_dir;
+
+  // Stable/preemptible memory tier settings (optional). When unset, the
+  // engine preserves legacy preemptible behavior.
+  std::optional<MemoryTierConfig> memory_tier_config;
 };
 
 } // namespace tensorcast::store

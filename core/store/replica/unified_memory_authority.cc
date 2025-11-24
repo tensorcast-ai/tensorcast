@@ -126,6 +126,7 @@ std::vector<uint32_t> UnifiedMemoryAuthority::get_missing_chunks(
 
   std::vector<uint32_t> missing;
   const auto& records = it->second.chunk_records;
+  bool preemptible_changed = false;
 
   for (size_t i = 0; i < records.size(); ++i) {
     const auto& rec = records[i];
@@ -142,7 +143,15 @@ std::vector<uint32_t> UnifiedMemoryAuthority::get_missing_chunks(
         is_missing = true;
       }
     } else if (target == common::memory::MemoryLocation::CPU) {
-      if (rec.cpu != ChunkState::HOT && rec.cpu != ChunkState::COLD && rec.cpu != ChunkState::PREEMPTIBLE) {
+      bool resident = is_cpu_resident_state_(rec.cpu);
+      if (rec.cpu == ChunkState::PREEMPTIBLE && resident) {
+        resident = is_preemptible_resident_locked_(it->second, static_cast<uint32_t>(i));
+        if (!resident) {
+          record_preemptible_fault_locked_(key, static_cast<uint32_t>(i));
+          preemptible_changed = true;
+        }
+      }
+      if (!resident) {
         is_missing = true;
       }
     }
@@ -150,6 +159,9 @@ std::vector<uint32_t> UnifiedMemoryAuthority::get_missing_chunks(
       missing.push_back(static_cast<uint32_t>(i));
   }
 
+  if (preemptible_changed) {
+    update_preemptible_budget_locked_();
+  }
   return missing;
 }
 
@@ -168,7 +180,11 @@ UnifiedMemoryAuthority::ChunkSource UnifiedMemoryAuthority::get_best_source_for_
 
   // Priority 1: Local copy (CPU→GPU or GPU→CPU)
   if (target == common::memory::MemoryLocation::GPU) {
-    if (rec.cpu == ChunkState::HOT || rec.cpu == ChunkState::COLD || rec.cpu == ChunkState::PREEMPTIBLE) {
+    bool cpu_available = is_cpu_resident_state_(rec.cpu);
+    if (rec.cpu == ChunkState::PREEMPTIBLE && cpu_available) {
+      cpu_available = is_preemptible_resident_locked_(it->second, chunk_idx);
+    }
+    if (cpu_available) {
       return {ChunkSource::LOCAL_CPU, -1, ""};
     }
   } else if (target == common::memory::MemoryLocation::CPU) {
@@ -227,6 +243,7 @@ std::vector<UnifiedMemoryAuthority::ChunkRecordView> UnifiedMemoryAuthority::sna
             .cpu = rec.cpu,
             .exported_cpu = rec.exported_cpu,
             .pin_refcnt = rec.pin_refcnt,
+            .stable_lease_count = rec.stable_lease_count,
             .last_access_ns = rec.last_access_ns,
             .version = rec.version});
   }
@@ -285,6 +302,7 @@ absl::Status UnifiedMemoryAuthority::release(const loading::ReplicaKey& key) {
     return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
   }
 
+  clear_rehydrate_records_for_key_(key);
   cpu_arena_.release_region(it->second);
   // GPU memory will be released automatically when shared_ptrs are destroyed
   allocations_.erase(it);
@@ -308,11 +326,13 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
   // Reset per-chunk GPU residency for this device and update counters
   size_t& counter = it->second.loaded_chunk_counts[dev_key];
   counter = 0;
+  bool mutated = false;
   for (auto& rec : it->second.chunk_records) {
     auto gr = rec.gpu.find(dev_key);
     if (gr != rec.gpu.end()) {
       gr->second = ChunkState::EVICTED;
       rec.version += 1;
+      mutated = true;
     }
   }
 
@@ -323,6 +343,10 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
       // Drop UMA-owned shared_ptr to allow VRAM to be reclaimed
       gpu_allocs.erase(ga_it);
     }
+  }
+
+  if (mutated) {
+    it->second.ledger_version += 1;
   }
 
   VLOG(1) << "UnifiedMemoryAuthority: released GPU device state for replica " << key.artifact_id << " on device "
@@ -369,6 +393,115 @@ absl::StatusOr<ChunkState> UnifiedMemoryAuthority::get_gpu_chunk_state(
   return itg->second;
 }
 
+absl::Status UnifiedMemoryAuthority::mark_chunks_preemptible_locked_(
+    ReplicaAllocation& alloc,
+    absl::Span<const uint32_t> indices) {
+  if (indices.empty()) {
+    return absl::OkStatus();
+  }
+  std::vector<uint32_t> eligible;
+  eligible.reserve(indices.size());
+  for (uint32_t idx : indices) {
+    if (idx >= alloc.chunk_records.size()) {
+      return absl::OutOfRangeError("Chunk index out of range");
+    }
+    const auto& rec = alloc.chunk_records[idx];
+    if (rec.stable_lease_count > 0 || rec.cpu == ChunkState::STABLE) {
+      continue; // protected by stable lease
+    }
+    eligible.push_back(idx);
+  }
+  if (eligible.empty()) {
+    return absl::OkStatus();
+  }
+  auto status = cpu_arena_.mark_preemptible(alloc, absl::MakeSpan(eligible));
+  if (!status.ok()) {
+    return status;
+  }
+  bool mutated = false;
+  for (uint32_t idx : eligible) {
+    auto& rec = alloc.chunk_records[idx];
+    rec.cpu = ChunkState::PREEMPTIBLE;
+    rec.version += 1;
+    mutated = true;
+  }
+  if (mutated) {
+    alloc.ledger_version += 1;
+    update_preemptible_budget_locked_();
+  }
+  return absl::OkStatus();
+}
+
+bool UnifiedMemoryAuthority::is_preemptible_resident_locked_(const ReplicaAllocation& alloc, uint32_t chunk_idx) const {
+  if (alloc.cpu_region.base == nullptr || chunk_idx >= alloc.num_chunks) {
+    return false;
+  }
+  const size_t page_size = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
+  const size_t chunk_bytes = cpu_arena_.chunk_bytes();
+  const size_t offset = static_cast<size_t>(chunk_idx) * chunk_bytes;
+  if (offset >= alloc.cpu_region.bytes) {
+    return false;
+  }
+  const size_t len = std::min(chunk_bytes, alloc.cpu_region.bytes - offset);
+  const size_t pages = (len + page_size - 1) / page_size;
+  std::vector<unsigned char> vec(pages, 0);
+  void* addr = static_cast<char*>(alloc.cpu_region.base) + offset;
+  if (::mincore(addr, len, vec.data()) != 0) {
+    // Assume resident when mincore is unavailable to avoid false positives.
+    return true;
+  }
+  for (unsigned char b : vec) {
+    if ((b & 1U) == 0U) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void UnifiedMemoryAuthority::record_preemptible_fault_locked_(const loading::ReplicaKey& key, uint32_t chunk_idx)
+    const {
+  const auto now = std::chrono::steady_clock::now();
+  {
+    std::lock_guard<std::mutex> lk(telemetry_mu_);
+    pending_rehydrate_[PendingRehydrateKey{.key = key, .chunk_idx = chunk_idx}] = now;
+  }
+  if (memory_tier_budget_) {
+    memory_tier_budget_->record_fault();
+  }
+}
+
+void UnifiedMemoryAuthority::maybe_record_rehydrate_latency_locked_(
+    const loading::ReplicaKey& key,
+    uint32_t chunk_idx) {
+  std::optional<std::chrono::steady_clock::time_point> start;
+  {
+    std::lock_guard<std::mutex> lk(telemetry_mu_);
+    auto it = pending_rehydrate_.find(PendingRehydrateKey{.key = key, .chunk_idx = chunk_idx});
+    if (it != pending_rehydrate_.end()) {
+      start = it->second;
+      pending_rehydrate_.erase(it);
+    }
+  }
+  if (start.has_value() && memory_tier_budget_) {
+    const auto delta = std::chrono::steady_clock::now() - *start;
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(delta).count();
+    if (ns > 0) {
+      memory_tier_budget_->record_rehydrate_latency(static_cast<uint64_t>(ns));
+    }
+  }
+}
+
+void UnifiedMemoryAuthority::clear_rehydrate_records_for_key_(const loading::ReplicaKey& key) {
+  std::lock_guard<std::mutex> lk(telemetry_mu_);
+  for (auto it = pending_rehydrate_.begin(); it != pending_rehydrate_.end();) {
+    if (it->first.key == key) {
+      it = pending_rehydrate_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 absl::Status UnifiedMemoryAuthority::mark_cpu_chunks_preemptible(const loading::ReplicaKey& key, float ratio) {
   if (ratio < 0.0F || ratio > 1.0F) {
     return absl::InvalidArgumentError("ratio must be between 0.0 and 1.0");
@@ -394,20 +527,7 @@ absl::Status UnifiedMemoryAuthority::mark_cpu_chunks_preemptible(const loading::
     indices.push_back(i);
   }
 
-  auto status = cpu_arena_.mark_preemptible(it->second, indices);
-  if (!status.ok()) {
-    return status;
-  }
-
-  // Update our tracking states
-  for (uint32_t idx : indices) {
-    if (idx < it->second.chunk_records.size()) {
-      it->second.chunk_records[idx].cpu = ChunkState::PREEMPTIBLE;
-      it->second.chunk_records[idx].version += 1;
-    }
-  }
-
-  return absl::OkStatus();
+  return mark_chunks_preemptible_locked_(it->second, indices);
 }
 
 bool UnifiedMemoryAuthority::is_gpu_loading_complete(const loading::ReplicaKey& key, int device_id) const {
@@ -523,6 +643,49 @@ std::vector<std::pair<uint32_t, uint32_t>> UnifiedMemoryAuthority::coalesce_runs
   return runs;
 }
 
+bool UnifiedMemoryAuthority::is_cpu_resident_state_(ChunkState state) {
+  switch (state) {
+    case ChunkState::HOT:
+    case ChunkState::STABLE:
+    case ChunkState::LOCKED_TX:
+    case ChunkState::COLD:
+    case ChunkState::PREEMPTIBLE:
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::vector<uint32_t> UnifiedMemoryAuthority::normalize_chunk_indices_(
+    absl::Span<const uint32_t> indices,
+    size_t num_chunks) {
+  std::vector<uint32_t> normalized;
+  if (indices.empty()) {
+    normalized.resize(num_chunks);
+    std::iota(normalized.begin(), normalized.end(), 0U);
+    return normalized;
+  }
+  normalized.assign(indices.begin(), indices.end());
+  std::sort(normalized.begin(), normalized.end());
+  normalized.erase(std::unique(normalized.begin(), normalized.end()), normalized.end());
+  return normalized;
+}
+
+uint64_t UnifiedMemoryAuthority::chunk_bytes_for_index_(
+    const ReplicaAllocation& alloc,
+    uint64_t chunk_size_bytes,
+    uint32_t idx) {
+  if (chunk_size_bytes == 0) {
+    return 0;
+  }
+  const uint64_t offset = static_cast<uint64_t>(idx) * chunk_size_bytes;
+  if (offset >= alloc.total_bytes) {
+    return 0;
+  }
+  const uint64_t remaining = alloc.total_bytes - offset;
+  return std::min<uint64_t>(chunk_size_bytes, remaining);
+}
+
 absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::plan_load(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation target,
@@ -557,6 +720,23 @@ absl::StatusOr<UnifiedMemoryAuthority::TransferPlan> UnifiedMemoryAuthority::pla
   }
   std::sort(chunks.begin(), chunks.end());
   chunks.erase(std::unique(chunks.begin(), chunks.end()), chunks.end());
+
+  if (chunk_indices.has_value() && !chunk_indices->empty()) {
+    bool preemptible_changed = false;
+    for (uint32_t idx : chunks) {
+      if (idx >= it->second.chunk_records.size()) {
+        continue;
+      }
+      const auto& rec = it->second.chunk_records[idx];
+      if (rec.cpu == ChunkState::PREEMPTIBLE && !is_preemptible_resident_locked_(it->second, idx)) {
+        record_preemptible_fault_locked_(key, idx);
+        preemptible_changed = true;
+      }
+    }
+    if (preemptible_changed) {
+      update_preemptible_budget_locked_();
+    }
+  }
 
   // Build byte ranges (chunk-aligned)
   const size_t chunk_size = chunk_size_bytes_;
@@ -617,7 +797,7 @@ std::vector<uint32_t> UnifiedMemoryAuthority::get_missing_chunks_locked_(
         is_missing = true;
       }
     } else if (target == common::memory::MemoryLocation::CPU) {
-      if (rec.cpu != ChunkState::HOT && rec.cpu != ChunkState::COLD && rec.cpu != ChunkState::PREEMPTIBLE) {
+      if (!is_cpu_resident_state_(rec.cpu)) {
         is_missing = true;
       }
     }
@@ -648,6 +828,14 @@ absl::Status UnifiedMemoryAuthority::commit(
     chunks = rec.chunks; // default to full plan
   }
 
+  auto it = allocations_.find(rec.key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", rec.key.artifact_id));
+  }
+  auto& alloc = it->second;
+  bool mutated = false;
+  const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+
   if (target == common::memory::MemoryLocation::GPU) {
     if (!device_id.has_value()) {
       device_id = rec.device_id;
@@ -655,22 +843,16 @@ absl::Status UnifiedMemoryAuthority::commit(
     if (!device_id.has_value()) {
       return absl::InvalidArgumentError("UMA commit(GPU): device_id is required");
     }
-    // Update UMA ledger directly
-    auto it = allocations_.find(rec.key);
-    if (it == allocations_.end()) {
-      return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", rec.key.artifact_id));
-    }
-    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
     DeviceKey dev_key = DeviceRegistry::instance().gpu_key(*device_id);
     for (uint32_t chunk_idx : chunks) {
-      if (chunk_idx >= it->second.chunk_records.size()) {
+      if (chunk_idx >= alloc.chunk_records.size()) {
         return absl::OutOfRangeError("Chunk index out of range");
       }
-      auto& r = it->second.chunk_records[chunk_idx];
+      auto& r = alloc.chunk_records[chunk_idx];
       auto prev_it = r.gpu.find(dev_key);
       ChunkState prev_state = (prev_it != r.gpu.end()) ? prev_it->second : ChunkState::EVICTED;
       r.gpu[dev_key] = ChunkState::COPIED_GPU;
-      auto& loaded_counts = it->second.loaded_chunk_counts;
+      auto& loaded_counts = alloc.loaded_chunk_counts;
       auto is_loaded = [](ChunkState s) { return s == ChunkState::HOT || s == ChunkState::COPIED_GPU; };
       if (is_loaded(ChunkState::COPIED_GPU) && !is_loaded(prev_state)) {
         loaded_counts[dev_key] += 1;
@@ -680,23 +862,27 @@ absl::Status UnifiedMemoryAuthority::commit(
       }
       r.last_access_ns = now;
       r.version += 1;
+      mutated = true;
     }
   } else if (target == common::memory::MemoryLocation::CPU) {
-    // UMA is authoritative: mark CPU chunks HOT in UMA ledger
-    auto it = allocations_.find(rec.key);
-    if (it == allocations_.end()) {
-      return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", rec.key.artifact_id));
-    }
-    auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+    // UMA is authoritative: mark CPU chunks HOT/STABLE in UMA ledger
     for (uint32_t chunk_idx : chunks) {
-      if (chunk_idx >= it->second.chunk_records.size()) {
+      if (chunk_idx >= alloc.chunk_records.size()) {
         return absl::OutOfRangeError("Chunk index out of range");
       }
-      auto& r = it->second.chunk_records[chunk_idx];
-      r.cpu = ChunkState::HOT;
+      auto& r = alloc.chunk_records[chunk_idx];
+      const ChunkState target_state = (r.stable_lease_count > 0) ? ChunkState::STABLE : ChunkState::HOT;
+      r.cpu = target_state;
       r.last_access_ns = now;
       r.version += 1;
+      mutated = true;
+      maybe_record_rehydrate_latency_locked_(rec.key, chunk_idx);
     }
+  }
+
+  if (mutated) {
+    alloc.ledger_version += 1;
+    update_preemptible_budget_locked_();
   }
 
   sessions_.erase(sit); // RAII: releasing session drops CPU pin leases
@@ -747,6 +933,132 @@ absl::Status UnifiedMemoryAuthority::abort(uint64_t session_id) {
   return absl::OkStatus();
 }
 
+absl::StatusOr<UnifiedMemoryAuthority::StableLease> UnifiedMemoryAuthority::acquire_stable_lease(
+    const loading::ReplicaKey& key,
+    absl::Span<const uint32_t> chunk_indices) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+  if (it->second.num_chunks == 0) {
+    return absl::FailedPreconditionError("Stable lease requested for empty replica");
+  }
+
+  std::vector<uint32_t> normalized = normalize_chunk_indices_(chunk_indices, it->second.num_chunks);
+  if (normalized.empty()) {
+    return absl::InvalidArgumentError("No chunk indices provided for stable lease");
+  }
+
+  const uint64_t pre_version = it->second.ledger_version;
+  uint64_t bytes = 0;
+  bool mutated = false;
+  for (uint32_t idx : normalized) {
+    if (idx >= it->second.num_chunks) {
+      return absl::OutOfRangeError("Chunk index out of range in stable lease");
+    }
+    auto& rec = it->second.chunk_records[idx];
+    rec.stable_lease_count += 1;
+    rec.cpu = ChunkState::STABLE;
+    rec.version += 1;
+    mutated = true;
+    bytes += chunk_bytes_for_index_(it->second, chunk_size_bytes_, idx);
+  }
+  if (mutated) {
+    it->second.ledger_version += 1;
+  }
+
+  StableLease lease;
+  lease.key = key;
+  lease.chunk_indices = std::move(normalized);
+  lease.bytes = bytes;
+  lease.ledger_version = it->second.ledger_version;
+
+  if (memory_tier_budget_) {
+    // Best-effort admission: roll back stable marks if budget is exhausted.
+    auto budget_status = memory_tier_budget_->try_acquire_stable(bytes);
+    if (!budget_status.ok()) {
+      // Undo ledger changes before returning
+      for (uint32_t idx : lease.chunk_indices) {
+        auto& rec = it->second.chunk_records[idx];
+        if (rec.stable_lease_count > 0) {
+          rec.stable_lease_count -= 1;
+          if (rec.stable_lease_count == 0 && rec.cpu == ChunkState::STABLE) {
+            rec.cpu = ChunkState::HOT;
+          }
+          rec.version += 1;
+        }
+      }
+      it->second.ledger_version = pre_version;
+      return budget_status;
+    }
+  }
+
+  return lease;
+}
+
+absl::Status UnifiedMemoryAuthority::release_stable_lease(const StableLease& lease) {
+  return release_stable_lease(lease.key, absl::MakeSpan(lease.chunk_indices));
+}
+
+absl::Status UnifiedMemoryAuthority::release_stable_lease(
+    const loading::ReplicaKey& key,
+    absl::Span<const uint32_t> chunk_indices) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+  if (chunk_indices.empty() && it->second.num_chunks == 0) {
+    return absl::OkStatus();
+  }
+  std::vector<uint32_t> normalized = normalize_chunk_indices_(chunk_indices, it->second.num_chunks);
+  if (normalized.empty()) {
+    return absl::InvalidArgumentError("No chunk indices provided for stable lease release");
+  }
+
+  bool mutated = false;
+  for (uint32_t idx : normalized) {
+    if (idx >= it->second.num_chunks) {
+      return absl::OutOfRangeError("Chunk index out of range in stable lease release");
+    }
+    auto& rec = it->second.chunk_records[idx];
+    if (rec.stable_lease_count == 0) {
+      return absl::FailedPreconditionError("Stable lease not held for specified chunk");
+    }
+    rec.stable_lease_count -= 1;
+    if (rec.stable_lease_count == 0 && rec.cpu == ChunkState::STABLE) {
+      rec.cpu = ChunkState::HOT;
+    }
+    rec.version += 1;
+    mutated = true;
+  }
+
+  if (mutated) {
+    it->second.ledger_version += 1;
+  }
+  if (memory_tier_budget_) {
+    const uint64_t released_bytes = [&]() -> uint64_t {
+      uint64_t total = 0;
+      for (uint32_t idx : normalized) {
+        total += chunk_bytes_for_index_(it->second, chunk_size_bytes_, idx);
+      }
+      return total;
+    }();
+    memory_tier_budget_->release_stable(released_bytes);
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<uint64_t> UnifiedMemoryAuthority::get_ledger_version(const loading::ReplicaKey& key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+  return it->second.ledger_version;
+}
+
 absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthority::set_exported(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location,
@@ -768,11 +1080,16 @@ absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthorit
   auto ranges = coalesce_runs_(absl::MakeSpan(idx));
 
   // Update UMA ledger exported flag
+  bool mutated = false;
   for (uint32_t c : idx) {
     if (c < it->second.chunk_records.size()) {
       if (location == common::memory::MemoryLocation::CPU) {
-        it->second.chunk_records[c].exported_cpu = on;
-        it->second.chunk_records[c].version += 1;
+        auto& rec = it->second.chunk_records[c];
+        if (rec.exported_cpu != on) {
+          rec.exported_cpu = on;
+          rec.version += 1;
+          mutated = true;
+        }
       }
     }
   }
@@ -806,10 +1123,19 @@ absl::StatusOr<UnifiedMemoryAuthority::ExportRegistration> UnifiedMemoryAuthorit
     DeviceKey dev_key = DeviceRegistry::instance().gpu_key(key.device.ordinal);
     for (uint32_t c : idx) {
       if (c < it->second.chunk_records.size()) {
-        it->second.chunk_records[c].exported_gpu[dev_key] = on;
-        it->second.chunk_records[c].version += 1;
+        auto& rec = it->second.chunk_records[c];
+        auto prev = rec.exported_gpu[dev_key];
+        if (prev != on) {
+          rec.exported_gpu[dev_key] = on;
+          rec.version += 1;
+          mutated = true;
+        }
       }
     }
+  }
+
+  if (mutated) {
+    it->second.ledger_version += 1;
   }
 
   // For CPU export disable: UMA drops ledger; pin leases are released when keepalive is dropped by caller.
@@ -877,6 +1203,19 @@ absl::Status UnifiedMemoryAuthority::post_gpu_load_policy(
   if (it == allocations_.end()) {
     return absl::FailedPreconditionError("UMA allocation not found for replica");
   }
+  auto policy_name = [](PostGpuLoadPolicy p) -> const char* {
+    switch (p) {
+      case PostGpuLoadPolicy::EvictCPU:
+        return "EvictCPU";
+      case PostGpuLoadPolicy::MarkPreemptible:
+        return "MarkPreemptible";
+      case PostGpuLoadPolicy::Keep:
+      default:
+        return "Keep";
+    }
+  };
+  VLOG(1) << "UMA post_gpu_load_policy: policy=" << policy_name(policy) << " bytes=" << bytes
+          << " artifact=" << key.artifact_id;
   switch (policy) {
     case PostGpuLoadPolicy::EvictCPU: {
       size_t freed = cpu_arena_.evict_tail_bytes(it->second, bytes);
@@ -888,9 +1227,10 @@ absl::Status UnifiedMemoryAuthority::post_gpu_load_policy(
       // Mark all chunks preemptible as a conservative default
       const size_t chunks = it->second.num_chunks;
       std::vector<uint32_t> all(chunks);
-      for (uint32_t i = 0; i < chunks; ++i)
+      for (uint32_t i = 0; i < chunks; ++i) {
         all[i] = i;
-      return cpu_arena_.mark_preemptible(it->second, all);
+      }
+      return mark_chunks_preemptible_locked_(it->second, all);
     }
     case PostGpuLoadPolicy::Keep:
     default:
@@ -1017,7 +1357,7 @@ absl::Status UnifiedMemoryAuthority::CpuArena::mark_preemptible(
       return absl::OutOfRangeError("Chunk index out of range");
     }
     auto& rec = alloc.chunk_records[i];
-    if (rec.pin_refcnt > 0) {
+    if (rec.pin_refcnt > 0 || rec.stable_lease_count > 0 || rec.cpu == ChunkState::STABLE) {
       continue;
     }
     if (rec.cpu == ChunkState::LOCKED_TX || rec.cpu == ChunkState::EVICTED) {
@@ -1047,7 +1387,7 @@ size_t UnifiedMemoryAuthority::CpuArena::evict_tail_bytes(ReplicaAllocation& all
   size_t freed = 0;
   for (ssize_t idx = static_cast<ssize_t>(alloc.num_chunks) - 1; idx >= 0 && freed < bytes; --idx) {
     auto& rec = alloc.chunk_records[static_cast<size_t>(idx)];
-    if (rec.pin_refcnt > 0) {
+    if (rec.pin_refcnt > 0 || rec.stable_lease_count > 0 || rec.cpu == ChunkState::STABLE) {
       continue;
     }
     if (rec.cpu == ChunkState::LOCKED_TX || rec.cpu == ChunkState::EVICTED) {
@@ -1167,6 +1507,27 @@ void UnifiedMemoryAuthority::CpuArena::release_pins(ReplicaAllocation& alloc, ab
       }
     }
   }
+}
+
+uint64_t UnifiedMemoryAuthority::compute_preemptible_bytes_locked_() const {
+  uint64_t total = 0;
+  for (const auto& kv : allocations_) {
+    const auto& alloc = kv.second;
+    for (size_t idx = 0; idx < alloc.chunk_records.size(); ++idx) {
+      if (alloc.chunk_records[idx].cpu == ChunkState::PREEMPTIBLE &&
+          is_preemptible_resident_locked_(alloc, static_cast<uint32_t>(idx))) {
+        total += chunk_bytes_for_index_(alloc, chunk_size_bytes_, static_cast<uint32_t>(idx));
+      }
+    }
+  }
+  return total;
+}
+
+void UnifiedMemoryAuthority::update_preemptible_budget_locked_() const {
+  if (!memory_tier_budget_) {
+    return;
+  }
+  memory_tier_budget_->set_preemptible_marked_bytes(compute_preemptible_bytes_locked_());
 }
 
 } // namespace tensorcast::store::replica

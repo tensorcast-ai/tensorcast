@@ -123,21 +123,11 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create ReplicaLoadController ---
   auto view_id = config.view_id;
 
-  auto memory_manager = std::make_shared<ReplicaLoadController>(
-      config.artifact_identifier,
-      config.local_device_id,
-      config.pinned_buffer_pool,
-      config.artifact_chunk_bytes,
-      config.max_buffer_bytes,
-      config.pinned_memory_timeout,
-      effective_size,
-      view_id);
-
-  // --- Create Replica Instance ---
-  // Build ReplicaKey for this replica/device
   DeviceKey dev_key;
-  if (config.device_type == DeviceType::GPU) {
-    // Explicit GPU target. Fall back to ordinal 0 if not provided.
+  const bool gpu_requested = (config.device_type == DeviceType::GPU) || (config.local_device_id >= 0);
+  if (gpu_requested) {
+    // Either explicit GPU target or legacy configs that only set local_device_id.
+    // Bind the Replica to that GPU so CUDA stream initialisation works for GPU copies.
     dev_key.type = DeviceType::GPU;
     dev_key.ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
   } else {
@@ -146,6 +136,19 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
     dev_key.ordinal = -1;
   }
 
+  auto memory_manager = std::make_shared<ReplicaLoadController>(
+      config.artifact_identifier,
+      dev_key,
+      config.pinned_buffer_pool,
+      config.artifact_chunk_bytes,
+      config.max_buffer_bytes,
+      config.pinned_memory_timeout,
+      effective_size,
+      view_id,
+      config.memory_tier_config);
+
+  // --- Create Replica Instance ---
+  // Build ReplicaKey for this replica/device
   loading::ReplicaKey inst_key{
       .artifact_id = config.artifact_identifier, .view_id = std::move(view_id), .device = dev_key, .replica = 0};
 

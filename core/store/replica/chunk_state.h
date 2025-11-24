@@ -16,6 +16,7 @@ namespace tensorcast::store::replica {
  */
 enum class ChunkState : uint8_t {
     HOT,         ///< Resident, actively used or not yet transferred
+    STABLE,      ///< Resident and protected by a stable lease (non-preemptible)
     LOCKED_TX,   ///< Locked for H2D or P2P transfer
     COPIED_GPU,  ///< Fully copied to GPU memory
     COLD,        ///< Resident but eligible for eviction
@@ -28,6 +29,8 @@ inline const char* chunk_state_to_string(ChunkState s) noexcept {
   switch (s) {
     case ChunkState::HOT:
       return "HOT";
+    case ChunkState::STABLE:
+      return "STABLE";
     case ChunkState::LOCKED_TX:
       return "LOCKED_TX";
     case ChunkState::COPIED_GPU:

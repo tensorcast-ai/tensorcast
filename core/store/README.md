@@ -100,6 +100,8 @@ graph TB
 
 - Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
 - Canonical Bazel targets: `//core/store/replica:unified_memory_authority` and `//core/store/replica:memory_export_registry`.
+- UMA ledger keys are derived from the Replica `DeviceKey` (GPU ordinals or CPU:-1). CPU materialization binds UMA allocation to the CPU key so memory-tier lease lookups and UMA snapshots reference the same entry.
+- Replica creation upgrades configs that provide `local_device_id >= 0` (even when `device_type` is left as CPU) to a GPU `DeviceKey` so CPU→GPU copy flows still bring up CUDA streams and UMA GPU sessions without requiring callers to flip the device type.
 
 ### Release & Eviction (GPU)
 
@@ -114,7 +116,7 @@ graph TB
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
     - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
-    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path` (rejects content-addressed IDs without that path).
+    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
@@ -267,6 +269,8 @@ stateDiagram-v2
 
 
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
+- `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
+- Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
 - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration

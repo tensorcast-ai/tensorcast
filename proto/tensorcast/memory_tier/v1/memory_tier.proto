@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package tensorcast.memory_tier.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message ChunkRange {
+  uint32 start = 1;
+  uint32 count = 2;
+}
+
+enum LeaseKind {
+  LEASE_KIND_UNSPECIFIED = 0;
+  LEASE_KIND_STABLE = 1;
+  LEASE_KIND_PREEMPTIBLE = 2;
+}
+
+enum LeaseState {
+  LEASE_STATE_UNSPECIFIED = 0;
+  LEASE_STATE_PENDING = 1;
+  LEASE_STATE_ACTIVE = 2;
+  LEASE_STATE_REVOKING = 3;
+  LEASE_STATE_EXPIRED = 4;
+}
+
+enum LeaseAckAction {
+  LEASE_ACK_ACTION_UNSPECIFIED = 0;
+  LEASE_ACK_ACTION_ACQUIRED = 1;
+  LEASE_ACK_ACTION_RELEASED = 2;
+}
+
+message MemoryTierStatus {
+  string node_id = 1;
+  string worker_id = 2;
+  uint64 stable_total_bytes = 3;
+  uint64 stable_used_bytes = 4;
+  uint64 preemptible_total_bytes = 5;
+  uint64 preemptible_marked_bytes = 6;
+  double faults_per_sec = 7;
+  uint64 rehydrate_p99_ns = 8;
+  bool enable_preemptible = 9;
+  string memory_tier_config_json = 10;
+  uint64 epoch_ns = 11;
+}
+
+message PublishMemoryTierStatusRequest {
+  MemoryTierStatus status = 1;
+}
+
+message PublishMemoryTierStatusResponse {}
+
+message MemoryTierLease {
+  string lease_id = 1;
+  string node_id = 2;
+  LeaseKind kind = 3;
+  string artifact_id = 4;
+  ChunkRange chunk_range = 5;
+  repeated uint32 chunk_ids = 6;
+  uint64 ledger_version = 7;
+  uint64 bytes = 8;
+  string workload_id = 9;
+  LeaseState state = 10;
+  string request_id = 11;
+  uint64 ack_epoch_ns = 12;
+  uint64 issued_at_ns = 13;
+  uint64 expires_at_ns = 14;
+}
+
+message RequestMemoryTierLeaseRequest {
+  string node_id = 1;
+  LeaseKind kind = 2;
+  string artifact_id = 3;
+  ChunkRange chunk_range = 4;
+  repeated uint32 chunk_ids = 5;
+  uint64 ledger_version = 6;
+  uint64 bytes = 7;
+  string workload_id = 8;
+  string request_id = 9;
+  uint64 issued_at_ns = 10;
+}
+
+message RequestMemoryTierLeaseResponse {
+  MemoryTierLease lease = 1;
+}
+
+message AcknowledgeMemoryTierLeaseRequest {
+  string lease_id = 1;
+  string node_id = 2;
+  LeaseAckAction action = 3;
+  repeated uint32 chunk_ids = 4;
+  ChunkRange chunk_range = 5;
+  uint64 ledger_version = 6;
+  uint64 bytes = 7;
+  string request_id = 8;
+  uint64 ack_epoch_ns = 9;
+  string artifact_id = 10;
+}
+
+message AcknowledgeMemoryTierLeaseResponse {
+  MemoryTierLease lease = 1;
+}
+
+message RevokeMemoryTierLeaseRequest {
+  string lease_id = 1;
+  string reason = 2;
+}
+
+message RevokeMemoryTierLeaseResponse {
+  MemoryTierLease lease = 1;
+}
+
+message ListOutstandingLeasesRequest {
+  string node_id = 1;
+  repeated LeaseState states = 2;
+}
+
+message ListOutstandingLeasesResponse {
+  repeated MemoryTierLease leases = 1;
+}
+
+service MemoryTierService {
+  rpc PublishMemoryTierStatus(PublishMemoryTierStatusRequest) returns (PublishMemoryTierStatusResponse);
+  rpc RequestMemoryTierLease(RequestMemoryTierLeaseRequest) returns (RequestMemoryTierLeaseResponse);
+  rpc AcknowledgeMemoryTierLease(AcknowledgeMemoryTierLeaseRequest) returns (AcknowledgeMemoryTierLeaseResponse);
+  rpc RevokeMemoryTierLease(RevokeMemoryTierLeaseRequest) returns (RevokeMemoryTierLeaseResponse);
+  rpc ListOutstandingLeases(ListOutstandingLeasesRequest) returns (ListOutstandingLeasesResponse);
+}
