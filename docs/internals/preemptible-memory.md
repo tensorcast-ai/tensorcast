@@ -44,6 +44,7 @@ areas: ["core", "daemon"]
 以下条目直接对应当前代码库（2025Q1）的行为，便于读者将文档与实现对照：
 
 - **稳定租约 Ledger**：`ChunkState` 新增 `STABLE`，`ChunkRecord` 记录 `stable_lease_count` 与单调 `ledger_version`。`acquire_stable_lease`/`release_stable_lease` 会把 chunk 固定为 `STABLE`，`mark_cpu_chunks_preemptible`、`post_gpu_load_policy` 与 `CpuArena::evict_tail_bytes` 都会跳过这些条目。`MemoryExportRegistry::export_chunks` 在 CPU 导出时自动申请稳定租约并在 unexport 时归还，确保导出窗口内的 chunk 不会被预抢占。
+- **预算同步**：稳定租约在申请成功或因 `MemoryTierBudget::try_acquire_stable` 拒绝而回滚后，UMA 都会重新计算 `preemptible_marked_bytes` 并调用 `MemoryTierBudget::set_preemptible_marked_bytes`，确保 telemetry 与 Global Store 所见的可抢占字节数始终与最新 ledger 状态一致。
 - **MemoryTierService 对齐**：daemon 在启动和心跳时通过 `ListOutstandingLeases` 拉取 `pending/active/revoking` 租约，调用 UMA 的稳定租约 API 绑定/释放后用 `AcknowledgeMemoryTierLease` 回传 **artifact_id + chunk_ids + ledger_version + bytes**。Global Store 按租约 ID + artifact 验证并更新 DuckDB，`revoking` 路径同样要求带 chunk_ids 以便审计与重放。
 - **ACK 入参约束**：gRPC 层会拒绝缺少 `chunk_ids` 的 acquire/release ACK，避免租约审计被清空或生成不可重放的记录。
 - **MemoryTier Telemetry/指标**：`MemoryTierStatus` 上报仅写入 `memory_tier_snapshots`，由 `node_memory_tier_latest` 视图在查询时联结 `workers` 以返回最新的稳定/可抢占容量及配置；同时通过 Prometheus 指标暴露 `tensorcast_memory_tier_stable_bytes{state=total|used}`、`tensorcast_memory_tier_preemptible_bytes{state=total|marked}`、`tensorcast_memory_tier_faults_per_sec`、`tensorcast_memory_tier_rehydrate_p99_ns` 和 `tensorcast_memory_tier_enable_preemptible`。

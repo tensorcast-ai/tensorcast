@@ -990,8 +990,10 @@ absl::StatusOr<UnifiedMemoryAuthority::StableLease> UnifiedMemoryAuthority::acqu
         }
       }
       it->second.ledger_version = pre_version;
+      update_preemptible_budget_locked_();
       return budget_status;
     }
+    update_preemptible_budget_locked_();
   }
 
   return lease;

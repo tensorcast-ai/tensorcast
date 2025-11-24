@@ -2,8 +2,6 @@ syntax = "proto3";
 
 package tensorcast.memory_tier.v1;
 
-import "google/protobuf/timestamp.proto";
-
 message ChunkRange {
   uint32 start = 1;
   uint32 count = 2;
