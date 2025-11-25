@@ -12,14 +12,17 @@
 #include "core/common/const/granularity.h"
 #include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/replica/replica_load_controller.h"
 
 namespace fs = std::filesystem;
+using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
+using tensorcast::store::DeviceKey;
 using tensorcast::store::DiskLoader;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::replica::MemoryState;
@@ -79,9 +82,10 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   const size_t artifact_chunk_bytes = tensorcast::common::consts::kArtifactChunkDefault;
+  const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
   auto memmgr = std::make_shared<ReplicaLoadController>(
       "loader_stream_artifact",
-      /*device=*/0,
+      gpu_device,
       pool,
       artifact_chunk_bytes,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming

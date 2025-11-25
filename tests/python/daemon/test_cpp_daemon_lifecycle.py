@@ -19,18 +19,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-import tempfile
 import yaml
-import os
 import grpc
 import pytest
-import yaml
 
 from tensorcast.cli_utils.proc import (
     build_daemon_process_env,
     ensure_cpp_daemon_binary,
 )
-from tensorcast.cli_utils.service_manager import ServiceError
 from tensorcast.global_store.config.settings import (
     GlobalStoreConfig,
 )
@@ -43,6 +39,7 @@ from tensorcast.proto.global_store.v1 import (
     global_store_pb2_grpc,
 )
 from concurrent.futures import ThreadPoolExecutor
+
 
 def _get_free_port() -> int:
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:

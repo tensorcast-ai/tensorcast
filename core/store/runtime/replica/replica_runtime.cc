@@ -335,7 +335,7 @@ absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) 
 
 std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
     const std::string& artifact_identifier,
-    const replica::ReplicaConfig& config) {
+    replica::ReplicaConfig config) {
   DeviceKey device_key;
   device_key.type = config.device_type;
   device_key.ordinal = (config.device_type == DeviceType::GPU) ? config.local_device_id : -1;
@@ -344,6 +344,10 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
       .view_id = config.view_id,
       .device = device_key,
   };
+
+  if (!config.memory_tier_config.has_value() && context_->options().memory_tier_config.has_value()) {
+    config.memory_tier_config = context_->options().memory_tier_config;
+  }
 
   if (auto existing_or = registry().find(inst_key); existing_or.ok()) {
     return existing_or.value();
@@ -355,6 +359,9 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
     return nullptr;
   }
   auto replica = std::shared_ptr<replica::Replica>(std::move(replica_create_or.value()));
+  if (auto budget = context_->memory_tier_budget(); budget) {
+    replica->get_memory_manager().set_memory_tier_budget(budget);
+  }
 
   const bool hydrate_inline_cpu = [&]() -> bool {
     if (config.device_type != DeviceType::CPU) {

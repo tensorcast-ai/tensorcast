@@ -11,6 +11,7 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/memory_tier_config.h"
 #include "gsl/pointers"
 
 // No forward declarations from unrelated namespaces here
@@ -67,6 +68,8 @@ struct ReplicaConfig {
   // - Quantization settings
   // - Memory layout preferences
   // - Performance tuning parameters
+  // - Memory tier enforcement
+  std::optional<MemoryTierConfig> memory_tier_config;
 };
 
 } // namespace tensorcast::store::replica

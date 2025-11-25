@@ -126,7 +126,7 @@ TEST_CASE("MaterializationService reuses resident replicas", "[materialization_s
   REQUIRE(status.ok());
 
   MaterializationService service(harness.BuildDeps());
-  auto result = service.Execute(request);
+  auto result = service.execute(request);
   REQUIRE(result.ok());
   REQUIRE(result->replica_key.artifact_id == request.canonical_artifact_id());
 }
@@ -144,7 +144,7 @@ TEST_CASE("MaterializationService COPY_ONLY fails without GPU sources", "[materi
   REQUIRE(request_or.ok());
 
   MaterializationService service(harness.BuildDeps());
-  auto result = service.Execute(request_or.value());
+  auto result = service.execute(request_or.value());
   REQUIRE_FALSE(result.ok());
   REQUIRE(result.status().code() == absl::StatusCode::kFailedPrecondition);
 }
@@ -170,7 +170,7 @@ TEST_CASE("MaterializationService proxies disk ingestion", "[materialization_ser
   };
 
   MaterializationService service(harness.BuildDeps());
-  auto result = service.Execute(request);
+  auto result = service.execute(request);
   REQUIRE(result.ok());
   REQUIRE(invoked);
 }
@@ -190,13 +190,13 @@ TEST_CASE("MaterializationService AUTO uses injected orchestrator", "[materializ
   REQUIRE(request_or.ok());
 
   MaterializationService service(harness.BuildDeps());
-  auto result = service.Execute(request_or.value());
+  auto result = service.execute(request_or.value());
   REQUIRE(result.ok());
   REQUIRE(result->replica_key.artifact_id == ready_key.artifact_id);
 
   harness.run_auto = [](const MaterializationRequest&) { return absl::AbortedError("downstream failure"); };
   MaterializationService failing_service(harness.BuildDeps());
-  auto failing = failing_service.Execute(request_or.value());
+  auto failing = failing_service.execute(request_or.value());
   REQUIRE_FALSE(failing.ok());
   REQUIRE(failing.status().code() == absl::StatusCode::kFailedPrecondition);
 }

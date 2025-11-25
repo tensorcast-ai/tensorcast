@@ -67,6 +67,7 @@ class WorkerLifecycleManager {
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
   absl::Status reregister_worker(bool preserve_identity);
+  void reconcile_memory_tier_leases_once();
 
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
@@ -107,6 +108,7 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> sync_ticks_{0};
   std::atomic<bool> hb_alive_{false};
   std::atomic<bool> sync_alive_{false};
+  bool memory_tier_enabled_{false};
 
  public:
   // Read-only accessors for metrics exporter

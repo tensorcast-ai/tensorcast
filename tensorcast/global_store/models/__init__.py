@@ -4,6 +4,6 @@
 
 from .replica import MemoryType, Replica
 from .transport import Transport
-from .worker import Worker
+from .worker import Worker, WorkerMemoryTierState
 
-__all__ = ["Replica", "Transport", "Worker", "MemoryType"]
+__all__ = ["Replica", "Transport", "Worker", "WorkerMemoryTierState", "MemoryType"]

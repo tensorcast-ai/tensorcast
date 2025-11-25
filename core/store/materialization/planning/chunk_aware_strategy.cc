@@ -157,27 +157,37 @@ absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
   // Post-loading memory management
   if (overall_status.ok()) {
     const auto& replica_key = mem_manager->replica_key();
+    const bool enable_preemptible =
+        mem_manager->memory_tier_config().has_value() && mem_manager->memory_tier_config()->enable_preemptible_memory;
 
     // Check if this was a DRAM load
     if (plan.target == common::memory::MemoryLocation::CPU) {
       // After initial DRAM load, mark configured ratio as preemptible
-      float preemptible_ratio = 0.5F; // TODO: Make configurable
-      auto preempt_status = mem_manager->mark_cpu_preemptible(preemptible_ratio);
-      if (!preempt_status.ok()) {
-        LOG(WARNING) << "Failed to mark CPU chunks as preemptible: " << preempt_status;
+      if (enable_preemptible) {
+        float preemptible_ratio = 0.5F; // TODO: Make configurable
+        auto preempt_status = mem_manager->mark_cpu_preemptible(preemptible_ratio);
+        if (!preempt_status.ok()) {
+          LOG(WARNING) << "Failed to mark CPU chunks as preemptible: " << preempt_status;
+        } else {
+          VLOG(1) << "Marked " << (preemptible_ratio * 100) << "% of CPU chunks as preemptible after DRAM load";
+        }
       } else {
-        VLOG(1) << "Marked " << (preemptible_ratio * 100) << "% of CPU chunks as preemptible after DRAM load";
+        VLOG(1) << "Skipping preemptible marking for CPU load because preemptible tier is disabled";
       }
     } else if (plan.target == common::memory::MemoryLocation::GPU) {
       // Check if GPU loading is complete
       int device_id = mem_manager->get_local_device_id();
       if (device_id >= 0 && memory.is_gpu_loading_complete(replica_key, device_id)) {
-        // GPU loading complete, mark all DRAM chunks as preemptible
-        auto preempt_status = mem_manager->mark_cpu_preemptible(1.0F);
-        if (!preempt_status.ok()) {
-          LOG(WARNING) << "Failed to mark all CPU chunks as preemptible: " << preempt_status;
+        if (enable_preemptible) {
+          // GPU loading complete, mark all DRAM chunks as preemptible
+          auto preempt_status = mem_manager->mark_cpu_preemptible(1.0F);
+          if (!preempt_status.ok()) {
+            LOG(WARNING) << "Failed to mark all CPU chunks as preemptible: " << preempt_status;
+          } else {
+            VLOG(1) << "Marked all CPU chunks as preemptible after GPU loading completion";
+          }
         } else {
-          VLOG(1) << "Marked all CPU chunks as preemptible after GPU loading completion";
+          VLOG(1) << "Preemptible tier disabled; skipping CPU preemptible marking after GPU load";
         }
       }
     }

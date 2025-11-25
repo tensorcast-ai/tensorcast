@@ -15,6 +15,7 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/common/view_hash_utils.h"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
 #include "core/store/store_engine_options.h"
@@ -38,6 +39,10 @@ class RuntimeContext {
 
   [[nodiscard]] std::shared_ptr<components::CommunicationManager> communication_manager() const {
     return comm_manager_;
+  }
+
+  [[nodiscard]] std::shared_ptr<MemoryTierBudget> memory_tier_budget() const {
+    return memory_tier_budget_;
   }
 
   [[nodiscard]] std::shared_ptr<common::memory::PinnedBufferPool> pinned_buffer_pool() const {
@@ -84,7 +89,7 @@ class RuntimeContext {
   const ingestion::IngestionEventHub* ingestion_event_hub() const;
 
  private:
-  void validate_options() const;
+  absl::Status validate_options() const;
   absl::Status initialize_device_manager();
   absl::Status initialize_communication_manager();
   absl::Status initialize_global_store_client();
@@ -98,6 +103,7 @@ class RuntimeContext {
   std::shared_ptr<components::CommunicationManager> comm_manager_;
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
+  std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
   std::unique_ptr<RuntimeContextEvents> events_;
   std::unique_ptr<ingestion::IngestionEventHub> ingestion_event_hub_;
   components::WorkerIdentity worker_identity_;

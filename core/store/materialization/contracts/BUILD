@@ -48,6 +48,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":loading_spec",
+        "//core/common:artifact_identity_lib",
         "//core/common:memory_location_lib",
         "//core/store:device_manager",
         "//core/store:device_types",

@@ -193,6 +193,10 @@ def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
 
     msg = cfg_pb.DaemonConfig()
     ParseDict(raw, msg, ignore_unknown_fields=False)
+    if msg.engine.HasField("memory_tiers"):
+        mt = msg.engine.memory_tiers
+        if mt.preemptible_low_watermark_ratio <= 0:
+            mt.preemptible_low_watermark_ratio = 0.4
     return msg
 
 

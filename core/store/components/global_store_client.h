@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -20,6 +21,7 @@
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/global_store/v1/global_store.grpc.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
+#include "tensorcast/memory_tier/v1/memory_tier.grpc.pb.h"
 
 namespace tensorcast::store::components {
 
@@ -88,6 +90,56 @@ struct VariantViewUpdate {
   uint64_t canonical_size_bytes{0};
   uint64_t canonical_bytes_covered{0};
   std::vector<global_store::v1::LeafWrite> leaf_writes;
+};
+
+enum class MemoryTierLeaseKind { kStable, kPreemptible };
+enum class MemoryTierLeaseState { kPending, kActive, kRevoking, kExpired };
+enum class MemoryTierAckAction { kAcquired, kReleased };
+
+struct MemoryTierStatusPayload {
+  std::string node_id;
+  std::string worker_id;
+  uint64_t stable_total_bytes{0};
+  uint64_t stable_used_bytes{0};
+  uint64_t preemptible_total_bytes{0};
+  uint64_t preemptible_marked_bytes{0};
+  double faults_per_sec{0.0};
+  uint64_t rehydrate_p99_ns{0};
+  bool enable_preemptible{false};
+  std::string memory_tier_config_json;
+  uint64_t epoch_ns{0};
+};
+
+struct MemoryTierLeaseDescriptor {
+  std::string lease_id;
+  std::string node_id;
+  MemoryTierLeaseKind kind{MemoryTierLeaseKind::kStable};
+  std::string artifact_id;
+  uint32_t chunk_start{0};
+  uint32_t chunk_count{0};
+  std::vector<uint32_t> chunk_ids;
+  uint64_t ledger_version{0};
+  uint64_t bytes{0};
+  std::string workload_id;
+  MemoryTierLeaseState state{MemoryTierLeaseState::kPending};
+  std::string request_id;
+  uint64_t ack_epoch_ns{0};
+  uint64_t issued_at_ns{0};
+  uint64_t expires_at_ns{0};
+};
+
+struct MemoryTierLeaseAckPayload {
+  std::string lease_id;
+  std::string node_id;
+  MemoryTierAckAction action{MemoryTierAckAction::kAcquired};
+  std::string artifact_id;
+  std::vector<uint32_t> chunk_ids;
+  uint32_t chunk_start{0};
+  uint32_t chunk_count{0};
+  uint64_t ledger_version{0};
+  uint64_t bytes{0};
+  std::string request_id;
+  uint64_t ack_epoch_ns{0};
 };
 
 class IGlobalStoreClient {
@@ -213,6 +265,29 @@ class IGlobalStoreClient {
       absl::Duration ttl) = 0;
 
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
+
+  // Memory tier RPCs (optional; default implementations return Unimplemented)
+  virtual absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) {
+    return absl::UnimplementedError("MemoryTierService not available");
+  }
+
+  virtual absl::StatusOr<MemoryTierLeaseDescriptor> request_memory_tier_lease(
+      const MemoryTierLeaseDescriptor& request) {
+    return absl::UnimplementedError("MemoryTierService not available");
+  }
+
+  virtual absl::StatusOr<MemoryTierLeaseDescriptor> acknowledge_memory_tier_lease(
+      const MemoryTierLeaseAckPayload& ack) {
+    return absl::UnimplementedError("MemoryTierService not available");
+  }
+
+  virtual absl::StatusOr<std::vector<MemoryTierLeaseDescriptor>> list_memory_tier_leases(std::string_view node_id) {
+    return absl::UnimplementedError("MemoryTierService not available");
+  }
+
+  virtual absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) {
+    return absl::UnimplementedError("MemoryTierService not available");
+  }
 
   virtual void update_local_endpoint(
       std::string node_id,
@@ -353,6 +428,14 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   absl::Status revoke_key_mapping(std::string_view key) override;
 
+  absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) override;
+  absl::StatusOr<MemoryTierLeaseDescriptor> request_memory_tier_lease(
+      const MemoryTierLeaseDescriptor& request) override;
+  absl::StatusOr<MemoryTierLeaseDescriptor> acknowledge_memory_tier_lease(
+      const MemoryTierLeaseAckPayload& ack) override;
+  absl::StatusOr<std::vector<MemoryTierLeaseDescriptor>> list_memory_tier_leases(std::string_view node_id) override;
+  absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override;
+
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
 
   void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
@@ -382,6 +465,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
   const GlobalStoreClientConfig config_;
   const gsl::not_null<std::shared_ptr<grpc::Channel>> channel_;
   const gsl::not_null<std::unique_ptr<global_store::v1::GlobalStoreService::Stub>> stub_;
+  const gsl::not_null<std::unique_ptr<tensorcast::memory_tier::v1::MemoryTierService::Stub>> memory_tier_stub_;
   std::string worker_id_;
   std::string node_id_;
   std::string node_address_;

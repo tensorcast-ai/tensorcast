@@ -170,6 +170,38 @@ STATE_SYNC_DURATION_SECONDS = Histogram(
     ),
 )
 
+# Memory tier telemetry ------------------------------------------------------
+
+MEMORY_TIER_STABLE_BYTES = Gauge(
+    "tensorcast_memory_tier_stable_bytes",
+    "Stable memory bytes per node (state=total|used).",
+    labelnames=("node", "state"),
+)
+
+MEMORY_TIER_PREEMPTIBLE_BYTES = Gauge(
+    "tensorcast_memory_tier_preemptible_bytes",
+    "Preemptible memory bytes per node (state=total|marked).",
+    labelnames=("node", "state"),
+)
+
+MEMORY_TIER_FAULTS_PER_SEC = Gauge(
+    "tensorcast_memory_tier_faults_per_sec",
+    "Faults per second observed for UMA preemptible memory.",
+    labelnames=("node",),
+)
+
+MEMORY_TIER_REHYDRATE_P99_NS = Gauge(
+    "tensorcast_memory_tier_rehydrate_p99_ns",
+    "p99 rehydration latency (ns) reported by UMA for preemptible chunks.",
+    labelnames=("node",),
+)
+
+MEMORY_TIER_ENABLE_PREEMPTIBLE = Gauge(
+    "tensorcast_memory_tier_enable_preemptible",
+    "Info gauge indicating whether preemptible memory is enabled on the node.",
+    labelnames=("node", "enable_preemptible"),
+)
+
 # ---------------------------------------------------------------------------
 # Helper functions to update high-level gauges from the business logic layer.
 # ---------------------------------------------------------------------------
@@ -185,6 +217,36 @@ def set_total_replicas(count: int) -> None:
     """Set the total replicas gauge to *count*."""
 
     ARTIFACT_REPLICAS_GAUGE.set(count)
+
+
+def observe_memory_tier_snapshot(
+    node_id: str,
+    stable_total_bytes: int,
+    stable_used_bytes: int,
+    preemptible_total_bytes: int,
+    preemptible_marked_bytes: int,
+    faults_per_sec: float,
+    rehydrate_p99_ns: int,
+    enable_preemptible: bool,
+) -> None:
+    """Record the latest memory tier telemetry for a node."""
+
+    MEMORY_TIER_STABLE_BYTES.labels(node=node_id, state="total").set(stable_total_bytes)
+    MEMORY_TIER_STABLE_BYTES.labels(node=node_id, state="used").set(stable_used_bytes)
+    MEMORY_TIER_PREEMPTIBLE_BYTES.labels(node=node_id, state="total").set(
+        preemptible_total_bytes
+    )
+    MEMORY_TIER_PREEMPTIBLE_BYTES.labels(node=node_id, state="marked").set(
+        preemptible_marked_bytes
+    )
+    MEMORY_TIER_FAULTS_PER_SEC.labels(node=node_id).set(faults_per_sec)
+    MEMORY_TIER_REHYDRATE_P99_NS.labels(node=node_id).set(rehydrate_p99_ns)
+    MEMORY_TIER_ENABLE_PREEMPTIBLE.labels(node=node_id, enable_preemptible="true").set(
+        1.0 if enable_preemptible else 0.0
+    )
+    MEMORY_TIER_ENABLE_PREEMPTIBLE.labels(node=node_id, enable_preemptible="false").set(
+        0.0 if enable_preemptible else 1.0
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ namespace tensorcast::store::components {
 
 // Backward-compatibility: map unversioned global_store symbols to v1
 namespace global_store = tensorcast::global_store::v1;
+namespace memory_tier = tensorcast::memory_tier::v1;
 
 namespace {
 // Map Global Store Status enum to readable string
@@ -50,6 +51,84 @@ const char* status_to_cstr(global_store::Status s) {
     default:
       return "<unknown>";
   }
+}
+
+memory_tier::LeaseKind to_proto_kind(MemoryTierLeaseKind kind) {
+  switch (kind) {
+    case MemoryTierLeaseKind::kPreemptible:
+      return memory_tier::LEASE_KIND_PREEMPTIBLE;
+    case MemoryTierLeaseKind::kStable:
+    default:
+      return memory_tier::LEASE_KIND_STABLE;
+  }
+}
+
+MemoryTierLeaseKind from_proto_kind(memory_tier::LeaseKind kind) {
+  switch (kind) {
+    case memory_tier::LEASE_KIND_PREEMPTIBLE:
+      return MemoryTierLeaseKind::kPreemptible;
+    case memory_tier::LEASE_KIND_STABLE:
+    default:
+      return MemoryTierLeaseKind::kStable;
+  }
+}
+
+memory_tier::LeaseState to_proto_state(MemoryTierLeaseState state) {
+  switch (state) {
+    case MemoryTierLeaseState::kActive:
+      return memory_tier::LEASE_STATE_ACTIVE;
+    case MemoryTierLeaseState::kRevoking:
+      return memory_tier::LEASE_STATE_REVOKING;
+    case MemoryTierLeaseState::kExpired:
+      return memory_tier::LEASE_STATE_EXPIRED;
+    case MemoryTierLeaseState::kPending:
+    default:
+      return memory_tier::LEASE_STATE_PENDING;
+  }
+}
+
+MemoryTierLeaseState from_proto_state(memory_tier::LeaseState state) {
+  switch (state) {
+    case memory_tier::LEASE_STATE_ACTIVE:
+      return MemoryTierLeaseState::kActive;
+    case memory_tier::LEASE_STATE_REVOKING:
+      return MemoryTierLeaseState::kRevoking;
+    case memory_tier::LEASE_STATE_EXPIRED:
+      return MemoryTierLeaseState::kExpired;
+    case memory_tier::LEASE_STATE_PENDING:
+    default:
+      return MemoryTierLeaseState::kPending;
+  }
+}
+
+memory_tier::LeaseAckAction to_proto_action(MemoryTierAckAction action) {
+  switch (action) {
+    case MemoryTierAckAction::kReleased:
+      return memory_tier::LEASE_ACK_ACTION_RELEASED;
+    case MemoryTierAckAction::kAcquired:
+    default:
+      return memory_tier::LEASE_ACK_ACTION_ACQUIRED;
+  }
+}
+
+MemoryTierLeaseDescriptor from_proto_lease(const memory_tier::MemoryTierLease& lease) {
+  MemoryTierLeaseDescriptor out;
+  out.lease_id = lease.lease_id();
+  out.node_id = lease.node_id();
+  out.kind = from_proto_kind(lease.kind());
+  out.artifact_id = lease.artifact_id();
+  out.chunk_start = lease.chunk_range().start();
+  out.chunk_count = lease.chunk_range().count();
+  out.chunk_ids.assign(lease.chunk_ids().begin(), lease.chunk_ids().end());
+  out.ledger_version = lease.ledger_version();
+  out.bytes = lease.bytes();
+  out.workload_id = lease.workload_id();
+  out.state = from_proto_state(lease.state());
+  out.request_id = lease.request_id();
+  out.ack_epoch_ns = lease.ack_epoch_ns();
+  out.issued_at_ns = lease.issued_at_ns();
+  out.expires_at_ns = lease.expires_at_ns();
+  return out;
 }
 
 bool is_loopback_or_unspecified(absl::string_view addr) {
@@ -91,7 +170,10 @@ GlobalStoreClient::GlobalStoreClient(GlobalStoreClientConfig config)
       channel_(gsl::not_null<std::shared_ptr<grpc::Channel>>(make_channel(config_))),
       stub_(
           gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>>(
-              global_store::GlobalStoreService::NewStub(channel_.get()))) {}
+              global_store::GlobalStoreService::NewStub(channel_.get()))),
+      memory_tier_stub_(
+          gsl::not_null<std::unique_ptr<memory_tier::MemoryTierService::Stub>>(
+              memory_tier::MemoryTierService::NewStub(channel_.get()))) {}
 
 GlobalStoreClient::~GlobalStoreClient() = default;
 
@@ -125,6 +207,148 @@ absl::Status GlobalStoreClient::initialize() {
 
   LOG(INFO) << "Successfully connected to Global Store at " << config_.global_store_address;
   return absl::OkStatus();
+}
+
+absl::Status GlobalStoreClient::publish_memory_tier_status(const MemoryTierStatusPayload& status) {
+  memory_tier::PublishMemoryTierStatusRequest request;
+  auto* s = request.mutable_status();
+  s->set_node_id(status.node_id);
+  s->set_worker_id(status.worker_id);
+  s->set_stable_total_bytes(status.stable_total_bytes);
+  s->set_stable_used_bytes(status.stable_used_bytes);
+  s->set_preemptible_total_bytes(status.preemptible_total_bytes);
+  s->set_preemptible_marked_bytes(status.preemptible_marked_bytes);
+  s->set_faults_per_sec(status.faults_per_sec);
+  s->set_rehydrate_p99_ns(status.rehydrate_p99_ns);
+  s->set_enable_preemptible(status.enable_preemptible);
+  s->set_memory_tier_config_json(status.memory_tier_config_json);
+  const uint64_t epoch_ns =
+      status.epoch_ns != 0 ? status.epoch_ns : static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
+  s->set_epoch_ns(epoch_ns);
+
+  memory_tier::PublishMemoryTierStatusResponse response;
+  return execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return memory_tier_stub_->PublishMemoryTierStatus(ctx, req, resp);
+      },
+      "PublishMemoryTierStatus");
+}
+
+absl::StatusOr<MemoryTierLeaseDescriptor> GlobalStoreClient::request_memory_tier_lease(
+    const MemoryTierLeaseDescriptor& request_desc) {
+  memory_tier::RequestMemoryTierLeaseRequest request;
+  request.set_node_id(request_desc.node_id);
+  request.set_kind(to_proto_kind(request_desc.kind));
+  request.set_artifact_id(request_desc.artifact_id);
+  request.set_ledger_version(request_desc.ledger_version);
+  request.set_bytes(request_desc.bytes);
+  request.set_workload_id(request_desc.workload_id);
+  request.set_request_id(request_desc.request_id);
+  if (request_desc.issued_at_ns != 0) {
+    request.set_issued_at_ns(request_desc.issued_at_ns);
+  }
+  auto* cr = request.mutable_chunk_range();
+  cr->set_start(request_desc.chunk_start);
+  cr->set_count(request_desc.chunk_count);
+  for (uint32_t id : request_desc.chunk_ids)
+    request.add_chunk_ids(id);
+
+  memory_tier::RequestMemoryTierLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return memory_tier_stub_->RequestMemoryTierLease(ctx, req, resp);
+      },
+      "RequestMemoryTierLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return from_proto_lease(response.lease());
+}
+
+absl::StatusOr<MemoryTierLeaseDescriptor> GlobalStoreClient::acknowledge_memory_tier_lease(
+    const MemoryTierLeaseAckPayload& ack) {
+  if (ack.artifact_id.empty()) {
+    return absl::InvalidArgumentError("artifact_id is required for MemoryTierLease acknowledgements");
+  }
+  memory_tier::AcknowledgeMemoryTierLeaseRequest request;
+  request.set_lease_id(ack.lease_id);
+  request.set_node_id(ack.node_id);
+  request.set_action(to_proto_action(ack.action));
+  request.set_ledger_version(ack.ledger_version);
+  request.set_bytes(ack.bytes);
+  request.set_request_id(ack.request_id);
+  request.set_artifact_id(ack.artifact_id);
+  if (ack.ack_epoch_ns != 0) {
+    request.set_ack_epoch_ns(ack.ack_epoch_ns);
+  }
+  auto* cr = request.mutable_chunk_range();
+  cr->set_start(ack.chunk_start);
+  cr->set_count(ack.chunk_count);
+  for (uint32_t id : ack.chunk_ids)
+    request.add_chunk_ids(id);
+
+  memory_tier::AcknowledgeMemoryTierLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return memory_tier_stub_->AcknowledgeMemoryTierLease(ctx, req, resp);
+      },
+      "AcknowledgeMemoryTierLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return from_proto_lease(response.lease());
+}
+
+absl::StatusOr<std::vector<MemoryTierLeaseDescriptor>> GlobalStoreClient::list_memory_tier_leases(
+    std::string_view node_id) {
+  memory_tier::ListOutstandingLeasesRequest request;
+  request.set_node_id(std::string(node_id));
+  // Default states: pending, active, revoking (mirror server default)
+  request.add_states(memory_tier::LEASE_STATE_PENDING);
+  request.add_states(memory_tier::LEASE_STATE_ACTIVE);
+  request.add_states(memory_tier::LEASE_STATE_REVOKING);
+
+  memory_tier::ListOutstandingLeasesResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return memory_tier_stub_->ListOutstandingLeases(ctx, req, resp);
+      },
+      "ListOutstandingLeases");
+  if (!status.ok()) {
+    return status;
+  }
+  std::vector<MemoryTierLeaseDescriptor> out;
+  out.reserve(response.leases_size());
+  for (const auto& l : response.leases()) {
+    out.push_back(from_proto_lease(l));
+  }
+  return out;
+}
+
+absl::StatusOr<MemoryTierLeaseDescriptor> GlobalStoreClient::revoke_memory_tier_lease(std::string_view lease_id) {
+  memory_tier::RevokeMemoryTierLeaseRequest request;
+  request.set_lease_id(std::string(lease_id));
+
+  memory_tier::RevokeMemoryTierLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return memory_tier_stub_->RevokeMemoryTierLease(ctx, req, resp);
+      },
+      "RevokeMemoryTierLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return from_proto_lease(response.lease());
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::register_worker(

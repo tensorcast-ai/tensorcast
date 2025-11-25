@@ -33,6 +33,9 @@ class GlobalStoreConfig(BaseModel):
     heartbeat_timeout_ms: int = 30000  # 30 seconds
     cleanup_interval_ms: int = 60000  # 1 minute
     default_heartbeat_interval_ms: int = 5000  # 5 seconds
+    memory_tier_snapshot_retention_ms: int = 600000  # 10 minutes
+    memory_tier_snapshot_max_rows: int = 200
+    memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
 
     # Server settings
     port: int = 50051
@@ -113,11 +116,31 @@ class GlobalStoreConfig(BaseModel):
         cleanup_interval_ms = max(0, cleanup_interval_ms)
         default_hb_ms = max(0, default_hb_ms)
 
+        snapshot_retention_ms = 600_000
+        snapshot_max_rows = 200
+        publish_interval_ms = 5000
+        if pb.worker_policy.HasField("memory_tiers"):
+            mt = pb.worker_policy.memory_tiers
+            snapshot_retention_ms = (
+                _dur_ms(mt.snapshot_retention)
+                if mt.HasField("snapshot_retention")
+                else snapshot_retention_ms
+            )
+            snapshot_max_rows = int(mt.snapshot_max_rows) or snapshot_max_rows
+            publish_interval_ms = (
+                _dur_ms(mt.publish_interval)
+                if mt.HasField("publish_interval")
+                else publish_interval_ms
+            )
+
         return cls(
             db_file=db_file,
             heartbeat_timeout_ms=heartbeat_timeout_ms,
             cleanup_interval_ms=cleanup_interval_ms,
             default_heartbeat_interval_ms=default_hb_ms,
+            memory_tier_snapshot_retention_ms=max(0, snapshot_retention_ms),
+            memory_tier_snapshot_max_rows=max(0, snapshot_max_rows),
+            memory_tier_publish_interval_ms=max(0, publish_interval_ms),
             port=port,
             max_workers=max_workers,
             transport_wait_retry_interval_ms=200,

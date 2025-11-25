@@ -208,6 +208,13 @@ void normalize_size_fields(nlohmann::json& root) {
       to_bytes(e["tx_slice_bytes"]);
     if (e.contains("artifact_chunk_bytes"))
       to_bytes(e["artifact_chunk_bytes"]);
+    if (e.contains("memory_tiers") && e["memory_tiers"].is_object()) {
+      auto& mt = e["memory_tiers"];
+      if (mt.contains("stable_bytes"))
+        to_bytes(mt["stable_bytes"]);
+      if (mt.contains("preemptible_limit_bytes"))
+        to_bytes(mt["preemptible_limit_bytes"]);
+    }
   }
   // checkpoint.streaming.* bytes
   if (root.contains("checkpoint") && root["checkpoint"].is_object()) {
@@ -297,6 +304,12 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     e->set_artifact_chunk_bytes(256ULL * 1024 * 1024);
   if (e->streaming_buffer_max_concurrent_sessions() == 0)
     e->set_streaming_buffer_max_concurrent_sessions(1);
+  if (e->has_memory_tiers()) {
+    auto* mt = e->mutable_memory_tiers();
+    if (mt->preemptible_low_watermark_ratio() <= 0.0) {
+      mt->set_preemptible_low_watermark_ratio(0.4);
+    }
+  }
 
   // Lifecycle defaults (durations left at 0s unless specified)
   auto* lf = cfg->mutable_lifecycle();

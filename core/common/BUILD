@@ -191,6 +191,29 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
 )
 
+sc_cc_library(
+    name = "host_memory_lib",
+    srcs = ["memory/host_memory.cc"],
+    hdrs = ["memory/host_memory.h"],
+    includes = ["memory"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_test(
+    name = "host_memory_test",
+    size = "small",
+    srcs = ["memory/host_memory_test.cc"],
+    deps = [
+        ":host_memory_lib",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - Streaming pinned buffer
 sc_cc_library(
     name = "streaming_pinned_buffer_lib",
