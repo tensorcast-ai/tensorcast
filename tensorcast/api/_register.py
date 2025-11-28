@@ -942,6 +942,7 @@ class _LeaseUploader:
                         base_addr=0,
                         length=length_bytes,
                         dst_offset=int(dst_offset),
+                        storage_id=storage_id,
                     )
                 )
                 storages_payload.append(

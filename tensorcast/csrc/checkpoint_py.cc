@@ -837,6 +837,19 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   py::module_::import("warnings")
       .attr("warn")("CUDA not detected, running with FakeCuda backend. Only logical correctness is guaranteed.");
 #endif
+
+  // Expose build configuration for runtime validation
+  m.def(
+      "is_fake_cuda",
+      []() -> bool {
+#ifdef USE_FAKE_CUDA
+        return true;
+#else
+        return false;
+#endif
+      },
+      "Returns True if this extension was built with the fake CUDA backend");
+
   m.def("save_tensors", &tensorcast::checkpoint::save_tensors, "Save a state dict")
       .def(
           "save_tensors_streaming",

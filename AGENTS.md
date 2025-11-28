@@ -140,7 +140,7 @@ bazel test //daemon:session_lifecycle_test \
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
-The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
+Use `nvidia-smi` to check if you have GPU available. The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
 
 ```bash
 # Build Python extension with fake CUDA
@@ -227,7 +227,7 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
   - Good: `loading::ReplicaHandle`, `replica::Replica::create(...)`, `communicator::misc::GB`, `grpc::ServiceImpl` (inside daemon).
   - Avoid: `tensorcast::store::loading::ReplicaHandle`, `tensorcast::store::replica::Replica::create(...)`, `tensorcast::communicator::misc::GB`, `tensorcast::daemon::grpc::ServiceImpl`.
 
-### C++ Guidelines (Simplified)
+### C++ Guidelines
 
 #### Includes vs. Forward Declarations
 - Avoid forward declarations; include the correct headers for any types used in headers and translation units.
@@ -305,6 +305,13 @@ if (fd < 0) {
  - **not_null dereference**: For `gsl::not_null<T*>` and `gsl::not_null<std::shared_ptr<T>>`, use `var->member` instead of `var.get()->member`; prefer `operator->` for readability.
 
 ### Python Guidelines
+- **Python Environment**: MUST use `source .venv/bin/activate` to activate the virtual environment before running any python scripts (including pytest tests)
+- **Package Management**: `uv` (MUST)
+- **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
+- **Type Checking & Linting**: `mypy` and `ruff`
+  - `uv run mypy ./tensorcast`
+  - `uv run ruff check .` and `uv run ruff format .`
+- **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
 
 #### Python Naming Conventions
 - **Files/Directories**: `snake_case` (e.g., `tensorcast/global_store/manager.py`)
@@ -333,13 +340,6 @@ if (fd < 0) {
 - Provide meaningful error messages
 - Prefer `contextlib.suppress` over `try/except` for suppressing exceptions
 
-#### Dependencies & Tools
-- **Package Management**: `uv` (MUST)
-- **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
-- **Type Checking & Linting**: `mypy` and `ruff`
-  - `uv run mypy ./tensorcast`
-  - `uv run ruff check .` and `uv run ruff format .`
-- **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
 
 #### Protobuf Imports
 - Import generated protobuf modules using the canonical package path `tensorcast.proto.<pkg>.v1`.

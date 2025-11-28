@@ -90,6 +90,19 @@ def _install_c_extension_bootstrap() -> None:
 _install_c_extension_bootstrap()
 
 # -----------------------------------------------------------------------------
+# Build configuration validation
+# -----------------------------------------------------------------------------
+# Validate that the C extension's CUDA backend matches the runtime environment.
+# This catches a common misconfiguration where the extension is built with
+# USE_FAKE_CUDA=1 but PyTorch has real CUDA available.
+from tensorcast._build_config import (  # noqa: E402
+    BuildConfigMismatchError,
+    validate_cuda_backend_consistency,
+)
+
+validate_cuda_backend_consistency()
+
+# -----------------------------------------------------------------------------
 # Public package interface remains unchanged below.
 # -----------------------------------------------------------------------------
 
@@ -155,4 +168,5 @@ __all__ = [
     "get_async",
     "get_into",
     "get_into_async",
+    "BuildConfigMismatchError",
 ]
