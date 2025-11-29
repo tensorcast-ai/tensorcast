@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from typing import Any, cast
+from typing import Any
 from types import SimpleNamespace
 
 import grpc
@@ -19,6 +19,12 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
     ArtifactError,
+)
+from tensorcast.api._view_ops import (
+    NarrowOp,
+    ResolvedViewInputs,
+    TransposeOp,
+    ViewSpecBuildResult,
 )
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -77,53 +83,74 @@ class _PlacementRpcError(grpc.RpcError):
 def test_build_view_spec_narrow_normalizes_length() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    view_spec, has_transpose, ops = Store._build_view_spec(
+    result = Store._build_view_spec(
         store,
         canonical_index=canonical,
         slices={"weights": (slice(32, 96),)},
         transpose=None,
     )
-    assert view_spec is not None
-    assert not has_transpose
-    assert "weights" in view_spec.tensors
-    view_ops = view_spec.tensors["weights"].ops
+    assert isinstance(result, ViewSpecBuildResult)
+    assert result.proto is not None
+    assert not result.has_transpose
+    assert "weights" in result.proto.tensors
+    view_ops = result.proto.tensors["weights"].ops
     assert len(view_ops) == 1
     narrow = view_ops[0].narrow
     assert narrow.dim == 0
     assert narrow.start == 32
     assert narrow.length == 64
-    assert ops["weights"][0]["type"] == "narrow"
+    assert result.tensor_ops["weights"][0] == NarrowOp(dim=0, start=32, length=64)
 
 
 def test_build_view_spec_identity_returns_none() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    view_spec, has_transpose, _ = Store._build_view_spec(
+    result = Store._build_view_spec(
         store,
         canonical_index=canonical,
         slices={"weights": (slice(0, 256),)},
         transpose=None,
     )
-    assert view_spec is None
-    assert not has_transpose
+    assert result.proto is None
+    assert result.is_identity
+    assert not result.has_transpose
 
 
 def test_build_view_spec_transpose_canonicalizes_sequence() -> None:
     store = _fresh_store()
     canonical = _make_three_dim_index()
-    view_spec, has_transpose, ops_map = Store._build_view_spec(
+    result = Store._build_view_spec(
         store,
         canonical_index=canonical,
         slices=None,
         transpose={"tensor": [(0, 1), (0, 2)]},
     )
-    assert view_spec is not None
-    assert has_transpose
-    ops = view_spec.tensors["tensor"].ops
+    assert result.proto is not None
+    assert result.has_transpose
+    ops = result.proto.tensors["tensor"].ops
     # Canonical ordering should be deterministic
     assert [(op.transpose.dim0, op.transpose.dim1) for op in ops] == [(0, 2), (1, 2)]
-    assert len(ops_map["tensor"]) == 2
-    assert ops_map["tensor"][0]["type"] == "transpose"
+    assert len(result.tensor_ops["tensor"]) == 2
+    assert all(isinstance(op, TransposeOp) for op in result.tensor_ops["tensor"])
+
+
+def test_build_view_spec_rejects_non_mapping_inputs() -> None:
+    store = _fresh_store()
+    canonical = _make_canonical_index()
+    with pytest.raises(ArtifactError, match="Slice spec must be a mapping"):
+        Store._build_view_spec(
+            store,
+            canonical_index=canonical,
+            slices=[(slice(0, 1),)],
+            transpose=None,
+        )
+    with pytest.raises(ArtifactError, match="Transpose spec must be a mapping"):
+        Store._build_view_spec(
+            store,
+            canonical_index=canonical,
+            slices=None,
+            transpose=[(0, 1)],
+        )
 
 
 def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,6 +162,11 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
     fake_spec.tensors["weights"].ops[-1].narrow.start = 0
     fake_spec.tensors["weights"].ops[-1].narrow.length = 16
 
+    build_result = ViewSpecBuildResult(
+        proto=fake_spec,
+        tensor_ops={"weights": [NarrowOp(dim=0, start=0, length=16)]},
+    )
+
     def fake_resolve(
         self,
         *,
@@ -144,18 +176,13 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
+    ) -> ResolvedViewInputs:
         assert client is fake_client
-        return "artifact-123", b"{}", fake_spec, False, None, {
-            "weights": [{"type": "narrow", "dim": 0, "start": 0, "length": 16}]
-        }
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=b"{}",
+            build_result=build_result,
+        )
 
     monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
 
@@ -228,15 +255,12 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
-        return "artifact-123", b"{}", None, False, None, {}
+    ) -> ResolvedViewInputs:
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=b"{}",
+            build_result=ViewSpecBuildResult.identity(),
+        )
 
     monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
 
@@ -307,21 +331,15 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
-        return (
-            "artifact-123",
-            canonical_index,
-            view_spec,
-            False,
-            None,
-            {"weights": [{"type": "narrow", "dim": 0, "start": 1, "length": 2}]},
+    ) -> ResolvedViewInputs:
+        build_result = ViewSpecBuildResult(
+            proto=view_spec,
+            tensor_ops={"weights": [NarrowOp(dim=0, start=1, length=2)]},
+        )
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=canonical_index,
+            build_result=build_result,
         )
 
     monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
