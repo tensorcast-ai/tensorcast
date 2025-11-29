@@ -32,8 +32,8 @@ using tensorcast::communicator::v1::CommunicatorConfig;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::components::CommunicationManager;
+using tensorcast::store::loading::MaterializeHints;
 using tensorcast::store::loading::ReplicaHandle;
-using tensorcast::store::loading::ReplicaLoadSpec;
 using tensorcast::store::loading::ReplicaTarget;
 using namespace tensorcast::testing;
 
@@ -126,11 +126,8 @@ TEST_CASE("StoreEngine P2P Loader RDMA end-to-end", "[store_engine][p2p][rdma][g
   StoreEngine tgt_store(opts);
 
   // ---------------------------------------------------------------------------
-  // 3. Build a LoadSpec describing the remote GPU source and local GPU target.
+  // 3. Build source/target descriptions for the remote GPU source and local GPU target.
   // ---------------------------------------------------------------------------
-  ReplicaLoadSpec spec;
-  spec.identifier = "remote_artifact";
-
   // Configure P2P source
   P2PSource p2p_src;
   p2p_src.size_bytes = artifact_size;
@@ -142,19 +139,17 @@ TEST_CASE("StoreEngine P2P Loader RDMA end-to-end", "[store_engine][p2p][rdma][g
   p2p_src.location.device_id = 0;
   p2p_src.enable_checksum = true;
   p2p_src.verification_json = verification_json;
-  spec.source = p2p_src;
 
   // Configure target
   ReplicaTarget target;
   target.location.type = MemoryLocation::GPU;
   target.location.device_id = 0;
-  spec.target = target;
+  MaterializeHints hints;
 
   // ---------------------------------------------------------------------------
-  // 4. Issue P2P load via internal helper and wait for completion.
+  // 4. Issue P2P load via the public ingestion API and wait for completion.
   // ---------------------------------------------------------------------------
-  absl::StatusOr<ReplicaHandle> handle_or =
-      tgt_store.ingest_from_p2p_internal("remote_artifact", p2p_src, target, spec.hints);
+  absl::StatusOr<ReplicaHandle> handle_or = tgt_store.ingest_from_p2p("remote_artifact", p2p_src, target, hints);
   REQUIRE(handle_or.ok());
   auto& handle = handle_or.value();
   REQUIRE(handle.ready_future.valid());

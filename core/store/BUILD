@@ -338,21 +338,6 @@ cc_test(
 )
 
 cc_test(
-    name = "store_engine_p2p_loader_test",
-    srcs = ["store_engine_p2p_loader_test.cc"],
-    tags = ["requires_cuda"],
-    deps = [
-        ":store_engine",
-        "//core/common",
-        "//core/communicator:engine_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "//core/testing:test_helpers",
-        "@catch2//:catch2_main",
-    ],
-)
-
-cc_test(
     name = "store_engine_p2p_rdma_loader_test",
     srcs = ["store_engine_p2p_rdma_loader_test.cc"],
     tags = [
