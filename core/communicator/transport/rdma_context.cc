@@ -4,16 +4,22 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
+#include <vector>
 
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_split.h"
 #include "core/common/cuda_api.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/rdma_transport.h"
 
 namespace tensorcast::communicator::transport {
+
+using base::COMMUNICATE_ENGINE_DEV_CPU;
+using base::COMMUNICATE_ENGINE_DEV_GPU;
 
 RdmaContext::RdmaContext() {
   ABSL_CHECK(ibv_init() == misc::SUCCESS) << "failed to init";
@@ -27,6 +33,18 @@ RdmaContext::~RdmaContext() {
 }
 
 misc::result_t RdmaContext::ibv_init() {
+  const char* mlx_dev_name_env = std::getenv("TENSORCAST_IB_HCA");
+  std::unordered_set<std::string> mlx_dev_names = {};
+  if (mlx_dev_name_env != nullptr) {
+    // remove "=" in mlx_dev_names
+    std::string mlx_dev_name = std::regex_replace(mlx_dev_name_env, std::regex("="), "");
+    LOG(INFO) << "using IB HCA Config: " << mlx_dev_name;
+    std::vector<std::string> mlx_dev_names_vec = absl::StrSplit(mlx_dev_name, ',');
+    for (const auto& dev_name : mlx_dev_names_vec) {
+      mlx_dev_names.insert(dev_name);
+    }
+  }
+
   if (misc::wrap_ibv_symbols() != misc::SUCCESS) {
     LOG(WARNING) << "failed to init ibv symbols";
     return misc::SYS_ERROR;
@@ -74,7 +92,12 @@ misc::result_t RdmaContext::ibv_init() {
       dev = std::make_shared<NetDev>(context, d, devices[d], port, port_attr);
 
       if (dev->get_best_gid_index() > 0) {
+        if (mlx_dev_names.size() > 0 && !mlx_dev_names.contains(dev->get_name())) {
+          continue;
+        }
+        LOG(INFO) << "Dev: " << dev->get_name() << " added, rail_id: " << dev->get_rail_id();
         devs_.push_back(dev);
+        rail_devs_[dev->get_rail_id()] = dev;
       }
     }
   }
@@ -97,6 +120,29 @@ net_dev_t RdmaContext::get_dev(const std::string& name) {
     }
   }
   return nullptr;
+}
+
+net_dev_t RdmaContext::get_dev_by_rail(int rail_id) {
+  if (rail_devs_.find(rail_id) == rail_devs_.end()) {
+    return nullptr;
+  }
+  return rail_devs_[rail_id];
+}
+
+net_dev_t RdmaContext::get_best_dev(int dev_type, int dev_id, int rail_id, const std::string& key) {
+  if (dev_type == COMMUNICATE_ENGINE_DEV_CPU) {
+    if (rail_id == -1) {
+      int index = std::hash<std::string>{}(key) % devs_.size();
+      LOG(INFO) << "get_best_dev: dev_type=" << dev_type << " dev_id=" << dev_id << " rail input=" << rail_id
+                << " key=" << key << " index=" << index << " dev=" << devs_[index]->get_name()
+                << " dev rail_id=" << devs_[index]->get_rail_id();
+      return devs_[index];
+    } else {
+      return rail_devs_[rail_id];
+    }
+  } else {
+    return get_best_dev(dev_id);
+  }
 }
 
 net_dev_t RdmaContext::get_best_dev(int gpu_id) {

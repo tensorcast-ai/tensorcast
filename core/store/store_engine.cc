@@ -468,7 +468,7 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Store registration helper for already-loaded replicas
 // ═══════════════════════════════════════════════════════════════════════════
-
+// 注册本地到global store
 absl::Status StoreEngine::register_replica_with_global_store(
     const ReplicaKey& key,
     std::string_view artifact_id_override) {

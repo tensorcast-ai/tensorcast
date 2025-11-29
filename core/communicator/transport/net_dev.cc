@@ -18,15 +18,18 @@ NetDev::NetDev(struct ibv_context* context, int dev_id, struct ibv_device* dev, 
       link_(port.link_layer),
       pci_path_(nullptr),
       gid_tbl_len_(port.gid_tbl_len),
+      numa_id_(0),
       pd_(nullptr),
       cq_(nullptr),
+      rail_id_(0),
       stop_(false) {
   CHECK_WARN(misc::wrap_ibv_alloc_pd(&pd_, context_), "failed to allocate PD");
   CHECK_WARN(misc::wrap_ibv_create_cq(&cq_, context_, 128, nullptr, nullptr, 0), "failed to allocate CQ");
   CHECK_WARN(read_pci_path(), "failed to get pci path");
+  read_numa_id();
   get_best_gid_index();
-
-  register_thread_ = std::thread([this]() { this->register_loop(); });
+  read_rail_id();
+  register_thread_ = std::thread(&NetDev::register_loop, this);
 }
 
 NetDev::~NetDev() {
@@ -63,6 +66,14 @@ int NetDev::get_link() const {
   return link_;
 }
 
+uint8_t NetDev::get_numa_id() const {
+  return numa_id_;
+}
+
+int16_t NetDev::get_rail_id() const {
+  return rail_id_;
+}
+
 ibv_pd* NetDev::get_pd() const {
   return pd_;
 }
@@ -71,7 +82,7 @@ ibv_cq* NetDev::get_cq() const {
   return cq_;
 }
 
-std::string NetDev::get_name() {
+std::string NetDev::get_name() const {
   return dev_name_;
 }
 
@@ -89,6 +100,66 @@ misc::result_t NetDev::read_pci_path() {
     return misc::FAILED;
   }
   return misc::SUCCESS;
+}
+
+misc::result_t NetDev::read_numa_id() {
+  char numa_id_path[1024];
+  snprintf(numa_id_path, sizeof(numa_id_path), "/sys/class/infiniband/%s/device/numa_node", dev_name_.c_str());
+  std::ifstream numa_id_file(numa_id_path);
+  std::string line;
+  while (std::getline(numa_id_file, line)) {
+    if (line.empty() || line[0] == '#') {
+      continue;
+    }
+    numa_id_ = uint8_t(std::stoi(line));
+    break;
+  }
+  return misc::SUCCESS;
+}
+
+void NetDev::read_rail_id() {
+  const char* lldp_file_name = std::getenv("TENSORCAST_LLDP_FILE_NAME");
+  if (lldp_file_name != nullptr) {
+    std::ifstream lldp_file(lldp_file_name);
+    std::string line;
+    // brainpf_bond0=0000:19:00.0,mlx5_bond100,1
+    while (std::getline(lldp_file, line)) {
+      if (line.empty() || line[0] == '#') {
+        continue;
+      }
+      // use = to split, get the left part of eth_name and the right part of value_part
+      size_t eq_pos = line.find('=');
+      if (eq_pos == std::string::npos) {
+        continue;
+      }
+
+      std::string eth_name = line.substr(0, eq_pos), value_part = line.substr(eq_pos + 1);
+
+      // use , to split the right part
+      std::istringstream iss(value_part);
+      std::string pci_path, mlx5_name, rail_id_str;
+
+      if (!std::getline(iss, pci_path, ',') || !std::getline(iss, mlx5_name, ',') ||
+          !std::getline(iss, rail_id_str, ','))
+        continue;
+
+      // check if mlx5_name matches the current device name
+      if (mlx5_name == dev_name_) {
+        try {
+          int rail_id = std::stoi(rail_id_str);
+          rail_id_ = uint16_t(rail_id);
+        } catch (const std::exception& e) {
+          LOG(WARNING) << "Failed to parse rail_id: " << rail_id_str;
+        }
+        break; // exit the loop
+      }
+    }
+  } else {
+    // base: by mlx5_name
+    if (std::regex_match(this->dev_name_, std::regex("mlx5_(\\d+)"))) {
+      this->rail_id_ = uint16_t(std::stoi(this->dev_name_.substr(this->dev_name_.find_last_of('_') + 1)));
+    }
+  }
 }
 
 int NetDev::get_best_gid_index() {
@@ -150,17 +221,22 @@ misc::result_t NetDev::create_qp(struct ibv_qp** ret, struct ibv_qp_init_attr* q
 }
 
 void NetDev::register_loop() {
+  uint64_t counter = 0;
   while (!stop_.load()) {
     auto t = register_queue_.pop(true);
     if (stop_.load()) {
       break;
     }
     if (t == nullptr) {
+      counter++;
+      if (counter % 3000 == 0) {
+        std::this_thread::yield();
+      }
       continue;
     }
 
     auto start = misc::get_us();
-    t->register_mr();
+    t->register_mr(this);
     LOG(INFO) << "register done: dev=" << dev_name_ << ", cost=" << misc::get_us() - start;
   }
 }

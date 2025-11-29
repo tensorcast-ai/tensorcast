@@ -84,6 +84,7 @@ struct ProtoMtcpConnectFailed {
 struct ProtoReadRequest {
   char tensor_key[kMaxTensorNameLen];
   uint8_t transport_type;
+  int16_t rail_id;
   uint64_t offset;
   uint64_t bytes;
 };
@@ -99,7 +100,8 @@ struct ProtoReadResponseExHeader {
   uint32_t window_seq;
   uint32_t credit_granted;
   uint8_t more_segments; // 1 when additional windows remain
-  uint8_t reserved[3];
+  int16_t rail_id;
+  uint8_t reserved[1];
 };
 
 struct ProtoReadResponseExSeg {

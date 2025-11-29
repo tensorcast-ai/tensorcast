@@ -46,6 +46,7 @@ class Channel {
     absl::Time next_retry_at ABSL_GUARDED_BY(mu) = absl::InfinitePast();
     int failure_count ABSL_GUARDED_BY(mu) = 0;
     bool retry_scheduled ABSL_GUARDED_BY(mu) = false;
+    std::vector<int> dst_nic_rail;
   };
 
   explicit Channel(

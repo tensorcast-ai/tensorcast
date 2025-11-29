@@ -331,11 +331,11 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
       COMMUNICATE_ENGINE_DEV_GPU,
       net_dev);
   local_tensor->set_device_id(0);
-  local_tensor->register_mr();
+  local_tensor->register_mr(net_dev.get());
   local_tensor->set_read_ready();
 
   auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
-      "rdma_handshake_tensor", "127.0.0.1", 65000, local_tensor, /*remote_offset=*/0);
+      "rdma_handshake_tensor", "127.0.0.1", 65000, local_tensor, /*remote_offset=*/0, net_dev->get_rail_id());
   auto remote_tensor = std::make_shared<tensorcast::communicator::transport::RemotePartitionTensor>(
       "rdma_handshake_tensor", remote_dev_name, /*addr=*/0xABC0, local_tensor->get_bytes(), /*rkey=*/0x1234);
   read_request->set_remote_tensor(remote_tensor);
@@ -467,7 +467,7 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
       COMMUNICATE_ENGINE_DEV_GPU,
       net_dev);
   local_tensor->set_device_id(0);
-  local_tensor->register_mr();
+  local_tensor->register_mr(net_dev.get());
   local_tensor->set_read_ready();
 
   auto read_request = std::make_shared<tensorcast::communicator::transport::ReadRequest>(
