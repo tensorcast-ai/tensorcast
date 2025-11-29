@@ -226,6 +226,7 @@ void release_device_buffer(void** ptr) {
   *ptr = nullptr;
 }
 
+#ifdef USE_FAKE_CUDA
 absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
     const uint8_t* device_base,
     uint64_t total_size,
@@ -270,11 +271,13 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
   }
   return root.value();
 }
+#endif // USE_FAKE_CUDA
 
 #ifndef USE_FAKE_CUDA
 constexpr char kSha256KernelName[] = "tensorcast_sha256_leaf_kernel";
 
 constexpr char kSha256KernelSource[] = R"NVRTC(
+typedef unsigned long long uint64_t;
 typedef unsigned int WORD;
 typedef unsigned char BYTE;
 
@@ -554,6 +557,32 @@ struct NvrtcSha256Kernel {
   }
 };
 
+std::string read_nvrtc_log(nvrtcProgram program) {
+  size_t log_size = 0;
+  if (nvrtcGetProgramLogSize(program, &log_size) != NVRTC_SUCCESS || log_size <= 1) {
+    return {};
+  }
+  std::string log(log_size, '\0');
+  if (nvrtcGetProgramLog(program, log.data()) != NVRTC_SUCCESS) {
+    return {};
+  }
+  while (!log.empty() && (log.back() == '\0' || log.back() == '\n')) {
+    log.pop_back();
+  }
+  return log;
+}
+
+std::string format_nvrtc_options(absl::Span<const char* const> options) {
+  std::string formatted;
+  for (const char* option : options) {
+    if (!formatted.empty()) {
+      absl::StrAppend(&formatted, ", ");
+    }
+    absl::StrAppend(&formatted, "'", option, "'");
+  }
+  return formatted;
+}
+
 absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(int major, int minor) {
   nvrtcProgram program;
   nvrtcResult create_result =
@@ -565,18 +594,24 @@ absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(i
 
   std::string arch_option = absl::StrCat("--gpu-architecture=compute_", major, minor);
   std::array<const char*, 2> options{"--std=c++17", arch_option.c_str()};
-  nvrtcResult compile_result = nvrtcCompileProgram(program, static_cast<int>(options.size()), options.data());
+  absl::Span<const char* const> options_span(options.data(), options.size());
+  nvrtcResult compile_result = nvrtcCompileProgram(program, static_cast<int>(options_span.size()), options_span.data());
 
-  size_t log_size = 0;
-  nvrtcGetProgramLogSize(program, &log_size);
-  if (log_size > 1) {
-    std::string log(log_size, '\0');
-    nvrtcGetProgramLog(program, log.data());
-    VLOG(1) << "NVRTC SHA256 kernel log:\n" << log.c_str();
+  const std::string log = read_nvrtc_log(program);
+  if (!log.empty()) {
+    VLOG(1) << "NVRTC SHA256 kernel log:\n" << log;
   }
 
   if (compile_result != NVRTC_SUCCESS) {
-    return absl::InternalError(absl::StrCat("nvrtcCompileProgram failed: ", nvrtcGetErrorString(compile_result)));
+    std::string message =
+        absl::StrCat("nvrtcCompileProgram failed: ", nvrtcGetErrorString(compile_result), " (options: ");
+    absl::StrAppend(&message, format_nvrtc_options(options_span), ")");
+    if (!log.empty()) {
+      absl::StrAppend(&message, "; NVRTC log:\n", log);
+    } else {
+      absl::StrAppend(&message, "; NVRTC log empty or unavailable");
+    }
+    return absl::InternalError(message);
   }
 
   size_t ptx_size = 0;
