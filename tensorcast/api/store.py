@@ -58,6 +58,13 @@ from tensorcast.api._register import (
 )
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
+from tensorcast.api._view_ops import (
+    ResolvedViewInputs,
+    SliceSpec,
+    ViewSpecBuildResult,
+    _coerce_slice_spec,
+    build_view_spec,
+)
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
@@ -94,9 +101,6 @@ ArtifactStatusCode = Literal[
     "DATA_LOSS",
     "UNAUTHENTICATED",
 ]
-
-NormalizedViewOpDict = dict[str, int | str]
-MutableNormalizedViewOps = dict[str, list[NormalizedViewOpDict]]
 
 
 class ArtifactError(RuntimeError):
@@ -1488,213 +1492,49 @@ class Store:
         canonical_index: CanonicalIndex,
         slices: Mapping[str, Sequence[object]] | None,
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None,
-    ) -> tuple[
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        MutableNormalizedViewOps,
-    ]:
-        if not slices and not transpose:
-            return None, False, {}
-
-        entry_map: dict[str, CanonicalIndexEntry] = {
-            entry.name: entry for entry in canonical_index.entries
+    ) -> ViewSpecBuildResult:
+        entry_shapes = {
+            entry.name: tuple(entry.shape) for entry in canonical_index.entries
         }
+        try:
+            if slices is not None and not isinstance(slices, Mapping):
+                raise ValueError("Slice spec must be a mapping of tensor name to slice")
+            if transpose is not None and not isinstance(transpose, Mapping):
+                raise ValueError(
+                    "Transpose spec must be a mapping of tensor name to dim pairs"
+                )
+            typed_slices: Mapping[str, SliceSpec] | None = None
+            if slices:
+                typed_slices = {}
+                for name, spec_seq in slices.items():
+                    if not isinstance(spec_seq, Sequence) or not spec_seq:
+                        raise ValueError(
+                            f"Slice spec for '{name}' must be a non-empty sequence"
+                        )
+                    typed_slices[name] = _coerce_slice_spec(spec_seq)
 
-        tensor_names_slices = set(slices.keys()) if slices else set()
-        tensor_names_transpose = set(transpose.keys()) if transpose else set()
-        overlap = tensor_names_slices & tensor_names_transpose
-        if overlap:
-            offending = ", ".join(sorted(overlap))
+            if transpose:
+                for name, ops in transpose.items():
+                    if not isinstance(ops, Sequence):
+                        raise ValueError(
+                            f"Transpose spec for '{name}' must be a non-empty sequence"
+                        )
+                    if not ops:
+                        raise ValueError(
+                            f"Transpose spec for '{name}' must be a non-empty sequence"
+                        )
+
+            return build_view_spec(
+                entry_shapes=entry_shapes,
+                slices=typed_slices,
+                transpose=transpose,
+            )
+        except ValueError as exc:
             raise ArtifactError(
-                f"Cannot apply slices and transpose to the same tensor(s): {offending}",
+                str(exc),
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
-            )
-
-        tensor_ops: dict[str, store_daemon_pb2.TensorViewOps] = {}
-        normalized_ops: MutableNormalizedViewOps = {}
-        has_ops = False
-        has_transpose = False
-
-        def ensure_ops(name: str) -> store_daemon_pb2.TensorViewOps:
-            if name not in tensor_ops:
-                tensor_ops[name] = store_daemon_pb2.TensorViewOps()
-            normalized_ops.setdefault(name, [])
-            return tensor_ops[name]
-
-        # Narrow handling (single-dimension)
-        if slices:
-            for name, spec_seq in sorted(slices.items()):
-                entry = entry_map.get(name)
-                if entry is None:
-                    raise ArtifactError(
-                        f"View references unknown tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                if not isinstance(spec_seq, Sequence) or not spec_seq:
-                    raise ArtifactError(
-                        f"Slice spec for '{name}' must be a non-empty sequence",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                resolved: list[tuple[int, slice]] = []
-                inferred_dim = 0
-                for item in spec_seq:
-                    if isinstance(item, slice):
-                        resolved.append((inferred_dim, item))
-                        inferred_dim += 1
-                    elif (
-                        isinstance(item, tuple)
-                        and len(item) == 2
-                        and isinstance(item[0], int)
-                        and isinstance(item[1], slice)
-                    ):
-                        resolved.append((int(item[0]), item[1]))
-                    else:
-                        raise ArtifactError(
-                            f"Slice spec for '{name}' must contain slice objects or (dim, slice) tuples",
-                            status_code="INVALID_ARGUMENT",
-                            retryable=False,
-                        )
-                if len(resolved) != 1:
-                    raise ArtifactError(
-                        f"Only a single narrow operation is supported per tensor (got {len(resolved)} for '{name}')",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                dim, slice_obj = resolved[0]
-                ndims = len(entry.shape)
-                if dim < 0 or dim >= ndims:
-                    raise ArtifactError(
-                        f"Slice dim {dim} out of range for tensor '{name}' (ndim={ndims})",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                step = 1 if slice_obj.step is None else slice_obj.step
-                if step != 1:
-                    raise ArtifactError(
-                        f"Slice step must be 1 for tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                dim_extent = entry.shape[dim]
-                start = 0 if slice_obj.start is None else int(slice_obj.start)
-                stop = dim_extent if slice_obj.stop is None else int(slice_obj.stop)
-                if start < 0:
-                    start += dim_extent
-                if stop < 0:
-                    stop += dim_extent
-                if start < 0 or start >= dim_extent:
-                    raise ArtifactError(
-                        f"Slice start {start} out of range for tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                if stop <= start:
-                    raise ArtifactError(
-                        f"Slice stop {stop} must be greater than start {start} for tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                length = stop - start
-                if length > dim_extent:
-                    raise ArtifactError(
-                        f"Slice length {length} exceeds dimension {dim_extent} for tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                # Ensure the requested slice does not exceed the dimension bounds.
-                # Example: dim_extent=10, start=8, stop=15 -> length=7 (<=10) but 8+7>10
-                # Reject such cases to avoid server-side errors.
-                if start + length > dim_extent:
-                    raise ArtifactError(
-                        f"Slice range [{start}, {stop}) exceeds dimension {dim_extent} for tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                if start == 0 and length == dim_extent:
-                    continue  # identity
-                op_container = ensure_ops(name)
-                op = op_container.ops.add()
-                op.narrow.dim = int(dim)
-                op.narrow.start = int(start)
-                op.narrow.length = int(length)
-                normalized_ops[name].append(
-                    {
-                        "type": "narrow",
-                        "dim": int(dim),
-                        "start": int(start),
-                        "length": int(length),
-                    }
-                )
-                has_ops = True
-
-        if transpose:
-            for name, ops in sorted(transpose.items()):
-                entry = entry_map.get(name)
-                if entry is None:
-                    raise ArtifactError(
-                        f"View references unknown tensor '{name}'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                if not isinstance(ops, Sequence) or not ops:
-                    raise ArtifactError(
-                        f"Transpose spec for '{name}' must be a non-empty sequence",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                ndims = len(entry.shape)
-                permutation = list(range(ndims))
-                for dim0, dim1 in ops:
-                    a = int(dim0)
-                    b = int(dim1)
-                    if a == b:
-                        continue
-                    if a < 0 or a >= ndims or b < 0 or b >= ndims:
-                        raise ArtifactError(
-                            f"Transpose dims {a},{b} out of range for tensor '{name}'",
-                            status_code="INVALID_ARGUMENT",
-                            retryable=False,
-                        )
-                    permutation[a], permutation[b] = permutation[b], permutation[a]
-                if permutation == list(range(ndims)):
-                    continue
-                # Canonicalise permutation using swap-to-place strategy
-                current = list(range(ndims))
-                op_container = ensure_ops(name)
-                for target_idx in range(ndims):
-                    desired = permutation[target_idx]
-                    if current[target_idx] == desired:
-                        continue
-                    source_idx = current.index(desired)
-                    if target_idx == source_idx:
-                        continue
-                    swap_op = op_container.ops.add()
-                    swap_op.transpose.dim0 = int(target_idx)
-                    swap_op.transpose.dim1 = int(source_idx)
-                    current[target_idx], current[source_idx] = (
-                        current[source_idx],
-                        current[target_idx],
-                    )
-                    normalized_ops[name].append(
-                        {
-                            "type": "transpose",
-                            "dim0": int(target_idx),
-                            "dim1": int(source_idx),
-                        }
-                    )
-                    has_ops = True
-                    has_transpose = True
-
-        if not has_ops:
-            return None, False, {}
-
-        spec = store_daemon_pb2.ViewSpec()
-        for name in sorted(tensor_ops.keys()):
-            spec.tensors[name].CopyFrom(tensor_ops[name])
-        return spec, has_transpose, normalized_ops
+            ) from exc
 
     def _resolve_view_inputs(
         self,
@@ -1705,14 +1545,7 @@ class Store:
         slices: Mapping[str, Sequence[object]] | None,
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        MutableNormalizedViewOps,
-    ]:
+    ) -> ResolvedViewInputs:
         resolved_artifact_id, resolved_key = artifact_id, key
         resolved_artifact_id, resolved_key = self._resolve_identifiers(
             resolved_artifact_id, resolved_key, None
@@ -1732,11 +1565,6 @@ class Store:
                     retryable=False,
                 )
 
-        canonical_index_bytes: bytes | None = None
-        view_spec: store_daemon_pb2.ViewSpec | None = None
-        has_transpose = False
-        normalized_ops: MutableNormalizedViewOps = {}
-
         if view_id is not None:
             if slices or transpose:
                 raise ArtifactError(
@@ -1744,13 +1572,10 @@ class Store:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-            return (
-                resolved_artifact_id,
-                canonical_index_bytes,
-                view_spec,
-                has_transpose,
-                disk_path_hint,
-                normalized_ops,
+            return ResolvedViewInputs.from_view_id(
+                artifact_id=resolved_artifact_id,
+                view_id=view_id,
+                disk_path_hint=disk_path_hint,
             )
 
         # Building a spec requires canonical metadata.
@@ -1763,18 +1588,16 @@ class Store:
 
         canonical_index_bytes = client.get_artifact_index_by_id(resolved_artifact_id)
         canonical_index = self._canonical_index_from_bytes(canonical_index_bytes)
-        view_spec, has_transpose, normalized_ops = self._build_view_spec(
+        build_result = self._build_view_spec(
             canonical_index=canonical_index,
             slices=slices,
             transpose=transpose,
         )
-        return (
-            resolved_artifact_id,
-            canonical_index_bytes,
-            view_spec,
-            has_transpose,
-            disk_path_hint,
-            normalized_ops,
+        return ResolvedViewInputs.from_build_result(
+            artifact_id=resolved_artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            build_result=build_result,
+            disk_path_hint=disk_path_hint,
         )
 
     @staticmethod
@@ -2174,14 +1997,7 @@ class Store:
                 retryable=False,
             )
         client = self._ensure_client()
-        (
-            resolved_artifact_id,
-            canonical_index_bytes,
-            view_spec,
-            has_transpose,
-            _,
-            normalized_ops,
-        ) = self._resolve_view_inputs(
+        resolved = self._resolve_view_inputs(
             client=client,
             artifact_id=artifact_id,
             key=key,
@@ -2189,28 +2005,38 @@ class Store:
             transpose=transpose,
             view_id=view_id,
         )
-        if view_spec is None:
+        if resolved.variant == "id":
             raise ArtifactError(
                 "View registration via pre-existing view_id is not supported yet",
                 status_code="UNIMPLEMENTED",
                 retryable=False,
             )
+        assert resolved.build_result is not None
+        if resolved.build_result.is_identity:
+            raise ArtifactError(
+                "View registration requires explicit view operations",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        placement_has_transpose = resolved.has_transpose
         placement_choice = placement
         if placement_choice is None:
-            placement_choice = "CLIENT" if has_transpose else "SERVER"
+            placement_choice = "CLIENT" if placement_has_transpose else "SERVER"
         placement_enum = self._resolve_transform_placement(
-            placement_choice, has_transpose=has_transpose
+            placement_choice, has_transpose=placement_has_transpose
         )
-        assert canonical_index_bytes is not None
+        assert resolved.canonical_index_bytes is not None
+        canonical_index_bytes = resolved.canonical_index_bytes
         canonical_index = self._canonical_index_from_bytes(canonical_index_bytes)
         plan_metadata = _compute_view_plan_metadata(
-            canonical_index_bytes, normalized_ops
+            canonical_index_bytes, resolved.build_result
         )
         canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
         view_options = store_daemon_pb2.ViewRegistrationOptions()
-        if view_id:
-            view_options.view_id = view_id
-        view_options.spec.CopyFrom(view_spec)
+        if resolved.view_id:
+            view_options.view_id = resolved.view_id
+        assert resolved.build_result.proto is not None
+        view_options.spec.CopyFrom(resolved.build_result.proto)
         view_options.placement = placement_enum
         view_options.canonical_size_bytes = canonical_index.total_size_bytes
         for rng in canonical_ranges:
@@ -2223,7 +2049,7 @@ class Store:
             upload_tensors = dict(tensors)
         elif placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_CLIENT:
             upload_tensors = _materialize_canonical_tensors(
-                canonical_index_bytes, normalized_ops, tensors
+                resolved.canonical_index_bytes, resolved.build_result, tensors
             )
         else:
             raise ArtifactError(
@@ -2356,14 +2182,7 @@ class Store:
                 retryable=False,
             )
         client = self._ensure_client()
-        (
-            resolved_artifact_id,
-            canonical_index_bytes,
-            view_spec,
-            has_transpose,
-            disk_path_hint,
-            _,
-        ) = self._resolve_view_inputs(
+        resolved = self._resolve_view_inputs(
             client=client,
             artifact_id=artifact_id,
             key=key,
@@ -2372,24 +2191,24 @@ class Store:
             view_id=view_id,
         )
         placement_enum: TransformPlacement | None = None
-        if view_spec is not None or placement is not None:
+        if resolved.view_spec is not None or placement is not None:
             placement_enum = self._resolve_transform_placement(
-                placement, has_transpose=has_transpose
+                placement, has_transpose=resolved.has_transpose
             )
 
         materialized, _ = self._perform_get_with_retry(
             method="get_view",
-            artifact_id=resolved_artifact_id,
+            artifact_id=resolved.artifact_id,
             key=None,
             device=device,
             fallback=None,
             cancel_event=None,
             options_override=options,
-            view=view_spec,
-            view_id=view_id,
+            view=resolved.view_spec,
+            view_id=resolved.view_id,
             placement=placement_enum,
-            canonical_index_hint=canonical_index_bytes,
-            disk_path_hint=disk_path_hint,
+            canonical_index_hint=resolved.canonical_index_bytes,
+            disk_path_hint=resolved.disk_path_hint,
         )
         return materialized.state_dict
 
@@ -2596,14 +2415,7 @@ class Store:
                 retryable=False,
             )
         client = self._ensure_client()
-        (
-            resolved_artifact_id,
-            canonical_index_bytes,
-            view_spec,
-            has_transpose,
-            disk_path_hint,
-            _,
-        ) = self._resolve_view_inputs(
+        resolved = self._resolve_view_inputs(
             client=client,
             artifact_id=artifact_id,
             key=key,
@@ -2612,24 +2424,24 @@ class Store:
             view_id=view_id,
         )
         placement_enum: TransformPlacement | None = None
-        if view_spec is not None or placement is not None:
+        if resolved.view_spec is not None or placement is not None:
             placement_enum = self._resolve_transform_placement(
-                placement, has_transpose=has_transpose
+                placement, has_transpose=resolved.has_transpose
             )
 
         materialized, device_id = self._perform_get_with_retry(
             method="get_view_into",
-            artifact_id=resolved_artifact_id,
+            artifact_id=resolved.artifact_id,
             key=None,
             device=device,
             fallback=None,
             cancel_event=None,
             options_override=options,
-            view=view_spec,
-            view_id=view_id,
+            view=resolved.view_spec,
+            view_id=resolved.view_id,
             placement=placement_enum,
-            canonical_index_hint=canonical_index_bytes,
-            disk_path_hint=disk_path_hint,
+            canonical_index_hint=resolved.canonical_index_bytes,
+            disk_path_hint=resolved.disk_path_hint,
         )
         try:
             layout_bytes = (
