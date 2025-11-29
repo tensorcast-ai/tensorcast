@@ -465,9 +465,10 @@ class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
     def initialize_options(self):
         BuildExtension.initialize_options(self)
-        self.clean = False
+
     def finalize_options(self):
         BuildExtension.finalize_options(self)
+
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_checkpoint_runtime_and_daemon(

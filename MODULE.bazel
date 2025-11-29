@@ -13,7 +13,6 @@ llvm.toolchain(
     },
     urls = {
         "linux-x86_64": [
-            "file:///home/niehao/tensorcast/LLVM-19.1.1-Linux-X64.tar.xz",
             "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-19.1.1/LLVM-19.1.1-Linux-X64.tar.xz",
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.1/LLVM-19.1.1-Linux-X64.tar.xz",
         ],
