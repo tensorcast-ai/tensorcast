@@ -32,6 +32,7 @@ using tensorcast::store::materialization::view::VariantIdentity;
 struct DiskSource {
   std::filesystem::path path;
   std::optional<uint64_t> expected_size;
+  bool require_descriptor{true};
 };
 
 struct InlineBufferSource {

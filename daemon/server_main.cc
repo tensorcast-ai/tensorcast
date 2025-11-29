@@ -82,6 +82,15 @@ int main(int argc, char** argv) {
         cfg.engine().pinned_allocation_timeout().nanos() / 1000000);
   }
   opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
+  if (cfg.engine().has_memory_tiers()) {
+    store::MemoryTierConfig tiers;
+    const auto& mt = cfg.engine().memory_tiers();
+    tiers.enable_preemptible_memory = mt.enable_preemptible();
+    tiers.stable_bytes = mt.stable_bytes();
+    tiers.preemptible_limit_bytes = mt.preemptible_limit_bytes();
+    tiers.preemptible_low_watermark_ratio = mt.preemptible_low_watermark_ratio();
+    opts.memory_tier_config = tiers;
+  }
 
   // Communicator setup (always create; RDMA enable is a config toggle inside engine)
   std::shared_ptr<store::components::CommunicationManager> comm_mgr;

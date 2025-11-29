@@ -11,13 +11,17 @@
 #include "absl/time/time.h"
 #include "core/common/cuda_api.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/memory_tier_config.h"
+#include "core/store/replica/chunk_state.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 
 namespace fs = std::filesystem;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::common::memory::PinnedBufferPool;
+using tensorcast::store::MemoryTierConfig;
 using tensorcast::store::loading::DiskSource;
+using tensorcast::store::replica::ChunkState;
 using tensorcast::store::replica::MemoryState;
 using tensorcast::store::replica::Replica;
 using tensorcast::store::replica::ReplicaConfig;
@@ -114,6 +118,98 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   REQUIRE(host_buf == combined);
 
   // Teardown
+  replica.reset();
+  pool.reset();
+  fs::remove_all(base);
+}
+
+TEST_CASE(
+    "Preemptible-disabled replicas keep CPU residency through GPU load",
+    "[replica][disk][copy][preemptible_off]") {
+  if (!is_cuda_available()) {
+    SKIP("CUDA not available. Skipping preemptible-off residency test.");
+  }
+
+  const std::string artifact_id = "preemptible_off_artifact";
+  const std::string artifact_dir_name = "preemptible_off_model_files";
+  const std::string shard_name = "tensor.data_0";
+  const size_t chunk_bytes = 1 * 1024 * 1024; // 1 MiB UMA chunking for the test fixture
+  const size_t payload_size = chunk_bytes * 2; // two full chunks
+
+  fs::path base = fs::temp_directory_path() / "preemptible_off_test";
+  if (fs::exists(base)) {
+    fs::remove_all(base);
+  }
+  fs::create_directories(base / artifact_dir_name);
+
+  fs::path shard_path = base / artifact_dir_name / shard_name;
+  REQUIRE(create_dummy_file(shard_path, payload_size, 'Z'));
+
+  REQUIRE(write_rfc0007_descriptor_for_standard_artifact_dir(base / artifact_dir_name).ok());
+
+  const size_t pool_total = 4 * chunk_bytes;
+  const size_t pool_chunk = chunk_bytes / 4;
+  auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
+  REQUIRE(pool != nullptr);
+
+  MemoryTierConfig mem_tier_cfg;
+  mem_tier_cfg.enable_preemptible_memory = false;
+  mem_tier_cfg.stable_bytes = pool_total;
+  mem_tier_cfg.preemptible_limit_bytes = 0;
+  mem_tier_cfg.preemptible_low_watermark_ratio = 0.2;
+
+  DiskSource disk_src;
+  disk_src.path = base / artifact_dir_name;
+
+  ReplicaConfig cfg{
+      .source = disk_src,
+      .artifact_identifier = artifact_id,
+      .device_type = ::tensorcast::DeviceType::CPU,
+      .local_device_id = 0,
+      .pinned_buffer_pool = pool,
+      .artifact_chunk_bytes = chunk_bytes,
+      .expected_artifact_size = payload_size,
+      .max_buffer_bytes = pool_total,
+      .memory_tier_config = mem_tier_cfg};
+
+  auto replica_or = Replica::create(cfg);
+  REQUIRE(replica_or.ok());
+  auto replica = std::move(*replica_or);
+
+  // Initial CPU load should not mark any chunk as PREEMPTIBLE when the tier is disabled.
+  auto cpu_fut = replica->ensure_loaded_async(MemoryLocation::CPU);
+  REQUIRE(cpu_fut.valid());
+  REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(15)).ok());
+  REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
+
+  auto& mem_manager = replica->get_memory_manager();
+  auto uma = mem_manager.memory_authority();
+  const auto replica_key = mem_manager.replica_key();
+  auto cpu_snapshot = uma->snapshot_cpu_chunks(replica_key);
+  REQUIRE_FALSE(cpu_snapshot.empty());
+  for (const auto& rec : cpu_snapshot) {
+    REQUIRE(rec.cpu != ChunkState::PREEMPTIBLE);
+  }
+
+  // Load to GPU and ensure post-GPU policy keeps CPU residency and stable states.
+  REQUIRE(tensorcast::cuda::set_device(cfg.local_device_id).ok());
+  auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
+  REQUIRE(gpu_fut.valid());
+  REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
+  REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
+
+  REQUIRE(mem_manager.get_state(MemoryLocation::CPU) == MemoryState::LOADED);
+  auto cpu_ptrs = mem_manager.get_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  REQUIRE(cpu_ptrs[0] != nullptr);
+
+  auto snapshot_after_gpu = uma->snapshot_cpu_chunks(replica_key);
+  REQUIRE(snapshot_after_gpu.size() == cpu_snapshot.size());
+  for (const auto& rec : snapshot_after_gpu) {
+    REQUIRE(rec.cpu != ChunkState::PREEMPTIBLE);
+    REQUIRE(rec.cpu != ChunkState::EVICTED);
+  }
+
   replica.reset();
   pool.reset();
   fs::remove_all(base);

@@ -11,6 +11,7 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/memory_tier_config.h"
 #include "gsl/pointers"
 
 // No forward declarations from unrelated namespaces here
@@ -58,7 +59,7 @@ struct ReplicaConfig {
 
   // Future runtime configurations can be added here:
   // - Variant residency metadata (view identifiers)
-  std::optional<std::string> view_id;
+  std::optional<std::string> view_id = std::nullopt;
   // - View execution plan metadata for variant-aware replicas
   std::optional<loader::ViewPlan> view_plan;
   // - Transform placement preference (server/client)
@@ -67,6 +68,8 @@ struct ReplicaConfig {
   // - Quantization settings
   // - Memory layout preferences
   // - Performance tuning parameters
+  // - Memory tier enforcement
+  std::optional<MemoryTierConfig> memory_tier_config;
 };
 
 } // namespace tensorcast::store::replica

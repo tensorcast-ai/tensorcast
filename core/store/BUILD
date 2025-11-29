@@ -45,6 +45,15 @@ sc_header_only_library(
     ],
 )
 
+sc_header_only_library(
+    name = "testing_recording_global_store_client",
+    hdrs = ["testing/recording_global_store_client.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":global_store_client",
+    ],
+)
+
 # UMA target is canonical: depend on //core/store/replica:unified_memory_authority
 
 # ========== Core store components ==========
@@ -63,10 +72,27 @@ sc_cc_library(
 
 sc_header_only_library(
     name = "store_engine_options",
-    hdrs = ["store_engine_options.h"],
+    hdrs = [
+        "memory_tier_config.h",
+        "store_engine_options.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:const_granularity_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "memory_tier_budget",
+    srcs = ["memory_tier_budget.cc"],
+    hdrs = ["memory_tier_budget.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":store_engine_options",
+        "//core/common:host_memory_lib",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -93,6 +119,7 @@ sc_cc_library(
         "//core/store/replica:chunk_state",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+        "//proto/tensorcast/memory_tier/v1:memory_tier_grpc_cc",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
         "@gsl",
@@ -161,69 +188,6 @@ sc_header_only_library(
 )
 
 sc_cc_library(
-    name = "registration_facade",
-    srcs = ["components/registration/registration_facade.cc"],
-    hdrs = ["components/registration/registration_facade.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":communication_manager",
-        ":component_catalog",
-        ":device_manager",
-        ":eviction_service",
-        ":global_store_publisher",
-        ":metrics_collector",
-        ":replica_registry",
-        ":view_utils",
-        "//core/common:artifact_hash_lib",
-        "//core/common:artifact_identity_lib",
-        "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
-        "//core/common:memory_location_lib",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/common:trace_macros_lib",
-        "//core/store:device_types",
-        "//core/store/materialization/contracts:loading_spec",
-        "//core/store/materialization/dataplane:canonical_index",
-        "//core/store/materialization/dataplane:segment_plan_source",
-        "//core/store/materialization/dataplane:source_hash",
-        "//core/store/materialization/dataplane:verification_utils",
-        "//core/store/materialization/dataplane:view_ingest_executor",
-        "//core/store/materialization/dataplane:view_plan_source",
-        "//core/store/materialization/dataplane:view_planner",
-        "//core/store/replica",
-        "//proto/tensorcast/global_store/v1:global_store_cc",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/time",
-        "@abseil-cpp//absl/types:span",
-        "@gsl",
-    ],
-)
-
-cc_test(
-    name = "registration_facade_test",
-    srcs = ["components/registration/registration_facade_test.cc"],
-    deps = [
-        ":device_manager",
-        ":metrics_collector",
-        ":registration_facade",
-        ":replica_registry",
-        "//core/common:artifact_hash_lib",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/store/materialization/dataplane:source_hash",
-        "//core/store/materialization/dataplane:view_planner",
-        "//core/store/replica",
-        "//core/testing:catch_main",
-        "@abseil-cpp//absl/status:statusor",
-        "@abseil-cpp//absl/strings:string_view",
-        "@abseil-cpp//absl/time",
-        "@abseil-cpp//absl/types:span",
-        "@catch2//:catch2_main",
-        "@nlohmann_json//:json",
-    ],
-)
-
-sc_cc_library(
     name = "eviction_service",
     srcs = ["components/eviction_service.cc"],
     hdrs = ["components/eviction_service.h"],
@@ -249,116 +213,6 @@ cc_test(
         "//core/testing:catch_main",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@catch2//:catch2_main",
-    ],
-)
-
-sc_cc_library(
-    name = "component_catalog",
-    srcs = ["components/runtime/component_catalog.cc"],
-    hdrs = ["components/runtime/component_catalog.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":communication_manager",
-        ":device_manager",
-        ":global_store_client",
-        ":metrics_collector",
-        ":replica_registry",
-        ":store_engine_options",
-        ":worker_identity",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/store/materialization/common:view_hash_utils",
-    ],
-)
-
-sc_cc_library(
-    name = "replica_service",
-    srcs = ["components/runtime/replica_service.cc"],
-    hdrs = [
-        "components/runtime/replica_info.h",
-        "components/runtime/replica_service.h",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":communication_manager",
-        ":component_catalog",
-        ":device_manager",
-        ":eviction_service",
-        ":metrics_collector",
-        ":replica_registry",
-        "//core/common:cuda_api_lib",
-        "//core/common:pinned_buffer_pool_lib",
-        "//core/store:communication_types",
-        "//core/store/materialization/contracts:loading_spec",
-        "//core/store/replica",
-        "//core/store/replica:memory_state",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/time",
-        "@gsl",
-    ],
-)
-
-sc_cc_library(
-    name = "global_store_publisher",
-    srcs = ["components/runtime/global_store_publisher.cc"],
-    hdrs = ["components/runtime/global_store_publisher.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":component_catalog",
-        ":device_types",
-        ":global_store_client",
-        ":ingestion_events",
-        ":replica_service",
-        "//core/common:memory_location_lib",
-        "//core/store/materialization/contracts:loading_spec",
-        "//core/store/materialization/control:replica_registration_helper",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/time",
-        "@gsl",
-    ],
-)
-
-sc_header_only_library(
-    name = "ingestion_events",
-    hdrs = ["components/runtime/ingestion_events.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":device_types",
-        "//core/common:memory_location_lib",
-        "//core/store/materialization/contracts:loading_spec",
-        "@abseil-cpp//absl/status",
-    ],
-)
-
-sc_cc_library(
-    name = "telemetry_service",
-    srcs = ["components/runtime/telemetry_service.cc"],
-    hdrs = ["components/runtime/telemetry_service.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":component_catalog",
-        ":device_types",
-        ":ingestion_events",
-        ":replica_service",
-        "//core/store/materialization/contracts:loading_spec",
-        "//core/store/replica:chunk_state",
-    ],
-)
-
-cc_test(
-    name = "runtime_services_test",
-    srcs = ["components/runtime/runtime_services_test.cc"],
-    tags = ["requires_cuda"],
-    deps = [
-        ":component_catalog",
-        ":replica_service",
-        ":store_engine_options",
-        "//core/store/materialization/contracts:loading_spec",
-        "//core/store/replica",
-        "//core/testing:catch_main",
-        "//core/testing:test_helpers",
-        "@abseil-cpp//absl/log:absl_check",
-        "@catch2//:catch2_main",
-        "@gsl",
     ],
 )
 
@@ -395,15 +249,11 @@ sc_cc_library(
     deps = [
         ":communication_manager",
         ":communication_types",
-        ":component_catalog",
         ":device_types",
         ":eviction_service",
         ":global_store_client",
-        ":global_store_publisher",
-        ":registration_facade",
-        ":replica_service",
+        ":memory_tier_budget",
         ":store_engine_options",
-        ":telemetry_service",
         ":view_utils",
         ":worker_identity",
         "//core/checkpoint:checkpoint_lib",
@@ -417,9 +267,6 @@ sc_cc_library(
         "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/contracts:materialization_request",
-        "//core/store/materialization/control:materialization_coordinator",
-        "//core/store/materialization/control:materialization_service",
-        "//core/store/materialization/control:materialize_orchestrator",
         "//core/store/materialization/control:replica_registration_helper",
         "//core/store/materialization/dataplane:canonical_index",
         "//core/store/materialization/dataplane:disk_loader",
@@ -436,6 +283,10 @@ sc_cc_library(
         "//core/store/replica",
         "//core/store/replica:memory_state",
         "//core/store/replica:replica_config",
+        "//core/store/runtime:runtime_env",
+        "//core/store/runtime/ingestion:ingestion_runtime",
+        "//core/store/runtime/metadata:metadata_gateway",
+        "//core/store/runtime/replica:replica_runtime",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/functional:overload",
@@ -462,6 +313,7 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
+        ":testing_recording_global_store_client",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",
@@ -524,6 +376,7 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         ":store_engine",
+        ":testing_recording_global_store_client",
         "//core/common",
         "//core/testing:catch_main",
         "//core/testing:common",

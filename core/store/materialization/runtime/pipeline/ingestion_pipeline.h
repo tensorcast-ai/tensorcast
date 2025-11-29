@@ -7,11 +7,6 @@
 #include <string>
 
 #include "absl/status/statusor.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/global_store_publisher.h"
-#include "core/store/components/runtime/ingestion_events.h"
-#include "core/store/components/runtime/replica_service.h"
-#include "core/store/components/runtime/telemetry_service.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/runtime/pipeline/allocation_stage.h"
 #include "core/store/materialization/runtime/pipeline/handle_stage.h"
@@ -19,9 +14,14 @@
 #include "core/store/materialization/runtime/pipeline/metadata_stage.h"
 #include "core/store/materialization/runtime/pipeline/source_adapter.h"
 #include "core/store/materialization/runtime/pipeline/verification_stage.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/ingestion_events.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
+
+namespace store_runtime = tensorcast::store::runtime;
 
 class IngestionPipeline {
  public:
@@ -31,27 +31,32 @@ class IngestionPipeline {
     size_t artifact_chunk_bytes;
     std::chrono::milliseconds pinned_memory_timeout;
     const StoreEngineOptions* engine_options;
-    components::runtime::ReplicaService* replica_service;
-    components::runtime::ComponentCatalog* component_catalog;
-    components::runtime::TelemetryService* telemetry_service;
-    components::runtime::GlobalStorePublisher* global_store_publisher;
+    store_runtime::ReplicaRuntime* replica_runtime;
+    store_runtime::RuntimeContext* runtime_context;
   };
 
   explicit IngestionPipeline(Config config);
+  virtual ~IngestionPipeline() = default;
 
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
+  virtual absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
-      bool publish_to_global_store = true);
+      bool publish_to_global_store = true,
+      store_runtime::IngestionResultEvent* event_out = nullptr,
+      std::string request_id = {},
+      std::string publish_context_id = {});
 
-  absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
+  virtual absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints,
-      bool publish_to_global_store = true);
+      bool publish_to_global_store = true,
+      store_runtime::IngestionResultEvent* event_out = nullptr,
+      std::string request_id = {},
+      std::string publish_context_id = {});
 
  private:
   Config config_;

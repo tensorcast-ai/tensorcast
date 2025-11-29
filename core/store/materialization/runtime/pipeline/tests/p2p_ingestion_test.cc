@@ -9,11 +9,11 @@
 #include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
-#include "core/store/components/runtime/component_catalog.h"
-#include "core/store/components/runtime/replica_service.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
+#include "core/store/runtime/context/runtime_context.h"
+#include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
 #include "core/testing/test_helpers.h"
 
@@ -24,9 +24,9 @@ using tensorcast::communicator::engine::Communicator;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::components::CommunicationManager;
-using tensorcast::store::components::runtime::ComponentCatalog;
-using tensorcast::store::components::runtime::ReplicaService;
 using tensorcast::store::loading::ReplicaTarget;
+using tensorcast::store::runtime::ReplicaRuntime;
+using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::testing::create_test_pattern;
 using tensorcast::testing::find_available_port;
 using tensorcast::testing::make_tcp_communicator_config;
@@ -35,12 +35,13 @@ using tensorcast::testing::verify_pattern;
 namespace {
 
 struct PipelineHarness {
-  ComponentCatalog catalog;
-  std::unique_ptr<ReplicaService> replica_service;
+  RuntimeContext catalog;
+  std::unique_ptr<ReplicaRuntime> replica_runtime;
   std::unique_ptr<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline> pipeline;
 
   explicit PipelineHarness(const StoreEngineOptions& opts)
-      : catalog(opts), replica_service(std::make_unique<ReplicaService>(&catalog)) {
+      : catalog(opts),
+        replica_runtime(std::make_unique<ReplicaRuntime>(ReplicaRuntime::Config{.runtime_context = &catalog})) {
     CHECK_OK(catalog.start());
     tensorcast::store::materialization::runtime::pipeline::IngestionPipeline::Config cfg{
         .storage_path = fs::path(opts.storage_path),
@@ -48,17 +49,15 @@ struct PipelineHarness {
         .artifact_chunk_bytes = opts.artifact_chunk_bytes,
         .pinned_memory_timeout = opts.pinned_memory_timeout,
         .engine_options = &opts,
-        .replica_service = replica_service.get(),
-        .component_catalog = &catalog,
-        .telemetry_service = nullptr,
-        .global_store_publisher = nullptr,
+        .replica_runtime = replica_runtime.get(),
+        .runtime_context = &catalog,
     };
     pipeline = std::make_unique<tensorcast::store::materialization::runtime::pipeline::IngestionPipeline>(cfg);
   }
 
   ~PipelineHarness() {
-    if (replica_service) {
-      replica_service->clear_mem();
+    if (replica_runtime) {
+      replica_runtime->clear_mem();
     }
     catalog.shutdown();
   }
@@ -144,7 +143,7 @@ TEST_CASE("IngestionPipeline P2P Loader TCP end-to-end", "[pipeline][p2p][gpu]")
   REQUIRE(handle.ready_future.valid());
   REQUIRE(handle.ready_future.get().ok());
 
-  auto gpu_ptr_result = harness.replica_service->get_replica_gpu_ptr(handle.replica_key);
+  auto gpu_ptr_result = harness.replica_runtime->get_replica_gpu_ptr(handle.replica_key);
   REQUIRE(gpu_ptr_result.ok());
   void* gpu_ptr = reinterpret_cast<void*>(gpu_ptr_result.value());
   std::vector<uint8_t> verify_buf(artifact_size);

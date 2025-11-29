@@ -8,6 +8,21 @@ from typing import Optional
 
 
 @dataclass
+class WorkerMemoryTierState:
+    """Latest memory tier snapshot materialized for a worker."""
+
+    stable_total_bytes: int = 0
+    stable_used_bytes: int = 0
+    preemptible_total_bytes: int = 0
+    preemptible_marked_bytes: int = 0
+    faults_per_sec: float = 0.0
+    rehydrate_p99_ns: int = 0
+    enable_preemptible: bool = False
+    memory_tier_config_json: str = "{}"
+    snapshot_epoch_ns: int = 0
+
+
+@dataclass
 class Worker:
     """Represents a Store Daemon worker node in the cluster."""
 
@@ -30,6 +45,9 @@ class Worker:
     # Timestamps
     registered_at: Optional[datetime] = None
     last_heartbeat: Optional[datetime] = None
+
+    # Latest memory tier state (optional)
+    memory_tier_state: Optional[WorkerMemoryTierState] = None
 
     @property
     def memory_utilization(self) -> float:

@@ -1,61 +1,73 @@
 ---
 slug: 0016-artifact-view-v1
-title: Variant-Aware Artifact Views (Narrow & Transpose)
+title: Variant-Aware Artifact Views (Retrieval & Registration)
 areas: ["core","daemon","global_store","sdk"]
 related_code:
   - core/store/materialization/dataplane/**
   - daemon/**
   - tensorcast/api/**
+  - tensorcast/global_store/**
 links:
-  plan_core: ../plans/0016-a-artifact-view-v1-core.md
-  plan_daemon_proto: ../plans/0016-b-artifact-view-v1-daemon-proto.md
-  plan_global_store: ../plans/0016-c--artifact-view-v1-global-store.md
-  plan_sdk: ../plans/0016-d--artifact-view-v1-sdk.md
   schema: ../../schema.sql
 ---
 
 # Summary
 
-This design introduces **Variant-Aware Views** for TensorCast artifacts.  A *view* is a reproducible, verifiable logical transformation over a canonical artifact that allows:
+This document is the canonical description of **Variant-Aware Artifact Views** in TensorCast. A view is a reproducible, verifiable logical transformation over a canonical artifact that allows clients to work on slices or layout-transposed tensors without materialising the entire artifact. The same architecture powers both retrieval (`get_view`, `get_view_into`) and registration (`register_view`).
 
-* partial registration & retrieval (tensor slicing / TP shards)
-* optional layout permutation (channel–dimension transpose)
-* bandwidth-reduced P2P transport by transferring only required bytes
+Variant views enable:
 
-Version 1 supports two PyTorch-compatible transforms:
+* **Partial transfer** – fetch or upload only the byte ranges that matter (for example tensor-parallel shards).
+* **Layout control** – optionally transpose dimension pairs so consumers see the layout they expect.
+* **Precise identity** – canonical `mi2_core` identity stays authoritative while each view receives its own `view_id` and `view_data_hash`.
+* **Symmetric verification** – TreeHash plus per-leaf digests cover both canonical and variant ByteSpaces with identical policies.
+* **Placement-aware execution** – clients choose whether transforms execute on the daemon (`SERVER`) or client (`CLIENT`) side; ingestion mirrors retrieval.
 
-* `torch.narrow(dim, start, length)` — contiguous slicing (step = 1)
-* `torch.transpose(dim0, dim1)` — dimension permutation
-
-All metadata, identity, and integrity rules are enforced in C++ core; Python SDK and Daemon merely call into the core helpers.
-
-The v1 release prioritises retrieval (`get_view` / `get_view_into`). Registration semantics are defined here but roll out with follow-up plan `0018-artifact-view-registration`; until then, canonical registration remains the only write path.
+> This document supersedes the earlier registration draft (`0018-artifact-view-registration`). All artifact-view behaviour now lives here as a single source of truth.
 
 # Goals / Non-Goals
 
 ## Goals
 
-1. Define the architecture so clients can **retrieve** and, in a follow-up release, **register** canonical *slices* or *transposed* views without materialising the whole artifact.
-2. Maintain a single canonical identity (`mi2_core`) while allowing multiple variant identities (`view_id`).
-3. Reduce network and IO by server-side byte range selection when possible.
-4. Preserve end-to-end verifiability via one-time strong validation and fast leaf validation thereafter.
-5. Provide a database schema extension that represents variants and variant leaves unambiguously.
+1. Allow clients to **retrieve** and **register** contiguous slices or per-tensor transposes without materialising the full artifact.
+2. Keep the canonical identity (`mi2_core`) authoritative while introducing deterministic `view_id` + `view_data_hash` for each variant.
+3. Reduce network, disk, and GPU IO by selecting minimal byte ranges server-side whenever possible.
+4. Provide symmetric placement semantics (`SERVER`/`CLIENT`) and bidirectional planning so the same code paths cover loads and ingests.
+5. Persist variant metadata and leaves in Global Store with clear schema extensions and SDK ergonomics.
+6. Maintain end-to-end verifiability through TreeHash roots and per-leaf digests shared by canonical and variant ByteSpaces.
 
 ## Non-Goals
 
-* Support for `reshape`, arbitrary stride slicing, channels-last conversion, or quantisation (future work).
-* Runtime on-the-fly graph rewrites; only storage & transport concerns are addressed.
+* New transform kinds (`reshape`, arbitrary striding, channels-last conversion, quantisation) remain out of scope.
+* Runtime graph rewrites and execution planning beyond storage/transport are not addressed.
+* Chunk-directory routing stays canonical-only in v1; replicas are still discovered via canonical coverage.
+* No schema downgrades or v2 compatibility paths; canonical index v3 is mandatory everywhere.
+* Automatic conflict detection or reconciliation between overlapping registrations is not part of this release.
 
-# Architecture & Interfaces
+# 1. Architecture & Interfaces
 
-## 1. Coordinate Systems
+## 1.1 Supported Transform Surface
+
+Version 1 supports two PyTorch-compatible per-tensor transforms:
+
+* `torch.narrow(dim, start, length)` — contiguous slice (`step = 1`).
+* `torch.transpose(dim0, dim1)` — dimension permutation.
+
+Rules:
+
+* A single tensor may participate in **either** `narrow` **or** `transpose`, never both.
+* `narrow` is limited to one dimension per tensor; `length > 0` and `start + length ≤ shape[dim]`.
+* You may mix transform kinds across different tensors inside the same view.
+* Tensors omitted from the `ViewSpec` are treated as identity passes.
+
+## 1.2 Coordinate Systems
 
 | Term | ID | Byte range | Source |
 |------|----|------------|--------|
-| **Canonical ByteSpace** | `index_multihash` | `[0,total_size)` | strict canonical index v3 |
+| **Canonical ByteSpace** | `index_multihash` | `[0,total_size)` | canonical index v3 |
 | **Variant ByteSpace**   | `view_id`         | `[0,view_size)`  | canonical index ⊕ ViewSpec |
 
-All coverage ranges must be expressed in exactly one ByteSpace.
+All coverage ranges and leaves are expressed in exactly one ByteSpace.
 
 ```
 flowchart LR
@@ -64,7 +76,7 @@ flowchart LR
   ByteSpace (view_id)]
 ```
 
-### 1.1 Identity
+## 1.3 Identity
 
 ```
 indexᵐ          = MH(canonical_index_v3_json)
@@ -76,11 +88,12 @@ view_id         = MH( DETERMINISTIC_PROTO(ViewSpec) ⊕ indexᵐ )
 view_data_hash  = TreeHash( Transform(ViewSpec, AVBS[indexᵐ]) )
 ```
 
-Identity folding (no‑op views)
-- During NORMALIZE, eliminate operations equivalent to identity (e.g., `narrow(dim,0,shape[dim])`, `transpose(dim,dim)`, and compositions that cancel).
-- If the entire ViewSpec becomes identity after folding, treat it as “no view”: omit the `view` field, do not compute a `view_id`, and route via the canonical path/ByteSpace.
+Identity folding (no-op views):
 
-### 1.2 ViewSpec (Proto; canonical JSON for storage)
+* During NORMALIZE, drop operations equivalent to identity (`narrow(dim,0,shape[dim])`, `transpose(dim,dim)`, cancelling compositions).
+* If the normalized `ViewSpec` becomes identity, omit the `view` field, skip `view_id`, and route via the canonical path.
+
+## 1.4 ViewSpec (Proto; canonical JSON for storage/auditing)
 
 ```json
 {
@@ -96,107 +109,136 @@ Identity folding (no‑op views)
 ```
 
 Normalization rules:
+
 * Map keys (`tensor_name`) are ASCII-sorted.
-* `ops` order is preserved; adjacent compatible ops MAY be canonically folded (full‑length `narrow` → no‑op; `transpose(dim,dim)` → no‑op; consecutive `transpose` composition).
-* JSON shown here is a canonical storage form for readability/auditing only and is NOT used for identity hashing; identity uses deterministic Proto serialization of `ViewSpec`.
-* For `narrow`, `start < 0` is canonicalised to `start' = shape[dim] + start`.
-* Placement is request-level and not part of `ViewSpec` or identity.
+* `ops` order is preserved; adjacent compatible ops may be folded (full-length `narrow`, redundant `transpose`, transpose composition).
+* JSON exists for readability; identity hashing always uses deterministic Proto serialization.
+* Negative `start` values are canonicalised to positive offsets via `start' = shape[dim] + start`.
+* Placement is request-level and never part of the ViewSpec or identity.
 
-#### 1.2.1 Field Definitions
+Field definitions:
 
-`tensors: map<string, TensorViewOps>`
-* Scope: transforms per tensor. Tensors not present are implicitly identity (unmodified) and must appear in `view_index_json` unaltered.
-* Key: `tensor_name` must exist in canonical index; keys are ASCII-sorted during normalisation.
-* Value: `TensorViewOps` is an ordered list `ops` (see below) applied sequentially.
+* `tensors: map<string, TensorViewOps>` — per-tensor transforms; missing tensors imply identity.
+* `TensorViewOps.ops: list<Op>` — evaluated left→right.
+* Allowed ops: `narrow` (`dim: u32`, `start: i64`, `length: u64`) and `transpose` (`dim0`, `dim1` in `[0, ndim)` and distinct).
+* Empty `ops` is allowed (treated as identity); unsupported ops yield `INVALID_ARGUMENT`.
 
-`TensorViewOps.ops: list<Op>`
-* Evaluation order: left → right, each op transforms the logical view for that tensor.
-* Allowed ops (v1):
-  - `narrow` — contiguous slice. Semantics: `torch.narrow(input, dim, start, length)`
-    - `dim: u32` in `[0, ndim)`.
-    - `start: i64` allowed negative; canonicalised to non-negative.
-    - `length: u64 > 0`, with `start + length ≤ shape[dim]`.
-  - `transpose` — swap two dimensions. Semantics: `torch.transpose(input, dim0, dim1)`
-    - `dim0, dim1: u32` in `[0, ndim)`, `dim0 != dim1`.
-* Invalid mixes: empty `ops` list is allowed (no-op) but discouraged; unsupported op kinds are rejected `INVALID_ARGUMENT`.
-* v1 exclusivity (per tensor): A given tensor may use either `narrow` or `transpose`, never both. Mixing kinds across different tensors within the same `ViewSpec` is allowed.
-* v1 single-dimension narrow: For any single tensor, at most one `narrow` op is allowed (one dimension only). Supplying multiple `narrow` ops for the same tensor (including across different dims) is `INVALID_ARGUMENT`.
+## 1.5 Placement & Validation
 
-Placement (request-level; AUTO removed)
-* Purpose: decide where compute-heavy transforms occur. Placement never changes mathematical output.
-* Policy (v1):
-  - `SERVER`:
-    - For `narrow`: server performs byte-range selection and sends minimal bytes; no GPU requirement.
-    - For `transpose`: server-side materialization required; if capability unavailable, return `FAILED_PRECONDITION` (or optional CPU fallback if explicitly enabled).
-  - `CLIENT`: server applies byte-range selection for slices; transpose is executed on client.
+Placement (request-level; AUTO removed):
 
-Server behaviour for slices
-* The server ALWAYS applies byte-range selection for all `narrow` operations and sends minimal bytes.
+* `SERVER`
+  * `narrow`: daemon performs byte-range selection, returning minimal bytes; no GPU requirement.
+  * `transpose`: daemon materialises the permutation (GPU preferred, CPU fallback when configured).
+* `CLIENT`
+  * `narrow`: daemon still performs byte-range selection; clients consume contiguous ranges.
+  * `transpose`: daemon ships canonical layout; client permutes locally.
 
-Validation & Errors
-* `INVALID_ARGUMENT`: unknown tensor name, out-of-bound dims/indices, negative or zero `length`, or unsupported op type.
-* `FAILED_PRECONDITION`: `SERVER` placement requested but source replicas do not allow server-side transform (e.g., lack of GPU residency or permissions).
-* `UNAVAILABLE` with detail `PARTIAL_COVERAGE`: P2P cannot assemble requested coverage within the chosen ByteSpace. The error MUST include a `PartialCoverageDetail` with `(space_kind, space_id, missing_ranges)`.
+Validation & errors:
 
-### 1.3 TreeHash and leaf digest (normative)
-- Hash: SHA‑256 for leaves and internal nodes (current policy v1).
-- Leaf chunking policy (current): `determine_leaf_chunk_size(total_size, 4MiB)` per `core/common/artifact_hash_*` with constants `kMaxChunkSize=64MiB`, `kMinLeafChunkBytes=512KiB`, `kTargetLeafCount=4096`, 64‑byte alignment. This is a pure function of `total_size` and identical for canonical and variant ByteSpaces.
-- Leaves: contiguous left→right over the normalized byte stream of the target ByteSpace (canonical for `dataᵐ`, variant for `view_data_hash`). Final leaf may be shorter; at least one leaf always exists.
-- Leaf digest storage: raw 32‑byte `SHA256(leaf_bytes)` is stored in `leaves.digest` (BLOB). No per‑leaf base32/multihash; root uses multihash sha2‑256 and multibase base32 (lowercase, no padding) per mi2 rules.
-- Internal nodes: pairwise left→right reduction hashing `SHA256(L || R)`; odd node promoted unchanged.
-- Compatibility: Any future hashing policy/version MUST be recorded alongside variant rows and validated end‑to‑end before adoption.
+* `INVALID_ARGUMENT`: unknown tensor, dimension out of bounds, invalid offsets/lengths, unsupported op mix.
+* `FAILED_PRECONDITION`: `SERVER` placement requested but daemon lacks capability (for example GPU transpose disabled).
+* `UNAVAILABLE` + `PartialCoverageDetail`: P2P or disk sources cannot satisfy the requested ByteSpace coverage.
 
-## 2. Core Components
+## 1.6 TreeHash & Leaf Digests (normative)
+
+* Hash: SHA-256 for leaves and internal nodes (policy v1).
+* Leaf chunk sizing: `determine_leaf_chunk_size(total_size, 4MiB)` from `core/common/artifact_hash_*` (`kMaxChunkSize=64MiB`, `kMinLeafChunkBytes=512KiB`, `kTargetLeafCount=4096`, 64-byte alignment).
+* Leaves traverse the normalized byte stream of the selected ByteSpace; final leaf may be shorter but at least one leaf always exists.
+* Stored leaf digest: raw 32-byte `SHA256(leaf_bytes)` inside `leaves.digest` (BLOB). Tree roots use multihash sha2-256 + multibase base32 (lowercase, no padding).
+* Internal nodes: `SHA256(L || R)` with odd-node promotion.
+* Any future hashing policy/version must be recorded alongside variant rows and validated end-to-end before adoption.
+
+# 2. Core Components
 
 ```
 core/store/materialization/dataplane/
-  canonical_index.{h,cc}        // v3 stabiliser (existing, bumped)
-  segment_plan_source.{h,cc}    // DATA & PAD plan (existing)
-  view_planner.{h,cc}           // NEW  – View → {TargetLayout,SelectionPlan,TransformPlan}
-  view_plan_source.{h,cc}       // NEW  – streaming / GPU transform executor
+  canonical_index.{h,cc}        // v3 stabiliser
+  segment_plan_source.{h,cc}    // DATA & PAD plan
+  view_planner.{h,cc}           // View → {TargetLayout, SelectionPlan, TransformPlan, ViewWritePlan}
+  view_plan_source.{h,cc}       // streaming / GPU transform executor (retrieval)
+  view_ingest_executor.{h,cc}   // streaming ingest + inverse transforms (registration)
 ```
 
-### 2.1 ViewPlanner
+## 2.1 ViewPlanner & Bidirectional Plans
 
-Inputs
-* canonical_index_json (**v3 mandatory**)
-* ViewSpec
+`ViewPlanner::compute_view_plan` consumes canonical index v3 JSON plus a ViewSpec and emits:
 
-Outputs
-* `TargetLayout` → `view_index_json` (same field order/typing as v3)
-* `SelectionPlan`  → minimal source ranges within canonical ByteSpace
-* `TransformPlan`  → steps for transpose when needed (`narrow` uses stride alias)
+* `TargetLayout` → `view_index_json` (strict v3 typing/order).
+* `SelectionPlan` → minimal canonical ranges for retrieval.
+* `TransformPlan` → permutation steps when needed.
+* `ViewWritePlan` → inverse mapping for ingestion.
+* Metadata flags (`is_contiguous`, `num_ranges`, `total_bytes`, `is_segment_aligned`, `requires_materialization`).
 
-### 2.2 Execution Rules
+Bidirectional plan structures:
+
+```cpp
+struct ViewWritePlan {
+  struct Chunk {
+    uint64_t canonical_offset;
+    uint64_t view_offset;
+    uint64_t length;
+    bool segment_aligned;
+  };
+  std::vector<Chunk> chunks;
+};
+
+struct BidirectionalViewPlan {
+  SelectionPlan forward;
+  TransformPlan forward_transform;
+  ViewWritePlan inverse;
+  TransformPlan inverse_transform;  // pre-computed inverse permutations
+};
+```
+
+Retrieval code consumes `forward` paths; registration code consumes `inverse` paths. The shared planner ensures canonical/variant drift cannot occur.
+
+## 2.2 ViewPlanSource (retrieval executor)
+
+`ViewPlanSource` streams canonical bytes according to the `SelectionPlan`, performing scatter/gather as needed and invoking the forward transform when `requires_materialization` is true.
+
+Execution rules:
 
 | Transform pattern | Placement | Transport bytes | Notes |
 |-------------------|-----------|-----------------|-------|
-| Slice (`narrow`)  | SERVER    | min-ranges      | 0‑copy alias only when segment‑aligned; else scatter/gather |
-| Transpose only    | CLIENT    | full bytes      | avoids double compute |
+| Slice (`narrow`)  | SERVER    | min ranges      | 0-copy alias only when segment-aligned; otherwise scatter/gather |
+| Transpose         | CLIENT    | full bytes      | avoids double compute unless explicitly SERVER |
 
-Server-side transpose materialises a *derived coalesced replica* on GPU memory (ByteSpace = `view_id`).
+SelectionPlan metadata:
 
-v1 combination rule: a single tensor may not combine `narrow` and `transpose`; mixing across different tensors within the same view is allowed. `narrow` is limited to a single dimension per tensor.
+* `is_contiguous: bool`
+* `num_ranges: u32`
+* `total_bytes: u64`
+* `is_segment_aligned: bool`
+* `requires_materialization: bool`
 
-SelectionPlan augmentation (normative)
-- `is_contiguous: bool`
-- `num_ranges: u32`
-- `total_bytes: u64`
-- `is_segment_aligned: bool` (eligible for 0‑copy alias)
-- `requires_materialization: bool`
+## 2.3 ViewIngestExecutor (registration executor)
 
-### 2.3 Replica Residency & Identity
+`view_ingest_executor` mirrors `view_plan_source` but writes into canonical storage:
 
-Variant replicas must coexist with canonical replicas on the same daemon without clobbering registry state or altering the canonical identity used for routing.
+* Input: `BidirectionalViewPlan`, canonical sink (`SeekableSink` over UMA/VRAM), pointer to uploaded view buffer(s).
+* `narrow`: iterate `ViewWritePlan::Chunk` entries; memcpy from view buffer into canonical offsets. `segment_aligned == true` enables UMA alias paths to avoid extra copies.
+* `transpose`: apply `inverse_transform` via LibTorch kernels (GPU preferred). CPU fallback materialises into pinned memory and re-uploads if needed.
+* Emits telemetry (bytes written, number of staging copies, GPU vs CPU, alias hit-rate) for observability.
+* Integrated inside `StoreEngine::register_artifact_impl` whenever the request includes a view.
 
-- **ReplicaKey** extends to `(canonical_artifact_id, view_id?, device, replica_idx)`. When `view_id` is absent the key represents the canonical ByteSpace. Variant replicas always retain the canonical id so that downstream metrics and GS bookkeeping remain anchored to the original artifact entry.
-- `ReplicaRegistry`, LIP caches, eviction heuristics, and lease tracking operate on the extended key. Fast-path lookups must match both canonical id and optional `view_id`; this prevents treating a variant materialisation as an existing canonical instance.
-- `register_replica_with_global_store` continues to publish replicas under the canonical id. Variant-specific metadata (view hash, leaves) is written through the dedicated GS RPC (§3) so that chunk directory semantics remain canonical in v1.
-- Canonical index **v3** is authoritative throughout the pipeline. Older schema variants (v2) are no longer accepted; any loader or repository code that previously inspected `schema_version` must be updated to expect `"v3"` exclusively.
+## 2.4 Transform Execution
 
-### 2.4 Variant-Aware Materialisation Flow
+* `TransformPlan` lists dimension swaps and expected output strides, reused by both executors.
+* For `SERVER` placement, transpose materialisation occurs on GPU when available; CPU fallback can be enabled explicitly.
+* TreeHash computation always uses the final byte stream (post-transform) so `view_data_hash` is consistent regardless of placement.
+* All descriptors, indices, and verification artifacts set `schema_version="v3"`; down-level schema branches are removed.
 
-`MaterializeHints` carries an optional `VariantIdentity` struct:
+## 2.5 Replica Residency & VariantIdentity
+
+Variant replicas coexist with canonical replicas on the same daemon:
+
+* `ReplicaKey` extends to `(canonical_artifact_id, view_id?, device, replica_idx)`. Absence of `view_id` denotes canonical ByteSpace.
+* `ReplicaRegistry`, LIP caches, eviction heuristics, and lease tracking operate on the extended key to avoid mistaking a variant for a canonical replica.
+* `register_replica_with_global_store` always publishes replicas under the canonical artifact id; variant metadata (view hash plus leaves) are handled via `UpdateArtifactViewState`.
+* Canonical index v3 is the sole accepted schema.
+
+`MaterializeHints` embeds the optional `VariantIdentity`:
 
 ```cpp
 struct VariantIdentity {
@@ -207,122 +249,143 @@ struct VariantIdentity {
 };
 ```
 
-- The daemon populates `VariantIdentity` whenever the request contains a view. `canonical_artifact_id` is always set (either resolved via key mapping or provided directly).
-- `StoreEngine::materialize_replica` first checks the registry using the extended key. On cache hit it reuses the resident replica that already matches the requested ByteSpace.
-- On miss, the engine invokes `ViewPlanner` (for slice) to produce a `SelectionPlan`.
-- `MaterializeOrchestrator` (AUTO mode) now becomes view-aware:
-  - When `VariantIdentity.view_id` is set it queries Global Store for view metadata/leaves. If GS has no variant records the orchestrator falls back to canonical transport.
-  - P2P transport requests propagate the variant identity so the sender can either stream minimal byte ranges (slice) or decline with `PARTIAL_COVERAGE`.
-  - Disk fallback and registration reuse the canonical id; variant metadata is flushed through `UpdateArtifactViewState`.
-- The resulting replica handle records the `view_id` so subsequent lookups resolve the correct ByteSpace.
-- Prior to invoking `ViewPlanner`, the engine obtains canonical index bytes either from on-disk `tensor_index.json`/descriptor or, when loading via AUTO, through `get_artifact_index_by_id` on the Global Store client. This keeps planning authoritative and avoids re-parsing JSON in multiple layers.
+The daemon fills `VariantIdentity` when requests carry a view, guaranteeing that both retrieval and registration flows query GS with consistent identities.
 
-### 2.5 Transpose Execution
+# 3. Lifecycle Flows
 
-- `ViewPlanner` produces a `TransformPlan` for `transpose` ops that lists dimension swaps and expected output strides.
-- When placement is `SERVER`, the daemon executes transpose on GPU memory when available; a CPU fallback path materialises into pinned memory and re-uploads if GPU execution is not possible. Placement `CLIENT` skips server transforms and mirrors canonical transport.
-- The transform executor integrates with `ViewPlanSource`: for transpose, the SelectionPlan streams canonical bytes into a staging buffer before the transform kernel runs.
-- TreeHash computation uses the transformed byte stream so `view_data_hash` represents the post-transpose ByteSpace.
-- All TreeHash and metadata emission leverage v3 ordering and typing rules. Persisted descriptors, indices, and GS mutations set `schema_version="v3"`; down-level schema branches are removed from the codebase once this design lands.
+## 3.1 Retrieval (`MaterializeReplica`)
 
-## 3. gRPC / Proto Additions
+1. SDK normalises `ViewSpec` (or accepts a `view_id`), selects placement, and sends `MaterializeReplicaRequest`.
+2. Daemon populates `MaterializeHints::variant`, fetches canonical index v3 (local or GS), and probes the registry with the extended `ReplicaKey`.
+3. On cache miss, `ViewPlanner` produces the bidirectional plan; retrieval path uses `SelectionPlan` plus `view_plan_source`.
+4. P2P and disk transports propagate `(canonical_artifact_id, view_id)` so senders can stream minimal byte ranges or reject with `PARTIAL_COVERAGE`.
+5. Daemon persists `view_index_json`, computes/validates `view_data_hash`, and records per-view verification metadata on disk (`verification.view_<id>.json`).
+6. If variant metadata/leaves are missing from GS, the daemon upserts them after successful verification.
+
+## 3.2 Registration (`RegisterArtifact`)
+
+1. SDK exposes `register_view`, which normalises inputs, chooses placement defaults (SERVER for slices, CLIENT for transpose-only unless overridden), and streams tensors in view layout when placement is SERVER.
+2. Daemon’s registration controller resolves `view_id` (fetching `ViewSpec` from GS when only an ID is provided) and passes `VariantIdentity` hints to `StoreEngine::register_artifact`.
+3. The engine fetches canonical index v3, allocates canonical storage, and invokes `ViewPlanner`.
+4. For `SERVER` placement, `view_ingest_executor` writes view bytes into canonical offsets (aliasing when possible) and performs inverse transforms. For `CLIENT` placement, only identity views are accepted and ingestion reuses the canonical path.
+5. After canonical bytes exist, the engine computes:
+   * canonical `TreeHash` (existing path),
+   * variant `TreeHash` via `view_plan_source` replay over the canonical buffer,
+   * per-leaf digests for the variant ByteSpace (and optionally canonical leaves for chunk-aligned slices).
+6. Registration metadata is flushed:
+   * local verification artifacts (`verification.json` plus `verification.view_<id>.json`),
+   * `UpdateArtifactViewState` with `VariantUpsert {view_id, view_spec_json, view_size, view_data_hash, mark_verified=true}` and `LeafWrite` batches.
+7. `register_replica_with_global_store` publishes the canonical replica as usual.
+8. Errors:
+   * `FAILED_PRECONDITION` instructs clients to retry with `placement="CLIENT"` when server-side transpose is unavailable.
+   * `UNAVAILABLE` plus `PartialCoverageDetail` (`ByteSpaceKind=BS_CANONICAL`) surfaces missing canonical coverage so orchestrators can schedule additional shards.
+   * `INVALID_ARGUMENT` rejects inconsistent tensor specs before any bytes are ingested.
+
+# 4. gRPC / Proto Surface
 
 ```proto
-message NarrowOp   { int32 dim = 1; int64 start = 2; uint64 length = 3; }
-message TransposeOp{ int32 dim0 = 1; int32 dim1 = 2; }
+message NarrowOp    { int32 dim = 1; int64 start = 2; uint64 length = 3; }
+message TransposeOp { int32 dim0 = 1; int32 dim1 = 2; }
 message Op { oneof kind { NarrowOp narrow = 1; TransposeOp transpose = 2; } }
 message TensorViewOps { repeated Op ops = 1; }
-enum TransformPlacement { TP_SERVER = 1; TP_CLIENT = 2; } // no AUTO
-message ViewSpec { map<string, TensorViewOps> tensors = 1; } // transform-only; placement not included
 
-message MaterializeReplicaRequest  {
+enum TransformPlacement { TP_SERVER = 1; TP_CLIENT = 2; } // no AUTO
+message ViewSpec { map<string, TensorViewOps> tensors = 1; } // transform-only; placement excluded
+
+message MaterializeReplicaRequest {
   // ... existing fields
   oneof view_identity {
-    ViewSpec view = 1001;   // transform-only spec; placement is request-level
-    string   view_id = 1002; // direct identity; skip JSON normalization
+    ViewSpec view = 1001;   // normalized by daemon if provided
+    string  view_id = 1002; // skip JSON normalization
   }
-  TransformPlacement placement = 1003; // request-level placement
+  TransformPlacement placement = 1003;
 }
-message MaterializeReplicaResponse { ...; bytes view_index_json = 1001; string view_data_hash = 1002; }
 
-// Error detail for partial coverage (attached via google.rpc.Status.details)
-enum ByteSpaceKind { BS_CANONICAL = 1; BS_VARIANT = 2; }
-message Range { uint64 off = 1; uint64 len = 2; }
-message PartialCoverageDetail {
-  ByteSpaceKind space_kind = 1; // canonical or variant
-  string        space_id   = 2; // index_multihash or view_id
-  repeated Range missing_ranges = 3; // compact set of uncovered byte ranges
+message MaterializeReplicaResponse {
+  // ... existing fields
+  bytes  view_index_json = 1001;
+  string view_data_hash  = 1002;
 }
-```
 
-Registration path:
-
-```proto
 message RegisterArtifactRequest {
-  // ... existing registration fields (storages, aliases, LIP/coalesced options)
+  // ... existing registration fields
   oneof view_identity {
-    ViewSpec view = 1001; // when present, registers a variant view (partial/full)
-    string   view_id = 1002; // direct identity path
+    ViewSpec view = 1001;
+    string  view_id = 1002;
   }
-  TransformPlacement placement = 1003; // request-level placement
+  TransformPlacement placement = 1003;
 }
 
 message RegisterArtifactResponse {
-  // ... existing fields (descriptor, plan, lease)
-  bytes  view_index_json = 1001; // view output layout (if view present)
-  string view_data_hash  = 1002; // set when the view is verified on first completion
-  // dims: int32; offsets: int64; lengths: uint64 in proto.
+  // ... existing fields
+  bytes  view_index_json = 1001;
+  string view_data_hash  = 1002;
+}
+
+enum ByteSpaceKind { BS_CANONICAL = 1; BS_VARIANT = 2; }
+message Range { uint64 off = 1; uint64 len = 2; }
+message PartialCoverageDetail {
+  ByteSpaceKind space_kind = 1;
+  string        space_id   = 2; // index_multihash or view_id
+  repeated Range missing_ranges = 3;
 }
 ```
 
-## Global Store Integration (v1)
+`PartialCoverageDetail` is attached via `google.rpc.Status.details` for both retrieval and registration errors.
 
-Role & boundaries
-- Global Store (GS) does not perform view planning, routing, or transforms. Those remain in the C++ core/daemon.
-- GS provides durable anchors for variant identity and fast verification (leaves), and keeps replica discovery on canonical `chunk_directory` unchanged.
+# 5. Global Store Integration
 
-Minimal RPC surface (reuse existing service; fewest new methods)
-- Extend `GetArtifactInfoById` to optionally return leaves and view metadata for a selected ByteSpace:
-  - Request additions:
-    - `include_replicas: bool` (default true; preserves existing behavior)
-    - `include_leaves: bool` (default false)
-    - `oneof space { bool canonical; string view_id; }` (required when `include_leaves` or `include_view_meta`)
-    - `leaf_idxs: repeated uint64` (when `include_leaves`)
-    - `include_view_meta: bool` (default false; only valid if `space=view_id`)
-  - Response additions:
-    - `repeated Leaf { uint64 leaf_idx; string digest; } leaves`
-    - `ViewMeta { bytes view_spec_json; uint64 view_size; string view_data_hash; google.protobuf.Timestamp verified_at; } view_meta`
-- Add `UpdateArtifactViewState` for variant upsert & leaf writes as described in the plan; daemon callers always pass the canonical artifact id plus the view identity.
-- v1 does **not** change `chunk_directory` routing. Canonical coverage continues to determine replica discovery, while variants rely on the leaves table for integrity checks.
+Role & boundaries:
 
-- Add a single write RPC `UpdateArtifactViewState` to upsert variant metadata and/or batch write leaves in one call:
-  - `artifact_id: string`
-  - Optional `VariantUpsert { view_id, view_spec_json (bytes), view_size (u64), optional view_data_hash (string), mark_verified (bool) }`
-  - `repeated LeafWrite { enum SpaceKind { CANONICAL=0, VARIANT=1 }; SpaceKind space_kind; string space_id; repeated Leaf leaves; }`
-  - Response: `Status`
+* GS never plans or executes transforms; it stores canonical artifacts, variant metadata, and per-ByteSpace leaves.
+* Replica discovery (`chunk_directory`) remains canonical-only; variants rely on the leaves table for integrity.
 
-Read/Write flows (daemon ↔ GS)
-- First verification: daemon computes `view_id` and completes a strong verification, then calls `UpdateArtifactViewState` with `VariantUpsert` (and `mark_verified=true`) and `LeafWrite` for the variant (and optionally canonical if aligned).
-- Retrieval-time fast check: daemon uses `GetArtifactInfoById` with `include_leaves=true`, `space=view_id`, and `leaf_idxs=[...]` to fetch only needed leaf digests; `include_replicas=true` continues to return canonical replicas as today.
+Read path (`GetArtifactInfoById`):
 
-Operational notes
-- Single `GlobalStoreService` remains; no separate view service in v1.
-- P2P selection and transports continue to rely on canonical `chunk_directory`; no ByteSpace-aware routing in GS for v1.
+* Add knobs: `include_replicas`, `include_leaves`, `include_view_meta`, and `oneof space { bool canonical; string view_id; }`.
+* When `include_leaves` is true, clients may pass `leaf_idxs` to fetch a subset.
+* Response additions: `repeated Leaf { uint64 leaf_idx; string digest; }` and `ViewMeta { bytes view_spec_json; uint64 view_size; string view_data_hash; google.protobuf.Timestamp verified_at; }`.
 
-## 4. Database Schema Changes (`schema.sql`)
+Write path (`UpdateArtifactViewState`):
 
-This design adopts the optimal path for a greenfield system: add new tables and move canonical index to v3 for all new artifacts. No backward-compatibility constraints are considered.
+```
+message VariantUpsert {
+  string view_id = 1;
+  bytes  view_spec_json = 2;
+  uint64 view_size = 3;
+  string view_data_hash = 4;
+  bool   mark_verified = 5;
+}
 
-### 4.1 New Tables
+message LeafWrite {
+  enum SpaceKind { CANONICAL = 0; VARIANT = 1; }
+  SpaceKind space_kind = 1;
+  string    space_id   = 2;
+  repeated Leaf leaves = 3;
+}
+```
+
+* Daemon calls `UpdateArtifactViewState` with `VariantUpsert` plus one or more `LeafWrite` batches after successful retrieval verification (first-time) or registration.
+* Canonical leaves are optionally written when chunk-aligned slices fully populate canonical ranges; variant leaves are always written for verified views.
+* `ViewStateService` (Python) wraps these RPCs with retries/telemetry and powers CLI tooling for inspection.
+
+Operational notes:
+
+* Tables are created lazily (see §6) and require no backfill.
+* A single `GlobalStoreService` serves all RPCs; no dedicated view service is introduced in v1.
+* Telemetry counters track variant writes, bytes per view, and verification latency.
+
+# 6. Database Schema (`schema.sql`)
+
+## 6.1 New Tables
 
 ```sql
--- Variant registry per artifact/view
 CREATE TABLE IF NOT EXISTS variants (
   artifact_id    TEXT    NOT NULL,
   view_id        TEXT    NOT NULL,
   view_spec_json TEXT    NOT NULL,
   view_size      BIGINT  NOT NULL,
-  view_data_hash TEXT    NULL,        -- set when first full verification completes
+  view_data_hash TEXT    NULL,
   verified_at    TIMESTAMP WITH TIME ZONE NULL,
   created_at     TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (artifact_id, view_id)
@@ -330,15 +393,14 @@ CREATE TABLE IF NOT EXISTS variants (
 
 CREATE INDEX IF NOT EXISTS idx_variants_artifact ON variants(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_variants_verified  ON variants(artifact_id, verified_at);
-CREATE INDEX IF NOT EXISTS idx_variants_view_id  ON variants(view_id);
+CREATE INDEX IF NOT EXISTS idx_variants_view_id   ON variants(view_id);
 
--- Leaf digests anchored to a ByteSpace (canonical or variant)
 CREATE TABLE IF NOT EXISTS leaves (
   artifact_id TEXT    NOT NULL,
   space_kind  CHAR(1) NOT NULL, -- 'C' canonical, 'V' variant
   space_id    TEXT    NOT NULL, -- index_multihash or view_id
   leaf_idx    BIGINT  NOT NULL,
-  digest      BLOB    NOT NULL, -- raw 32-byte SHA-256 leaf digest
+  digest      BLOB    NOT NULL,
   PRIMARY KEY (artifact_id, space_kind, space_id, leaf_idx)
 );
 
@@ -346,102 +408,90 @@ CREATE INDEX IF NOT EXISTS idx_leaves_space ON leaves(artifact_id, space_kind, s
 ```
 
 Notes:
-* `leaves` rows are anchored to a ByteSpace defined by `(space_kind, space_id)`; 'C' denotes canonical, 'V' denotes variant.
-* `variants.view_spec_json` stores a canonicalized JSON form for auditing and is not used for identity hashing.
-* `leaves.digest` stores the raw 32-byte SHA-256 digest for each leaf; textual forms (hex/base32) should be produced on demand by clients if needed. No per-leaf multihash/base32 encoding is stored.
-* v1 不引入 per-replica ByteSpace 覆盖持久化；GS 仍基于 canonical `chunk_directory` 进行路由。未来若需要 ByteSpace 感知的覆盖/路由能力，将在后续版本单独扩展 schema。
 
-### 4.2 Canonical Index v3 Only
+* `leaves` rows are anchored to `(space_kind, space_id)`; canonical and variant digests coexist.
+* `variants.view_spec_json` stores the normalized JSON form for auditing and is not used for identity hashing.
+* `leaves.digest` stores raw 32-byte SHA-256 digests; textual encodings are produced on demand.
 
-* All artifacts must use canonical index v3 (strict u64 fields and ordering) and record `artifacts.schema_version='v3'`.
-* No mixed v2/v3 handling.
+## 6.2 Canonical Index v3 Only
 
-### 4.3 Operational Simplicity
+* All artifacts record `artifacts.schema_version='v3'`.
+* No mixed v2/v3 handling exists anywhere in the stack.
 
-* Tables are created with `IF NOT EXISTS`; no backfill is required.
-* Variant rows and leaves are written when `register_view`/`get_view` runs; canonical leaves are written only for partial registration flows.
+## 6.3 Operational Simplicity
 
-## 5. SDK API
+* Tables use `IF NOT EXISTS`; no migrations/backfill required.
+* Variant rows and leaves are written whenever `register_view` or first-time `get_view` verification runs; canonical leaves are written only when partial registrations align with canonical chunking.
+
+# 7. SDK API & Ergonomics
 
 ```python
 store.get_view(
     key="model:v2",
     slices={"wte.weight": (slice(0, 128),)},
-    placement="SERVER",   # explicit; guarantees min-byte path
+    placement="SERVER",
 )
 
-store.put_view(tensors=my_tp_shard_state,
-               key="model:v2",
-               slices={"wte.weight": (slice(tp_off, tp_off+tp_len),)},
-               placement="SERVER")  # implemented with plan 0018
+store.get_view_into(
+    target={"wte.weight": torch.empty((128, 4096), device="cuda:0")},
+    key="model:v2",
+    slices={"wte.weight": (slice(0, 128),)},
+    placement="SERVER",
+)
+
+store.register_view(
+    tensors=my_tp_shard,
+    key="model:v2",
+    slices={"wte.weight": (slice(tp_off, tp_off + tp_len),)},
+    placement="SERVER",
+    ttl_ms=3600,
+)
 ```
 
-> **Scope note:** The v1 rollout focuses on retrieval (`get_view` / `get_view_into`). SDK-side `register_view` will ship alongside the follow-up execution plan (`0018-artifact-view-registration`) so registration flows remain canonical in the initial release.
+Key behaviours:
 
-### 5.1 Additional SDK APIs
+* `_resolve_view_inputs` enforces per-tensor exclusivity, canonicalises slices/transposes, folds identities, and produces the deterministic `ViewSpec`.
+* Placement defaults: slice-only views default to `SERVER`; transpose-only views default to `CLIENT` to avoid redundant compute, though callers may override.
+* When `view_id` is provided, the SDK skips local normalization and asks the daemon/GS for the canonical spec. Outputs remain identical regardless of placement.
+* `get_view_into` validates target tensor shapes/dtypes against `view_index_json` and releases temporary replicas after copy.
+* `register_view` streams tensors in view layout only when placement is `SERVER`; otherwise it reuses the canonical upload path.
+* Errors from `PartialCoverageDetail` are surfaced as `ArtifactError` objects so orchestrators can schedule missing slices.
+* Upon completion, `RegisteredArtifact` instances include `view_index_json` plus `view_data_hash` for downstream validation.
 
-```python
-def get_view_into(target: dict[str, torch.Tensor], *,
-                  artifact_id: str | None = None,
-                  key: str | None = None,
-                  slices: Mapping[str, Sequence[slice]] | None = None,
-                  transpose: Mapping[str, Sequence[tuple[int,int]]] | None = None,
-                  placement: Literal["SERVER","CLIENT"],
-                  device: torch.device | str | None = None) -> None:
-    """Materialize a view and copy into preallocated target tensors on the selected device.
-    - Validates shapes/dtypes vs view_index_json returned by daemon.
-    - Releases any temporary replica after copy.
-    - Per-tensor mixing allowed: some tensors may be in `slices`, others in `transpose`. A single tensor cannot appear in both. For `slices`, each tensor may specify at most one dimension slice.
-    """
+# 8. Validation & Acceptance
 
-def register_view(tensors: Mapping[str, torch.Tensor], *,
-                  key: str | None = None,
-                  slices: Mapping[str, Sequence[slice]] | None = None,
-                  transpose: Mapping[str, Sequence[tuple[int,int]]] | None = None,
-                  placement: Literal["SERVER","CLIENT"],
-                  ttl_ms: int | None = None) -> RegisteredArtifact:
-    """Register a view (partial or full) under the artifact key.
-    - Persists variant metadata and variant leaves;当切片对齐时可同时写入 canonical leaves（可选）。
-    - For transpose-only, default placement=CLIENT to avoid double compute.
-    - Per-tensor mixing allowed: some tensors may be in `slices`, others in `transpose`. A single tensor cannot appear in both. For `slices`, each tensor may specify at most one dimension slice.
-    """
-```
+* **Backward compatibility**: canonical flows remain untouched when `view` is absent.
+* **Integrity**: `view_data_hash` must equal the recomputed value on every first verification; repeat loads rely on leaf checks.
+* **Performance**: slice plus server-side selection adds ≤2 µs/MB on intra-node LIP fast paths; registration ingestion stays within +5% CPU of canonical uploads for narrow-only views.
+* **Test coverage**:
+  1. Two partial TP slices register successfully, composing the canonical artifact and producing individual variant digests plus shared canonical leaves.
+  2. Slice retrieval equals the output of `torch.narrow`.
+  3. Transpose retrieval equals `torch.transpose` when executed client-side and server-side.
+  4. `get_view_into` copies into preallocated tensors and validates shapes/dtypes.
+  5. `register_view` writes variant metadata, variant leaves, and optional canonical leaves for chunk-aligned slices.
+  6. Identity ViewSpec folding results in canonical paths (no `view_id` emission).
+  7. `view_id` is invariant to placement; providing only the ID yields identical results.
+  8. TreeHash roots match between CPU and GPU implementations for the same bytes; chunk sizing follows policy constants.
+  9. `view_ingest_executor` unit tests cover narrow plus transpose ingestion (CPU + fake CUDA) with alias hit/miss cases.
+ 10. Global Store unit tests verify `UpdateArtifactViewState` and `GetArtifactInfoById` leaf/view metadata semantics, including partial coverage errors.
 
-## 6. Compatibility & Acceptance Criteria
-
-* **Backward-compatible**: existing canonical paths untouched (`view` absent ⇒ old behaviour).
-* **Integrity**: `view_data_hash` must equal recomputed value on first verification; subsequent replicas require only leaf checks. Variant loads persist per-view hashes under `verification.view_<sanitized_view_id>.json`; each record includes `byte_space_id` so canonical `verification.json` is never reused for a different ByteSpace.
-* **Performance**: slice + server-side selection must not exceed 2 µs/MB extra latency on intra-node LIP fast path.
-* **P2P**: router returns `UNAVAILABLE` with detail `PARTIAL_COVERAGE` if coverage within the requested ByteSpace cannot be satisfied.
-* **Test Cases**
-  1. Register two partial TP slices, verify they compose full canonical and individual variant digests.
-  2. Retrieve a slice view and verify output tensor equals ground-truth torch.narrow().
-  3. Transpose view retrieved with client-side transform equals torch.transpose() result.
-  4. get_view_into: preallocate target tensors with expected shapes; API copies and validates against view_index_json.
-  5. register_view: variant coverage and leaves recorded; first verification yields view_data_hash; subsequent registrations only check leaves.
-  6. ViewSpec normalization folds identity; when identity, `view` omitted and canonical path is taken.
-  7. `view_id` is invariant to placement; providing only `view_id` yields identical output without JSON parsing.
-  8. TreeHash root matches CPU and GPU implementations given the same bytes; chunk sizing follows the fixed policy.
-  9. Providing both `slices` and `transpose` in v1 yields `INVALID_ARGUMENT`.
-
-## Implementation Tracks & Status
-
-- **Core (`docs/plans/0016-a-artifact-view-v1-core.md`)** — Completed. ViewPlanner, ViewPlanSource, transform executor, residency/AUTO wiring, and Canonical Index v3 enforcement ship with full Catch2 coverage.
-- **Daemon & Proto (`docs/plans/0016-b-artifact-view-v1-daemon-proto.md`)** — Completed. RPCs carry `ViewSpec`/`view_id`, placement, and view metadata; orchestrator/P2P paths propagate variant identity.
-- **Global Store (`docs/plans/0016-c--artifact-view-v1-global-store.md`)** — Completed. Schema adds `variants`/`leaves`, GS RPCs serve variant metadata, and repositories/tests cover partial-coverage detail.
-- **SDK (`docs/plans/0016-d--artifact-view-v1-sdk.md`)** — Completed for retrieval scope. `get_view`/`get_view_into` normalise specs, call the daemon with placement, and validate layouts; registration helpers follow plan 0018.
-
-# Trade-offs & Risks
+# 9. Trade-offs & Risks
 
 | Risk | Mitigation |
 |------|------------|
-| Canonical-variant drift (bug) | single C++ ViewPlanner implementation used by SDK & daemon |
-| Increased DB writes (variant leaves) | batched leaf writes; only variant ByteSpace persisted |
-| GPU cost for server transpose | default placement=CLIENT when bytes unchanged |
+| Canonical ⇔ variant drift | Single `ViewPlanner` plus bidirectional plans guarantee identical math for load/ingest. |
+| View ingestion bug corrupts canonical replica | Symmetric unit tests plus `ABSL_CHECK` on total written bytes per plan chunk. |
+| Increased DB writes (variant leaves) | Batched `LeafWrite` RPCs; canonical leaves only written when chunk-aligned. |
+| GPU cost for server-side transpose | Default placement `CLIENT` unless bytes shrink; CPU fallback plus placement override guidance. |
+| Transpose SERVER placement may require large staging buffers | Tile-based kernels with bounded scratch; fallback to CLIENT when resources insufficient. |
+| Variants table growth due to per-shard registrations | Metrics plus retention tooling via `ViewStateService`. |
 
-# References
+# 10. Status & References
 
-* 0015-artifact-view.md – prior proposal
-* 0007-content-addressed-artifact-id.md
-* docs/internals/canonical-index.md
-* Torch operators docs: `torch.narrow`, `torch.transpose`
+Implementation status:
+
+* **Core** — `ViewPlanner`, `view_plan_source`, and `view_ingest_executor` ship with Catch2 coverage and fake-CUDA parity.
+* **Daemon & Proto** — gRPC surfaces carry `ViewSpec`/`view_id`, placement, and view metadata across both Materialize and Register RPCs; orchestrators propagate variant identity through P2P.
+* **Global Store** — `variants`/`leaves` tables, `GetArtifactInfoById` extensions, and `UpdateArtifactViewState` are live with Python service helpers.
+* **SDK** — `get_view`, `get_view_into`, and `register_view` share the same normalization pipeline and expose placement-aware ergonomics.
+

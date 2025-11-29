@@ -23,9 +23,14 @@ Key files:
   - VerificationService: core/store/materialization/dataplane/verification/verification_utils.{h,cc}
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
-  - Runtime catalog + services:
-    - ComponentCatalog: core/store/components/runtime/component_catalog.{h,cc} (bootstraps DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, PinnedBufferPool, and the optional Global Store client with a single lifecycle).
-    - ReplicaService: core/store/components/runtime/replica_service.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, and remote access toggles; StoreEngine now queries replicas exclusively through this facade).
+  - Runtime catalog + services (core/store/runtime/**):
+    - RuntimeContext: core/store/runtime/context/runtime_context.{h,cc} (initializes the shared PinnedBufferPool, DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, GlobalStoreClient, and ViewHashComputer, while embedding the Folly-backed event dispatcher used by the runtimes).
+    - RuntimeEnv: core/store/runtime/runtime_env.{h,cc} (bootstraps RuntimeContext, owns worker identity, and coordinates lifecycle/shutdown hooks for runtime services).
+    - ReplicaRuntime: core/store/runtime/replica/replica_runtime.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, publishes replica lifecycle events, and manages remote access toggles; StoreEngine now queries replicas exclusively through this facade).
+    - Ingestion events: core/store/runtime/ingestion_events.h (canonical definitions for runtime ingestion hooks shared by RuntimeContext’s dispatcher, ReplicaRuntime, and the ingestion/metadata runtimes).
+    - MetadataGateway: core/store/runtime/metadata/metadata_gateway.{h,cc} (merges the old GlobalMetadataGateway + RegistrationFacade responsibilities, acting as the sole publisher for Global Store metadata, registration CRUD, key-mapping operations, and TTL refreshes).
+    - IngestionRuntime: core/store/runtime/ingestion/ingestion_runtime.{h,cc} (delegates all ingestion/materialize flows to `MaterializationFacade` and exposes `IngestionRuntimeDependencies` so tests can inject facade hooks without touching production wiring; lifecycle events flow through `IngestionEventHub`).
+    - RuntimeContextEvents: core/store/runtime/context/runtime_context_events.{h,cc} (Folly MPMC queue used by observers/tests; runtimes now publish ingestion/replica/registration updates after performing their own work so event consumers remain optional).
 - Components: core/store/components/*
 - Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
@@ -89,11 +94,14 @@ graph TB
   TS --> PUMP
 ```
 
-Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime facade. Construction now builds a `components::runtime::ComponentCatalog`, which sequentially validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `components::runtime::ReplicaService`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `components::runtime::GlobalStorePublisher` is the sole component that talks to Global Store; `StoreEngine`, the ingestion pipeline, and the registration facade emit events and the publisher translates them into register/unregister/key-mapping RPCs. `components::runtime::TelemetryService` consumes the same events and the replica service snapshots to keep metrics and daemon-facing queries consistent without duplicating logic in the facade. This keeps the ingestion/materialization logic focused on orchestration while the catalog/services encapsulate ownership and telemetry.
+`StoreEngine` is treated as a thin runtime facade. Construction delegates to `runtime::RuntimeEnv`, which validates options, initializes DeviceManager/ReplicaRegistry/MetricsCollector, wires the shared `PinnedBufferPool`, owns worker identity, and optionally connects to Global Store. Replica lifecycle helpers (`get_resident_devices`, `wait_replica_ready`, UMA snapshots, remote access toggles, eviction retries, etc.) are provided by `runtime::ReplicaRuntime`, so `StoreEngine` no longer reaches directly into `ReplicaRegistry`/`DeviceManager`. `runtime::metadata::MetadataGateway` is the sole component that talks to Global Store; all ingestion lifecycle notifications flow through `IngestionEventHub`, so `ReplicaRuntime`, `MetadataGateway`, and observability subscribers see the same typed events. `runtime::IngestionRuntime` forwards every disk/P2P/materialize request to `MaterializationFacade`, which wires the planner (`MaterializationService` + `MaterializeOrchestrator`), data plane (`IngestionPipeline`), and publishes started/completed events. Memory-registration commits and aborts still emit RuntimeContext payloads for observers, but MetadataGateway also refreshes UMA metrics inline so StoreEngine never needs to thread callbacks through the façade.
+
 ## UMA V3 Cutover (single ledger)
 
 - Final cutover (V3): VirtualAddressSpace has been removed; UnifiedMemoryAuthority owns CPU virtual address reservation, chunk telemetry, and export bookkeeping. Incremental rollout flags are gone; transactional Plan→Execute→Commit and UMA-ledger authority are always enabled.
 - Canonical Bazel targets: `//core/store/replica:unified_memory_authority` and `//core/store/replica:memory_export_registry`.
+- UMA ledger keys are derived from the Replica `DeviceKey` (GPU ordinals or CPU:-1). CPU materialization binds UMA allocation to the CPU key so memory-tier lease lookups and UMA snapshots reference the same entry.
+- Replica creation upgrades configs that provide `local_device_id >= 0` (even when `device_type` is left as CPU) to a GPU `DeviceKey` so CPU→GPU copy flows still bring up CUDA streams and UMA GPU sessions without requiring callers to flip the device type.
 
 ### Release & Eviction (GPU)
 
@@ -108,7 +116,7 @@ Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime fa
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
     - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
-    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path` (rejects content-addressed IDs without that path).
+    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
@@ -121,9 +129,10 @@ Beginning with refactor plan 0028, `StoreEngine` is treated as a thin runtime fa
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
     - Allocates target GPU memory via a temporary `Replica` and returns a CUDA IPC handle so the caller can write directly.
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
-    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, and registers with Global Store.
+    - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, registers with Global Store, and emits a `RegistrationCommitted` RuntimeContext notification. The returned `RegistrationCommitResult` now includes a `DeviceKey device` describing the committed residency alongside `device_id` for ABI compatibility.
   - `abort_registered_artifact(string_view registration_id)`
-  - Implementation is provided by `components::RegistrationFacade`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events. Global Store publication is delegated to `components::runtime::GlobalStorePublisher` so the facade never reaches into the Global Store client directly.
+    - Releases UMA allocations for the pending session, refreshes UMA telemetry via ReplicaRuntime, and emits a `RegistrationAborted` RuntimeContext event (including error status when the abort is triggered by failures instead of clients).
+  - Implementation is provided by `runtime::metadata::RegistrationBackend`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events through `MetadataGateway`. Global Store publication stays confined to `runtime::metadata::MetadataGateway`, so registration flows never reach into the Global Store client directly.
 
 - Replica queries and management (ReplicaKey-centric):
   - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
@@ -260,6 +269,8 @@ stateDiagram-v2
 
 
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
+- `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
+- Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
 - Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration

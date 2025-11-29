@@ -189,7 +189,7 @@ std::filesystem::path build_temp_path(const std::filesystem::path& final_path) {
   const uint64_t nonce = g_temp_file_nonce.fetch_add(1, std::memory_order_relaxed);
   const pid_t pid = getpid();
   std::filesystem::path tmp = final_path;
-  tmp += absl::StrFormat(".tmp.%d.%llu", static_cast<int>(pid), static_cast<unsigned long long>(nonce));
+  tmp += absl::StrFormat(".tmp.%d.%llu", static_cast<int>(pid), static_cast<uint64_t>(nonce));
   return tmp;
 }
 

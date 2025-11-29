@@ -62,6 +62,7 @@ sc_cc_library(
         "//core/common:system_capabilities_lib",
         "//core/store:device_registry",
         "//core/store:device_types",
+        "//core/store:memory_tier_budget",
         "//core/store/materialization/contracts:loading_spec",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
@@ -166,6 +167,7 @@ sc_cc_library(
         "//core/communicator:engine_lib",
         "//core/store:device_types",
         "//core/store:memory_types",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:cpu_va_sink",
         "//core/store/materialization/dataplane:gpu_memory_sink",
@@ -199,6 +201,7 @@ sc_cc_library(
         "//core/store:communication_types",
         "//core/store:device_types",
         "//core/store:memory_types",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:disk_loader",
         "//core/store/materialization/dataplane:inline_buffer_loader",
@@ -222,6 +225,19 @@ cc_test(
     srcs = ["unified_memory_authority_plan_commit_test.cc"],
     deps = [
         ":unified_memory_authority",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "replica_load_controller_device_key_test",
+    srcs = ["replica_load_controller_device_key_test.cc"],
+    deps = [
+        ":replica_load_controller",
+        "//core/common:const_granularity_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store:device_types",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

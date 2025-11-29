@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -70,6 +71,7 @@ class MemoryExportRegistry {
     std::shared_ptr<void> uma_keepalive;
     // Coalesced chunk ranges used for this export (for UMA ledger updates on unexport)
     std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    std::optional<UnifiedMemoryAuthority::StableLease> stable_lease;
   };
 
   gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>> uma_;

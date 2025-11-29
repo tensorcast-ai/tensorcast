@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <optional>
+#include <utility>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -12,6 +13,8 @@
 #include "opentelemetry/trace/scope.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
+
+namespace store_runtime = tensorcast::store::runtime;
 
 namespace otel = opentelemetry;
 
@@ -44,17 +47,15 @@ uint64_t determine_logical_size(const IngestionContext& ctx) {
   return 0;
 }
 
-void emit_ingestion_event(
-    const IngestionPipeline::Config& config,
+store_runtime::IngestionResultEvent make_ingestion_result_event(
     const IngestionContext& ctx,
     const absl::Status& status,
     const loading::ReplicaHandle* handle) {
-  if (!config.telemetry_service && !config.global_store_publisher) {
-    return;
-  }
-  components::runtime::IngestionResultEvent event;
-  event.source = ctx.source_type == SourceType::kP2P ? components::runtime::IngestionSource::kP2P
-                                                     : components::runtime::IngestionSource::kDisk;
+  store_runtime::IngestionResultEvent event;
+  event.request_id = ctx.request_id;
+  event.source = ctx.source_type == SourceType::kP2P ? store_runtime::IngestionSource::kP2P
+                                                     : store_runtime::IngestionSource::kDisk;
+  event.materialize_mode = ctx.materialize_mode;
   event.artifact_id = ctx.artifact_identifier;
   event.target_device = ctx.target_device;
   event.target_location = ctx.target_location;
@@ -70,13 +71,20 @@ void emit_ingestion_event(
     event.view_id = ctx.hints.variant->view_id;
   }
   event.publish_to_global_store = ctx.publish_to_global_store;
+  event.publish_context_id = ctx.publish_context_id;
+  return event;
+}
 
-  if (config.telemetry_service) {
-    config.telemetry_service->record_ingestion_result(event);
+void emit_ingestion_event(
+    const IngestionPipeline::Config& /*config*/,
+    const IngestionContext& ctx,
+    const absl::Status& status,
+    const loading::ReplicaHandle* handle,
+    store_runtime::IngestionResultEvent* event_out) {
+  if (event_out == nullptr) {
+    return;
   }
-  if (status.ok() && handle != nullptr && ctx.publish_to_global_store && config.global_store_publisher) {
-    config.global_store_publisher->handle_ingestion_result(event);
-  }
+  *event_out = make_ingestion_result_event(ctx, status, handle);
 }
 
 absl::Status initialize_context(
@@ -86,8 +94,12 @@ absl::Status initialize_context(
     SourceType source_type,
     const IngestionPipeline::Config& config,
     bool publish_to_global_store,
-    IngestionContext& ctx) {
+    IngestionContext& ctx,
+    const std::string& request_id,
+    const std::string& publish_context_id) {
   ctx.source_type = source_type;
+  ctx.request_id = request_id;
+  ctx.publish_context_id = publish_context_id;
   ctx.artifact_identifier = artifact_identifier;
   ctx.target = target;
   ctx.hints = hints;
@@ -96,22 +108,22 @@ absl::Status initialize_context(
   ctx.num_threads = config.num_threads;
   ctx.pinned_memory_timeout = config.pinned_memory_timeout;
   ctx.options = config.engine_options;
-  ctx.replica_service = config.replica_service;
-  ctx.component_catalog = config.component_catalog;
+  ctx.replica_runtime = config.replica_runtime;
+  ctx.runtime_context = config.runtime_context;
   ctx.target_device = target.location.to_device_key();
   ctx.target_is_gpu = ctx.target_device.type == DeviceType::GPU;
   ctx.target_location = ctx.target_is_gpu ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
   ctx.target_device_id = ctx.target_device.ordinal;
   ctx.publish_to_global_store = publish_to_global_store;
   if (ctx.target_is_gpu && !ctx.target_device.uuid.empty()) {
-    auto device_result = ctx.replica_service->device_manager().find_device_by_uuid(ctx.target_device.uuid);
+    auto device_result = ctx.replica_runtime->device_manager().find_device_by_uuid(ctx.target_device.uuid);
     if (!device_result.ok()) {
       return device_result.status();
     }
     ctx.target_device_id = device_result.value();
   }
   if (ctx.target_is_gpu) {
-    const int num_gpus = ctx.replica_service->device_manager().get_num_gpus();
+    const int num_gpus = ctx.replica_runtime->device_manager().get_num_gpus();
     if (ctx.target_device_id < 0 || ctx.target_device_id >= num_gpus) {
       return absl::InvalidArgumentError(
           absl::StrCat("Invalid GPU device ordinal: ", ctx.target_device_id, " (", num_gpus, " devices available)"));
@@ -124,8 +136,8 @@ absl::Status initialize_context(
 
 IngestionPipeline::IngestionPipeline(Config config) : config_(std::move(config)) {
   ABSL_DCHECK(config_.engine_options != nullptr);
-  ABSL_DCHECK(config_.replica_service != nullptr);
-  ABSL_DCHECK(config_.component_catalog != nullptr);
+  ABSL_DCHECK(config_.replica_runtime != nullptr);
+  ABSL_DCHECK(config_.runtime_context != nullptr);
 }
 
 absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_disk(
@@ -133,13 +145,25 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_disk(
     const loading::DiskSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints,
-    bool publish_to_global_store) {
-  const std::string request_id = absl::StrCat("disk_", absl::ToUnixNanos(absl::Now()));
-  SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_disk_internal");
+    bool publish_to_global_store,
+    store_runtime::IngestionResultEvent* event_out,
+    std::string request_id,
+    std::string publish_context_id) {
+  std::string resolved_request_id =
+      request_id.empty() ? absl::StrCat("disk_", absl::ToUnixNanos(absl::Now())) : std::move(request_id);
+  SC_TRACE_INIT_GUARD(resolved_request_id, artifact_identifier, "ingest_from_disk_internal");
 
   IngestionContext ctx;
-  absl::Status init_status =
-      initialize_context(artifact_identifier, target, hints, SourceType::kDisk, config_, publish_to_global_store, ctx);
+  absl::Status init_status = initialize_context(
+      artifact_identifier,
+      target,
+      hints,
+      SourceType::kDisk,
+      config_,
+      publish_to_global_store,
+      ctx,
+      resolved_request_id,
+      publish_context_id);
   if (!init_status.ok()) {
     return init_status;
   }
@@ -147,7 +171,7 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_disk(
   ctx.publish_to_global_store = publish_to_global_store;
 
   auto fail = [&](const absl::Status& status) -> absl::StatusOr<loading::ReplicaHandle> {
-    emit_ingestion_event(config_, ctx, status, nullptr);
+    emit_ingestion_event(config_, ctx, status, nullptr, event_out);
     return status;
   };
 
@@ -176,7 +200,7 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_disk(
     return fail(handle_or.status());
   }
   auto handle = std::move(handle_or.value());
-  emit_ingestion_event(config_, ctx, absl::OkStatus(), &handle);
+  emit_ingestion_event(config_, ctx, absl::OkStatus(), &handle, event_out);
   return handle;
 }
 
@@ -185,9 +209,13 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
     const P2PSource& source,
     const loading::ReplicaTarget& target,
     const loading::MaterializeHints& hints,
-    bool publish_to_global_store) {
-  const std::string request_id = absl::StrCat("p2p_", absl::ToUnixNanos(absl::Now()));
-  SC_TRACE_INIT_GUARD(request_id, artifact_identifier, "ingest_from_p2p_internal");
+    bool publish_to_global_store,
+    store_runtime::IngestionResultEvent* event_out,
+    std::string request_id,
+    std::string publish_context_id) {
+  std::string resolved_request_id =
+      request_id.empty() ? absl::StrCat("p2p_", absl::ToUnixNanos(absl::Now())) : std::move(request_id);
+  SC_TRACE_INIT_GUARD(resolved_request_id, artifact_identifier, "ingest_from_p2p_internal");
 
   auto tracer = otel::trace::Provider::GetTracerProvider()->GetTracer("tensorcast.store");
   otel::trace::StartSpanOptions span_opts;
@@ -197,8 +225,16 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
   p2p_span->SetAttribute("component", "StoreEngine");
 
   IngestionContext ctx;
-  absl::Status init_status =
-      initialize_context(artifact_identifier, target, hints, SourceType::kP2P, config_, publish_to_global_store, ctx);
+  absl::Status init_status = initialize_context(
+      artifact_identifier,
+      target,
+      hints,
+      SourceType::kP2P,
+      config_,
+      publish_to_global_store,
+      ctx,
+      resolved_request_id,
+      publish_context_id);
   if (!init_status.ok()) {
     p2p_span->SetAttribute("error", true);
     p2p_span->AddEvent("p2p_ingest_error", {{"message", std::string(init_status.message())}});
@@ -206,12 +242,13 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
     return init_status;
   }
   ctx.start_time = std::chrono::steady_clock::now();
+  ctx.publish_to_global_store = publish_to_global_store;
 
   auto fail_with_status = [&](const absl::Status& status) -> absl::Status {
     p2p_span->SetAttribute("error", true);
     p2p_span->AddEvent("p2p_ingest_error", {{"message", std::string(status.message())}});
     p2p_span->End();
-    emit_ingestion_event(config_, ctx, status, nullptr);
+    emit_ingestion_event(config_, ctx, status, nullptr, event_out);
     return status;
   };
 
@@ -249,7 +286,7 @@ absl::StatusOr<loading::ReplicaHandle> IngestionPipeline::ingest_from_p2p(
   }
 
   auto handle = std::move(handle_or.value());
-  emit_ingestion_event(config_, ctx, absl::OkStatus(), &handle);
+  emit_ingestion_event(config_, ctx, absl::OkStatus(), &handle, event_out);
   p2p_span->AddEvent("p2p_ingest_complete", {{"bytes", static_cast<int64_t>(ctx.p2p.source.size_bytes)}});
   p2p_span->End();
   return handle;

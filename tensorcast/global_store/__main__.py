@@ -10,17 +10,26 @@ import grpc
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import set_config
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.memory_tier_grpc_service import MemoryTierGrpcServicer
 
 # Prometheus metrics
 from tensorcast.global_store.metrics import (
     PrometheusInterceptor,
     start_metrics_http_server,
 )
+from tensorcast.global_store.repositories.memory_tier_lease_repository import (
+    MemoryTierLeaseRepository,
+)
+from tensorcast.global_store.repositories.memory_tier_snapshot_repository import (
+    MemoryTierSnapshotRepository,
+)
+from tensorcast.global_store.services.memory_tier_service import MemoryTierService
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import (
     setup_otel_from_observability as _setup_otel_from_observability,
 )
 from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
+from tensorcast.proto.memory_tier.v1 import memory_tier_pb2_grpc
 
 logger = init_logger(__name__)
 
@@ -54,6 +63,15 @@ def main():
     servicer = GlobalStoreServicer(
         db_file=str(config.db_file) if config.db_file else None
     )
+    snapshot_repo = MemoryTierSnapshotRepository(servicer.connection)
+    lease_repo = MemoryTierLeaseRepository(servicer.connection)
+    memory_tier_service = MemoryTierService(
+        snapshot_repository=snapshot_repo,
+        lease_repository=lease_repo,
+        snapshot_retention_ns=config.memory_tier_snapshot_retention_ms * 1_000_000,
+        snapshot_max_rows=config.memory_tier_snapshot_max_rows,
+    )
+    memory_tier_servicer = MemoryTierGrpcServicer(memory_tier_service)
 
     # Start Prometheus metrics HTTP server (idempotent)
     start_metrics_http_server(config.metrics_port)
@@ -64,6 +82,9 @@ def main():
         interceptors=[PrometheusInterceptor()],
     )
     global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+    memory_tier_pb2_grpc.add_MemoryTierServiceServicer_to_server(
+        memory_tier_servicer, server
+    )
 
     # Bind to port
     server.add_insecure_port(f"[::]:{config.port}")

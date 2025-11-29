@@ -202,7 +202,8 @@ absl::Status DiskLoader::initialize() {
     const auto first_name = partition_paths_[0].filename().string();
     const std::string st_ext = ".safetensors";
     const bool is_safetensors = first_name.ends_with(st_ext);
-    if (!is_safetensors) {
+    const bool enforce_descriptor = source_.require_descriptor && !is_safetensors;
+    if (enforce_descriptor) {
       const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
       const auto index_json_path = artifact_dir / "tensor_index.json";
       const auto index_cbor_path = artifact_dir / "tensor_index.cbor";
