@@ -31,7 +31,7 @@ static void create_gpu_memory_replica(
   // Provide a dummy canonical tensor index key (sha256 hex-like) to satisfy API
   reg.tensor_index_key = std::string(64, 'a');
   reg.encoding = "json";
-  reg.schema_version = "v2";
+  reg.schema_version = "v3";
   reg.enable_p2p = false; // avoid registering comm keys for this test
 
   auto beg = engine->begin_register_artifact(reg);

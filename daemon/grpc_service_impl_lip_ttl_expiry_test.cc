@@ -45,7 +45,7 @@ TEST_CASE("LIP TTL expiry gates P2P source selection", "[daemon][lip][ttl][fakec
   breq.set_owner_pid(getpid());
   auto* ti = breq.mutable_tensor_index_data();
   ti->set_data(index_bytes);
-  ti->set_schema_version("v2");
+  ti->set_schema_version("v3");
   ti->set_encoding("json");
   breq.mutable_lease()->set_in_place(true);
 

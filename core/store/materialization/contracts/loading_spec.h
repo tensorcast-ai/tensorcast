@@ -29,6 +29,10 @@ using tensorcast::store::materialization::view::VariantIdentity;
 // Replica Sources - Describe where data comes from
 // ══════════════════════════════════════════════════════════════════════════
 
+enum class SourcePreference : uint8_t { kUnspecified, kAuto, kPreferP2P, kPreferDisk };
+
+enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalReplica };
+
 struct DiskSource {
   std::filesystem::path path;
   std::optional<uint64_t> expected_size;
@@ -71,6 +75,7 @@ struct MaterializeHints {
 
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
   Verify verify = Verify::CHECKSUM;
+  SourcePreference source_preference{SourcePreference::kAuto};
 
   std::optional<VariantIdentity> variant;
 };
@@ -137,6 +142,7 @@ struct ReplicaHandle {
   CudaIpcHandle cuda_ipc_handle;
   std::optional<std::string> view_index_json;
   std::optional<std::string> view_data_hash;
+  MaterializationSource source{MaterializationSource::kUnspecified};
 
   [[nodiscard]] const ReplicaKey& key() const {
     return replica_key;

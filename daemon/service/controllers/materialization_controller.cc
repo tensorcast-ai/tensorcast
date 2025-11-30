@@ -2,18 +2,25 @@
 
 #include "daemon/service/controllers/materialization_controller.h"
 
+#include <filesystem>
+#include <fstream>
 #include <future>
 #include <optional>
+#include <string>
+#include <utility>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
 #include "opentelemetry/metrics/provider.h"
 
+#include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::daemon {
 
@@ -25,6 +32,127 @@ namespace {
 
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
+using store::loading::MaterializationSource;
+using store::loading::SourcePreference;
+
+bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+  }
+  return true;
+}
+
+absl::StatusOr<std::filesystem::path> normalize_disk_path(std::string_view disk_path) {
+  std::error_code ec;
+  const auto normalized = std::filesystem::weakly_canonical(disk_path, ec);
+  if (!ec) {
+    return normalized;
+  }
+  const std::filesystem::path lex = std::filesystem::path(disk_path).lexically_normal();
+  if (lex.empty()) {
+    return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
+  }
+  return lex;
+}
+
+void record_disk_path_denied() {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_denied_total");
+    if (counter) {
+      counter->Add(1);
+    }
+  } catch (...) {
+  }
+}
+
+absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_dir) {
+  std::error_code ec;
+  const auto json_path = artifact_dir / "tensor_index.json";
+  const auto cbor_path = artifact_dir / "tensor_index.cbor";
+  const bool has_json = std::filesystem::exists(json_path, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat tensor_index.json at ", json_path.string()));
+  }
+  const bool has_cbor = std::filesystem::exists(cbor_path, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat tensor_index.cbor at ", cbor_path.string()));
+  }
+  if (!has_json && !has_cbor) {
+    return absl::NotFoundError(
+        absl::StrCat("tensor index not found under ", artifact_dir.string(), " (expected tensor_index.json or .cbor)"));
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::optional<std::string>> load_artifact_id_from_descriptor(const std::filesystem::path& artifact_dir) {
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+  std::error_code ec;
+  if (!std::filesystem::exists(descriptor_path, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(
+          ec.value(), absl::StrCat("Failed to stat artifact_descriptor.json at ", descriptor_path.string()));
+    }
+    return std::optional<std::string>{};
+  }
+  std::ifstream in(descriptor_path);
+  if (!in.is_open()) {
+    return absl::PermissionDeniedError(
+        absl::StrCat("artifact_descriptor.json not readable at ", descriptor_path.string()));
+  }
+  try {
+    nlohmann::json j;
+    in >> j;
+    if (!j.contains("artifact_id")) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("artifact_descriptor.json missing artifact_id at ", descriptor_path.string()));
+    }
+    if (!j["artifact_id"].is_string()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("artifact_descriptor.json artifact_id must be string at ", descriptor_path.string()));
+    }
+    const std::string raw_artifact_id = j["artifact_id"].get<std::string>();
+    const std::string artifact_id = std::string(absl::StripAsciiWhitespace(raw_artifact_id));
+    if (artifact_id.empty()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("artifact_descriptor.json artifact_id empty at ", descriptor_path.string()));
+    }
+    return std::optional<std::string>(artifact_id);
+  } catch (const std::exception& ex) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Failed to parse artifact_descriptor.json at ", descriptor_path.string(), ": ", ex.what()));
+  }
+}
+
+SourcePreference to_hint_preference(v1::SourcePreference preference) {
+  switch (preference) {
+    case v1::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P:
+      return SourcePreference::kPreferP2P;
+    case v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK:
+      return SourcePreference::kPreferDisk;
+    case v1::SourcePreference::SOURCE_PREFERENCE_AUTO:
+    case v1::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED:
+    default:
+      return SourcePreference::kAuto;
+  }
+}
+
+v1::MaterializationSource to_proto_source(MaterializationSource source) {
+  switch (source) {
+    case MaterializationSource::kDisk:
+      return v1::MaterializationSource::MATERIALIZATION_SOURCE_DISK;
+    case MaterializationSource::kP2P:
+      return v1::MaterializationSource::MATERIALIZATION_SOURCE_P2P;
+    case MaterializationSource::kLocalReplica:
+      return v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA;
+    case MaterializationSource::kUnspecified:
+    default:
+      return v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
+  }
+}
 
 absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
   ViewSpec spec;
@@ -91,22 +219,38 @@ store::loading::TransformPlacement resolve_placement(
 
 } // namespace
 
+MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
+  std::error_code ec;
+  for (const auto& entry : d_.disk_path_whitelist) {
+    if (entry.empty()) {
+      continue;
+    }
+    auto normalized = std::filesystem::weakly_canonical(entry, ec);
+    if (ec) {
+      ec.clear();
+      normalized = entry.lexically_normal();
+    }
+    if (!normalized.empty()) {
+      disk_path_whitelist_.push_back(normalized);
+    }
+  }
+  whitelist_enforced_ = !disk_path_whitelist_.empty();
+}
+
 grpc::Status MaterializationController::materialize_replica(
     RpcContext& rctx,
     const v1::MaterializeReplicaRequest& req,
     v1::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  // Always attach artifact_id for correlation
-  if (req.has_artifact_id() && !req.artifact_id().empty()) {
-    span->SetAttribute("tc.artifact.id", req.artifact_id());
-  }
+  const v1::SourcePreference preference = req.preference();
+  const bool prefer_disk = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
+  const bool prefer_p2p = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
+
   if (rctx.allow_high_card_attrs()) {
-    if (req.has_disk_path() && !req.disk_path().empty()) {
-      span->SetAttribute("tc.disk.path", req.disk_path());
-    }
     span->SetAttribute("tc.device.uuid", req.device_uuid());
   }
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.size_bytes()));
+  span->SetAttribute("tc.store.preference", static_cast<int64_t>(preference));
 
   using v1::MaterializeReplicaStatus;
   if (d_.is_shutting_down.load()) {
@@ -114,10 +258,85 @@ grpc::Status MaterializationController::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  const bool has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
-  const bool has_disk = req.has_disk_path() && !req.disk_path().empty();
-  if (has_artifact == has_disk) {
-    return {StatusCode::INVALID_ARGUMENT, "Exactly one of artifact_id or disk_path must be provided"};
+  const bool request_has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
+  const bool request_has_disk = req.has_disk_path() && !req.disk_path().empty();
+  if (!request_has_artifact && !request_has_disk) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id or disk_path is required"};
+  }
+
+  std::optional<std::filesystem::path> normalized_disk_path;
+  if (request_has_disk) {
+    auto normalized_or = normalize_disk_path(req.disk_path());
+    if (!normalized_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(normalized_or.status());
+    }
+    const auto& normalized = *normalized_or;
+    if (whitelist_enforced_) {
+      bool allowed = false;
+      for (const auto& prefix : disk_path_whitelist_) {
+        if (path_has_prefix(normalized, prefix)) {
+          allowed = true;
+          break;
+        }
+      }
+      if (!allowed) {
+        record_disk_path_denied();
+        LOG(WARNING) << "disk_path not permitted by whitelist: " << normalized;
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return {StatusCode::INVALID_ARGUMENT, "disk_path not permitted by daemon whitelist"};
+      }
+    }
+    normalized_disk_path = normalized;
+    resp.set_disk_path(normalized.string());
+    if (rctx.allow_high_card_attrs()) {
+      span->SetAttribute("tc.disk.path", normalized.string());
+    }
+  }
+
+  std::optional<std::string> descriptor_artifact_id;
+  if (normalized_disk_path.has_value()) {
+    auto artifact_id_or = load_artifact_id_from_descriptor(*normalized_disk_path);
+    if (!artifact_id_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(artifact_id_or.status());
+    }
+    descriptor_artifact_id = *artifact_id_or;
+    if (prefer_disk) {
+      auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+      if (!idx_status.ok()) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return to_grpc_status(idx_status);
+      }
+      if (!descriptor_artifact_id.has_value()) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return {StatusCode::NOT_FOUND, "artifact_descriptor.json required when preference=PREFER_DISK"};
+      }
+    }
+  }
+
+  std::optional<std::string> artifact_id =
+      request_has_artifact ? std::optional<std::string>(req.artifact_id()) : std::nullopt;
+  if (!artifact_id.has_value()) {
+    artifact_id = descriptor_artifact_id;
+  }
+  if (artifact_id.has_value() && descriptor_artifact_id.has_value() && *artifact_id != *descriptor_artifact_id) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::FAILED_PRECONDITION, "artifact_id mismatch between request and artifact_descriptor.json"};
+  }
+  if (!artifact_id.has_value() && normalized_disk_path.has_value()) {
+    artifact_id = normalized_disk_path->string();
+  }
+  const bool has_artifact = artifact_id.has_value() && !artifact_id->empty();
+  const bool has_disk = normalized_disk_path.has_value();
+  const std::string resolved_artifact_id = has_artifact ? *artifact_id : std::string();
+  if (has_artifact) {
+    span->SetAttribute("tc.artifact.id", resolved_artifact_id);
+    resp.set_artifact_id(resolved_artifact_id);
+  }
+  if (prefer_p2p && !has_artifact) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required when preference=PREFER_P2P"};
   }
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
@@ -138,7 +357,7 @@ grpc::Status MaterializationController::materialize_replica(
         return to_grpc_status(spec_or.status());
       }
       view_spec = std::move(*spec_or);
-      auto index_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
+      auto index_or = d_.engine.get_canonical_index_by_id(resolved_artifact_id);
       if (!index_or.ok()) {
         return to_grpc_status(index_or.status());
       }
@@ -177,7 +396,7 @@ grpc::Status MaterializationController::materialize_replica(
   const bool view_requested = view_spec.has_value() || request_view_id.has_value();
   if (has_artifact && !view_requested) {
     auto satisfied = d_.lip.try_satisfy_from_lip(
-        req.artifact_id(),
+        resolved_artifact_id,
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
           if (!req.replica_uuid().empty()) {
@@ -215,6 +434,8 @@ grpc::Status MaterializationController::materialize_replica(
       }
     } else if (*satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+      resp.set_source(v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
+      span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
       rctx.mark_success();
       return Status::OK;
     }
@@ -225,14 +446,15 @@ grpc::Status MaterializationController::materialize_replica(
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
+  hints.source_preference = to_hint_preference(preference);
   if (has_artifact)
-    hints.artifact_id = req.artifact_id();
+    hints.artifact_id = resolved_artifact_id;
   if (has_disk)
-    hints.disk_path = req.disk_path();
+    hints.disk_path = normalized_disk_path->string();
   if (view_spec.has_value() || request_view_id.has_value()) {
     store::loading::VariantIdentity variant;
     if (has_artifact) {
-      variant.canonical_artifact_id = req.artifact_id();
+      variant.canonical_artifact_id = resolved_artifact_id;
     }
     if (view_spec.has_value()) {
       variant.view_spec = view_spec;
@@ -249,8 +471,8 @@ grpc::Status MaterializationController::materialize_replica(
     variant.placement = resolve_placement(req, view_spec);
     hints.variant = std::move(variant);
   }
-  const auto mode =
-      has_disk ? store::StoreEngine::MaterializeMode::LOAD_ONLY : store::StoreEngine::MaterializeMode::AUTO;
+  const auto mode = (has_disk && !has_artifact && !prefer_disk) ? store::StoreEngine::MaterializeMode::LOAD_ONLY
+                                                                : store::StoreEngine::MaterializeMode::AUTO;
 
   auto result = d_.engine.materialize_replica(dev, mode, hints);
   if (!result.ok()) {
@@ -258,6 +480,8 @@ grpc::Status MaterializationController::materialize_replica(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
+  resp.set_source(to_proto_source(handle.source));
+  span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   if (!req.replica_uuid().empty()) {
     d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
   }
@@ -282,7 +506,7 @@ grpc::Status MaterializationController::materialize_replica(
     }
   }
   if (has_disk)
-    resp.set_disk_path(req.disk_path());
+    resp.set_disk_path(normalized_disk_path->string());
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.cuda_ipc_handle.is_valid()) {
     resp.mutable_mem_handle()->set_cuda_ipc_handle(
@@ -290,6 +514,30 @@ grpc::Status MaterializationController::materialize_replica(
   }
   if (handle.view_index_json.has_value()) {
     resp.set_view_index_json(*handle.view_index_json);
+  }
+  if (resp.view_index_json().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
+    // Prefer disk-local canonical index to avoid Global Store dependency for disk loads.
+    if (normalized_disk_path.has_value()) {
+      auto local_index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
+      if (local_index_or.ok()) {
+        resp.set_view_index_json(local_index_or->canonical_index_json);
+        VLOG(1) << "MaterializationController: filled view_index_json from disk for artifact_id="
+                << handle.replica_key.artifact_id;
+      } else {
+        LOG(WARNING) << "Failed to read canonical index from disk for artifact_id=" << handle.replica_key.artifact_id
+                     << ": " << local_index_or.status();
+      }
+    }
+    if (resp.view_index_json().empty()) {
+      auto index_or = d_.engine.get_canonical_index_by_id(handle.replica_key.artifact_id);
+      if (index_or.ok()) {
+        resp.set_view_index_json(*index_or);
+        VLOG(1) << "MaterializationController: filled view_index_json from engine for disk artifact_id="
+                << handle.replica_key.artifact_id;
+      } else {
+        LOG(WARNING) << "Failed to fetch canonical index for disk materialization response: " << index_or.status();
+      }
+    }
   }
   if (handle.view_data_hash.has_value()) {
     resp.set_view_data_hash(*handle.view_data_hash);
@@ -367,6 +615,8 @@ grpc::Status MaterializationController::materialize_by_key(
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_artifact_id(mapping.artifact_id);
       resp.set_used_disk_path(mapping.disk_path);
+      resp.set_source(v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
+      span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
       rctx.mark_success();
       return Status::OK;
     }
@@ -422,6 +672,8 @@ grpc::Status MaterializationController::materialize_by_key(
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);
   resp.set_used_disk_path(mapping.disk_path);
+  resp.set_source(to_proto_source(handle.source));
+  span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   rctx.mark_success();
   return Status::OK;
 }

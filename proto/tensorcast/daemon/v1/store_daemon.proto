@@ -101,6 +101,22 @@ enum TransformPlacement {
   TRANSFORM_PLACEMENT_CLIENT = 2;
 }
 
+// Hint for selecting the preferred materialization source.
+enum SourcePreference {
+  SOURCE_PREFERENCE_UNSPECIFIED = 0;
+  SOURCE_PREFERENCE_AUTO = 1;
+  SOURCE_PREFERENCE_PREFER_P2P = 2;
+  SOURCE_PREFERENCE_PREFER_DISK = 3;
+}
+
+// Actual source used to serve a materialization request.
+enum MaterializationSource {
+  MATERIALIZATION_SOURCE_UNSPECIFIED = 0;
+  MATERIALIZATION_SOURCE_DISK = 1;
+  MATERIALIZATION_SOURCE_P2P = 2;
+  MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
+}
+
 message MemCopyHandle {
   bytes cuda_ipc_handle = 1;
 }
@@ -147,7 +163,7 @@ message ViewRegistrationOptions {
 
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
-  // Exactly one of artifact_id or disk_path (or legacy disk_path) should be provided.
+  // At least one of artifact_id or disk_path (or legacy disk_path) should be provided.
   optional string artifact_id = 9; // Content-addressed ID (mi2:...)
   optional string disk_path = 10; // On-disk path for legacy/disk loads
 
@@ -159,6 +175,8 @@ message MaterializeReplicaRequest {
   int32 pinned_allocation_timeout_ms = 5;
   int32 pid = 6; // Process ID for reference tracking
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
+
+  SourcePreference preference = 11;
 
   oneof view_identity {
     ViewSpec view = 1001;
@@ -185,6 +203,9 @@ message MaterializeReplicaResponse {
   // but data transfer is still in progress. Client must call
   // ConfirmReplica to verify completion before using the artifact.
   MaterializeReplicaStatus status = 3;
+
+  MaterializationSource source = 4;
+  optional string artifact_id = 5;
 
   bytes view_index_json = 1001;
   string view_data_hash = 1002;
@@ -629,6 +650,7 @@ message MaterializeByKeyResponse {
   MaterializeReplicaStatus status = 2;
   string artifact_id = 3;
   string used_disk_path = 4;
+  MaterializationSource source = 5;
 }
 
 message PublishReplicaKeyRequest {

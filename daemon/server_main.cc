@@ -1,5 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -179,6 +180,9 @@ int main(int argc, char** argv) {
   svc_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)
   svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
+  for (const auto& prefix : cfg.engine().disk_path_whitelist()) {
+    svc_opts.disk_path_whitelist.emplace_back(prefix);
+  }
 
   daemon::StoreDaemonServiceImpl service(engine, svc_opts);
 

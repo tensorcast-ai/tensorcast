@@ -102,7 +102,7 @@ struct CommitLeaseResult {
   std::string artifact_id;
   std::string index_multihash;
   std::string data_multihash;
-  std::string schema_version; // e.g., "v2"
+  std::string schema_version; // e.g., "v3"
   std::string encoding; // e.g., "json"
   uint64_t total_size{0};
   std::string verification_json; // optional JSON payload

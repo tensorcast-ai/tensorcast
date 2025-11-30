@@ -110,7 +110,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const Ma
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
   auto fut = replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
-  return build_handle(request, replica, fut);
+  return build_handle(request, replica, fut, loading::MaterializationSource::kLocalReplica);
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const MaterializationRequest& request) const {
@@ -181,7 +181,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
     absl::Status copy_st = dst_replica->copy_from(*src_replica);
     std::promise<absl::Status> p;
     p.set_value(copy_st);
-    return build_handle(request, dst_replica, p.get_future().share());
+    return build_handle(request, dst_replica, p.get_future().share(), loading::MaterializationSource::kLocalReplica);
   }
 
   return absl::FailedPreconditionError(
@@ -215,7 +215,11 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
       request.target_is_gpu() ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
   target.location.device_id = request.target_device().ordinal;
 
-  return deps_.ingest_from_disk(request.canonical_artifact_id(), disk_src, target, request.hints());
+  auto handle = deps_.ingest_from_disk(request.canonical_artifact_id(), disk_src, target, request.hints());
+  if (handle.ok() && handle->source == loading::MaterializationSource::kUnspecified) {
+    handle->source = loading::MaterializationSource::kDisk;
+  }
+  return handle;
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const MaterializationRequest& request) const {
@@ -249,12 +253,14 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
 ReplicaHandle MaterializationService::build_handle(
     const MaterializationRequest& request,
     const std::shared_ptr<replica::Replica>& replica,
-    std::shared_future<absl::Status> ready_future) const {
+    std::shared_future<absl::Status> ready_future,
+    loading::MaterializationSource source) const {
   ReplicaHandle handle;
   handle.replica_key = request.replica_key();
   handle.ready_future = std::move(ready_future);
   handle.cpu_state = replica->get_memory_state(MemoryLocation::CPU);
   handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
+  handle.source = source;
 
   if (request.target_is_gpu()) {
     const auto gpu_ptrs = replica->get_data_pointer(MemoryLocation::GPU);

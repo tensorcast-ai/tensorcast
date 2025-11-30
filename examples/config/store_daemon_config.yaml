@@ -17,6 +17,8 @@ engine:
   streaming_buffer_max_concurrent_sessions: 1
   pinned_allocation_timeout: 30s
   p2p_fallback_disk_dir: ""
+  # Optional: limit daemon-served disk materialization to these path prefixes. Empty list allows all.
+  disk_path_whitelist: []
 high_availability:
   enabled: true
   global_store_endpoints:

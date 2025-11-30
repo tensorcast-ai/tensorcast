@@ -27,48 +27,93 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     const DeviceKey& target_device,
     const MaterializeHints& hints) {
   // ------------------------------------------------------------------
-  // 1. Query Global Store for existing replicas
+  // 1. Preference handling and Global Store connectivity guard
   // ------------------------------------------------------------------
-  if (!gs_client_->is_connected()) {
+  const bool gs_connected = gs_client_->is_connected();
+  const auto preference = hints.source_preference;
+  const bool has_disk_path = !hints.disk_path.empty();
+  const bool has_artifact_id_hint = !hints.artifact_id.empty();
+  if (preference == loading::SourcePreference::kPreferP2P && !has_artifact_id_hint) {
+    return absl::InvalidArgumentError("preference=PREFER_P2P requires a canonical artifact_id");
+  }
+  if (!gs_connected && !has_disk_path) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
+
+  auto register_with_global_store = [&](const loading::ReplicaHandle& handle) {
+    absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
+    if (!reg_status.ok()) {
+      LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
+    }
+  };
+
+  bool attempted_disk_first = false;
+  absl::Status last_p2p_status = absl::OkStatus();
 
   const std::optional<std::string> view_id = hints.variant ? hints.variant->view_id : std::nullopt;
 
   // ------------------------------------------------------------------
-  // 2. Request transport session – Global Store will choose a suitable source
+  // 2. Disk-first path when requested
   // ------------------------------------------------------------------
-  absl::StatusOr<components::TransportSession> transport_or;
-  if (view_id.has_value()) {
-    transport_or = gs_client_->request_view_transport(
-        artifact_id,
-        *view_id,
-        /*source_node_id=*/"",
-        /*source_address=*/"",
-        /*source_port=*/0,
-        target_device,
-        /*wait_timeout_ms=*/30000);
-    if (!transport_or.ok()) {
-      if (absl::IsNotFound(transport_or.status()) || absl::IsUnimplemented(transport_or.status())) {
-        LOG(INFO) << "Variant transport unavailable for view_id=" << *view_id << " (" << transport_or.status()
-                  << "); falling back to canonical routing";
-        transport_or = gs_client_->request_replica_transport(
-            artifact_id,
-            /*source_node_id=*/"",
-            /*source_address=*/"",
-            /*source_port=*/0,
-            target_device,
-            /*wait_timeout_ms=*/30000);
-      }
+  if (preference == loading::SourcePreference::kPreferDisk && has_disk_path) {
+    loading::DiskSource disk_src;
+    disk_src.path = std::filesystem::path(hints.disk_path);
+
+    loading::ReplicaTarget target;
+    target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                   : common::memory::MemoryLocation::CPU;
+    target.location.device_id = target_device.ordinal;
+
+    auto disk_or = backend_->ingest_from_disk(std::string(artifact_id), disk_src, target, hints);
+    attempted_disk_first = true;
+    if (disk_or.ok()) {
+      register_with_global_store(*disk_or);
+      return disk_or;
     }
-  } else {
-    transport_or = gs_client_->request_replica_transport(
-        artifact_id,
-        /*source_node_id=*/"", // Local node info optional – left empty here
-        /*source_address=*/"",
-        /*source_port=*/0,
-        target_device,
-        /*wait_timeout_ms=*/30000);
+    // If caller only provided disk hints, surface the disk failure directly.
+    if (!has_artifact_id_hint || !gs_connected) {
+      return disk_or.status();
+    }
+    LOG(INFO) << "Disk-preferred load failed, retrying via P2P: " << disk_or.status();
+  }
+
+  // ------------------------------------------------------------------
+  // 3. Request transport session – Global Store will choose a suitable source
+  // ------------------------------------------------------------------
+  absl::StatusOr<components::TransportSession> transport_or =
+      absl::FailedPreconditionError("GlobalStoreClient not connected");
+  if (gs_connected) {
+    if (view_id.has_value()) {
+      transport_or = gs_client_->request_view_transport(
+          artifact_id,
+          *view_id,
+          /*source_node_id=*/"",
+          /*source_address=*/"",
+          /*source_port=*/0,
+          target_device,
+          /*wait_timeout_ms=*/30000);
+      if (!transport_or.ok()) {
+        if (absl::IsNotFound(transport_or.status()) || absl::IsUnimplemented(transport_or.status())) {
+          LOG(INFO) << "Variant transport unavailable for view_id=" << *view_id << " (" << transport_or.status()
+                    << "); falling back to canonical routing";
+          transport_or = gs_client_->request_replica_transport(
+              artifact_id,
+              /*source_node_id=*/"",
+              /*source_address=*/"",
+              /*source_port=*/0,
+              target_device,
+              /*wait_timeout_ms=*/30000);
+        }
+      }
+    } else {
+      transport_or = gs_client_->request_replica_transport(
+          artifact_id,
+          /*source_node_id=*/"", // Local node info optional – left empty here
+          /*source_address=*/"",
+          /*source_port=*/0,
+          target_device,
+          /*wait_timeout_ms=*/30000);
+    }
   }
 
   if (transport_or.ok()) {
@@ -112,6 +157,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     if (!comp_status.ok()) {
       LOG(WARNING) << "complete_replica_transport after failure returned error: " << comp_status;
     }
+    last_p2p_status = load_or.status();
     if (view_id.has_value()) {
       LOG(WARNING) << "P2P load failed for view_id=" << *view_id << ": " << load_or.status();
     } else {
@@ -142,13 +188,17 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
                                                                  : common::memory::MemoryLocation::CPU;
   target.location.device_id = target_device.ordinal;
 
+  if (preference == loading::SourcePreference::kPreferDisk && attempted_disk_first) {
+    if (!last_p2p_status.ok()) {
+      return last_p2p_status;
+    }
+    return transport_or.ok() ? absl::FailedPreconditionError("disk path already attempted") : transport_or.status();
+  }
+
   auto disk_or = backend_->ingest_from_disk(std::string(artifact_id), disk_src, target, hints);
   if (disk_or.ok()) {
     const auto& handle = *disk_or;
-    absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
-    if (!reg_status.ok()) {
-      LOG(WARNING) << "register_replica_with_global_store (disk fallback) returned error: " << reg_status;
-    }
+    register_with_global_store(handle);
   }
   return disk_or;
 }

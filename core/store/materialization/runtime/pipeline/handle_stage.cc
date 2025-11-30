@@ -2,10 +2,8 @@
 
 #include "core/store/materialization/runtime/pipeline/handle_stage.h"
 
-#include <chrono>
 #include <cstring>
 #include <optional>
-#include <string_view>
 
 #include "absl/status/statusor.h"
 
@@ -41,8 +39,25 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
   if (ctx.resolved_view_plan.has_value() && !ctx.resolved_view_plan->is_identity) {
     handle.view_index_json = ctx.resolved_view_plan->view_index_json;
   }
+  if (!handle.view_index_json.has_value() && ctx.source_type == SourceType::kDisk) {
+    if (ctx.verification.canonical_index_json.has_value()) {
+      handle.view_index_json = ctx.verification.canonical_index_json;
+      LOG(INFO) << "HandleStage: attached canonical index from disk for artifact=" << ctx.artifact_identifier;
+    } else {
+      LOG(INFO) << "HandleStage: no canonical index available for disk source artifact=" << ctx.artifact_identifier;
+    }
+  }
   if (ctx.verification.view_data_hash.has_value()) {
     handle.view_data_hash = ctx.verification.view_data_hash;
+  }
+
+  switch (ctx.source_type) {
+    case SourceType::kDisk:
+      handle.source = loading::MaterializationSource::kDisk;
+      break;
+    case SourceType::kP2P:
+      handle.source = loading::MaterializationSource::kP2P;
+      break;
   }
 
   return handle;

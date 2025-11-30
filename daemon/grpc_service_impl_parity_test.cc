@@ -3,6 +3,7 @@
 #include "daemon/grpc_service_impl.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <filesystem>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
@@ -61,7 +62,7 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   }
 
-  // Both present -> INVALID_ARGUMENT
+  // Both present are accepted (may still fail deeper in the stack, but not on input validation)
   {
     tensorcast::daemon::v1::MaterializeReplicaRequest req;
     req.set_disk_path("/tmp/x");
@@ -70,8 +71,23 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
     tensorcast::daemon::v1::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
-    REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+    REQUIRE(st.error_code() != grpc::StatusCode::INVALID_ARGUMENT);
   }
+}
+
+TEST_CASE("MaterializeReplica enforces disk whitelist", "[daemon][parity]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  StoreDaemonServiceImpl::Options opts;
+  opts.disk_path_whitelist = {std::filesystem::path("/allowed")};
+  StoreDaemonServiceImpl svc(engine, opts);
+
+  tensorcast::daemon::v1::MaterializeReplicaRequest req;
+  req.set_disk_path("/denied/path");
+  req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
+  tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+  grpc::ServerContext ctx;
+  auto st = svc.MaterializeReplica(&ctx, &req, &resp);
+  REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]") {

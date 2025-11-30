@@ -531,7 +531,7 @@ static py::dict save_model_to_disk_wrapper(
   desc["artifact_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
   desc["index_multihash"] = *idx_mh_or;
   desc["data_multihash"] = *data_mh_or;
-  desc["schema_version"] = "v2";
+  desc["schema_version"] = "v3";
   desc["encoding"] = "json";
   desc["total_size"] = total_size;
   nlohmann::json hash_params;
@@ -672,7 +672,7 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
   desc["artifact_id"] = std::string("mi2:") + *idx_mh_or + std::string(":") + *data_mh_or;
   desc["index_multihash"] = *idx_mh_or;
   desc["data_multihash"] = *data_mh_or;
-  desc["schema_version"] = "v2";
+  desc["schema_version"] = "v3";
   desc["encoding"] = "json";
   desc["total_size"] = total_size;
   nlohmann::json hash_params;
