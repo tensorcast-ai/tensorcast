@@ -396,13 +396,14 @@ def _ensure_process_store(
         current_closed = current.closed if current is not None else False
         if current is None or force_recreate or current_closed:
             prior = _PROCESS_STORE
+            opts_marker: StoreOptions | None
             if opts is not None:
                 opts_marker = opts
             elif current_closed and not force_recreate:
                 opts_marker = _PROCESS_STORE_OPTS
             else:
                 opts_marker = None
-            effective_opts = opts_marker or context.opts
+            effective_opts: StoreOptions = opts_marker or context.opts
             _PROCESS_STORE = Store(
                 context.daemon_endpoint, opts=effective_opts, runtime=context
             )
