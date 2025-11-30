@@ -20,7 +20,6 @@ from tensorcast.api._register import (
     RegisteredArtifact as _RegisterHandle,
 )
 from tensorcast.api._register import (
-    RegisteredLease,
     RegistrationResult,
     ViewRegistrationContext,
     _compute_view_plan_metadata,
@@ -301,7 +300,7 @@ class RegistrationPipeline:
         key: str | None,
         plan: PlanType,
         cancel_event: threading.Event | None = None,
-        on_begin: Callable[[RegisteredLease], None] | None = None,
+        on_begin: Callable[[_RegisterHandle], None] | None = None,
         options_override: RegisterArtifactOptions | None = None,
         ttl_override: int | None = None,
         device_override: int | torch.device | None = None,
@@ -404,7 +403,7 @@ class RegistrationPipeline:
         key: str | None,
         plan: PlanType,
         cancel_event: threading.Event | None = None,
-        on_begin: Callable[[RegisteredLease], None] | None = None,
+        on_begin: Callable[[_RegisterHandle], None] | None = None,
         options_override: RegisterArtifactOptions | None = None,
         ttl_override: int | None = None,
         device_override: int | torch.device | None = None,

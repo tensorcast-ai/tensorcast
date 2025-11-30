@@ -513,6 +513,44 @@ def register_view(
     )
 
 
+def register_vram_region(
+    *,
+    device_id: int,
+    base_ptr: int,
+    size_bytes: int,
+    ttl_ms: int,
+    name: str | None = None,
+) -> VramRegionHandle:
+    return _coerce_store().register_vram_region(
+        device_id=device_id,
+        base_ptr=base_ptr,
+        size_bytes=size_bytes,
+        ttl_ms=ttl_ms,
+        name=name,
+    )
+
+
+def unregister_vram_region(region_id: str, *, force: bool | None = None) -> bool:
+    return _coerce_store().unregister_vram_region(region_id, force=force)
+
+
+def deregister_artifact(
+    artifact_id: str,
+    *,
+    wait: bool = True,
+    drain_timeout_s: float | None = None,
+    extend_ttl_ms: int | None = None,
+    device_id: int | None = None,
+) -> DeregisterArtifactOutcome:
+    return _coerce_store().deregister_artifact(
+        artifact_id,
+        wait=wait,
+        drain_timeout_s=drain_timeout_s,
+        extend_ttl_ms=extend_ttl_ms,
+        device_id=device_id,
+    )
+
+
 def put(
     tensors: TensorDict,
     *,
