@@ -3,6 +3,17 @@
 The `tensorcast.api` package exposes the high-level registration and loading
 helpers that SDK integrations use during artifact lifecycle management.
 
+## Store module layout
+
+Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
+
+- `store/types.py` and `store/handles.py` keep immutable dataclasses and handle wrappers importable from `tensorcast.api.store`.
+- `store/runtime.py` owns the process-wide daemon client, session record writes, key/capability caches, and fork-aware executor lifecycle.
+- `store/registration.py` and `store/materialization.py` orchestrate register/put/view and get/get_into/get_view flows with shared retry/error mapping.
+- `store/views.py` keeps view-spec parsing, placement defaults, and canonical index lookups isolated from the pipelines.
+- `store/async_ops.py` centralizes async helpers (`ArtifactFuture`, `TrackedExecutor`) so cancellation/confirm semantics are consistent across verbs.
+- `store/__init__.py` is the public façade; it now eagerly wires runtime/registration/materialization without monkeypatch/override hooks or lazy rebuilds.
+
 ## View Retrieval
 
 `Store.get_view()` defaults to executing transforms on the daemon so that
