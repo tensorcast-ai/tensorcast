@@ -468,6 +468,10 @@ class StoreRuntimeContext:
     def opts(self) -> StoreOptions:
         return self._opts
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
 
 _GLOBAL_CONTEXT_LOCK = threading.RLock()
 _GLOBAL_CONTEXT: StoreRuntimeContext | None = None
@@ -502,7 +506,7 @@ def get_context(
         global _GLOBAL_CONTEXT, _GLOBAL_CONTEXT_ADDRESS, _GLOBAL_CONTEXT_OPTIONS
 
         current = _GLOBAL_CONTEXT
-        current_closed = bool(getattr(current, "_closed", False)) if current else False
+        current_closed = current.closed if current else False
         same_address = (_GLOBAL_CONTEXT_ADDRESS == address) if current else False
 
         if current is not None and not force_recreate:

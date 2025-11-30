@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
 import threading
-from typing import Any
 from types import SimpleNamespace
+from typing import Any
 
 import grpc
 import pytest
@@ -20,6 +21,10 @@ from tensorcast.api.store import (
     StoreOptions,
     ArtifactError,
 )
+from tensorcast.api.store import materialization as materialization_mod
+from tensorcast.api.store.materialization import MaterializationPipeline
+from tensorcast.api.store.retry import map_registration_error
+from tensorcast.api.store.views import ViewOrchestrator
 from tensorcast.api._view_ops import (
     NarrowOp,
     ResolvedViewInputs,
@@ -55,18 +60,51 @@ def _make_three_dim_index() -> CanonicalIndex:
     return CanonicalIndex(entries=(entry,), total_size_bytes=entry.size_bytes, avbs_hash="")
 
 
+class _DummyExecutor:
+    def submit(self, fn, *args, **kwargs):
+        fut: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+        return fut
+
+
+class _DummyRuntime:
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client or SimpleNamespace(get_artifact_index_by_id=lambda _: b"{}")
+        self.daemon_endpoint = "dummy"
+        self.session_id = "sess"
+        self.opts = StoreOptions()
+        self.retry_policies: dict[str, object] = {}
+        self.executor = _DummyExecutor()
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+
+    def ensure_client(self) -> Any:
+        return self._client
+
+    def operation_span(self, *_args, **_kwargs):
+        span = SimpleNamespace(
+            add_event=lambda *a, **k: None,
+            set_attribute=lambda *a, **k: None,
+            set_status=lambda *a, **k: None,
+            record_exception=lambda *a, **k: None,
+        )
+        return contextlib.nullcontext(span)
+
+    def track_future(self, _future: Any) -> None:
+        return None
+
+    def resolve_key_mapping_cached(self, key: str) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key, (None, None))
+
+    def cache_key_mapping(self, key: str, artifact_id: str | None, disk_path: str | None) -> None:
+        self._key_cache[key] = (artifact_id, disk_path)
+
+
 def _fresh_store() -> Store:
-    store = object.__new__(Store)
-    store._opts = StoreOptions()
-    store._retry_policies = {}
-    store._daemon_endpoint = "dummy"
-    store._session_id = "sess"
-    store._pending_futures = set()
-    store._key_cache = {}
-    store._key_cache_lock = threading.RLock()
-    store._metadata_lock = threading.RLock()
-    store._metadata = {}
-    return store
+    runtime = _DummyRuntime()
+    return Store("dummy:0", runtime=runtime)
 
 
 class _PlacementRpcError(grpc.RpcError):
@@ -83,8 +121,7 @@ class _PlacementRpcError(grpc.RpcError):
 def test_build_view_spec_narrow_normalizes_length() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    result = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices={"weights": (slice(32, 96),)},
         transpose=None,
@@ -105,8 +142,7 @@ def test_build_view_spec_narrow_normalizes_length() -> None:
 def test_build_view_spec_identity_returns_none() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    result = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices={"weights": (slice(0, 256),)},
         transpose=None,
@@ -119,8 +155,7 @@ def test_build_view_spec_identity_returns_none() -> None:
 def test_build_view_spec_transpose_canonicalizes_sequence() -> None:
     store = _fresh_store()
     canonical = _make_three_dim_index()
-    result = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices=None,
         transpose={"tensor": [(0, 1), (0, 2)]},
@@ -138,15 +173,13 @@ def test_build_view_spec_rejects_non_mapping_inputs() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
     with pytest.raises(ArtifactError, match="Slice spec must be a mapping"):
-        Store._build_view_spec(
-            store,
+        store._views._build_view_spec(
             canonical_index=canonical,
             slices=[(slice(0, 1),)],
             transpose=None,
         )
     with pytest.raises(ArtifactError, match="Transpose spec must be a mapping"):
-        Store._build_view_spec(
-            store,
+        store._views._build_view_spec(
             canonical_index=canonical,
             slices=None,
             transpose=[(0, 1)],
@@ -155,8 +188,6 @@ def test_build_view_spec_rejects_non_mapping_inputs() -> None:
 
 def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
     fake_spec = store_daemon_pb2.ViewSpec()
     fake_spec.tensors["weights"].ops.add().narrow.dim = 0
     fake_spec.tensors["weights"].ops[-1].narrow.start = 0
@@ -167,46 +198,32 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
         tensor_ops={"weights": [NarrowOp(dim=0, start=0, length=16)]},
     )
 
-    def fake_resolve(
-        self,
+    def fake_resolve_inputs(
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
         transpose: Any,
         view_id: str | None,
     ) -> ResolvedViewInputs:
-        assert client is fake_client
         return ResolvedViewInputs.from_build_result(
             artifact_id="artifact-123",
             canonical_index_bytes=b"{}",
             build_result=build_result,
         )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve_inputs.__get__(store._views, ViewOrchestrator),
+    )
 
-    fake_span = SimpleNamespace(
-        add_event=lambda *args, **kwargs: None,
-        set_attribute=lambda *args, **kwargs: None,
-        set_status=lambda *args, **kwargs: None,
-        record_exception=lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        Store,
-        "_operation_span",
-        lambda self, *args, **kwargs: contextlib.nullcontext(fake_span),
-    )
-    monkeypatch.setattr(
-        store,
-        "_operation_span",
-        lambda *args, **kwargs: contextlib.nullcontext(fake_span),
-    )
     placement_value = store_daemon_pb2.TransformPlacement.TRANSFORM_PLACEMENT_SERVER
     monkeypatch.setattr(
-        Store,
-        "_resolve_transform_placement",
-        lambda self, placement, has_transpose: placement_value,
+        store._views,
+        "resolve_transform_placement",
+        lambda placement, *, has_transpose, for_registration=False: placement_value,
     )
     materialized = MaterializedArtifact(
         artifact_id="artifact-123",
@@ -216,13 +233,17 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
     )
     captured: dict[str, Any] = {}
 
-    def fake_perform(self, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
         captured.update(kwargs)
         return materialized, 0
 
-    monkeypatch.setattr(Store, "_perform_get_with_retry", fake_perform)
+    monkeypatch.setattr(
+        store._materialization,
+        "_perform_get_with_retry",
+        fake_perform.__get__(store._materialization, MaterializationPipeline),
+    )
 
-    result = Store.get_view(store, artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
+    result = store.get_view(artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
     assert result is materialized.state_dict
     assert captured["artifact_id"] == "artifact-123"
     assert captured["view"] is fake_spec
@@ -232,8 +253,6 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
 
     layout_index_json = (
         b'{"weights":[0,16,[16],[1],"torch.float32",0]}'
@@ -247,9 +266,8 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
     def fake_resolve(
-        self,
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
@@ -262,23 +280,30 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
             build_result=ViewSpecBuildResult.identity(),
         )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve.__get__(store._views, ViewOrchestrator),
+    )
 
-    def fake_perform(self, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
         return materialized, 0
 
-    monkeypatch.setattr(Store, "_perform_get_with_retry", fake_perform)
+    monkeypatch.setattr(
+        store._materialization,
+        "_perform_get_with_retry",
+        fake_perform.__get__(store._materialization, MaterializationPipeline),
+    )
     released: dict[str, Any] = {}
     monkeypatch.setattr(
-        Store,
+        store._materialization,
         "_release_materialized",
-        lambda self, mat, client: released.setdefault("called", True),
+        lambda mat, client: released.setdefault("called", True),
     )
 
     captured_index: dict[str, Any] = {}
 
     def fake_validate(
-        self,
         *,
         canonical_index: CanonicalIndex,
         target: dict[str, torch.Tensor],
@@ -288,10 +313,10 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
         captured_index["shapes"] = [entry.shape for entry in canonical_index.entries]
         return [(target["weights"], source["weights"])]
 
-    monkeypatch.setattr(Store, "_validate_targets", fake_validate)
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     target = {"weights": torch.zeros(16)}
-    Store.get_view_into(store, target, artifact_id="artifact-123", view_id=None, slices={"weights": (slice(0, 16),)})
+    store.get_view_into(target, artifact_id="artifact-123", view_id=None, slices={"weights": (slice(0, 16),)})
     assert torch.allclose(target["weights"], torch.ones(16))
     assert captured_index["shapes"] == [(16,)]
     assert released.get("called") is True
@@ -312,8 +337,6 @@ def test_compute_view_registration_plan_binding_narrow() -> None:
 
 def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
 
     canonical_index = b'{"weights":[0,16,[4],[1],"torch.float32",0]}'
     view_spec = store_daemon_pb2.ViewSpec()
@@ -323,9 +346,8 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
     narrow.length = 2
 
     def fake_resolve(
-        self,
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
@@ -342,7 +364,11 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
             build_result=build_result,
         )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve.__get__(store._views, ViewOrchestrator),
+    )
 
     captured: dict[str, Any] = {}
 
@@ -351,11 +377,14 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
         captured["view_registration"] = kwargs.get("view_registration")
         return SimpleNamespace()
 
-    monkeypatch.setattr(Store, "_perform_registration", fake_perform)
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        fake_perform.__get__(store._registration, store._registration.__class__),
+    )
 
     view_tensor = torch.tensor([10.0, 20.0], dtype=torch.float32)
-    result = Store.register_view(
-        store,
+    result = store.register_view(
         tensors={"weights": view_tensor},
         artifact_id="artifact-123",
         placement="CLIENT",
@@ -375,7 +404,7 @@ def test_register_view_server_placement_error_guidance() -> None:
         "retry with placement=CLIENT (mock device missing)"
     )
 
-    mapped = store._map_registration_error(failure)
+    mapped = map_registration_error(failure)
     assert isinstance(mapped, ArtifactError)
     assert mapped.status_code == "FAILED_PRECONDITION"
     assert mapped.retryable is False

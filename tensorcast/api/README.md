@@ -14,6 +14,17 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 - `store/async_ops.py` centralizes async helpers (`ArtifactFuture`, `TrackedExecutor`) so cancellation/confirm semantics are consistent across verbs.
 - `store/__init__.py` is the public façade; it now eagerly wires runtime/registration/materialization without monkeypatch/override hooks or lazy rebuilds.
 
+Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
+
+## Device requirements
+
+`Store.get*`/`Store.get_into*` default to materializing replicas onto CUDA
+devices. On hosts without `torch.cuda.is_available()`, callers must either
+provide disk fallback options (so bytes can be streamed from disk) or explicitly
+select a CPU target alongside those fallback settings. Otherwise the API raises
+`ArtifactError("CUDA device required for retrieval")` immediately, keeping
+callers from running deeper into retry loops that can never succeed.
+
 ## View Retrieval
 
 `Store.get_view()` defaults to executing transforms on the daemon so that

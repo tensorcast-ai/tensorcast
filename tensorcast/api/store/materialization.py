@@ -481,8 +481,14 @@ class MaterializationPipeline:
 
         if selector is None:
             if not torch.cuda.is_available():
-                # Allow CPU selection in test or fallback contexts even without disk.
-                return 0
+                if _has_disk_fallback():
+                    # Disk fallback provides the bytes for CPU materialization.
+                    return 0
+                raise ArtifactError(
+                    "CUDA device required for retrieval",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
             return int(torch.cuda.current_device())
         if isinstance(selector, torch.device):
             if selector.type != "cuda":

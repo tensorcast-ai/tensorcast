@@ -163,14 +163,19 @@ class ViewOrchestrator:
 
     @staticmethod
     def resolve_transform_placement(
-        placement: str | None, *, has_transpose: bool
+        placement: str | None,
+        *,
+        has_transpose: bool,
+        for_registration: bool = False,
     ) -> TransformPlacement:
         if placement is None:
-            return (
-                TransformPlacement.TRANSFORM_PLACEMENT_CLIENT
-                if has_transpose
-                else TransformPlacement.TRANSFORM_PLACEMENT_SERVER
-            )
+            # Retrieval (get_view) always defaults to SERVER because client-side
+            # transform engine doesn't exist yet (see tensorcast/api/README.md).
+            # Registration defaults to CLIENT when transpose is present so the
+            # client pre-applies the transform before upload.
+            if for_registration and has_transpose:
+                return TransformPlacement.TRANSFORM_PLACEMENT_CLIENT
+            return TransformPlacement.TRANSFORM_PLACEMENT_SERVER
         normalized = placement.upper()
         if normalized == "SERVER":
             return TransformPlacement.TRANSFORM_PLACEMENT_SERVER

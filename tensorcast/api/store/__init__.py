@@ -364,6 +364,10 @@ class Store:
     def daemon_endpoint(self) -> str:
         return self._runtime.daemon_endpoint
 
+    @property
+    def closed(self) -> bool:
+        return self._runtime.closed
+
     def close(self) -> None:
         self._runtime.close()
 
@@ -388,10 +392,21 @@ def _ensure_process_store(
     )
 
     with _PROCESS_STORE_LOCK:
-        if _PROCESS_STORE is None or force_recreate:
+        current = _PROCESS_STORE
+        current_closed = current.closed if current is not None else False
+        if current is None or force_recreate or current_closed:
             prior = _PROCESS_STORE
-            _PROCESS_STORE = Store(context.daemon_endpoint, opts=opts, runtime=context)
-            _PROCESS_STORE_OPTS = opts
+            if opts is not None:
+                opts_marker = opts
+            elif current_closed and not force_recreate:
+                opts_marker = _PROCESS_STORE_OPTS
+            else:
+                opts_marker = None
+            effective_opts = opts_marker or context.opts
+            _PROCESS_STORE = Store(
+                context.daemon_endpoint, opts=effective_opts, runtime=context
+            )
+            _PROCESS_STORE_OPTS = opts_marker
             if prior is not None:
                 with contextlib.suppress(Exception):
                     prior.close()
@@ -403,7 +418,10 @@ def _ensure_process_store(
             raise RuntimeError(
                 "Store already initialized with different options. Pass force_recreate=True to replace."
             )
-        return _PROCESS_STORE
+        result = _PROCESS_STORE
+        if result is None:
+            raise RuntimeError("Failed to initialize process Store")
+        return result
 
 
 def store(
@@ -419,10 +437,12 @@ def store(
 def shutdown_process_store() -> None:
     """Close and clear the process-wide Store if it exists."""
 
+    global _PROCESS_STORE, _PROCESS_STORE_OPTS
+
     with _PROCESS_STORE_LOCK:
-        global _PROCESS_STORE
         current = _PROCESS_STORE
         _PROCESS_STORE = None
+        _PROCESS_STORE_OPTS = None
     if current is not None:
         with contextlib.suppress(Exception):
             current.close()
@@ -431,7 +451,7 @@ def shutdown_process_store() -> None:
 
 def _coerce_store() -> Store:
     current = _PROCESS_STORE
-    if current is not None:
+    if current is not None and not current.closed:
         return current
     return store()
 

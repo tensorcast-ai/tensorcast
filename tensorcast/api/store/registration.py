@@ -173,6 +173,7 @@ class RegistrationPipeline:
         placement_enum = self._views.resolve_transform_placement(
             placement,
             has_transpose=resolved.has_transpose,
+            for_registration=True,
         )
         assert resolved.canonical_index_bytes is not None
         canonical_index_bytes = resolved.canonical_index_bytes
