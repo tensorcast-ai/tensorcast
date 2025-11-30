@@ -11,7 +11,7 @@ related_code:
   - tensorcast/api/**
   - tensorcast/global_store/**
 created: 2025-09-24
-last_updated: 2025-09-24
+last_updated: 2025-11-30
 status: proposed
 ---
 
@@ -123,6 +123,7 @@ The design maintains backward compatibility by marking new fields as optional an
   - `Store.register_vram_region(...) -> VramRegion`
   - `Store.unregister_vram_region(region_id: str) -> None`
   - `Store.deregister_artifact(..., wait: bool = True, drain_timeout_s: float = 30.0)`
+  - Module-level helpers mirror these APIs under `tensorcast.api.store` for clients using the process-scoped store façade.
 - Extended APIs:
   - `Store.register(..., artifact_id: str | None = None, key: str | None = None, ttl_ms: int | None = None)`:
     - When `artifact_id.startswith("cgid:")`, skip hashing and send the CGID path introduced in design 0017.

@@ -29,7 +29,9 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
+from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.common.identity import ArtifactIdKind
+from tensorcast import daemon_ctl
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -270,6 +272,10 @@ def _make_registered_artifact(
 
 @pytest.fixture
 def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
+    # Reset global daemon client singleton to avoid address mismatches across tests
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     client = FakeDaemonCtl(resolves={})
     env = FakeEnvironment(
         client=client,
@@ -348,7 +354,6 @@ def test_store_get_into_copies_tensors(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -357,7 +362,7 @@ def test_store_get_into_copies_tensors(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     store.get_into(target, artifact_id="artifact-1", device=torch.device("cuda", 0))
     assert torch.allclose(target["bias"], state["bias"])
@@ -372,7 +377,6 @@ def test_store_get_into_unloads_replica(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -381,7 +385,7 @@ def test_store_get_into_unloads_replica(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     store.get_into(target, artifact_id="artifact-release", device=torch.device("cuda", 0))
 
@@ -398,7 +402,6 @@ def test_store_get_into_unloads_on_validation_error(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def failing_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -407,7 +410,7 @@ def test_store_get_into_unloads_on_validation_error(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
-    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
     with pytest.raises(ArtifactError):
         store.get_into(target, artifact_id="artifact-invalid", device=torch.device("cuda", 0))
@@ -452,7 +455,11 @@ def test_store_get_async_cancel_unloads_replica(
         assert artifact_id is not None
         return env.materialized_by_id[artifact_id]
 
-    monkeypatch.setattr(store, "_materialize", slow_materialize.__get__(store, Store))
+    monkeypatch.setattr(
+        store._materialization,
+        "_materialize",
+        slow_materialize.__get__(store._materialization, store._materialization.__class__),
+    )
 
     future = store.get_async(artifact_id=artifact_id, device=torch.device("cuda", 0))
     assert cancel_ready.wait(timeout=1.0)
@@ -471,7 +478,6 @@ def test_store_get_into_async_unloads_replica(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -480,7 +486,7 @@ def test_store_get_into_async_unloads_replica(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     future = store.get_into_async(
         target,
@@ -502,7 +508,6 @@ def test_store_get_into_async_unloads_on_validation_error(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def failing_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -511,7 +516,7 @@ def test_store_get_into_async_unloads_on_validation_error(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
-    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
     future = store.get_into_async(
         target,
@@ -532,7 +537,7 @@ def test_store_get_prefers_disk_when_available(
     disk_called = {}
 
     def fake_materialize_from_disk(
-        self: Store,
+        self: Any,
         *,
         disk_path: str,
         artifact_id: str | None,
@@ -560,7 +565,11 @@ def test_store_get_prefers_disk_when_available(
             disk_path=disk_path,
         )
 
-    monkeypatch.setattr(store, "_materialize_from_disk", fake_materialize_from_disk.__get__(store, Store))
+    monkeypatch.setattr(
+        store._materialization,
+        "_materialize_from_disk",
+        fake_materialize_from_disk.__get__(store._materialization, store._materialization.__class__),
+    )
 
     result = store.get(
         key="does-not-matter",
@@ -595,9 +604,10 @@ def test_store_key_resolution_cache_reuses_mapping(
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
     monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
+    store = store_mod.Store("fake://daemon")
 
     def fake_materialize_from_disk(
-        self: Store,
+        self: Any,
         *,
         disk_path: str,
         artifact_id: str | None,
@@ -609,12 +619,11 @@ def test_store_key_resolution_cache_reuses_mapping(
         return env.materialized_by_id[target_id]
 
     monkeypatch.setattr(
-        store_mod.Store,
+        store._materialization,
         "_materialize_from_disk",
-        fake_materialize_from_disk,
+        fake_materialize_from_disk.__get__(store._materialization, store._materialization.__class__),
     )
 
-    store = store_mod.Store("fake://daemon")
     fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
 
     first = store.get(key=key, fallback=fallback, device=torch.device("cuda", 0))
@@ -799,9 +808,12 @@ def test_get_into_async_function_delegates_to_session(
 
 
 def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     class DummyStore:
         def __init__(
-            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None
+            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
         ) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
@@ -812,6 +824,7 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()
@@ -827,11 +840,82 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert first.closed
 
 
+def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
+    created: list[DummyStore] = []
+
+    class DummyStore:
+        def __init__(
+            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
+        ) -> None:
+            del runtime
+            self.daemon_endpoint = daemon_endpoint
+            self.opts = opts
+            self.closed = False
+            self.register_calls: list[tuple[dict[str, torch.Tensor], dict[str, object]]] = []
+            created.append(self)
+
+        def register(
+            self,
+            tensors: dict[str, torch.Tensor],
+            *,
+            artifact_id: str | None = None,
+            key: str | None = None,
+            options: RegisterArtifactOptions | None = None,
+            ttl_ms: int | None = None,
+        ) -> DummyStore:
+            self.register_calls.append(
+                (
+                    tensors,
+                    {
+                        "artifact_id": artifact_id,
+                        "key": key,
+                        "options": options,
+                        "ttl_ms": ttl_ms,
+                    },
+                )
+            )
+            return self
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime_handle = SimpleNamespace(address="fake://daemon")
+    monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(
+        store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={})
+    )
+    monkeypatch.setattr(store_mod, "Store", DummyStore)
+
+    store_mod.shutdown_process_store()
+
+    first = cast(DummyStore, store_mod.store())
+    assert created == [first]
+
+    first.close()
+    assert first.closed is True
+
+    result = cast(DummyStore, store_mod.register({"w": torch.ones(1)}))
+
+    assert len(created) == 2
+    assert result is created[-1]
+    assert result is not first
+    assert first.register_calls == []
+    assert created[-1].register_calls
+
+    store_mod.shutdown_process_store()
+
+
 def test_store_force_recreate_and_option_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     class DummyStore:
-        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None) -> None:
+        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None, runtime=None) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
             self.closed = False
@@ -844,6 +928,7 @@ def test_store_force_recreate_and_option_refresh(
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()
