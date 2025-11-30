@@ -625,6 +625,19 @@ class MaterializationPipeline:
             disk_path_hint=disk_path,
             preference=preference,
         )
+        if fallback_opts and not fallback_opts.allow_p2p:
+            disallowed_sources = {
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P,
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA,
+            }
+            if result.source in disallowed_sources:
+                source_label = _source_label(result.source) or "non-disk"
+                self._release_materialized(result, client)
+                raise ArtifactError(
+                    f"Disk-only fallback requested but daemon served from {source_label}",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
         source_label = _source_label(result.source)
         self._fallback.record_event(
             mode="disk" if requested_disk else "p2p",

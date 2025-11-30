@@ -215,6 +215,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 - All metadata extraction and checksum verification happen daemon-side.
 - `load_dict_from_disk()` is only callable from tests; production modules import it solely under `if TYPE_CHECKING` or test harnesses.
 - If the daemon reports an error (`NOT_FOUND`, `DATA_LOSS`, `FAILED_PRECONDITION`, etc.), the SDK propagates the error without attempting local fallback.
+- When `fallback.allow_p2p=False`, the SDK rejects materializations served from P2P or reused replicas even if the daemon attempted a fallback after a disk error.
 - `MaterializeReplicaResponse.source` reflects the true path (disk, existing replica, remote peer); telemetry uses this field rather than inferring from request preferences.
 - `SourcePreference` is honored end-to-end: `PREFER_DISK` attempts disk first (then P2P only if an artifact_id is available), `PREFER_P2P` requires a canonical artifact_id and keeps P2P-first ordering, and AUTO preserves existing behavior.
 

@@ -173,6 +173,16 @@ def materialize_artifact(
                 wait_for_completion=opts.wait_for_completion,
                 return_response=True,
             )
+            if not isinstance(
+                response, store_daemon_pb2.MaterializeReplicaResponse
+            ):
+                raise DaemonUnavailable(
+                    "Daemon returned unexpected response type for key materialization"
+                )
+            if response.mem_handle is None or not response.mem_handle.cuda_ipc_handle:
+                raise DaemonUnavailable(
+                    "Daemon returned empty mem_handle for key materialization"
+                )
             handle_bytes = response.mem_handle.cuda_ipc_handle
             disk_path = response.used_disk_path
             resolved_artifact_id = response.artifact_id
