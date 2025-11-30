@@ -178,6 +178,11 @@ def test_materialization_rejects_empty_disk_fallback():
 
 
 def test_get_into_validates_targets(monkeypatch):
+    # Ensure device selection follows the CUDA path even in CPU-only/fake-CUDA CI,
+    # so we hit target validation and get INVALID_ARGUMENT.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+
     runtime = _DummyRuntime()
     pipeline = MaterializationPipeline(
         runtime, ViewOrchestrator(runtime), materialize_fn=lambda **_: _materialized_artifact(replica_uuid="r2")
