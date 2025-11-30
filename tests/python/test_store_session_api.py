@@ -224,8 +224,9 @@ class FakeEnvironment:
         placement: int | None = None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
+        preference: int | None = None,
     ) -> MaterializedArtifact:
-        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint
+        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, preference
         disk_hint = disk_path_hint
         if artifact_id is not None and artifact_id in self.materialized_by_id:
             resolved = self.materialized_by_id[artifact_id]
@@ -241,9 +242,16 @@ class FakeEnvironment:
             resolved = None
         if resolved is None:
             raise RuntimeError("artifact not found")
+        resolved_source = resolved.source or (
+            store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
+            if disk_hint
+            else store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
+        )
         if disk_hint is not None and resolved.disk_path != disk_hint:
-            resolved = replace(resolved, disk_path=disk_hint)
+            resolved = replace(resolved, disk_path=disk_hint, source=resolved_source)
             self.materialized_by_id[resolved.artifact_id] = resolved
+        elif resolved.source != resolved_source:
+            resolved = replace(resolved, source=resolved_source)
         return resolved
 
 
@@ -286,10 +294,11 @@ def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
     )
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
-    monkeypatch.setattr(store_mod, "_register_artifact_core", env.fake_register)
-    monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
-
-    store = store_mod.Store("fake://daemon")
+    store = store_mod.Store(
+        "fake://daemon",
+        register_fn=env.fake_register,
+        materialize_fn=env.fake_materialize,
+    )
     return store, env
 
 
@@ -534,19 +543,18 @@ def test_store_get_prefers_disk_when_available(
     store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, env = store_env
-    disk_called = {}
+    disk_called: dict[str, str | store_daemon_pb2.SourcePreference | None] = {}
 
-    def fake_materialize_from_disk(
-        self: Any,
+    def fake_materialize(
         *,
-        disk_path: str,
-        artifact_id: str | None,
-        device_id: int,
-        verify_checksums: bool,
+        disk_path_hint: str | None,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        **_: Any,
     ) -> MaterializedArtifact:
-        disk_called["path"] = disk_path
+        disk_called["path"] = disk_path_hint
+        disk_called["preference"] = preference
         return MaterializedArtifact(
-            artifact_id=artifact_id or "disk-artifact",
+            artifact_id="disk-artifact",
             state_dict={"t": torch.zeros(1, dtype=torch.float32)},
             canonical_index_bytes=json.dumps(
                 {
@@ -561,15 +569,12 @@ def test_store_get_prefers_disk_when_available(
                 },
                 separators=(",", ":"),
             ).encode("utf-8"),
-            replica_uuid="",
-            disk_path=disk_path,
+            replica_uuid="rep-disk",
+            disk_path=disk_path_hint,
+            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK,
         )
 
-    monkeypatch.setattr(
-        store._materialization,
-        "_materialize_from_disk",
-        fake_materialize_from_disk.__get__(store._materialization, store._materialization.__class__),
-    )
+    store.set_materialize_fn(fake_materialize)
 
     result = store.get(
         key="does-not-matter",
@@ -577,6 +582,7 @@ def test_store_get_prefers_disk_when_available(
         device=torch.device("cuda", 0),
     )
     assert disk_called["path"] == "/tmp/artifact"
+    assert disk_called["preference"] == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     assert "t" in result
 
 
@@ -603,25 +609,9 @@ def test_store_key_resolution_cache_reuses_mapping(
     env.add_materialized(artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache")
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
-    monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
-    store = store_mod.Store("fake://daemon")
-
-    def fake_materialize_from_disk(
-        self: Any,
-        *,
-        disk_path: str,
-        artifact_id: str | None,
-        device_id: int,
-        verify_checksums: bool,
-    ) -> MaterializedArtifact:
-        assert disk_path == disk_path_value
-        target_id = artifact_id or artifact_id_value
-        return env.materialized_by_id[target_id]
-
-    monkeypatch.setattr(
-        store._materialization,
-        "_materialize_from_disk",
-        fake_materialize_from_disk.__get__(store._materialization, store._materialization.__class__),
+    store = store_mod.Store(
+        "fake://daemon",
+        materialize_fn=env.fake_materialize,
     )
 
     fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)

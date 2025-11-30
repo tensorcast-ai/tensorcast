@@ -82,52 +82,62 @@ class _MeterState:
         return True
 
     def record_latency(
-        self, verb: str, daemon: str, status: str, duration_s: float
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        duration_s: float,
+        *,
+        source: str | None = None,
     ) -> None:
         if not self.ensure():
             return
         assert self._latency is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
         try:
-            self._latency.record(
-                max(duration_s, 0.0),
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._latency.record(max(duration_s, 0.0), attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to record store latency", exc_info=True)
 
-    def increment_errors(self, verb: str, daemon: str, status: str) -> None:
+    def increment_errors(
+        self, verb: str, daemon: str, status: str, *, source: str | None = None
+    ) -> None:
         if not self.ensure():
             return
         assert self._errors is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
         try:
-            self._errors.add(
-                1,
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._errors.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store error counter", exc_info=True)
 
-    def increment_retries(self, verb: str, daemon: str, status: str) -> None:
+    def increment_retries(
+        self, verb: str, daemon: str, status: str, *, source: str | None = None
+    ) -> None:
         if not self.ensure():
             return
         assert self._retries is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
         try:
-            self._retries.add(
-                1,
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._retries.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store retry counter", exc_info=True)
 
@@ -135,13 +145,19 @@ class _MeterState:
 _METRICS = _MeterState()
 
 
-def observe_latency(verb: str, daemon: str, status: str, duration_s: float) -> None:
-    _METRICS.record_latency(verb, daemon, status, duration_s)
+def observe_latency(
+    verb: str, daemon: str, status: str, duration_s: float, *, source: str | None = None
+) -> None:
+    _METRICS.record_latency(verb, daemon, status, duration_s, source=source)
 
 
-def increment_error(verb: str, daemon: str, status: str) -> None:
-    _METRICS.increment_errors(verb, daemon, status)
+def increment_error(
+    verb: str, daemon: str, status: str, *, source: str | None = None
+) -> None:
+    _METRICS.increment_errors(verb, daemon, status, source=source)
 
 
-def increment_retry(verb: str, daemon: str, status: str) -> None:
-    _METRICS.increment_retries(verb, daemon, status)
+def increment_retry(
+    verb: str, daemon: str, status: str, *, source: str | None = None
+) -> None:
+    _METRICS.increment_retries(verb, daemon, status, source=source)

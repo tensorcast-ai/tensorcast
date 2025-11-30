@@ -47,7 +47,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   breq.set_total_size(48);
   breq.set_owner_pid(getpid());
   breq.mutable_tensor_index_data()->set_data(index_bytes);
-  breq.mutable_tensor_index_data()->set_schema_version("v2");
+  breq.mutable_tensor_index_data()->set_schema_version("v3");
   breq.mutable_tensor_index_data()->set_encoding("json");
   (void)breq.mutable_lease();
 

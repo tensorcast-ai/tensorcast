@@ -7,22 +7,13 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
-from dataclasses import replace
-from pathlib import Path
 
 import torch
 from opentelemetry.trace import Status, StatusCode
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions
-from tensorcast.api._indices import (
-    build_v2_index_bytes,
-    calculate_tensor_device_offsets,
-    load_tensor_indices_from_dir,
-)
-from tensorcast.api._io_disk import load_dict_from_disk
 from tensorcast.api._materialize import MaterializedArtifact, materialize_artifact
-from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
@@ -48,6 +39,19 @@ from tensorcast.api.store.views import (
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+def _source_label(
+    source: store_daemon_pb2.MaterializationSource | None,
+) -> str | None:
+    mapping = {
+        store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK: "disk",
+        store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P: "p2p",
+        store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA: "local_replica",
+    }
+    if source is None:
+        return None
+    return mapping.get(source)
 
 
 class FallbackResolver:
@@ -122,6 +126,11 @@ class MaterializationPipeline:
         self._views = views
         self._fallback = FallbackResolver(runtime)
         self._executor = TrackedExecutor(runtime)
+        self._materialize_fn = materialize_fn
+
+    def set_materialize_fn(
+        self, materialize_fn: Callable[..., MaterializedArtifact]
+    ) -> None:
         self._materialize_fn = materialize_fn
 
     # ------------------------------------------------------------------
@@ -518,13 +527,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         options_override: GetArtifactOptions | None,
     ) -> GetArtifactOptions:
-        options = options_override or GetArtifactOptions()
-        if (
-            fallback is not None
-            and options.enable_verification != fallback.verify_checksums
-        ):
-            options = replace(options, enable_verification=fallback.verify_checksums)
-        return options
+        return options_override or GetArtifactOptions()
 
     def _materialize(
         self,
@@ -547,14 +550,14 @@ class MaterializationPipeline:
         disk_path: str | None = disk_path_hint
         resolved_artifact_id = artifact_id
         fallback_opts = fallback
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        requested_disk = False
         if (view is not None or view_id is not None) and fallback_opts:
             raise ArtifactError(
                 "Disk fallback is not supported for view materialization",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-
-        result: MaterializedArtifact | None = None
 
         if fallback_opts and (
             fallback_opts.prefer_disk
@@ -570,6 +573,10 @@ class MaterializationPipeline:
                 )
             )
             if disk_path:
+                requested_disk = True
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+                )
                 self._fallback.record_event(
                     mode="disk",
                     artifact_id=resolved_artifact_id,
@@ -585,26 +592,10 @@ class MaterializationPipeline:
                         {
                             "tc.artifact.id": resolved_artifact_id or "",
                             "tc.store.disk_path_present": True,
-                            "tc.store.verify_checksums": bool(
-                                fallback_opts.verify_checksums
-                            ),
+                            "tc.store.verify_checksums": True,
                         },
                     )
-                result = self._materialize_from_disk(
-                    disk_path=disk_path,
-                    artifact_id=resolved_artifact_id,
-                    device_id=device_id,
-                    verify_checksums=fallback_opts.verify_checksums,
-                )
-                if key:
-                    self._runtime.cache_key_mapping(
-                        key,
-                        artifact_id=resolved_artifact_id,
-                        disk_path=disk_path,
-                    )
-                if cancel_event and cancel_event.is_set():
-                    raise CancelledError
-                return result
+                resolved_artifact_id = resolved_artifact_id or artifact_id
             if fallback_opts and not fallback_opts.allow_p2p:
                 if disk_error is not None:
                     raise ArtifactError(
@@ -612,34 +603,50 @@ class MaterializationPipeline:
                         status_code="UNAVAILABLE",
                         retryable=True,
                     ) from disk_error
+                if not disk_path:
+                    raise ArtifactError(
+                        "Disk fallback required but disk_path unavailable",
+                        status_code="NOT_FOUND",
+                        retryable=False,
+                    )
+
+        request_artifact_id = resolved_artifact_id or artifact_id
+        result = self._materialize_fn(
+            client=client,
+            daemon_address=self._runtime.daemon_endpoint,
+            device_id=device_id,
+            artifact_id=request_artifact_id,
+            key=None if requested_disk and disk_path else key,
+            options=options,
+            view=view,
+            view_id=view_id,
+            placement=placement,
+            canonical_index_hint=canonical_index_hint,
+            disk_path_hint=disk_path,
+            preference=preference,
+        )
+        if fallback_opts and not fallback_opts.allow_p2p:
+            disallowed_sources = {
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P,
+                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA,
+            }
+            if result.source in disallowed_sources:
+                source_label = _source_label(result.source) or "non-disk"
+                self._release_materialized(result, client)
                 raise ArtifactError(
-                    "Disk fallback required but disk_path unavailable",
-                    status_code="NOT_FOUND",
+                    f"Disk-only fallback requested but daemon served from {source_label}",
+                    status_code="FAILED_PRECONDITION",
                     retryable=False,
                 )
-
-        if result is None:
-            result = self._materialize_fn(
-                client=client,
-                daemon_address=self._runtime.daemon_endpoint,
-                device_id=device_id,
-                artifact_id=artifact_id,
-                key=key,
-                options=options,
-                view=view,
-                view_id=view_id,
-                placement=placement,
-                canonical_index_hint=canonical_index_hint,
-                disk_path_hint=disk_path,
-            )
-        assert result is not None
+        source_label = _source_label(result.source)
         self._fallback.record_event(
-            mode="p2p",
-            artifact_id=result.artifact_id or artifact_id,
+            mode="disk" if requested_disk else "p2p",
+            artifact_id=result.artifact_id or request_artifact_id,
             key=key,
             detail={
                 "disk_requested": bool(fallback and fallback.prefer_disk),
                 "allow_p2p": bool(fallback is None or fallback.allow_p2p),
+                "source": source_label or "",
             },
         )
         if key:
@@ -656,51 +663,13 @@ class MaterializationPipeline:
                     "tc.artifact.id": result.artifact_id or artifact_id or "",
                     "tc.store.disk_requested": bool(fallback and fallback.prefer_disk),
                     "tc.store.allow_p2p": bool(fallback is None or fallback.allow_p2p),
+                    "tc.store.source": source_label or "",
                 },
             )
         if cancel_event and cancel_event.is_set():
             self._release_materialized(result, client)
             raise CancelledError
         return result
-
-    def _materialize_from_disk(
-        self,
-        *,
-        disk_path: str,
-        artifact_id: str | None,
-        device_id: int,
-        verify_checksums: bool,
-    ) -> MaterializedArtifact:
-        raw_path = Path(str(disk_path))
-        if not raw_path.exists():
-            raise ArtifactError(
-                f"Disk path '{disk_path}' not found",
-                status_code="NOT_FOUND",
-                retryable=False,
-            )
-        tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(raw_path)
-        tensor_device_offsets, _ = calculate_tensor_device_offsets(
-            tensor_data_index, device_id
-        )
-        canonical_index = build_v2_index_bytes(
-            tensor_meta_index,
-            tensor_data_index,
-            tensor_device_offsets,
-            device_id,
-        )
-        if verify_checksums:
-            validate_disk_index_matches(canonical_index, str(raw_path))
-        state_dict = load_dict_from_disk(
-            raw_path,
-            device_id=device_id,
-        )
-        return MaterializedArtifact(
-            artifact_id=artifact_id or "",
-            state_dict=state_dict,
-            canonical_index_bytes=canonical_index,
-            replica_uuid="",
-            disk_path=str(raw_path),
-        )
 
     def _call_view_resolver(
         self,
@@ -751,18 +720,26 @@ class MaterializationPipeline:
             "tc.store.fallback.prefer_disk": bool(fallback and fallback.prefer_disk),
             "tc.store.fallback.allow_p2p": bool(fallback is None or fallback.allow_p2p),
         }
+        source_label: str | None = None
 
         with self._runtime.operation_span(span_name, attributes) as span:
 
             def record_outcome(status: str) -> None:
                 duration = time.monotonic() - start_time
                 store_metrics.observe_latency(
-                    method, self._runtime.daemon_endpoint, status, duration
+                    method,
+                    self._runtime.daemon_endpoint,
+                    status,
+                    duration,
+                    source=source_label,
                 )
                 span.set_attribute("tc.store.status", status)
                 if status not in {"OK", "CANCELLED"}:
                     store_metrics.increment_error(
-                        method, self._runtime.daemon_endpoint, status
+                        method,
+                        self._runtime.daemon_endpoint,
+                        status,
+                        source=source_label,
                     )
 
             while True:
@@ -789,6 +766,7 @@ class MaterializationPipeline:
                         canonical_index_hint=canonical_index_hint,
                         disk_path_hint=disk_path_hint,
                     )
+                    source_label = _source_label(materialized.source)
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
                     span.set_attribute("tc.device.id", int(device_id))
@@ -796,6 +774,7 @@ class MaterializationPipeline:
                     span.set_attribute(
                         "tc.store.fallback.used_disk", bool(materialized.disk_path)
                     )
+                    span.set_attribute("tc.store.source", source_label or "")
                     span.set_status(Status(StatusCode.OK))
                     return materialized, device_id
                 except ArtifactError as error:
@@ -821,7 +800,10 @@ class MaterializationPipeline:
                     if remaining is not None:
                         delay = min(delay, max(0.0, remaining))
                     store_metrics.increment_retry(
-                        method, self._runtime.daemon_endpoint, error.status_code
+                        method,
+                        self._runtime.daemon_endpoint,
+                        error.status_code,
+                        source=source_label,
                     )
                     span.add_event(
                         "store.retry",
@@ -867,7 +849,10 @@ class MaterializationPipeline:
                     if remaining is not None:
                         delay = min(delay, max(0.0, remaining))
                     store_metrics.increment_retry(
-                        method, self._runtime.daemon_endpoint, error.status_code
+                        method,
+                        self._runtime.daemon_endpoint,
+                        error.status_code,
+                        source=source_label,
                     )
                     span.add_event(
                         "store.retry",

@@ -70,6 +70,9 @@ class RegistrationPipeline:
         self._default_lease_ttl_ms = StoreRuntimeContext._DEFAULT_LEASE_TTL_MS
         self._register_fn = register_fn
 
+    def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
+        self._register_fn = register_fn
+
     def register(
         self,
         tensors: Mapping[str, torch.Tensor],

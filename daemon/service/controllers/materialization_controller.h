@@ -5,6 +5,8 @@
 #pragma once
 
 #include <atomic>
+#include <filesystem>
+#include <vector>
 
 #include "core/store/store_engine.h"
 #include "daemon/device_resolver.h"
@@ -26,9 +28,10 @@ class MaterializationController {
     DeviceResolver& devices;
     std::atomic<bool>& is_shutting_down;
     SessionLifecycleManager* lifecycle{nullptr};
+    std::vector<std::filesystem::path> disk_path_whitelist;
   };
 
-  explicit MaterializationController(Dep d) : d_(d) {}
+  explicit MaterializationController(Dep d);
 
   grpc::Status materialize_replica(
       RpcContext& rctx,
@@ -56,6 +59,8 @@ class MaterializationController {
 
  private:
   Dep d_;
+  std::vector<std::filesystem::path> disk_path_whitelist_;
+  bool whitelist_enforced_{false};
 };
 
 } // namespace tensorcast::daemon

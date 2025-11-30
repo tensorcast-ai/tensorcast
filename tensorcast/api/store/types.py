@@ -61,6 +61,8 @@ class RetryPolicy:
 
 @dataclass(frozen=True)
 class FallbackOptions:
+    """Disk fallback hints; verify_checksums is retained for compatibility but is a no-op."""
+
     disk_path: str | None = None
     prefer_disk: bool = False
     allow_p2p: bool = True

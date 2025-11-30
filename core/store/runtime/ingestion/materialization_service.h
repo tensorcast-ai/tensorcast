@@ -64,7 +64,8 @@ class MaterializationService {
   [[nodiscard]] ReplicaHandle build_handle(
       const MaterializationRequest& request,
       const std::shared_ptr<replica::Replica>& replica,
-      std::shared_future<absl::Status> ready_future) const;
+      std::shared_future<absl::Status> ready_future,
+      loading::MaterializationSource source) const;
 };
 
 } // namespace tensorcast::store::runtime::ingestion

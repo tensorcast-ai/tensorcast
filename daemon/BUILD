@@ -650,6 +650,19 @@ cc_test(
 )
 
 cc_test(
+    name = "grpc_service_impl_disk_index_test",
+    srcs = ["grpc_service_impl_disk_index_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_status_test",
     srcs = ["grpc_service_impl_status_test.cc"],
     deps = [

@@ -130,7 +130,7 @@ Tensor-first semantics remain intact even as artifacts bounce between Lease-In-P
 | Lease-In-Place reuse on the same GPU (or peer) | `Store.get*` issues a `MaterializeReplicaRequest` without a view | Existing `ReplicaKey` + CUDA IPC handle exported from prior registration; no copying, just ref-count/lease | [`MaterializationController::materialize_replica`](../../daemon/service/controllers/materialization_controller.cc) tries `lip.try_satisfy_from_lip` before touching the engine, while [`LipManager::copy_to_new_coalesced`](../../daemon/lip_manager.cc) rehydrates segments whenever a peer needs a coalesced buffer. |
 | Coalesced VRAM materialization (engine path) | `Store._materialize` falls through to `materialize_artifact` | Fresh UMA allocation zero-fills PAD ranges and replays the canonical segment plan | [`StoreEngine::materialize_replica`](../../core/store/store_engine.cc) delegates to ingestion runtimes, and [`build_segment_plan_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/segment_plan_source.cc) emits deterministic DATA/PAD spans so seams stay canonical. |
 | Host UMA staging & view ingestion | Registration of a view or canonical ingest that cannot alias GPU memory | Host buffers populated according to `SelectionPlan` and replayed into canonical VRAM | [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) streams only the requested ranges, while [`ViewIngestExecutor`](../../core/store/materialization/dataplane/view/view_ingest_executor.cc) enforces contiguity, executes inverse transforms, and copies back into UMA. |
-| Disk-first fallback on the client | `FallbackOptions(prefer_disk=True)` or explicit `disk_path` | CPU `state_dict` rebuilt from `tensor_index.json` and verified hashes | [`Store._materialize` + `_materialize_from_disk`](../../tensorcast/api/store.py) resolve key mappings, emit structured fallback logs, and reuse `load_dict_from_disk`; `MaterializedArtifact` still carries canonical index bytes for later verification. |
+| Disk-first fallback on the client | `FallbackOptions(prefer_disk=True)` or explicit `disk_path` | Disk path forwarded to daemon with `SourcePreference=PREFER_DISK`; daemon streams metadata, validates checksums, and reports the actual materialization source | [`MaterializationPipeline._materialize`](../../tensorcast/api/store/materialization.py) resolves key mappings, sets `disk_path`/`preference`, and `MaterializedArtifact.source` mirrors the daemon-reported path. |
 | Remote daemon / P2P streaming | Engine needs bytes another daemon already hosts | Chunked `SegmentPlan` ranges copied over communicator sessions before being committed locally | [`StoreEngine::ingest_from_p2p`](../../core/store/store_engine.cc) and [`LipManager::create_staged_export`](../../daemon/lip_manager.cc) both consume the same segment metadata, so the receiver observes tensors in canonical byte order even though the source is remote VRAM. |
 
 ### 6.2 Canonical data & abstraction graph
@@ -186,7 +186,7 @@ This graph separates *data artifacts* (blue) from *abstractions/processors* (ora
 flowchart LR
     subgraph Client["Client process<br/>(tensorcast.api.store.Store)"]
         GET["get / get_view / get_into"]
-        FALL["Disk fallback loader<br/>_materialize_from_disk"]
+        FALL["Disk fallback loader<br/>daemon-routed disk path"]
     end
 
     subgraph Daemon["Store daemon + UMA"]
@@ -224,6 +224,7 @@ flowchart LR
 ### 6.4 Implementation hooks to highlight
 
 - **Client orchestration.** `Store._materialize` decides between disk, daemon, and retry policies, while [`materialize_artifact`](../../tensorcast/api/_materialize.py) reconstructs tensors from CUDA IPC handles and keeps the `MaterializedArtifact`’s canonical bytes so downstream verification still hashes what the daemon hashed.
+- **Response validation.** The Python client now treats any non-`MaterializeReplicaResponse` or empty `mem_handle` from daemon key-based materialization as a hard failure before attempting CUDA IPC restores, matching the strictness already applied to artifact-id and view flows.
 - **LIP vs. engine path.** [`MaterializationController::materialize_replica`](../../daemon/service/controllers/materialization_controller.cc) annotates OpenTelemetry spans with LIP hits/misses and only calls the engine when `lip.try_satisfy_from_lip` cannot reuse an existing replica.
 - **Deterministic staging.** [`build_segment_plan_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/segment_plan_source.cc) and [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) turn canonical indices into DATA/PAD runs, so both disk and P2P loaders stream bytes with the same offsets the hashers expect.
 - **Variant ingestion safety.** [`ViewIngestExecutor`](../../core/store/materialization/dataplane/view/view_ingest_executor.cc) enforces contiguous writes, backfills PAD, and applies inverse transforms before the UMA ledger wires CUDA IPC handles back to clients, preventing malformed view uploads from corrupting canonical replicas.
@@ -233,4 +234,3 @@ Taken together, the figure now shows *which* code moves tensors between resource
 ---
 
 **Key takeaway:** TensorCast’s “artifact = tensor dict” premise is backed by deterministic indices, identity hashing, view planners, and session-level validation spread across C++ and Python. When resource policies feel “generic,” it’s because the abstraction layers already encode tensor semantics—new optimizations should hook into these builders rather than bolt on ad-hoc tensor logic elsewhere.
-

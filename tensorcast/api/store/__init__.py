@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 import torch
 
@@ -17,7 +17,7 @@ from tensorcast.api._region_cache import (
 from tensorcast.api._region_cache import (
     unregister_region as _cache_unregister_region,
 )
-from tensorcast.api._register import _register_artifact_core
+from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api.store.async_ops import ArtifactFuture
 from tensorcast.api.store.handles import RegisteredArtifact
@@ -57,17 +57,31 @@ class Store:
         *,
         opts: StoreOptions | None = None,
         runtime: StoreRuntimeContext | None = None,
+        register_fn: Callable[..., RegistrationResult] | None = None,
+        materialize_fn: Callable[..., MaterializedArtifact] | None = None,
     ) -> None:
         self._runtime = runtime or StoreRuntimeContext(
             daemon_endpoint, opts=opts, client_factory=get_daemon_client
         )
         self._views = ViewOrchestrator(self._runtime)
         self._registration = RegistrationPipeline(
-            self._runtime, self._views, register_fn=_register_artifact_core
+            self._runtime,
+            self._views,
+            register_fn=register_fn or _register_artifact_core,
         )
         self._materialization = MaterializationPipeline(
-            self._runtime, self._views, materialize_fn=materialize_artifact
+            self._runtime,
+            self._views,
+            materialize_fn=materialize_fn or materialize_artifact,
         )
+
+    def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
+        self._registration.set_register_fn(register_fn)
+
+    def set_materialize_fn(
+        self, materialize_fn: Callable[..., MaterializedArtifact]
+    ) -> None:
+        self._materialization.set_materialize_fn(materialize_fn)
 
     # ------------------------------------------------------------------
     # Registration APIs

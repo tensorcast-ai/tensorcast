@@ -152,7 +152,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   store::StoreEngine::ArtifactRegistration areg;
   areg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()));
   areg.tensor_index_data = canonical_index_json;
-  areg.schema_version = "v2";
+  areg.schema_version = "v3";
   areg.encoding = "json";
   areg.device_id = target_device_id;
   areg.total_size_bytes = total_size;
@@ -882,7 +882,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     out.id_kind = common::ArtifactIdKind::kCgid;
   }
 
-  out.schema_version = "v2";
+  out.schema_version = "v3";
   out.encoding = "json";
   out.total_size = total_size;
 

@@ -168,6 +168,9 @@ For advanced scenarios (async verbs, fine-grained inspection, or direct access t
 `tc.store()` to obtain the underlying `Store` session object. That object exposes the complete
 surface described in [docs/designs/0014-store-session-api-modernization.md](docs/designs/0014-store-session-api-modernization.md),
 including async futures, retry telemetry, and session metadata.
+For test doubles or advanced embeddings, you can inject custom registration/materialization
+handlers via `Store(..., register_fn=..., materialize_fn=...)` or swap them on an existing
+session with `set_register_fn`/`set_materialize_fn`—no global monkeypatching required.
 
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.

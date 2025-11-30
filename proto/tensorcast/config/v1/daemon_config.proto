@@ -84,6 +84,8 @@ message Engine {
   uint32 streaming_buffer_max_concurrent_sessions = 4;
   google.protobuf.Duration pinned_allocation_timeout = 5;
   string p2p_fallback_disk_dir = 6;
+  // Whitelisted disk path prefixes for daemon-side materialization. Empty list allows all paths.
+  repeated string disk_path_whitelist = 7;
   MemoryTiers memory_tiers = 10;
 }
 

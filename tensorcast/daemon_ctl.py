@@ -404,6 +404,8 @@ class DaemonCtl:
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
+        disk_path: str | None = None,
+        preference: store_daemon_pb2.SourcePreference | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse | bytes | tuple[bytes, int]:
         """Materialize a replica by content-addressed artifact_id via daemon.
 
@@ -431,6 +433,10 @@ class DaemonCtl:
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
             )
+            if disk_path:
+                request.disk_path = disk_path
+            if preference is not None:
+                request.preference = preference
             if view is not None:
                 request.view.CopyFrom(view)
             elif view_id:
@@ -480,7 +486,7 @@ class DaemonCtl:
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
             # Confirm using empty disk_path (daemon ignores it for P2P sessions)
-            success = self.confirm_replica_loaded("", replica_uuid)
+            success = self.confirm_replica_loaded(disk_path or "", replica_uuid)
             if not success:
                 raise RuntimeError(
                     f"Failed to confirm artifact loading for {artifact_id}"
@@ -499,6 +505,7 @@ class DaemonCtl:
         device_id: int,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
+        return_response: bool = False,
     ):
         """Materialize a replica by RFC-0014 key via daemon.
 
@@ -568,30 +575,26 @@ class DaemonCtl:
         )
         artifact_id = response.artifact_id if hasattr(response, "artifact_id") else ""
 
+        handle_bytes = response.mem_handle.cuda_ipc_handle
         if not wait_for_completion:
             assert response.mem_handle is not None
-            return (
-                response.mem_handle.cuda_ipc_handle,
-                load_status,
-                used_disk_path,
-                artifact_id,
-            )
+            if return_response:
+                return response
+            return (handle_bytes, load_status, used_disk_path, artifact_id)
 
         # Synchronous path: confirm completion using the session created with replica_uuid
         if (
             load_status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            success = self.confirm_replica_loaded("", replica_uuid)
+            success = self.confirm_replica_loaded(used_disk_path, replica_uuid)
             if not success:
                 raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
 
         assert response.mem_handle is not None
-        return (
-            response.mem_handle.cuda_ipc_handle,
-            used_disk_path,
-            artifact_id,
-        )
+        if return_response:
+            return response
+        return (handle_bytes, used_disk_path, artifact_id)
 
     def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
         with self._client_span("Client/ConfirmReplica") as span:
@@ -657,7 +660,7 @@ class DaemonCtl:
         tensor_index_key: str | None = None,
         tensor_index_data: bytes | None = None,
         encoding: str = "json",
-        schema_version: str = "v2",
+        schema_version: str = "v3",
         client_artifact_id: str | None = None,
         plan: Plan | None = None,
         timeout_s: float = 30.0,
@@ -672,7 +675,7 @@ class DaemonCtl:
             tensor_index_key: optional hex key of canonical index.
             tensor_index_data: optional canonical index bytes (preferred).
             encoding: "json" or "cbor" for index bytes.
-            schema_version: index schema version (e.g., "v2").
+            schema_version: index schema version (e.g., "v3").
             plan: oneof plan options dict: {"kind": "coalesced"|"uma_vs"|"lease", ...}.
 
         Returns:

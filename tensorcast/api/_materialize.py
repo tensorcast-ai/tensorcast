@@ -6,7 +6,6 @@ import json
 import os
 import threading
 from dataclasses import dataclass, replace
-from typing import cast
 
 import torch
 from opentelemetry import trace
@@ -37,6 +36,7 @@ class MaterializedArtifact:
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     view_data_hash: str | None = None
+    source: store_daemon_pb2.MaterializationSource | None = None
 
 
 def materialize_artifact(
@@ -52,9 +52,12 @@ def materialize_artifact(
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,
     disk_path_hint: str | None = None,
+    preference: store_daemon_pb2.SourcePreference | None = None,
 ) -> MaterializedArtifact:
-    if (artifact_id is None and key is None) or (artifact_id and key):
+    if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
+    if artifact_id is None and key is None and not disk_path_hint:
+        raise ValueError("Either artifact_id, key, or disk_path_hint is required")
     if view is not None and view_id is not None:
         raise ValueError("Specify at most one of view or view_id")
     if artifact_id is None and (view is not None or view_id is not None):
@@ -92,10 +95,16 @@ def materialize_artifact(
     disk_path: str | None = disk_path_hint
     view_index_bytes: bytes | None = None
     view_data_hash: str | None = None
+    materialized_source: store_daemon_pb2.MaterializationSource | None = None
 
     with tracer.start_as_current_span(
         "Client/MaterializeArtifact", kind=SpanKind.INTERNAL
     ):
+        preference_value = (
+            preference
+            if preference is not None
+            else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        )
         if artifact_id is not None:
             if view is not None or view_id is not None:
                 response = client.materialize_by_artifact_id(
@@ -108,6 +117,8 @@ def materialize_artifact(
                     view_id=view_id,
                     placement=placement,
                     return_response=True,
+                    disk_path=disk_path_hint,
+                    preference=preference_value,
                 )
                 if not isinstance(
                     response, store_daemon_pb2.MaterializeReplicaResponse
@@ -115,6 +126,7 @@ def materialize_artifact(
                     raise DaemonUnavailable(
                         "Daemon returned unexpected response type for view materialization"
                     )
+                disk_path = response.disk_path or disk_path
                 if (
                     response.mem_handle is None
                     or not response.mem_handle.cuda_ipc_handle
@@ -127,33 +139,96 @@ def materialize_artifact(
                     view_index_bytes = bytes(response.view_index_json)
                 if response.view_data_hash:
                     view_data_hash = str(response.view_data_hash)
+                materialized_source = response.source
+                resolved_artifact_id = response.artifact_id or artifact_id
             else:
-                handle_bytes = cast(
-                    bytes,
-                    client.materialize_by_artifact_id(
-                        artifact_id,
-                        replica_uuid,
-                        device_uuid_for(dev_id),
-                        pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                        wait_for_completion=opts.wait_for_completion,
-                    ),
+                response = client.materialize_by_artifact_id(
+                    artifact_id,
+                    replica_uuid,
+                    device_uuid_for(dev_id),
+                    pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                    wait_for_completion=opts.wait_for_completion,
+                    return_response=True,
+                    disk_path=disk_path_hint,
+                    preference=preference_value,
                 )
-            resolved_artifact_id = artifact_id
-        else:
-            mat_result = client.materialize_by_key(
+                if not isinstance(
+                    response, store_daemon_pb2.MaterializeReplicaResponse
+                ):
+                    raise DaemonUnavailable(
+                        "Daemon returned unexpected response type for materialization"
+                    )
+                handle_bytes = response.mem_handle.cuda_ipc_handle
+                disk_path = response.disk_path or disk_path
+                materialized_source = response.source
+                resolved_artifact_id = response.artifact_id or artifact_id
+                if response.view_index_json:
+                    view_index_bytes = bytes(response.view_index_json)
+        elif key is not None:
+            response = client.materialize_by_key(
                 key or "",
                 replica_uuid,
                 dev_id,
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
+                return_response=True,
             )
-            handle_bytes, disk_path, resolved_artifact_id = cast(
-                tuple[bytes, str, str], mat_result
+            if not isinstance(
+                response, store_daemon_pb2.MaterializeReplicaResponse
+            ):
+                raise DaemonUnavailable(
+                    "Daemon returned unexpected response type for key materialization"
+                )
+            if response.mem_handle is None or not response.mem_handle.cuda_ipc_handle:
+                raise DaemonUnavailable(
+                    "Daemon returned empty mem_handle for key materialization"
+                )
+            handle_bytes = response.mem_handle.cuda_ipc_handle
+            disk_path = response.used_disk_path
+            resolved_artifact_id = response.artifact_id
+            materialized_source = response.source
+        else:
+            response = client.materialize_by_artifact_id(
+                artifact_id or "",
+                replica_uuid,
+                device_uuid_for(dev_id),
+                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                wait_for_completion=opts.wait_for_completion,
+                return_response=True,
+                disk_path=disk_path_hint,
+                preference=preference_value,
             )
+            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
+                raise DaemonUnavailable(
+                    "Daemon returned unexpected response type for disk materialization"
+                )
+            handle_bytes = response.mem_handle.cuda_ipc_handle
+            disk_path = response.disk_path or disk_path_hint
+            materialized_source = response.source
+            resolved_artifact_id = (
+                response.artifact_id or artifact_id or (disk_path or "")
+            )
+            if response.view_index_json:
+                view_index_bytes = bytes(response.view_index_json)
 
-    canonical_index_bytes = canonical_index_hint or client.get_artifact_index_by_id(
-        resolved_artifact_id
-    )
+    if not resolved_artifact_id:
+        raise IndexParseError(
+            "Daemon did not provide artifact_id for materialized artifact"
+        )
+
+    canonical_index_bytes = canonical_index_hint
+    if canonical_index_bytes is None and view_index_bytes is not None:
+        canonical_index_bytes = view_index_bytes
+    if canonical_index_bytes is None:
+        try:
+            canonical_index_bytes = client.get_artifact_index_by_id(
+                resolved_artifact_id
+            )
+        except RuntimeError as exc:
+            # Provide clearer error when daemon could not supply index and GS is unavailable.
+            raise IndexParseError(
+                f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}: {exc}"
+            ) from exc
     if not canonical_index_bytes:
         raise IndexParseError(
             f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}"
@@ -210,6 +285,7 @@ def materialize_artifact(
         disk_path=disk_path,
         view_index_bytes=view_index_bytes,
         view_data_hash=view_data_hash,
+        source=materialized_source,
     )
 
 

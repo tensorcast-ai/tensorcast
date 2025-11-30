@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <memory>
 
 #include "absl/synchronization/mutex.h"
@@ -63,6 +64,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     // ordering (artifact_id, device_id). If false (default), uses numeric
     // index tokens.
     bool use_cursor_pagination{false};
+
+    std::vector<std::filesystem::path> disk_path_whitelist;
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
@@ -93,7 +96,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .lip = *lip_bridge_,
         .devices = devices_,
         .is_shutting_down = is_shutting_down_,
-        .lifecycle = lifecycle_mgr_.get()};
+        .lifecycle = lifecycle_mgr_.get(),
+        .disk_path_whitelist = opts_.disk_path_whitelist};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
         .engine = *engine_,
