@@ -361,6 +361,13 @@ absl::Status get_device(int* device_id) {
 }
 
 absl::Status malloc(void** ptr, size_t bytes) {
+  if (bytes == 0) {
+    if (ptr != nullptr) {
+      *ptr = nullptr;
+    }
+    return absl::OkStatus();
+  }
+
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);
 
@@ -417,6 +424,13 @@ absl::Status malloc(void** ptr, size_t bytes) {
 }
 
 absl::Status malloc_host(void** ptr, size_t bytes) {
+  if (bytes == 0) {
+    if (ptr != nullptr) {
+      *ptr = nullptr;
+    }
+    return absl::OkStatus();
+  }
+
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);
 
@@ -478,6 +492,9 @@ absl::Status free_host(void* ptr) {
 
 absl::Status memcpy(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind) {
   static_cast<void>(kind);
+  if (bytes == 0) {
+    return absl::OkStatus();
+  }
   if (bytes > 0 && (dst == nullptr || src == nullptr)) {
     return absl::InvalidArgumentError("null pointer passed to fake cudaMemcpy");
   }
@@ -488,6 +505,13 @@ absl::Status memcpy(void* dst, const void* src, size_t bytes, cudaMemcpyKind kin
 
 absl::Status memcpy_async(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind, cudaStream_t stream) {
   static_cast<void>(kind);
+  if (bytes == 0) {
+    auto stream_or = get_stream_state(stream);
+    if (!stream_or.ok()) {
+      return stream_or.status();
+    }
+    return absl::OkStatus();
+  }
   if (bytes > 0 && (dst == nullptr || src == nullptr)) {
     return absl::InvalidArgumentError("null pointer passed to fake cudaMemcpyAsync");
   }
@@ -511,6 +535,9 @@ absl::Status memcpy_async(void* dst, const void* src, size_t bytes, cudaMemcpyKi
 }
 
 absl::Status memset(void* ptr, int value, size_t bytes) {
+  if (bytes == 0) {
+    return absl::OkStatus();
+  }
   std::memset(ptr, value, bytes);
   return absl::OkStatus();
 }
