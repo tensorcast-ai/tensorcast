@@ -1,0 +1,115 @@
+syntax = "proto3";
+
+package tensorcast.daemon.v2;
+
+import "google/protobuf/timestamp.proto";
+import "tensorcast/daemon/v1/store_daemon.proto";
+
+// Materialization v2 RPC surface focused on streaming payload descriptors.
+service StoreDaemonService {
+  rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
+  rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
+  rpc GetMaterializeCapabilities(GetMaterializeCapabilitiesRequest) returns (GetMaterializeCapabilitiesResponse) {}
+}
+
+message DiskFallbackHint {
+  string disk_path = 1;
+  bool verify_checksums = 2;
+}
+
+message TensorPayloadDescriptor {
+  string name = 1;
+  repeated int64 shape = 2;
+  repeated int64 stride = 3;
+  uint64 buffer_offset = 4;
+  uint64 byte_length = 5;
+  uint64 storage_offset = 6;
+  string dtype = 7;
+  string device_uuid = 8;
+}
+
+message ViewSubset {
+  repeated string tensor_names = 1;
+  bytes subset_hash = 2;
+}
+
+message ReplicaTicket {
+  string replica_uuid = 1;
+  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
+  google.protobuf.Timestamp created_at = 3;
+}
+
+message MaterializeReplicaRequest {
+  // RFC-0007: Use content-addressed artifact_id when available.
+  optional string artifact_id = 1;
+  // Disk fallback hint; when present, the daemon may serve directly from disk.
+  DiskFallbackHint disk_fallback = 2;
+
+  string replica_uuid = 3;
+  string device_uuid = 4;
+  tensorcast.daemon.v1.DeviceType target_device_type = 5;
+  int32 pinned_allocation_timeout_ms = 6;
+  int32 pid = 7; // Process ID for reference tracking
+  int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
+
+  tensorcast.daemon.v1.SourcePreference preference = 9;
+
+  // Selective materialization
+  repeated string tensor_names = 10;
+  bytes view_subset_hash = 11;
+
+  oneof view_identity {
+    tensorcast.daemon.v1.ViewSpec view = 1001;
+    string view_id = 1002;
+  }
+
+  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+  bool wait_for_completion = 1004;
+}
+
+message MaterializeReplicaResponse {
+  string artifact_id = 1;
+  string disk_path = 2;
+  tensorcast.daemon.v1.MemCopyHandle mem_handle = 3;
+  tensorcast.daemon.v1.MaterializeReplicaStatus status = 4;
+  tensorcast.daemon.v1.MaterializationSource source = 5;
+  bytes canonical_index_json = 6;
+  ViewSubset view_subset = 7;
+  repeated TensorPayloadDescriptor payloads = 8;
+  ReplicaTicket ticket = 9;
+  bytes view_index_json = 10;
+}
+
+message MaterializeByKeyRequest {
+  string key = 1;
+  int32 device_id = 2;
+  int32 pinned_allocation_timeout_ms = 3;
+  string replica_uuid = 4;
+  int32 pid = 5;
+
+  // Selective materialization
+  repeated string tensor_names = 10;
+  bytes view_subset_hash = 11;
+
+  tensorcast.daemon.v1.SourcePreference preference = 12;
+  bool wait_for_completion = 20;
+}
+
+message MaterializeByKeyResponse {
+  tensorcast.daemon.v1.MaterializeReplicaStatus status = 1;
+  string artifact_id = 2;
+  string used_disk_path = 3;
+  tensorcast.daemon.v1.MemCopyHandle mem_handle = 4;
+  tensorcast.daemon.v1.MaterializationSource source = 5;
+  bytes canonical_index_json = 6;
+  ViewSubset view_subset = 7;
+  repeated TensorPayloadDescriptor payloads = 8;
+  ReplicaTicket ticket = 9;
+  bytes view_index_json = 10;
+}
+
+message GetMaterializeCapabilitiesRequest {}
+
+message GetMaterializeCapabilitiesResponse {
+  bool supports_view_subset_hash = 1;
+}

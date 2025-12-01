@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import json
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -16,7 +17,6 @@ from tensorcast import _C
 from tensorcast.api.store import (
     CanonicalIndex,
     CanonicalIndexEntry,
-    MaterializedArtifact,
     Store,
     StoreOptions,
     ArtifactError,
@@ -31,6 +31,7 @@ from tensorcast.api._view_ops import (
     TransposeOp,
     ViewSpecBuildResult,
 )
+from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 
@@ -58,6 +59,55 @@ def _make_three_dim_index() -> CanonicalIndex:
         size_bytes=2 * 3 * 4 * 4,
     )
     return CanonicalIndex(entries=(entry,), total_size_bytes=entry.size_bytes, avbs_hash="")
+
+
+def _make_payload(
+    tensors: dict[str, torch.Tensor],
+    *,
+    replica_uuid: str = "replica",
+    canonical_index_bytes: bytes | None = None,
+    view_index_bytes: bytes | None = None,
+) -> MaterializationPayload:
+    descriptors: list[TensorPayloadDescriptor] = []
+    index: dict[str, list[object]] = {}
+    offset = 0
+    for name, tensor in tensors.items():
+        size_bytes = int(tensor.element_size() * tensor.numel())
+        index[name] = [
+            offset,
+            size_bytes,
+            list(map(int, tensor.shape)),
+            list(map(int, tensor.stride())),
+            str(tensor.dtype),
+            int(tensor.storage_offset()),
+        ]
+        descriptors.append(
+            TensorPayloadDescriptor(
+                name=name,
+                dtype=str(tensor.dtype),
+                shape=tuple(map(int, tensor.shape)),
+                stride=tuple(map(int, tensor.stride())),
+                buffer_offset=offset,
+                byte_length=size_bytes,
+                storage_offset=int(tensor.storage_offset()),
+            )
+        )
+        offset += size_bytes
+    canonical_bytes = canonical_index_bytes or json.dumps(index, separators=(",", ":")).encode("utf-8")
+
+    def _iter():
+        for desc in descriptors:
+            yield desc, tensors[desc.name]
+
+    return MaterializationPayload(
+        artifact_id="artifact-123",
+        canonical_index_bytes=canonical_bytes,
+        descriptors=tuple(descriptors),
+        payload_iter=_iter,
+        state_dict=dict(tensors),
+        replica_uuid=replica_uuid,
+        view_index_bytes=view_index_bytes,
+    )
 
 
 class _DummyExecutor:
@@ -225,17 +275,16 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
         "resolve_transform_placement",
         lambda placement, *, has_transpose, for_registration=False: placement_value,
     )
-    materialized = MaterializedArtifact(
-        artifact_id="artifact-123",
-        state_dict={"weights": torch.zeros(16)},
+    payload = _make_payload(
+        {"weights": torch.zeros(16)},
         canonical_index_bytes=b"{}",
         replica_uuid="replica",
     )
     captured: dict[str, Any] = {}
 
-    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializationPayload, int]:
         captured.update(kwargs)
-        return materialized, 0
+        return payload, 0
 
     monkeypatch.setattr(
         store._materialization,
@@ -244,7 +293,9 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     result = store.get_view(artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
-    assert result is materialized.state_dict
+    assert set(result.keys()) == {"weights"}
+    assert payload.state_dict is not None
+    assert result["weights"] is payload.state_dict["weights"]
     assert captured["artifact_id"] == "artifact-123"
     assert captured["view"] is fake_spec
     assert captured["placement"] == placement_value
@@ -257,9 +308,8 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
     layout_index_json = (
         b'{"weights":[0,16,[16],[1],"torch.float32",0]}'
     )
-    materialized = MaterializedArtifact(
-        artifact_id="artifact-123",
-        state_dict={"weights": torch.ones(16)},
+    payload = _make_payload(
+        {"weights": torch.ones(16)},
         canonical_index_bytes=b"{}",
         replica_uuid="replica",
         view_index_bytes=layout_index_json,
@@ -286,8 +336,8 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
         fake_resolve.__get__(store._views, ViewOrchestrator),
     )
 
-    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
-        return materialized, 0
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializationPayload, int]:
+        return payload, 0
 
     monkeypatch.setattr(
         store._materialization,

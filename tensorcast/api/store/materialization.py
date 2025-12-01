@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
+from typing import TypedDict
 
 import torch
 from opentelemetry.trace import Status, StatusCode
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions
-from tensorcast.api._materialize import MaterializedArtifact, materialize_artifact
+from tensorcast.api._materialize import (
+    MaterializationPayload,
+    materialize_artifact_v2,
+)
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
@@ -39,6 +44,12 @@ from tensorcast.api.store.views import (
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
+
+
+class _MaterializationSummary(TypedDict):
+    count: int | None
+    bytes: int | None
+    selection: str | None
 
 
 def _source_label(
@@ -120,7 +131,7 @@ class MaterializationPipeline:
         runtime: StoreRuntimeContext,
         views: ViewOrchestrator,
         *,
-        materialize_fn: Callable[..., MaterializedArtifact] = materialize_artifact,
+        materialize_fn: Callable[..., MaterializationPayload] = materialize_artifact_v2,
     ) -> None:
         self._runtime = runtime
         self._views = views
@@ -129,7 +140,7 @@ class MaterializationPipeline:
         self._materialize_fn = materialize_fn
 
     def set_materialize_fn(
-        self, materialize_fn: Callable[..., MaterializedArtifact]
+        self, materialize_fn: Callable[..., MaterializationPayload]
     ) -> None:
         self._materialize_fn = materialize_fn
 
@@ -144,8 +155,9 @@ class MaterializationPipeline:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
+        tensor_names: Sequence[str] | None = None,
     ) -> dict[str, torch.Tensor]:
-        materialized, _ = self._perform_get_with_retry(
+        payload, _ = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
             device=device,
@@ -153,8 +165,19 @@ class MaterializationPipeline:
             method="get",
             cancel_event=None,
             options_override=options,
+            tensor_names=tensor_names,
         )
-        return materialized.state_dict
+        state = self._payload_state_dict(payload)
+        if tensor_names:
+            missing = [name for name in tensor_names if name not in state]
+            if missing:
+                raise ArtifactError(
+                    f"Materialization payload missing tensors: {', '.join(missing)}",
+                    status_code="NOT_FOUND",
+                    retryable=False,
+                )
+            state = {name: state[name] for name in tensor_names}
+        return state
 
     def get_view(
         self,
@@ -184,7 +207,7 @@ class MaterializationPipeline:
                 placement, has_transpose=resolved.has_transpose
             )
 
-        materialized, _ = self._perform_get_with_retry(
+        payload, _ = self._perform_get_with_retry(
             method="get_view",
             artifact_id=resolved.artifact_id,
             key=None,
@@ -198,7 +221,7 @@ class MaterializationPipeline:
             canonical_index_hint=resolved.canonical_index_bytes,
             disk_path_hint=resolved.disk_path_hint,
         )
-        return materialized.state_dict
+        return self._payload_state_dict(payload)
 
     def get_async(
         self,
@@ -208,13 +231,14 @@ class MaterializationPipeline:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
+        tensor_names: Sequence[str] | None = None,
     ) -> ArtifactFuture[dict[str, torch.Tensor]]:
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
-        mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
+        mat_ref: dict[str, MaterializationPayload | None] = {"value": None}
 
         def _task() -> dict[str, torch.Tensor]:
-            materialized: MaterializedArtifact | None = None
+            materialized: MaterializationPayload | None = None
             try:
                 materialized, _ = self._perform_get_with_retry(
                     artifact_id=artifact_id,
@@ -224,6 +248,7 @@ class MaterializationPipeline:
                     method="get",
                     cancel_event=cancel_event,
                     options_override=options,
+                    tensor_names=tensor_names,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized
@@ -235,7 +260,7 @@ class MaterializationPipeline:
                     )
                     materialized = None
                     raise CancelledError
-                return materialized.state_dict
+                return self._payload_state_dict(materialized)
             except CancelledError as exc:
                 raise ArtifactError(
                     "Retrieval cancelled",
@@ -277,8 +302,9 @@ class MaterializationPipeline:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
+        tensor_names: Sequence[str] | None = None,
     ) -> None:
-        materialized, device_id = self._perform_get_with_retry(
+        payload, device_id = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
             device=device,
@@ -286,21 +312,21 @@ class MaterializationPipeline:
             method="get_into",
             cancel_event=None,
             options_override=options,
+            tensor_names=tensor_names,
         )
         try:
-            canonical_index = canonical_index_from_bytes(
-                materialized.canonical_index_bytes
-            )
+            layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
+            canonical_index = canonical_index_from_bytes(layout_bytes)
             pairs = validate_targets(
                 canonical_index=canonical_index,
                 target=target,
-                source=materialized.state_dict,
+                source=self._payload_state_dict(payload),
                 device_id=device_id,
             )
             for tgt, src in pairs:
                 tgt.copy_(src)
         finally:
-            self._release_materialized(materialized, self._runtime.ensure_client())
+            self._release_materialized(payload, self._runtime.ensure_client())
 
     def get_into_async(
         self,
@@ -311,13 +337,14 @@ class MaterializationPipeline:
         device: torch.device | str | None = None,
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
+        tensor_names: Sequence[str] | None = None,
     ) -> ArtifactFuture[None]:
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
-        mat_ref: dict[str, MaterializedArtifact | None] = {"value": None}
+        mat_ref: dict[str, MaterializationPayload | None] = {"value": None}
 
         def _task() -> None:
-            materialized: MaterializedArtifact | None = None
+            materialized: MaterializationPayload | None = None
             try:
                 materialized, device_id = self._perform_get_with_retry(
                     artifact_id=artifact_id,
@@ -327,6 +354,7 @@ class MaterializationPipeline:
                     method="get_into",
                     cancel_event=cancel_event,
                     options_override=options,
+                    tensor_names=tensor_names,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized
@@ -339,13 +367,16 @@ class MaterializationPipeline:
                     materialized = None
                     raise CancelledError
                 try:
-                    canonical_index = canonical_index_from_bytes(
-                        materialized.canonical_index_bytes
+                    layout_bytes = (
+                        materialized.view_index_bytes
+                        or materialized.canonical_index_bytes
                     )
+                    canonical_index = canonical_index_from_bytes(layout_bytes)
+                    source_map = self._payload_state_dict(materialized)
                     pairs = validate_targets(
                         canonical_index=canonical_index,
                         target=target,
-                        source=materialized.state_dict,
+                        source=source_map,
                         device_id=device_id,
                     )
                     for tgt, src in pairs:
@@ -414,7 +445,7 @@ class MaterializationPipeline:
                 placement, has_transpose=resolved.has_transpose
             )
 
-        materialized, device_id = self._perform_get_with_retry(
+        payload, device_id = self._perform_get_with_retry(
             method="get_view_into",
             artifact_id=resolved.artifact_id,
             key=None,
@@ -429,20 +460,18 @@ class MaterializationPipeline:
             disk_path_hint=resolved.disk_path_hint,
         )
         try:
-            layout_bytes = (
-                materialized.view_index_bytes or materialized.canonical_index_bytes
-            )
+            layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
             layout_index = canonical_index_from_bytes(layout_bytes)
             pairs = validate_targets(
                 canonical_index=layout_index,
                 target=target,
-                source=materialized.state_dict,
+                source=self._payload_state_dict(payload),
                 device_id=device_id,
             )
             for tgt, src in pairs:
                 tgt.copy_(src)
         finally:
-            self._release_materialized(materialized, self._runtime.ensure_client())
+            self._release_materialized(payload, self._runtime.ensure_client())
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -522,6 +551,86 @@ class MaterializationPipeline:
             return int(device.index or 0)
         return int(selector)
 
+    def _payload_state_dict(
+        self, payload: MaterializationPayload
+    ) -> dict[str, torch.Tensor]:
+        if payload.descriptors and payload.state_dict is not None:
+            missing = [
+                d.name for d in payload.descriptors if d.name not in payload.state_dict
+            ]
+            if missing:
+                raise ArtifactError(
+                    f"Materialization payload missing tensors: {', '.join(missing)}",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            return {d.name: payload.state_dict[d.name] for d in payload.descriptors}
+        state: dict[str, torch.Tensor] = {}
+        for desc, tensor in payload.payload_iter():
+            state[desc.name] = tensor
+        return state
+
+    def _summarize_materialized(
+        self,
+        materialized: MaterializationPayload,
+        requested_names: Sequence[str] | None,
+    ) -> _MaterializationSummary:
+        summary: _MaterializationSummary = {
+            "count": None,
+            "bytes": None,
+            "selection": None,
+        }
+        descriptor_names: list[str] = []
+        bytes_total = 0
+        if materialized.descriptors:
+            descriptor_names = [desc.name for desc in materialized.descriptors]
+            bytes_total = sum(
+                int(desc.byte_length) for desc in materialized.descriptors
+            )
+        elif materialized.state_dict is not None:
+            descriptor_names = list(materialized.state_dict.keys())
+        if descriptor_names:
+            summary["count"] = len(descriptor_names)
+
+        canonical_index_bytes = (
+            getattr(materialized, "canonical_index_bytes", b"") or b""
+        )
+        canonical_count: int | None = None
+        if canonical_index_bytes:
+            try:
+                index_obj = json.loads(canonical_index_bytes)
+                canonical_count = len(index_obj)
+                if bytes_total == 0:
+                    names = descriptor_names or list(index_obj.keys())
+                    for name in names:
+                        if (
+                            name in index_obj
+                            and isinstance(index_obj[name], list)
+                            and len(index_obj[name]) > 1
+                        ):
+                            bytes_total += int(index_obj[name][1])
+            except Exception:  # noqa: BLE001
+                canonical_count = None
+
+        if bytes_total > 0:
+            summary["bytes"] = bytes_total
+
+        selection: str | None = None
+        subset = bool(requested_names)
+        count_value = summary["count"]
+        if (
+            canonical_count is not None
+            and count_value is not None
+            and count_value < canonical_count
+        ):
+            subset = True
+        if subset:
+            selection = "subset"
+        elif canonical_count is not None:
+            selection = "full"
+        summary["selection"] = selection
+        return summary
+
     def _build_get_options(
         self,
         fallback: FallbackOptions | None,
@@ -544,13 +653,50 @@ class MaterializationPipeline:
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
-    ) -> MaterializedArtifact:
+        tensor_names: Sequence[str] | None = None,
+    ) -> MaterializationPayload:
+        return self._materialize_payload(
+            artifact_id=artifact_id,
+            key=key,
+            device_id=device_id,
+            options=options,
+            fallback=fallback,
+            cancel_event=cancel_event,
+            span=span,
+            view=view,
+            view_id=view_id,
+            placement=placement,
+            canonical_index_hint=canonical_index_hint,
+            disk_path_hint=disk_path_hint,
+            tensor_names=tensor_names,
+        )
+
+    def _materialize_payload(
+        self,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        device_id: int,
+        options: GetArtifactOptions,
+        fallback: FallbackOptions | None,
+        cancel_event: threading.Event | None = None,
+        span=None,
+        view: store_daemon_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        placement: TransformPlacement | None = None,
+        canonical_index_hint: bytes | None = None,
+        disk_path_hint: str | None = None,
+        tensor_names: Sequence[str] | None = None,
+    ) -> MaterializationPayload:
         client = self._runtime.ensure_client()
         disk_error: Exception | None = None
         disk_path: str | None = disk_path_hint
         resolved_artifact_id = artifact_id
         fallback_opts = fallback
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        verify_checksums = (
+            bool(fallback_opts.verify_checksums) if fallback_opts else True
+        )
         requested_disk = False
         if (view is not None or view_id is not None) and fallback_opts:
             raise ArtifactError(
@@ -624,6 +770,8 @@ class MaterializationPipeline:
             canonical_index_hint=canonical_index_hint,
             disk_path_hint=disk_path,
             preference=preference,
+            tensor_names=tensor_names,
+            verify_checksums=verify_checksums,
         )
         if fallback_opts and not fallback_opts.allow_p2p:
             disallowed_sources = {
@@ -638,7 +786,7 @@ class MaterializationPipeline:
                     status_code="FAILED_PRECONDITION",
                     retryable=False,
                 )
-        source_label = _source_label(result.source)
+        source_label = _source_label(result.source) or ""
         self._fallback.record_event(
             mode="disk" if requested_disk else "p2p",
             artifact_id=result.artifact_id or request_artifact_id,
@@ -646,7 +794,7 @@ class MaterializationPipeline:
             detail={
                 "disk_requested": bool(fallback and fallback.prefer_disk),
                 "allow_p2p": bool(fallback is None or fallback.allow_p2p),
-                "source": source_label or "",
+                "source": source_label,
             },
         )
         if key:
@@ -663,12 +811,64 @@ class MaterializationPipeline:
                     "tc.artifact.id": result.artifact_id or artifact_id or "",
                     "tc.store.disk_requested": bool(fallback and fallback.prefer_disk),
                     "tc.store.allow_p2p": bool(fallback is None or fallback.allow_p2p),
-                    "tc.store.source": source_label or "",
+                    "tc.store.source": source_label,
                 },
             )
         if cancel_event and cancel_event.is_set():
             self._release_materialized(result, client)
             raise CancelledError
+        if tensor_names and result.descriptors:
+            present = {desc.name for desc in result.descriptors}
+            missing = [name for name in tensor_names if name not in present]
+            if missing:
+                self._release_materialized(result, client)
+                raise ArtifactError(
+                    f"Requested tensors missing from materialized payload: {', '.join(missing)}",
+                    status_code="NOT_FOUND",
+                    retryable=False,
+                )
+            requested = set(tensor_names)
+            base_payload = result
+            filtered_descriptors = tuple(
+                desc for desc in result.descriptors if desc.name in requested
+            )
+            try:
+                index_obj = json.loads(base_payload.canonical_index_bytes)
+                filtered_index = {
+                    name: meta for name, meta in index_obj.items() if name in requested
+                }
+                canonical_bytes = json.dumps(
+                    filtered_index, separators=(",", ":")
+                ).encode("utf-8")
+            except Exception:  # noqa: BLE001
+                canonical_bytes = base_payload.canonical_index_bytes
+
+            def _filtered_iter():
+                for desc, tensor in base_payload.payload_iter():
+                    if desc.name in requested:
+                        yield desc, tensor
+
+            state_dict = None
+            if base_payload.state_dict is not None:
+                state_dict = {
+                    name: tensor
+                    for name, tensor in base_payload.state_dict.items()
+                    if name in requested
+                }
+
+            result = MaterializationPayload(
+                artifact_id=base_payload.artifact_id,
+                canonical_index_bytes=canonical_bytes,
+                descriptors=filtered_descriptors,
+                payload_iter=_filtered_iter,
+                state_dict=state_dict,
+                replica_uuid=base_payload.replica_uuid,
+                disk_path=base_payload.disk_path,
+                view_index_bytes=base_payload.view_index_bytes,
+                view_data_hash=base_payload.view_data_hash,
+                source=base_payload.source,
+                device_uuid=base_payload.device_uuid,
+            )
         return result
 
     def _call_view_resolver(
@@ -704,7 +904,8 @@ class MaterializationPipeline:
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
-    ) -> tuple[MaterializedArtifact, int]:
+        tensor_names: Sequence[str] | None = None,
+    ) -> tuple[MaterializationPayload, int]:
         policy = self._runtime.retry_policies.get(
             method, self._runtime.retry_policies.get("get")
         )
@@ -721,6 +922,7 @@ class MaterializationPipeline:
             "tc.store.fallback.allow_p2p": bool(fallback is None or fallback.allow_p2p),
         }
         source_label: str | None = None
+        selection_label: str | None = None
 
         with self._runtime.operation_span(span_name, attributes) as span:
 
@@ -732,6 +934,7 @@ class MaterializationPipeline:
                     status,
                     duration,
                     source=source_label,
+                    selection=selection_label,
                 )
                 span.set_attribute("tc.store.status", status)
                 if status not in {"OK", "CANCELLED"}:
@@ -740,9 +943,11 @@ class MaterializationPipeline:
                         self._runtime.daemon_endpoint,
                         status,
                         source=source_label,
+                        selection=selection_label,
                     )
 
             while True:
+                selection_label = None
                 if cancel_event and cancel_event.is_set():
                     record_outcome("CANCELLED")
                     span.set_status(Status(StatusCode.ERROR, "CANCELLED"))
@@ -765,8 +970,19 @@ class MaterializationPipeline:
                         placement=placement,
                         canonical_index_hint=canonical_index_hint,
                         disk_path_hint=disk_path_hint,
+                        tensor_names=tensor_names,
                     )
+                    summary = self._summarize_materialized(materialized, tensor_names)
+                    selection_label = summary["selection"]
                     source_label = _source_label(materialized.source)
+                    count_value = summary["count"]
+                    bytes_value = summary["bytes"]
+                    if count_value is not None:
+                        span.set_attribute("tc.tensor.count", int(count_value))
+                    if bytes_value is not None:
+                        span.set_attribute("tc.tensor.bytes", int(bytes_value))
+                    if selection_label:
+                        span.set_attribute("tc.tensor.selection", selection_label)
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
                     span.set_attribute("tc.device.id", int(device_id))
@@ -804,6 +1020,7 @@ class MaterializationPipeline:
                         self._runtime.daemon_endpoint,
                         error.status_code,
                         source=source_label,
+                        selection=selection_label,
                     )
                     span.add_event(
                         "store.retry",
@@ -853,6 +1070,7 @@ class MaterializationPipeline:
                         self._runtime.daemon_endpoint,
                         error.status_code,
                         source=source_label,
+                        selection=selection_label,
                     )
                     span.add_event(
                         "store.retry",
@@ -890,7 +1108,8 @@ class MaterializationPipeline:
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
-    ) -> tuple[MaterializedArtifact, int]:
+        tensor_names: Sequence[str] | None = None,
+    ) -> tuple[MaterializationPayload, int]:
         resolved_fallback = fallback or self._runtime.opts.fallback
         artifact_id, key = self._resolve_identifiers(
             artifact_id, key, resolved_fallback
@@ -912,16 +1131,19 @@ class MaterializationPipeline:
                 placement=placement,
                 canonical_index_hint=canonical_index_hint,
                 disk_path_hint=disk_path_hint,
+                tensor_names=tensor_names,
             )
         except Exception as exc:  # noqa: BLE001
             raise map_materialization_error(exc) from exc
         return materialized, device_id
 
-    def _release_materialized(self, materialized: MaterializedArtifact, client) -> None:
-        replica_uuid = materialized.replica_uuid
+    def _release_materialized(
+        self, materialized: MaterializationPayload, client
+    ) -> None:
+        replica_uuid = getattr(materialized, "replica_uuid", "") or ""
+        disk_path = getattr(materialized, "disk_path", "") or ""
         if not replica_uuid:
             return
-        disk_path = materialized.disk_path or ""
         if not client.unload_replica(replica_uuid, disk_path=disk_path):
             logger.warning(
                 "store.cancel_unload_failed",

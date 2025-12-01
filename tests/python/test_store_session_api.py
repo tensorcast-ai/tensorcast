@@ -8,14 +8,14 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, Callable, Sequence, cast
 
 import pytest
 import torch
 
 import tensorcast.api.store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
-from tensorcast.api._materialize import MaterializedArtifact
+from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api._register import (
     BuildContext,
     CoalescedLayout,
@@ -81,7 +81,7 @@ class FakeEnvironment:
     futures: list[FakeHandle]
     block_registration: bool
     register_started: threading.Event
-    materialized_by_id: dict[str, MaterializedArtifact]
+    materialized_by_id: dict[str, MaterializationPayload]
 
     def add_materialized(
         self,
@@ -92,26 +92,45 @@ class FakeEnvironment:
     ) -> None:
         if replica_uuid is None:
             replica_uuid = f"replica-{artifact_id}"
-        index: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+        index: dict[str, list[object]] = {}
+        descriptors: list[TensorPayloadDescriptor] = []
         offset = 0
         for name, tensor in tensors.items():
             size_bytes = int(tensor.element_size() * tensor.nelement())
-            index[name] = (
+            index[name] = [
                 offset,
                 size_bytes,
                 list(map(int, tensor.shape)),
                 list(map(int, tensor.stride())),
                 str(tensor.dtype),
                 int(tensor.storage_offset()),
+            ]
+            descriptors.append(
+                TensorPayloadDescriptor(
+                    name=name,
+                    dtype=str(tensor.dtype),
+                    shape=tuple(map(int, tensor.shape)),
+                    stride=tuple(map(int, tensor.stride())),
+                    buffer_offset=offset,
+                    byte_length=size_bytes,
+                    storage_offset=int(tensor.storage_offset()),
+                )
             )
             offset += size_bytes
         canonical = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self.materialized_by_id[artifact_id] = MaterializedArtifact(
+        canonical_index_bytes = canonical
+
+        def _iter():
+            for desc in descriptors:
+                yield desc, tensors[desc.name]
+
+        self.materialized_by_id[artifact_id] = MaterializationPayload(
             artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            descriptors=tuple(descriptors),
+            payload_iter=_iter,
             state_dict=tensors,
-            canonical_index_bytes=canonical,
             replica_uuid=replica_uuid,
-            disk_path=None,
         )
 
     def make_registration_result(
@@ -225,8 +244,11 @@ class FakeEnvironment:
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
         preference: int | None = None,
-    ) -> MaterializedArtifact:
-        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, preference
+        tensor_names: Sequence[str] | None = None,
+        verify_checksums: bool = True,
+        **_: Any,
+    ) -> MaterializationPayload:
+        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, preference, tensor_names, verify_checksums
         disk_hint = disk_path_hint
         if artifact_id is not None and artifact_id in self.materialized_by_id:
             resolved = self.materialized_by_id[artifact_id]
@@ -456,7 +478,7 @@ def test_store_get_async_cancel_unloads_replica(
         cancel_event: threading.Event | None,
         span: Any = None,
         **kwargs: Any,
-    ) -> MaterializedArtifact:
+    ) -> MaterializationPayload:
         cancel_ready.set()
         assert cancel_event is not None
         while not cancel_event.is_set():
@@ -550,25 +572,34 @@ def test_store_get_prefers_disk_when_available(
         disk_path_hint: str | None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         **_: Any,
-    ) -> MaterializedArtifact:
+    ) -> MaterializationPayload:
         disk_called["path"] = disk_path_hint
         disk_called["preference"] = preference
-        return MaterializedArtifact(
+        tensor = torch.zeros(1, dtype=torch.float32)
+        size_bytes = int(tensor.element_size() * tensor.numel())
+        canonical_index_bytes = json.dumps(
+            {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        descriptor = TensorPayloadDescriptor(
+            name="t",
+            dtype=str(tensor.dtype),
+            shape=tuple(tensor.shape),
+            stride=tuple(tensor.stride()),
+            buffer_offset=0,
+            byte_length=size_bytes,
+            storage_offset=int(tensor.storage_offset()),
+        )
+
+        def _iter():
+            yield descriptor, tensor
+
+        return MaterializationPayload(
             artifact_id="disk-artifact",
-            state_dict={"t": torch.zeros(1, dtype=torch.float32)},
-            canonical_index_bytes=json.dumps(
-                {
-                    "t": [
-                        0,
-                        4,
-                        [1],
-                        [1],
-                        "torch.float32",
-                        0,
-                    ]
-                },
-                separators=(",", ":"),
-            ).encode("utf-8"),
+            canonical_index_bytes=canonical_index_bytes,
+            descriptors=(descriptor,),
+            payload_iter=_iter,
+            state_dict={"t": tensor},
             replica_uuid="rep-disk",
             disk_path=disk_path_hint,
             source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK,

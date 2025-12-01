@@ -9,7 +9,7 @@ sidebar_position: 3
 The Store Daemon is the data-plane service process that exposes a stable gRPC API over the C++ StoreEngine. It validates and routes requests, coordinates per-request orchestration, and tracks ephemeral state (sessions, PID refs, locks). It does not own domain invariants implemented in the engine.
 
 - Binary: `//daemon:tensorcast_daemon`
-- Public API: `../proto/tensorcast/daemon/v1/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v1`)
+- Public API: `../proto/tensorcast/daemon/v1/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v1`); streaming descriptor v2 surface lives at `../proto/tensorcast/daemon/v2/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v2`) and is always enabled.
 - Deployment: see `../docs/deployment/store-daemon.md`
 
 ## What It Does
@@ -61,10 +61,12 @@ flowchart TB
 ## Interfaces (Public Surface)
 
 - Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`.
+- Loading v2 (gated): `MaterializeByKey`/`MaterializeReplica` with descriptor payloads plus `GetMaterializeCapabilities` (SDK probe) under `StoreDaemonServiceV2`. Descriptors are derived from UMA view plans (offset/stride/byte-length) when a view is requested so the exported buffer layout matches the planner, and disk fallbacks stay daemon-owned via `DiskFallbackHint` (respecting `verify_checksums`).
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
+- V2 requests carry `DiskFallbackHint` + `SourcePreference` so the daemon owns all disk reads; the v2 gRPC service is always registered alongside v1 for legacy clients.
 
 Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.

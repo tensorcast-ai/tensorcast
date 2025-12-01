@@ -13,7 +13,10 @@ import pytest
 import torch
 
 from tensorcast.api._config import PlanType
-from tensorcast.api._materialize import MaterializedArtifact
+from tensorcast.api._materialize import (
+    MaterializationPayload,
+    TensorPayloadDescriptor,
+)
 from tensorcast.api._register import RegistrationResult
 from tensorcast.api.store.async_ops import TrackedExecutor
 from tensorcast.api.store.materialization import MaterializationPipeline
@@ -134,14 +137,33 @@ def _registration_result(artifact_id: str = "aid") -> RegistrationResult:
     )
 
 
-def _materialized_artifact(replica_uuid: str = "r1") -> MaterializedArtifact:
-    index_bytes = json.dumps({"x": [0, 4, [1], [1], "float32", 0]}).encode("utf-8")
-    return MaterializedArtifact(
+def _materialization_payload(replica_uuid: str = "r1") -> MaterializationPayload:
+    tensor = torch.zeros(1, device="cpu")
+    size_bytes = int(tensor.element_size() * tensor.numel())
+    index_bytes = json.dumps(
+        {"x": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    descriptor = TensorPayloadDescriptor(
+        name="x",
+        dtype=str(tensor.dtype),
+        shape=tuple(tensor.shape),
+        stride=tuple(tensor.stride()),
+        buffer_offset=0,
+        byte_length=size_bytes,
+        storage_offset=int(tensor.storage_offset()),
+    )
+
+    def _iter():
+        yield descriptor, tensor
+
+    return MaterializationPayload(
         artifact_id="aid",
-        state_dict={"x": torch.zeros(1, device="cpu")},
         canonical_index_bytes=index_bytes,
+        descriptors=(descriptor,),
+        payload_iter=_iter,
+        state_dict={"x": tensor},
         replica_uuid=replica_uuid,
-        disk_path=None,
     )
 
 
@@ -185,12 +207,12 @@ def test_get_into_validates_targets(monkeypatch):
 
     runtime = _DummyRuntime()
     pipeline = MaterializationPipeline(
-        runtime, ViewOrchestrator(runtime), materialize_fn=lambda **_: _materialized_artifact(replica_uuid="r2")
+        runtime, ViewOrchestrator(runtime), materialize_fn=lambda **_: _materialization_payload(replica_uuid="r2")
     )
 
     called_release: list[str] = []
 
-    def fake_release(mat: MaterializedArtifact, client: _FakeClient) -> None:
+    def fake_release(mat: MaterializationPayload, client: _FakeClient) -> None:
         called_release.append(mat.replica_uuid)
 
     monkeypatch.setattr(pipeline, "_release_materialized", fake_release)

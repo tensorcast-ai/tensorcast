@@ -21,6 +21,8 @@ This document explains High Availability (HA) as implemented in code: startup re
 - Protocol buffers
   - Enhanced heartbeat and sync: `proto/tensorcast/global_store/v1/global_store.proto`
 
+Materialization HA invariant: v2 descriptor streaming in the daemon uses UMA view plans when a view is requested and always routes disk fallbacks through `DiskFallbackHint` (including `verify_checksums`). SDKs never read disk directly for retrieval, so selective tensor loads and disk-sourced replicas share the same daemon-managed buffer layout.
+
 ## Startup Recovery (Global Store)
 
 Global Store runs a recovery pass on startup; workers/replicas are marked stale until workers re-confirm via registration/heartbeat.

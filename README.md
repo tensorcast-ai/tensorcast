@@ -196,7 +196,7 @@ Note: SDK examples have been aligned to UMA V3 final naming; CPU streaming now u
 Notes:
 - For VRAM lease (FDML), begin with `LeasePlan(kind="lease", ...)` and feed `LeaseSegment` items using IPC handles exported from unique CUDA storage blocks. Each `LeaseSegment` includes `dst_offset` so segment order is irrelevant; the daemon zero-fills PAD and places bytes at the specified destination offsets.
 - Coalesced VRAM remains the simplest one-shot path; `Store.put(...)` performs the copy + commit and surfaces the resulting `RegisteredArtifact`.
-- Without GPUs, build and run with the Fake CUDA backend (see AGENTS.md).
+- Without GPUs, build and run with the Fake CUDA backend (see AGENTS.md). Fake CUDA now simulates cross-process CUDA IPC by backing handles with shared memory so daemon↔client materialization paths (e.g., shared storage round-trips) work in CI without GPUs.
 
 ## Run test
 

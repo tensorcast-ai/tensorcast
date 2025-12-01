@@ -17,7 +17,7 @@ links:
 
 # Summary
 
-All disk materialization flows must traverse the Store daemon so that descriptor streaming, view slicing, metrics, and retries are identical to P2P paths. Today, whenever callers set `FallbackOptions.prefer_disk` or provide `disk_path`, the Python SDK bypasses the daemon, calls `_materialize_from_disk()`, and eagerly reconstructs a CPU `state_dict` via `load_dict_from_disk()`. This bypass undermines telemetry, selective tensor hydration, and iterator reuse. This design replaces the bypass with daemon-backed RPCs and confines `load_dict_from_disk()` to tests only. We assume daemon availability; if the daemon fails to read disk, the SDK simply reports the daemon error without retrying locally.
+All disk materialization flows must traverse the Store daemon so that descriptor streaming, view slicing, metrics, and retries are identical to P2P paths. The SDK now routes disk fallbacks through the v2 `DiskFallbackHint` + `SourcePreference=PREFER_DISK` RPC and confines `_materialize_from_disk()` to tests only. We assume daemon availability; if the daemon fails to read disk, the SDK simply reports the daemon error without retrying locally.
 
 # Goals / Non-Goals
 
@@ -37,7 +37,9 @@ All disk materialization flows must traverse the Store daemon so that descriptor
 
 # Current State
 
-- `_perform_get_with_retry()` diverts to `_materialize_from_disk()` whenever disk fallback is requested, never touching the daemon path.
+The SDK now issues v2 disk hints to the daemon; the legacy bypass described below has been removed.
+
+- Previously, `_perform_get_with_retry()` diverted to `_materialize_from_disk()` whenever disk fallback was requested, never touching the daemon path.
 
 ```560:607:tensorcast/api/store/materialization.py
         if fallback_opts.prefer_disk or fallback_opts.disk_path or not fallback_opts.allow_p2p:
@@ -46,11 +48,11 @@ All disk materialization flows must traverse the Store daemon so that descriptor
             return result
 ```
 
-- `_materialize_from_disk()` calls `load_dict_from_disk()` and eagerly builds a `MaterializedArtifact`, so it cannot stream descriptors or respect `tensor_names`.
+- `_materialize_from_disk()` called `load_dict_from_disk()` and eagerly built a `MaterializationPayload`-style tensor map, so it could not stream descriptors or respect `tensor_names`.
 
 ```666:703:tensorcast/api/store/materialization.py
         state_dict = load_dict_from_disk(raw_path, device_id=device_id)
-        return MaterializedArtifact(...)
+        return MaterializationPayload(...)
 ```
 
 - The `MaterializeReplicaRequest` already has `disk_path` (field 10), but the SDK never populates it for daemon-routed flows; `DiskLoader` is invoked only by legacy code paths.
@@ -168,7 +170,7 @@ flowchart TD
    - Remove `_materialize_from_disk()` and its direct `load_dict_from_disk()` calls.
    - When disk fallback is requested (`FallbackOptions.prefer_disk=True` or `disk_path` set), build the same `MaterializeReplicaRequest` as P2P flows, set `preference=PREFER_DISK`, and populate the existing `disk_path` field.
    - When a disk path is resolved from a key, strip the key before invoking `materialize_artifact` so the daemon receives a single identifier (avoids artifact_id+key rejection).
-   - Extend `MaterializedArtifact` with a `source` field and plumb the daemon's `MaterializationSource` through `_materialize_fn` so higher layers know the actual data path.
+   - Extend `MaterializationPayload` with a `source` field and plumb the daemon's `MaterializationSource` through `_materialize_fn` so higher layers know the actual data path.
    - Always receive a `MaterializationPayload` iterator; legacy `load_dict_from_disk()` remains only under `tensorcast/api/_io_disk.py` for tests.
 
 2. **FallbackOptions**
@@ -213,6 +215,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 
 - All tensor payload transfers originate from the daemon; the SDK never reads disk directly for materialization.
 - All metadata extraction and checksum verification happen daemon-side.
+- Disk fallbacks travel through `DiskFallbackHint` (including `verify_checksums`) and reuse the same UMA view-plan descriptor builder as P2P loads, so selective slices report accurate offsets/strides without SDK-side disk helpers.
 - `load_dict_from_disk()` is only callable from tests; production modules import it solely under `if TYPE_CHECKING` or test harnesses.
 - If the daemon reports an error (`NOT_FOUND`, `DATA_LOSS`, `FAILED_PRECONDITION`, etc.), the SDK propagates the error without attempting local fallback.
 - When `fallback.allow_p2p=False`, the SDK rejects materializations served from P2P or reused replicas even if the daemon attempted a fallback after a disk error.

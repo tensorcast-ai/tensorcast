@@ -89,6 +89,7 @@ class _MeterState:
         duration_s: float,
         *,
         source: str | None = None,
+        selection: str | None = None,
     ) -> None:
         if not self.ensure():
             return
@@ -100,13 +101,21 @@ class _MeterState:
         }
         if source:
             attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
             self._latency.record(max(duration_s, 0.0), attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to record store latency", exc_info=True)
 
     def increment_errors(
-        self, verb: str, daemon: str, status: str, *, source: str | None = None
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        *,
+        source: str | None = None,
+        selection: str | None = None,
     ) -> None:
         if not self.ensure():
             return
@@ -118,13 +127,21 @@ class _MeterState:
         }
         if source:
             attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
             self._errors.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store error counter", exc_info=True)
 
     def increment_retries(
-        self, verb: str, daemon: str, status: str, *, source: str | None = None
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        *,
+        source: str | None = None,
+        selection: str | None = None,
     ) -> None:
         if not self.ensure():
             return
@@ -136,6 +153,8 @@ class _MeterState:
         }
         if source:
             attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
             self._retries.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
@@ -146,18 +165,36 @@ _METRICS = _MeterState()
 
 
 def observe_latency(
-    verb: str, daemon: str, status: str, duration_s: float, *, source: str | None = None
+    verb: str,
+    daemon: str,
+    status: str,
+    duration_s: float,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
 ) -> None:
-    _METRICS.record_latency(verb, daemon, status, duration_s, source=source)
+    _METRICS.record_latency(
+        verb, daemon, status, duration_s, source=source, selection=selection
+    )
 
 
 def increment_error(
-    verb: str, daemon: str, status: str, *, source: str | None = None
+    verb: str,
+    daemon: str,
+    status: str,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
 ) -> None:
-    _METRICS.increment_errors(verb, daemon, status, source=source)
+    _METRICS.increment_errors(verb, daemon, status, source=source, selection=selection)
 
 
 def increment_retry(
-    verb: str, daemon: str, status: str, *, source: str | None = None
+    verb: str,
+    daemon: str,
+    status: str,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
 ) -> None:
-    _METRICS.increment_retries(verb, daemon, status, source=source)
+    _METRICS.increment_retries(verb, daemon, status, source=source, selection=selection)
