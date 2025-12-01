@@ -16,6 +16,13 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
+## Materialization v2 (descriptor streaming)
+
+- `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.
+- Selective fetch (`tensor_names`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `get_into*` copies consume descriptors directly without building intermediate dicts.
+- Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
+- Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePreference=PREFER_DISK` (including the `verify_checksums` hint) so all disk reads stay in the daemon data path.
+
 ## Device requirements
 
 `Store.get*`/`Store.get_into*` default to materializing replicas onto CUDA

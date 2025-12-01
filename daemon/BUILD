@@ -401,8 +401,11 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
+        "@protobuf",
     ],
 )
 

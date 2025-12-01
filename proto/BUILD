@@ -65,6 +65,18 @@ alias(
 )
 
 alias(
+    name = "store_daemon_v2_grpc_cpp",
+    actual = "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "store_daemon_v2_grpc",
+    actual = "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+    visibility = ["//visibility:public"],
+)
+
+alias(
     name = "memory_tier_grpc_cpp",
     actual = "//proto/tensorcast/memory_tier/v1:memory_tier_grpc_cc",
     visibility = ["//visibility:public"],

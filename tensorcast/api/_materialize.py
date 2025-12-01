@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import os
 import threading
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, replace
 
 import torch
@@ -15,31 +15,63 @@ from tensorcast._C import get_cuda_memory_ptr, restore_tensors
 from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
-from tensorcast.api._indices import (
-    TensorDataIndex,
-    TensorMetaIndex,
-    calculate_tensor_device_offsets,
-)
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
 
 
 @dataclass(frozen=True)
-class MaterializedArtifact:
+class TensorPayloadDescriptor:
+    name: str
+    dtype: str
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    buffer_offset: int
+    byte_length: int
+    storage_offset: int
+    device_uuid: str | None = None
+
+
+PayloadIterator = Iterator[tuple[TensorPayloadDescriptor, torch.Tensor]]
+
+
+@dataclass(frozen=True)
+class MaterializationPayload:
     artifact_id: str
-    state_dict: dict[str, torch.Tensor]
     canonical_index_bytes: bytes
+    descriptors: Sequence[TensorPayloadDescriptor]
+    payload_iter: Callable[[], PayloadIterator]
     replica_uuid: str
+    state_dict: dict[str, torch.Tensor] | None = None
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     view_data_hash: str | None = None
     source: store_daemon_pb2.MaterializationSource | None = None
+    device_uuid: str | None = None
 
 
-def materialize_artifact(
+def _tensor_payload_from_proto(
+    proto: store_daemon_v2_pb2.TensorPayloadDescriptor,
+    *,
+    default_device_uuid: str | None,
+) -> TensorPayloadDescriptor:
+    device_uuid = proto.device_uuid or default_device_uuid
+    return TensorPayloadDescriptor(
+        name=str(proto.name),
+        dtype=str(proto.dtype),
+        shape=tuple(int(dim) for dim in proto.shape),
+        stride=tuple(int(dim) for dim in proto.stride),
+        buffer_offset=int(proto.buffer_offset),
+        byte_length=int(proto.byte_length),
+        storage_offset=int(proto.storage_offset),
+        device_uuid=str(device_uuid) if device_uuid else None,
+    )
+
+
+def materialize_artifact_v2(
     *,
     client: DaemonCtl,
     daemon_address: str,
@@ -53,7 +85,9 @@ def materialize_artifact(
     canonical_index_hint: bytes | None = None,
     disk_path_hint: str | None = None,
     preference: store_daemon_pb2.SourcePreference | None = None,
-) -> MaterializedArtifact:
+    tensor_names: Sequence[str] | None = None,
+    verify_checksums: bool = True,
+) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
     if artifact_id is None and key is None and not disk_path_hint:
@@ -69,7 +103,7 @@ def materialize_artifact(
     opts = options or GetArtifactOptions()
     if not opts.wait_for_completion:
         raise DaemonUnavailable(
-            "wait_for_completion=False is not supported for materialize_artifact"
+            "wait_for_completion=False is not supported for materialize_artifact_v2"
         )
 
     dev_id = resolve_device(device_id)
@@ -94,174 +128,124 @@ def materialize_artifact(
     replica_uuid = new_uuid()
     disk_path: str | None = disk_path_hint
     view_index_bytes: bytes | None = None
-    view_data_hash: str | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
 
     with tracer.start_as_current_span(
-        "Client/MaterializeArtifact", kind=SpanKind.INTERNAL
+        "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
     ):
         preference_value = (
             preference
             if preference is not None
             else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         )
+        response: (
+            store_daemon_v2_pb2.MaterializeReplicaResponse
+            | store_daemon_v2_pb2.MaterializeByKeyResponse
+        )
         if artifact_id is not None:
-            if view is not None or view_id is not None:
-                response = client.materialize_by_artifact_id(
-                    artifact_id,
-                    replica_uuid,
-                    device_uuid_for(dev_id),
-                    pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                    wait_for_completion=opts.wait_for_completion,
-                    view=view,
-                    view_id=view_id,
-                    placement=placement,
-                    return_response=True,
-                    disk_path=disk_path_hint,
-                    preference=preference_value,
-                )
-                if not isinstance(
-                    response, store_daemon_pb2.MaterializeReplicaResponse
-                ):
-                    raise DaemonUnavailable(
-                        "Daemon returned unexpected response type for view materialization"
-                    )
-                disk_path = response.disk_path or disk_path
-                if (
-                    response.mem_handle is None
-                    or not response.mem_handle.cuda_ipc_handle
-                ):
-                    raise DaemonUnavailable(
-                        "Daemon returned empty mem_handle for view materialization"
-                    )
-                handle_bytes = response.mem_handle.cuda_ipc_handle
-                if response.view_index_json:
-                    view_index_bytes = bytes(response.view_index_json)
-                if response.view_data_hash:
-                    view_data_hash = str(response.view_data_hash)
-                materialized_source = response.source
-                resolved_artifact_id = response.artifact_id or artifact_id
-            else:
-                response = client.materialize_by_artifact_id(
-                    artifact_id,
-                    replica_uuid,
-                    device_uuid_for(dev_id),
-                    pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                    wait_for_completion=opts.wait_for_completion,
-                    return_response=True,
-                    disk_path=disk_path_hint,
-                    preference=preference_value,
-                )
-                if not isinstance(
-                    response, store_daemon_pb2.MaterializeReplicaResponse
-                ):
-                    raise DaemonUnavailable(
-                        "Daemon returned unexpected response type for materialization"
-                    )
-                handle_bytes = response.mem_handle.cuda_ipc_handle
-                disk_path = response.disk_path or disk_path
-                materialized_source = response.source
-                resolved_artifact_id = response.artifact_id or artifact_id
-                if response.view_index_json:
-                    view_index_bytes = bytes(response.view_index_json)
-        elif key is not None:
-            response = client.materialize_by_key(
-                key or "",
-                replica_uuid,
-                dev_id,
+            response = client.materialize_by_artifact_id_v2(
+                artifact_id=artifact_id,
+                replica_uuid=replica_uuid,
+                device_uuid=device_uuid_for(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
-                return_response=True,
-            )
-            if not isinstance(
-                response, store_daemon_pb2.MaterializeReplicaResponse
-            ):
-                raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for key materialization"
-                )
-            if response.mem_handle is None or not response.mem_handle.cuda_ipc_handle:
-                raise DaemonUnavailable(
-                    "Daemon returned empty mem_handle for key materialization"
-                )
-            handle_bytes = response.mem_handle.cuda_ipc_handle
-            disk_path = response.used_disk_path
-            resolved_artifact_id = response.artifact_id
-            materialized_source = response.source
-        else:
-            response = client.materialize_by_artifact_id(
-                artifact_id or "",
-                replica_uuid,
-                device_uuid_for(dev_id),
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=opts.wait_for_completion,
+                view=view,
+                view_id=view_id,
+                placement=placement,
                 return_response=True,
                 disk_path=disk_path_hint,
                 preference=preference_value,
+                tensor_names=tensor_names,
+                verify_checksums=verify_checksums,
             )
-            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
+            if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for disk materialization"
+                    "Daemon returned unexpected response type for materialization v2"
                 )
-            handle_bytes = response.mem_handle.cuda_ipc_handle
-            disk_path = response.disk_path or disk_path_hint
+            disk_path = response.disk_path or disk_path
             materialized_source = response.source
-            resolved_artifact_id = (
-                response.artifact_id or artifact_id or (disk_path or "")
+        elif key is not None:
+            response = client.materialize_by_key_v2(
+                key=key or "",
+                replica_uuid=replica_uuid,
+                device_id=int(dev_id),
+                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                wait_for_completion=opts.wait_for_completion,
+                return_response=True,
+                tensor_names=tensor_names,
             )
-            if response.view_index_json:
-                view_index_bytes = bytes(response.view_index_json)
+            if not isinstance(response, store_daemon_v2_pb2.MaterializeByKeyResponse):
+                raise DaemonUnavailable(
+                    "Daemon returned unexpected response type for key materialization v2"
+                )
+            disk_path = response.used_disk_path or disk_path
+            materialized_source = response.source
+        else:
+            raise ValueError(
+                "artifact_id or key is required for materialize_artifact_v2"
+            )
 
-    if not resolved_artifact_id:
-        raise IndexParseError(
-            "Daemon did not provide artifact_id for materialized artifact"
+    handle_bytes = b""
+    if response.HasField("mem_handle"):
+        handle_bytes = response.mem_handle.cuda_ipc_handle
+    if not handle_bytes:
+        raise DaemonUnavailable(
+            "Daemon returned empty mem_handle for materialization v2"
         )
 
-    canonical_index_bytes = canonical_index_hint
-    if canonical_index_bytes is None and view_index_bytes is not None:
-        canonical_index_bytes = view_index_bytes
-    if canonical_index_bytes is None:
-        try:
-            canonical_index_bytes = client.get_artifact_index_by_id(
-                resolved_artifact_id
-            )
-        except RuntimeError as exc:
-            # Provide clearer error when daemon could not supply index and GS is unavailable.
+    canonical_index_bytes = (
+        bytes(response.canonical_index_json)
+        if hasattr(response, "canonical_index_json")
+        else b""
+    )
+    if canonical_index_bytes:
+        resolved_artifact_id = response.artifact_id or artifact_id or key or ""
+    else:
+        if canonical_index_hint is not None:
+            canonical_index_bytes = canonical_index_hint
+            resolved_artifact_id = artifact_id or key or ""
+        else:
             raise IndexParseError(
-                f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}: {exc}"
-            ) from exc
-    if not canonical_index_bytes:
-        raise IndexParseError(
-            f"Failed to fetch canonical index for artifact_id={resolved_artifact_id}"
-        )
+                f"Failed to fetch canonical index for artifact_id={artifact_id or key or ''}"
+            )
 
+    if hasattr(response, "view_index_json") and response.view_index_json:
+        view_index_bytes = bytes(response.view_index_json)
+
+    # Translate descriptors from proto into SDK form.
+    device_uuid: str | None
     try:
-        layout_index_bytes = view_index_bytes or canonical_index_bytes
-        index_obj = json.loads(layout_index_bytes)
-    except Exception as exc:  # noqa: BLE001
-        raise IndexParseError("Invalid canonical index JSON from Global Store") from exc
-
-    tensor_meta_index: TensorMetaIndex = {}
-    tensor_data_index: TensorDataIndex = {}
-    for name, meta in index_obj.items():
-        if len(meta) != 6:
-            raise IndexParseError(
-                f"Invalid canonical index entry for '{name}': expected 6 fields [offset,size,shape,stride,dtype,storage_offset], got {len(meta)}"
-            )
-        offset, size, shape, stride, dtype, storage_offset = meta
-        tensor_meta_index[name] = (shape, stride, dtype, storage_offset)
-        tensor_data_index[name] = (int(offset), int(size))
-
-    tensor_device_offsets, _ = calculate_tensor_device_offsets(
-        tensor_data_index, dev_id
-    )
-
+        resolved_device = resolve_device(device_id)
+        device_uuid = device_uuid_for(resolved_device)
+    except Exception:  # noqa: BLE001
+        device_uuid = None
+    descriptors = [
+        _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
+        for desc in response.payloads
+    ]
     cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
-    state_dict = restore_tensors(
-        tensor_meta_index,
-        {dev_id: cuda_memory_ptr},
-        tensor_device_offsets,
-        True,
-    )
+
+    def _iter() -> PayloadIterator:
+        for desc in descriptors:
+            meta_state_dict = {
+                desc.name: (
+                    list(desc.shape),
+                    list(desc.stride),
+                    desc.dtype,
+                    int(desc.storage_offset),
+                )
+            }
+            tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
+                dev_id: {desc.name: int(desc.buffer_offset)}
+            }
+            memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
+            tensors = restore_tensors(
+                meta_state_dict,
+                memory_ptrs,
+                tensor_offsets,
+                True,
+            )
+            yield desc, tensors[desc.name]
 
     if opts.enable_verification:
         verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000
@@ -269,7 +253,7 @@ def materialize_artifact(
             target=_monitor_verification,
             args=(
                 client,
-                resolved_artifact_id,
+                artifact_id or key or "",
                 replica_uuid,
                 verification_timeout_ms,
             ),
@@ -277,15 +261,17 @@ def materialize_artifact(
         )
         t.start()
 
-    return MaterializedArtifact(
+    return MaterializationPayload(
         artifact_id=resolved_artifact_id,
-        state_dict=state_dict,
         canonical_index_bytes=canonical_index_bytes,
+        descriptors=tuple(descriptors),
+        payload_iter=_iter,
         replica_uuid=replica_uuid,
         disk_path=disk_path,
         view_index_bytes=view_index_bytes,
-        view_data_hash=view_data_hash,
+        view_data_hash=None,
         source=materialized_source,
+        device_uuid=device_uuid,
     )
 
 
@@ -312,4 +298,8 @@ def _monitor_verification(
         pass
 
 
-__all__ = ["MaterializedArtifact", "materialize_artifact"]
+__all__ = [
+    "MaterializationPayload",
+    "TensorPayloadDescriptor",
+    "materialize_artifact_v2",
+]

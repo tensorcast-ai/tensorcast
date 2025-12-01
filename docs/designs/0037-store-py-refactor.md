@@ -81,7 +81,7 @@ flowchart LR
     A --> G[Async helpers<br>cancellation + tracking]
     B -->|capabilities| A
     C -->|CanonicalIndex/Replica| A
-    D -->|MaterializedArtifact| A
+    D -->|MaterializationPayload| A
 ```
 
 ## Naming compliance
@@ -120,7 +120,7 @@ None.
 ## Relationship to existing modules (`_register`, `_materialize`, `_view_ops`)
 
 - `_register.py`: ` _register_artifact_core` remains the low-level primitive for daemon registration and stays in place. `Store._perform_registration` and all retry/device/lease orchestration move into `store/registration.py`, which calls `_register_artifact_core` via injected runtime/client. Long term, helper functions in `_register.py` that are only used by the Store may migrate into the `store` subpackage, but this refactor keeps the primitive module stable to avoid churn.
-- `_materialize.py`: `materialize_artifact` and related helper functions remain the foundational materialization primitive and stay in their module. `store/materialization.py` wraps them with fallback, retry, and validation logic. Future cleanups can consider moving narrowly scoped helpers if they become Store-only, but the primitive stays to avoid changing wire logic.
+- `_materialize.py`: `materialize_artifact_v2` and related helper functions remain the foundational materialization primitive and stay in their module. `store/materialization.py` wraps them with fallback, retry, and validation logic. Future cleanups can consider moving narrowly scoped helpers if they become Store-only, but the primitive stays to avoid changing wire logic.
 - `_view_ops.py`: Typed view-spec builders introduced in Plan/Design 0035 stay as the canonical implementation. `store/views.py` will delegate to `_view_ops` for spec building and validation; no code is duplicated. Any store-specific glue (placement defaults, canonical index resolution) lives in `store/views.py`.
 - Consolidation stance: this refactor does not merge `_register.py`, `_materialize.py`, or `_view_ops.py` into the `store` subpackage; it layers the Store-facing orchestration on top of these stable primitives while keeping import boundaries explicit.
 

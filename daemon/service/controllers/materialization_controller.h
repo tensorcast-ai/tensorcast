@@ -15,6 +15,7 @@
 #include "daemon/rpc_context.h"
 #include "daemon/session_lifecycle.h"
 #include "daemon/sessions_service.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -42,6 +43,16 @@ class MaterializationController {
       RpcContext& rctx,
       const v1::MaterializeByKeyRequest& req,
       v1::MaterializeByKeyResponse& resp);
+
+  grpc::Status materialize_replica_v2(
+      RpcContext& rctx,
+      const v2::MaterializeReplicaRequest& req,
+      v2::MaterializeReplicaResponse& resp);
+
+  grpc::Status materialize_by_key_v2(
+      RpcContext& rctx,
+      const v2::MaterializeByKeyRequest& req,
+      v2::MaterializeByKeyResponse& resp);
 
   grpc::Status get_artifact_index_by_id(
       RpcContext& rctx,

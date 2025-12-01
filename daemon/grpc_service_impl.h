@@ -32,6 +32,7 @@
 #include "grpcpp/grpcpp.h"
 #include "gsl/pointers"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -275,6 +276,10 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::GetLoadedReplicasV2Request* req,
       v1::GetLoadedReplicasV2Response* resp) override;
 
+  MaterializationController& materialization_controller() const {
+    return *materialization_controller_;
+  }
+
   // Expose current ref-count for a given replica key (for HA state reporting)
   size_t ref_count_for(const store::loading::ReplicaKey& key) const {
     return refs_.ref_count(key);
@@ -340,6 +345,31 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+};
+
+class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
+ public:
+  StoreDaemonServiceV2Impl(MaterializationController& materialization_controller, bool allow_high_card_attrs)
+      : materialization_controller_(materialization_controller), allow_high_card_attrs_(allow_high_card_attrs) {}
+
+  grpc::Status MaterializeReplica(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeReplicaRequest* req,
+      v2::MaterializeReplicaResponse* resp) override;
+
+  grpc::Status MaterializeByKey(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeByKeyRequest* req,
+      v2::MaterializeByKeyResponse* resp) override;
+
+  grpc::Status GetMaterializeCapabilities(
+      grpc::ServerContext* ctx,
+      const v2::GetMaterializeCapabilitiesRequest* req,
+      v2::GetMaterializeCapabilitiesResponse* resp) override;
+
+ private:
+  MaterializationController& materialization_controller_;
+  bool allow_high_card_attrs_{false};
 };
 
 } // namespace tensorcast::daemon

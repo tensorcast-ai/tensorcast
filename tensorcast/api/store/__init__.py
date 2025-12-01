@@ -10,7 +10,10 @@ import torch
 
 from tensorcast._C import get_cuda_memory_handle
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
-from tensorcast.api._materialize import MaterializedArtifact, materialize_artifact
+from tensorcast.api._materialize import (
+    MaterializationPayload,
+    materialize_artifact_v2,
+)
 from tensorcast.api._region_cache import (
     register_region as _cache_register_region,
 )
@@ -58,7 +61,7 @@ class Store:
         opts: StoreOptions | None = None,
         runtime: StoreRuntimeContext | None = None,
         register_fn: Callable[..., RegistrationResult] | None = None,
-        materialize_fn: Callable[..., MaterializedArtifact] | None = None,
+        materialize_fn: Callable[..., MaterializationPayload] | None = None,
     ) -> None:
         self._runtime = runtime or StoreRuntimeContext(
             daemon_endpoint, opts=opts, client_factory=get_daemon_client
@@ -72,14 +75,14 @@ class Store:
         self._materialization = MaterializationPipeline(
             self._runtime,
             self._views,
-            materialize_fn=materialize_fn or materialize_artifact,
+            materialize_fn=materialize_fn or materialize_artifact_v2,
         )
 
     def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
         self._registration.set_register_fn(register_fn)
 
     def set_materialize_fn(
-        self, materialize_fn: Callable[..., MaterializedArtifact]
+        self, materialize_fn: Callable[..., MaterializationPayload]
     ) -> None:
         self._materialization.set_materialize_fn(materialize_fn)
 
@@ -748,7 +751,7 @@ __all__ = [
     "CanonicalIndexEntry",
     "FallbackOptions",
     "LeaseHandle",
-    "MaterializedArtifact",
+    "MaterializationPayload",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",
@@ -777,5 +780,5 @@ __all__ = [
     "get_daemon_client",
     "require_runtime",
     "_register_artifact_core",
-    "materialize_artifact",
+    "materialize_artifact_v2",
 ]

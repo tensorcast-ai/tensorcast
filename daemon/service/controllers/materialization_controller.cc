@@ -2,6 +2,7 @@
 
 #include "daemon/service/controllers/materialization_controller.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -9,11 +10,13 @@
 #include <string>
 #include <utility>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
+#include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
@@ -215,6 +218,212 @@ store::loading::TransformPlacement resolve_placement(
     return store::loading::TransformPlacement::kClient;
   }
   return store::loading::TransformPlacement::kServer;
+}
+
+struct DescriptorBuildResult {
+  std::vector<v2::TensorPayloadDescriptor> descriptors;
+  std::vector<std::string> included_names;
+};
+
+absl::StatusOr<DescriptorBuildResult> build_descriptors_from_view_plan(
+    const store::loader::ViewPlan& plan,
+    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
+    std::string_view device_uuid) {
+  absl::flat_hash_set<std::string> filter;
+  std::vector<std::string> requested_order;
+  for (const auto& name : tensor_names) {
+    filter.insert(name);
+    requested_order.push_back(name);
+  }
+  const bool filter_enabled = !filter.empty();
+
+  struct OrderedDescriptor {
+    uint64_t offset{0};
+    v2::TensorPayloadDescriptor desc;
+  };
+
+  std::vector<OrderedDescriptor> built;
+  built.reserve(plan.transform.tensors.size());
+
+  absl::flat_hash_set<std::string> seen;
+  for (const auto& tensor : plan.transform.tensors) {
+    if (filter_enabled && !filter.contains(tensor.tensor_name)) {
+      continue;
+    }
+    OrderedDescriptor out;
+    out.offset = tensor.dst_offset;
+    out.desc.set_name(tensor.tensor_name);
+    out.desc.set_buffer_offset(tensor.dst_offset);
+    out.desc.set_storage_offset(tensor.storage_offset_elements);
+    out.desc.set_dtype(tensor.dtype);
+    if (!device_uuid.empty()) {
+      out.desc.set_device_uuid(std::string(device_uuid));
+    }
+    uint64_t elements = 1;
+    for (const auto dim : tensor.view_shape) {
+      out.desc.add_shape(dim);
+      elements *= static_cast<uint64_t>(dim);
+    }
+    for (const auto stride : tensor.view_stride) {
+      out.desc.add_stride(stride);
+    }
+    if (tensor.element_size_bytes == 0) {
+      return absl::InvalidArgumentError(absl::StrCat("Invalid element_size_bytes for tensor ", tensor.tensor_name));
+    }
+    out.desc.set_byte_length(elements * tensor.element_size_bytes);
+    built.push_back(std::move(out));
+    seen.insert(tensor.tensor_name);
+  }
+
+  if (filter_enabled) {
+    for (const auto& name : requested_order) {
+      if (!seen.contains(name)) {
+        return absl::NotFoundError(absl::StrCat("requested tensor '", name, "' missing from view transform"));
+      }
+    }
+  }
+
+  std::sort(built.begin(), built.end(), [](const OrderedDescriptor& a, const OrderedDescriptor& b) {
+    return a.offset < b.offset;
+  });
+
+  DescriptorBuildResult result;
+  result.descriptors.reserve(built.size());
+  result.included_names.reserve(built.size());
+  for (auto& entry : built) {
+    result.included_names.push_back(entry.desc.name());
+    result.descriptors.push_back(std::move(entry.desc));
+  }
+  return result;
+}
+
+absl::StatusOr<DescriptorBuildResult> build_descriptors_from_index(
+    std::string_view canonical_index_json,
+    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
+    std::string_view device_uuid) {
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("canonical index JSON is required for descriptor building");
+  }
+
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(canonical_index_json, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON for descriptors: ", e.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("canonical index JSON must be an object");
+  }
+
+  absl::flat_hash_set<std::string> filter;
+  std::vector<std::string> requested_order;
+  for (const auto& name : tensor_names) {
+    filter.insert(name);
+    requested_order.push_back(name);
+  }
+  const bool filter_enabled = !filter.empty();
+
+  struct OrderedDescriptor {
+    uint64_t offset{0};
+    v2::TensorPayloadDescriptor desc;
+  };
+
+  std::vector<OrderedDescriptor> built;
+  built.reserve(j.size());
+
+  auto parse_entry = [&](const std::string& name, const nlohmann::json& meta) -> absl::StatusOr<OrderedDescriptor> {
+    if (!meta.is_array() || meta.size() < 6) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("canonical index entry for ", name, " must be array [offset,size,shape,stride,dtype,storage]"));
+    }
+    OrderedDescriptor out;
+    out.offset = meta[0].get<uint64_t>();
+    const uint64_t size_bytes = meta[1].get<uint64_t>();
+    out.desc.set_name(name);
+    out.desc.set_buffer_offset(out.offset);
+    out.desc.set_byte_length(size_bytes);
+    out.desc.set_storage_offset(meta[5].get<uint64_t>());
+    out.desc.set_dtype(meta[4].get<std::string>());
+    if (!device_uuid.empty()) {
+      out.desc.set_device_uuid(std::string(device_uuid));
+    }
+    for (const auto& dim : meta[2]) {
+      out.desc.add_shape(dim.get<int64_t>());
+    }
+    for (const auto& stride : meta[3]) {
+      out.desc.add_stride(stride.get<int64_t>());
+    }
+    return out;
+  };
+
+  if (filter_enabled) {
+    absl::flat_hash_set<std::string> seen;
+    for (const auto& name : requested_order) {
+      const auto it = j.find(name);
+      if (it == j.end()) {
+        return absl::NotFoundError(absl::StrCat("requested tensor '", name, "' missing from canonical index"));
+      }
+      auto parsed_or = parse_entry(name, *it);
+      if (!parsed_or.ok()) {
+        return parsed_or.status();
+      }
+      built.push_back(std::move(*parsed_or));
+      seen.insert(name);
+    }
+  } else {
+    for (auto it = j.begin(); it != j.end(); ++it) {
+      auto parsed_or = parse_entry(it.key(), it.value());
+      if (!parsed_or.ok()) {
+        return parsed_or.status();
+      }
+      built.push_back(std::move(*parsed_or));
+    }
+  }
+
+  std::sort(built.begin(), built.end(), [](const OrderedDescriptor& a, const OrderedDescriptor& b) {
+    return a.offset < b.offset;
+  });
+
+  DescriptorBuildResult result;
+  result.descriptors.reserve(built.size());
+  result.included_names.reserve(built.size());
+  for (auto& entry : built) {
+    result.included_names.push_back(entry.desc.name());
+    result.descriptors.push_back(std::move(entry.desc));
+  }
+  return result;
+}
+
+absl::StatusOr<std::string> resolve_layout_json(
+    const v1::MaterializeReplicaResponse& v1_resp,
+    const v2::MaterializeReplicaRequest& v2_req,
+    store::StoreEngine& engine) {
+  if (!v1_resp.view_index_json().empty()) {
+    return v1_resp.view_index_json();
+  }
+  if (!v2_req.artifact_id().empty()) {
+    return engine.get_canonical_index_by_id(v2_req.artifact_id());
+  }
+  if (!v1_resp.artifact_id().empty()) {
+    return engine.get_canonical_index_by_id(v1_resp.artifact_id());
+  }
+  if (v2_req.has_disk_fallback() && !v2_req.disk_fallback().disk_path().empty()) {
+    auto local_or = store::loader::read_from_artifact_dir(v2_req.disk_fallback().disk_path(), /*target_device_id=*/0);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  }
+  return absl::NotFoundError("canonical index JSON unavailable for materialization response");
+}
+
+absl::StatusOr<std::string> resolve_layout_json_by_key(
+    const v1::MaterializeByKeyResponse& v1_resp,
+    store::StoreEngine& engine) {
+  if (!v1_resp.artifact_id().empty()) {
+    return engine.get_canonical_index_by_id(v1_resp.artifact_id());
+  }
+  return absl::NotFoundError("canonical index JSON unavailable for key materialization");
 }
 
 } // namespace
@@ -676,6 +885,167 @@ grpc::Status MaterializationController::materialize_by_key(
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   rctx.mark_success();
   return Status::OK;
+}
+
+grpc::Status MaterializationController::materialize_replica_v2(
+    RpcContext& rctx,
+    const v2::MaterializeReplicaRequest& req,
+    v2::MaterializeReplicaResponse& resp) {
+  v1::MaterializeReplicaRequest v1_req;
+  if (req.has_artifact_id() && !req.artifact_id().empty()) {
+    v1_req.set_artifact_id(req.artifact_id());
+  }
+  if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
+    v1_req.set_disk_path(req.disk_fallback().disk_path());
+  }
+  v1_req.set_replica_uuid(req.replica_uuid());
+  v1_req.set_device_uuid(req.device_uuid());
+  v1_req.set_target_device_type(req.target_device_type());
+  v1_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
+  v1_req.set_pid(req.pid());
+  v1_req.set_size_bytes(req.size_bytes());
+  v1_req.set_preference(req.preference());
+  v1_req.set_placement(req.placement());
+  switch (req.view_identity_case()) {
+    case v2::MaterializeReplicaRequest::kView:
+      v1_req.mutable_view()->CopyFrom(req.view());
+      break;
+    case v2::MaterializeReplicaRequest::kViewId:
+      v1_req.set_view_id(req.view_id());
+      break;
+    case v2::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
+      break;
+  }
+
+  v1::MaterializeReplicaResponse v1_resp;
+  auto status = materialize_replica(rctx, v1_req, v1_resp);
+  if (!status.ok()) {
+    return status;
+  }
+
+  if (!v1_resp.artifact_id().empty()) {
+    resp.set_artifact_id(v1_resp.artifact_id());
+  } else if (req.has_artifact_id()) {
+    resp.set_artifact_id(req.artifact_id());
+  }
+  resp.set_disk_path(v1_resp.disk_path());
+  resp.set_status(v1_resp.status());
+  resp.set_source(v1_resp.source());
+  if (v1_resp.has_mem_handle()) {
+    resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
+  }
+  if (!v1_resp.view_index_json().empty()) {
+    resp.set_view_index_json(v1_resp.view_index_json());
+  }
+
+  auto layout_or = resolve_layout_json(v1_resp, req, d_.engine);
+  if (!layout_or.ok()) {
+    return to_grpc_status(layout_or.status());
+  }
+  resp.set_canonical_index_json(*layout_or);
+
+  std::optional<DescriptorBuildResult> desc_result;
+  if (req.view_identity_case() == v2::MaterializeReplicaRequest::kView && v1_resp.view_index_json().empty()) {
+    auto spec_or = convert_view_spec(req.view());
+    if (!spec_or.ok()) {
+      return to_grpc_status(spec_or.status());
+    }
+    auto plan_or = store::StoreEngine::compute_view_plan(*layout_or, *spec_or);
+    if (!plan_or.ok()) {
+      return to_grpc_status(plan_or.status());
+    }
+    if (!plan_or->is_identity) {
+      auto desc_or = build_descriptors_from_view_plan(*plan_or, req.tensor_names(), req.device_uuid());
+      if (!desc_or.ok()) {
+        return to_grpc_status(desc_or.status());
+      }
+      desc_result = std::move(*desc_or);
+    }
+  }
+  if (!desc_result.has_value()) {
+    auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), req.device_uuid());
+    if (!desc_or.ok()) {
+      return to_grpc_status(desc_or.status());
+    }
+    desc_result = std::move(*desc_or);
+  }
+  for (auto& desc : desc_result->descriptors) {
+    *resp.add_payloads() = std::move(desc);
+  }
+  if (!req.view_subset_hash().empty() || !desc_result->included_names.empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!req.view_subset_hash().empty()) {
+      subset->set_subset_hash(req.view_subset_hash());
+    }
+    for (const auto& name : desc_result->included_names) {
+      subset->add_tensor_names(name);
+    }
+  }
+  if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
+    auto* ticket = resp.mutable_ticket();
+    ticket->set_replica_uuid(req.replica_uuid());
+    ticket->set_status(v1_resp.status());
+    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  }
+  return status;
+}
+
+grpc::Status MaterializationController::materialize_by_key_v2(
+    RpcContext& rctx,
+    const v2::MaterializeByKeyRequest& req,
+    v2::MaterializeByKeyResponse& resp) {
+  v1::MaterializeByKeyRequest v1_req;
+  v1_req.set_key(req.key());
+  v1_req.set_device_id(req.device_id());
+  v1_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
+  v1_req.set_replica_uuid(req.replica_uuid());
+  v1_req.set_pid(req.pid());
+
+  v1::MaterializeByKeyResponse v1_resp;
+  auto status = materialize_by_key(rctx, v1_req, v1_resp);
+  if (!status.ok()) {
+    return status;
+  }
+
+  resp.set_status(v1_resp.status());
+  resp.set_artifact_id(v1_resp.artifact_id());
+  resp.set_used_disk_path(v1_resp.used_disk_path());
+  resp.set_source(v1_resp.source());
+  if (v1_resp.has_mem_handle()) {
+    resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
+  }
+
+  auto layout_or = resolve_layout_json_by_key(v1_resp, d_.engine);
+  if (!layout_or.ok()) {
+    return to_grpc_status(layout_or.status());
+  }
+  resp.set_canonical_index_json(*layout_or);
+
+  auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), /*device_uuid=*/"");
+  if (!desc_or.ok()) {
+    return to_grpc_status(desc_or.status());
+  }
+  for (auto& desc : desc_or->descriptors) {
+    *resp.add_payloads() = std::move(desc);
+  }
+  if (!req.view_subset_hash().empty() || !desc_or->included_names.empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!req.view_subset_hash().empty()) {
+      subset->set_subset_hash(req.view_subset_hash());
+    }
+    for (const auto& name : desc_or->included_names) {
+      subset->add_tensor_names(name);
+    }
+  }
+  if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
+    auto* ticket = resp.mutable_ticket();
+    ticket->set_replica_uuid(req.replica_uuid());
+    ticket->set_status(v1_resp.status());
+    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  }
+  // Fill view index JSON with resolved canonical to aid clients that expect a layout hint.
+  resp.set_view_index_json(*layout_or);
+  return status;
 }
 
 grpc::Status MaterializationController::get_artifact_index_by_id(
