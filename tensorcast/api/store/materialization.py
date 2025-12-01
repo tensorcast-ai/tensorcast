@@ -722,13 +722,6 @@ class MaterializationPipeline:
             bool(fallback_opts.verify_checksums) if fallback_opts else True
         )
         requested_disk = False
-        if (view is not None or view_id is not None) and fallback_opts:
-            raise ArtifactError(
-                "Disk fallback is not supported for view materialization",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-
         if fallback_opts and (
             fallback_opts.prefer_disk
             or fallback_opts.disk_path

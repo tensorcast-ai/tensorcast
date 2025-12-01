@@ -22,6 +22,10 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
   expose metadata (`tensor_names`, `tensor_meta`, `describe`) and selective
   materialization (`tensor_dict(names=...)`, `tensor(name, ...)`) without
   changing the eager `get*` APIs.
+- Handles accept whichever identifiers are available (`artifact_id`, key, or
+  disk path). At least one identifier is required, but resolved handles keep all
+  known hints so `with_fallback(...)` and `to_dict()/from_dict()` remain valid
+  even after key resolution.
 - Handles are bound to the originating `Store`; materialization after
   `Store.close()` or `Artifact.release()` raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata

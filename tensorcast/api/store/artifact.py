@@ -97,9 +97,9 @@ class Artifact:
         generation: int | None = None,
     ) -> None:
         identifiers = [bool(artifact_id), bool(key), bool(disk_path)]
-        if sum(identifiers) != 1:
+        if sum(identifiers) == 0:
             raise ArtifactError(
-                "Exactly one of artifact_id, key, or disk_path is required",
+                "At least one of artifact_id, key, or disk_path is required",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
@@ -311,6 +311,7 @@ class Artifact:
         return {
             "artifact_id": self._artifact_id,
             "key": self._key_hint,
+            "disk_path": self._disk_path_hint,
             "fallback": _fallback_to_dict(self._fallback),
             "canonical_index": encoded_index,
             "generation": self._generation,
@@ -320,6 +321,7 @@ class Artifact:
     def from_dict(cls, data: Mapping[str, object], store: "Store") -> Artifact:
         artifact_id = data.get("artifact_id")
         key_hint = data.get("key")
+        disk_path = data.get("disk_path")
         fallback_dict = data.get("fallback")
         canonical_blob = data.get("canonical_index")
         generation = data.get("generation")
@@ -347,6 +349,7 @@ class Artifact:
             store_ref=weakref.ref(store),
             artifact_id=str(artifact_id) if artifact_id else None,
             key=str(key_hint) if key_hint else None,
+            disk_path=str(disk_path) if disk_path else None,
             fallback=fallback,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,

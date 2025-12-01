@@ -99,7 +99,7 @@ Phase 2 adds `ArtifactCache` alongside the key cache so metadata can be reused a
 - `Store.artifact(...) -> Artifact`
 - `tensorcast.from_disk(path) -> Artifact` (convenience wrapper, see Phase 4)
 
-Factories require exactly one of `key`, `artifact_id`, or `disk_path`. When `disk_path` is provided, the factory calls the daemon to resolve the artifact identity from the disk path (the daemon reads `tensor_index.json` and computes/verifies the artifact ID). All construction paths return the same `Artifact` type—there is no special subclass for disk-backed artifacts. They capture a `weakref.ref[Store]` to avoid keeping the Store alive indefinitely.
+Factories require at least one of `key`, `artifact_id`, or `disk_path`. Multiple identifiers may be provided; handles keep all known hints so cloning/serialization works even after resolution. When `disk_path` is provided, the factory calls the daemon to resolve the artifact identity from the disk path (the daemon reads `tensor_index.json` and computes/verifies the artifact ID). All construction paths return the same `Artifact` type—there is no special subclass for disk-backed artifacts. They capture a `weakref.ref[Store]` to avoid keeping the Store alive indefinitely.
 
 > **Note**: The `disk_path=` parameter and `from_disk()` function are defined here for completeness but are fully implemented in Phase 4 (`0036-04-disk-artifact-variant.md`).
 

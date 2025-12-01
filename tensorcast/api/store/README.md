@@ -11,6 +11,11 @@ managing clients manually.
   bound to the process `Store`. Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
+- Handles retain whichever identifiers are available (`artifact_id`, `key`,
+  `disk_path`). At least one identifier is required when instantiating or
+  rehydrating a handle, but resolved handles may keep both `artifact_id` and
+  `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
+  continue to work.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
