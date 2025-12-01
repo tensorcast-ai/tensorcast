@@ -180,9 +180,33 @@ def materialize_artifact_v2(
                 )
             disk_path = response.used_disk_path or disk_path
             materialized_source = response.source
+        elif disk_path_hint:
+            # Disk-only materialization: no artifact_id or key, just a disk path.
+            # The daemon loads directly from disk via DiskFallbackHint.
+            response = client.materialize_by_artifact_id_v2(
+                artifact_id="",
+                replica_uuid=replica_uuid,
+                device_uuid=device_uuid_for(dev_id),
+                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
+                wait_for_completion=opts.wait_for_completion,
+                view=view,
+                view_id=view_id,
+                placement=placement,
+                return_response=True,
+                disk_path=disk_path_hint,
+                preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
+                tensor_names=tensor_names,
+                verify_checksums=verify_checksums,
+            )
+            if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
+                raise DaemonUnavailable(
+                    "Daemon returned unexpected response type for disk materialization v2"
+                )
+            disk_path = response.disk_path or disk_path
+            materialized_source = response.source
         else:
             raise ValueError(
-                "artifact_id or key is required for materialize_artifact_v2"
+                "artifact_id, key, or disk_path_hint is required for materialize_artifact_v2"
             )
 
     handle_bytes = b""

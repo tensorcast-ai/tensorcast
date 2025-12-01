@@ -2,6 +2,10 @@
 
 #include "core/common/cuda_api.h"
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <cerrno>
 #include <cstring>
 #include <deque>
 #include <functional>
@@ -10,12 +14,16 @@
 #include <random>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -71,10 +79,20 @@ struct FakeEvent {
 
 // Fake GPU memory allocation structure
 struct FakeAllocation {
-  std::unique_ptr<uint8_t[]> buffer;
-  size_t size;
-  bool is_pinned;
-  int device_id; // device where the allocation was performed
+  void* ptr = nullptr;
+  size_t size = 0;
+  bool is_pinned = false;
+  int device_id = 0; // device where the allocation was performed
+  std::unique_ptr<uint8_t[]> owned_buffer; // used for host/pinned allocations
+  std::string shm_name; // used for device allocations
+  bool uses_shm = false;
+};
+
+struct IpcMapping {
+  void* mapped = nullptr;
+  size_t size = 0;
+  std::string shm_name;
+  int fd = -1;
 };
 
 // Global state for fake CUDA runtime
@@ -86,6 +104,9 @@ struct FakeCudaState {
 
   // IPC handle mapping (handle -> pointer)
   absl::flat_hash_map<std::string, void*> ipc_handles ABSL_GUARDED_BY(mutex);
+
+  // Cross-process IPC mappings opened in the current process (ptr -> metadata)
+  absl::flat_hash_map<void*, IpcMapping> ipc_mappings ABSL_GUARDED_BY(mutex);
 
   // Streams and events for async simulation
   std::shared_ptr<FakeStream> default_stream ABSL_GUARDED_BY(mutex);
@@ -116,6 +137,51 @@ std::string generate_random_handle() {
     ss << std::hex << std::setw(2) << std::setfill('0') << dis(gen);
   }
   return ss.str();
+}
+
+constexpr size_t kHandleSizeBytes = sizeof(cudaIpcMemHandle_t);
+constexpr size_t kHandleSizeFieldBytes = sizeof(std::uint64_t);
+constexpr size_t kHandleNameBytes = kHandleSizeBytes - kHandleSizeFieldBytes;
+
+std::string make_shm_name() {
+  // Limit the name to what fits in cudaIpcMemHandle_t after the size prefix.
+  std::string suffix = generate_random_handle().substr(0, 24); // 24 hex chars
+  return absl::StrCat("/tcfake_", suffix);
+}
+
+absl::Status encode_shm_handle(cudaIpcMemHandle_t* handle, absl::string_view shm_name, size_t size) {
+  if (handle == nullptr) {
+    return absl::InvalidArgumentError("handle is null");
+  }
+  if (shm_name.empty()) {
+    return absl::InvalidArgumentError("shared memory name is empty");
+  }
+  if (shm_name.size() >= kHandleNameBytes) {
+    return absl::InvalidArgumentError("shared memory name too long for cudaIpcMemHandle_t");
+  }
+
+  std::memset(handle, 0, sizeof(cudaIpcMemHandle_t));
+  std::memcpy(handle->reserved, &size, sizeof(std::uint64_t));
+  std::memcpy(handle->reserved + sizeof(std::uint64_t), shm_name.data(), shm_name.size());
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::pair<std::string, size_t>> decode_shm_handle(const cudaIpcMemHandle_t& handle) {
+  size_t size = 0;
+  std::memcpy(&size, handle.reserved, sizeof(std::uint64_t));
+  if (size == 0) {
+    return absl::InvalidArgumentError("decoded IPC size is zero");
+  }
+
+  char name_buf[kHandleNameBytes + 1];
+  std::memset(name_buf, 0, sizeof(name_buf));
+  std::memcpy(name_buf, handle.reserved + sizeof(std::uint64_t), kHandleNameBytes);
+  std::string shm_name(name_buf);
+  if (shm_name.empty()) {
+    return absl::InvalidArgumentError("decoded shared memory name is empty");
+  }
+
+  return std::make_pair(shm_name, size);
 }
 
 FakeStream::FakeStream() {
@@ -305,15 +371,48 @@ absl::Status malloc(void** ptr, size_t bytes) {
     return absl::ResourceExhaustedError("Out of GPU memory");
   }
 
-  // Allocate CPU memory to simulate GPU memory
-  auto buffer = std::make_unique<uint8_t[]>(bytes);
-  void* raw_ptr = buffer.get();
+  const std::string shm_name = make_shm_name();
+  int fd = shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+  if (fd < 0) {
+    return absl::ErrnoToStatus(errno, "shm_open failed in fake cuda malloc");
+  }
 
-  state.allocations[raw_ptr] =
-      FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = false, .device_id = device_id};
+  if (ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
+    const absl::Status err = absl::ErrnoToStatus(errno, "ftruncate failed in fake cuda malloc");
+    close(fd);
+    shm_unlink(shm_name.c_str());
+    return err;
+  }
+
+  void* mapped = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (mapped == MAP_FAILED) {
+    const absl::Status err = absl::ErrnoToStatus(errno, "mmap failed in fake cuda malloc");
+    close(fd);
+    shm_unlink(shm_name.c_str());
+    return err;
+  }
+
+  if (close(fd) != 0) {
+    const absl::Status err = absl::ErrnoToStatus(errno, "close failed in fake cuda malloc");
+    munmap(mapped, bytes);
+    shm_unlink(shm_name.c_str());
+    return err;
+  }
+
+  std::memset(mapped, 0, bytes);
+
+  FakeAllocation alloc;
+  alloc.ptr = mapped;
+  alloc.size = bytes;
+  alloc.is_pinned = false;
+  alloc.device_id = device_id;
+  alloc.shm_name = shm_name;
+  alloc.uses_shm = true;
+
+  state.allocations[mapped] = std::move(alloc);
   state.allocated_bytes[device_id] += bytes;
 
-  *ptr = raw_ptr;
+  *ptr = mapped;
   return absl::OkStatus();
 }
 
@@ -325,8 +424,13 @@ absl::Status malloc_host(void** ptr, size_t bytes) {
   auto buffer = std::make_unique<uint8_t[]>(bytes);
   void* raw_ptr = buffer.get();
 
-  state.allocations[raw_ptr] =
-      FakeAllocation{.buffer = std::move(buffer), .size = bytes, .is_pinned = true, .device_id = tls_current_device};
+  state.allocations[raw_ptr] = FakeAllocation{
+      .ptr = raw_ptr,
+      .size = bytes,
+      .is_pinned = true,
+      .device_id = tls_current_device,
+      .owned_buffer = std::move(buffer),
+      .uses_shm = false};
 
   *ptr = raw_ptr;
   return absl::OkStatus();
@@ -351,8 +455,20 @@ absl::Status free(void* ptr) {
     used = (used >= it->second.size) ? (used - it->second.size) : 0;
   }
 
+  absl::Status status = absl::OkStatus();
+  if (it->second.uses_shm) {
+    if (munmap(it->second.ptr, it->second.size) != 0) {
+      status = absl::ErrnoToStatus(errno, "munmap failed in fake cuda free");
+    }
+    if (!it->second.shm_name.empty()) {
+      if (shm_unlink(it->second.shm_name.c_str()) != 0 && status.ok()) {
+        status = absl::ErrnoToStatus(errno, "shm_unlink failed in fake cuda free");
+      }
+    }
+  }
+
   state.allocations.erase(it);
-  return absl::OkStatus();
+  return status;
 }
 
 absl::Status free_host(void* ptr) {
@@ -362,6 +478,9 @@ absl::Status free_host(void* ptr) {
 
 absl::Status memcpy(void* dst, const void* src, size_t bytes, cudaMemcpyKind kind) {
   static_cast<void>(kind);
+  if (bytes > 0 && (dst == nullptr || src == nullptr)) {
+    return absl::InvalidArgumentError("null pointer passed to fake cudaMemcpy");
+  }
   // In fake backend, all memory is CPU memory, so just use std::memcpy
   std::memcpy(dst, src, bytes);
   return absl::OkStatus();
@@ -381,10 +500,7 @@ absl::Status memcpy_async(void* dst, const void* src, size_t bytes, cudaMemcpyKi
   StreamTask task;
   task.label = "memcpy_async";
   task.delay = simulate_async_delay(bytes);
-  task.work = [dst, src, bytes]() {
-    VLOG(2) << "FakeCuda memcpy_async executing copy of " << bytes << " bytes";
-    std::memcpy(dst, src, bytes);
-  };
+  task.work = [dst, src, bytes]() { std::memcpy(dst, src, bytes); };
 
   auto enqueue_or = stream_ptr->Enqueue(std::move(task));
   if (!enqueue_or.ok()) {
@@ -892,35 +1008,80 @@ absl::Status get_ipc_mem_handle(cudaIpcMemHandle_t* handle, void* dev_ptr) {
     return absl::InvalidArgumentError("Pointer not found in allocations");
   }
 
-  // Generate a unique handle by using the pointer address
-  std::memset(handle, 0, sizeof(cudaIpcMemHandle_t));
-  // Store pointer address in the first 8 bytes of the handle
-  std::memcpy(handle->reserved, &dev_ptr, sizeof(void*));
+  const FakeAllocation& alloc = it->second;
+  if (!alloc.uses_shm || alloc.shm_name.empty()) {
+    return absl::FailedPreconditionError("fake cuda IPC requested for non-shareable allocation");
+  }
+
+  const size_t size = alloc.size;
+  auto encode_status = encode_shm_handle(handle, alloc.shm_name, size);
+  if (!encode_status.ok()) {
+    return encode_status;
+  }
 
   return absl::OkStatus();
 }
 
 absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsigned int flags) {
-  // In fake backend, we can only open handles within the same process
-  void* original_ptr = nullptr;
-  std::memcpy(&original_ptr, handle.reserved, sizeof(void*));
-
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);
+  static_cast<void>(flags);
 
-  // Check if the original pointer is still valid
-  auto it = state.allocations.find(original_ptr);
-  if (it == state.allocations.end()) {
-    return absl::NotFoundError("IPC handle refers to invalid memory");
+  auto decoded_or = decode_shm_handle(handle);
+  if (!decoded_or.ok()) {
+    return decoded_or.status();
+  }
+  const std::string& shm_name = decoded_or->first;
+  const size_t size = decoded_or->second;
+
+  int fd = shm_open(shm_name.c_str(), O_RDWR, 0600);
+  if (fd < 0) {
+    return absl::ErrnoToStatus(errno, "shm_open failed in fake open_ipc_mem_handle");
   }
 
-  *dev_ptr = original_ptr;
+  void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  if (mapped == MAP_FAILED) {
+    const absl::Status err = absl::ErrnoToStatus(errno, "mmap failed in fake open_ipc_mem_handle");
+    close(fd);
+    return err;
+  }
+
+  IpcMapping mapping;
+  mapping.mapped = mapped;
+  mapping.size = size;
+  mapping.shm_name = shm_name;
+  mapping.fd = fd;
+  state.ipc_mappings[mapped] = std::move(mapping);
+
+  *dev_ptr = mapped;
   return absl::OkStatus();
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {
-  // In fake backend, nothing to do
-  return absl::OkStatus();
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+
+  auto it = state.ipc_mappings.find(dev_ptr);
+  if (it == state.ipc_mappings.end()) {
+    // In fake backend, unknown mappings are treated as already-closed.
+    return absl::OkStatus();
+  }
+
+  IpcMapping mapping = std::move(it->second);
+  state.ipc_mappings.erase(it);
+
+  absl::Status status = absl::OkStatus();
+  if (munmap(mapping.mapped, mapping.size) != 0) {
+    status = absl::ErrnoToStatus(errno, "munmap failed in fake close_ipc_mem_handle");
+  }
+
+  if (mapping.fd >= 0 && close(mapping.fd) != 0) {
+    if (status.ok()) {
+      status = absl::ErrnoToStatus(errno, "close failed in fake close_ipc_mem_handle");
+    }
+  }
+
+  return status;
 }
 
 absl::Status host_register(void* ptr, size_t size, unsigned int flags) {
