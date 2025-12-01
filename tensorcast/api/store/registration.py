@@ -461,6 +461,9 @@ class RegistrationPipeline:
                         device_override=device_override,
                         view_registration=view_registration,
                     )
+                    self._runtime.invalidate_artifact(
+                        result.artifact_id, key=key, reason="registration"
+                    )
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
                     span.set_attribute("tc.replica.type", result.replica.replica_type)

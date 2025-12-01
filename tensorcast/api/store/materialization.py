@@ -179,6 +179,30 @@ class MaterializationPipeline:
             state = {name: state[name] for name in tensor_names}
         return state
 
+    def materialize_subset(
+        self,
+        *,
+        artifact_id: str | None,
+        key: str | None,
+        device: torch.device | str | None,
+        fallback: FallbackOptions | None,
+        tensor_names: Sequence[str] | None,
+        canonical_index_hint: bytes | None = None,
+        disk_path_hint: str | None = None,
+    ) -> tuple[MaterializationPayload, int]:
+        return self._perform_get_with_retry(
+            method="get",
+            artifact_id=artifact_id,
+            key=key,
+            device=device,
+            fallback=fallback,
+            cancel_event=None,
+            options_override=None,
+            canonical_index_hint=canonical_index_hint,
+            disk_path_hint=disk_path_hint,
+            tensor_names=tensor_names,
+        )
+
     def get_view(
         self,
         *,
@@ -861,6 +885,7 @@ class MaterializationPipeline:
                 canonical_index_bytes=canonical_bytes,
                 descriptors=filtered_descriptors,
                 payload_iter=_filtered_iter,
+                generation=base_payload.generation,
                 state_dict=state_dict,
                 replica_uuid=base_payload.replica_uuid,
                 disk_path=base_payload.disk_path,
@@ -995,6 +1020,10 @@ class MaterializationPipeline:
                     return materialized, device_id
                 except ArtifactError as error:
                     span.record_exception(error)
+                    if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
+                        self._runtime.invalidate_artifact(
+                            artifact_id, key=key, reason="materialize_error"
+                        )
                     should_retry_op = should_retry(
                         error=error,
                         attempt=attempt,
@@ -1045,6 +1074,10 @@ class MaterializationPipeline:
                 except Exception as exc:  # noqa: BLE001
                     error = map_materialization_error(exc)
                     span.record_exception(error)
+                    if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
+                        self._runtime.invalidate_artifact(
+                            artifact_id, key=key, reason="materialize_error"
+                        )
                     should_retry_op = should_retry(
                         error=error,
                         attempt=attempt,

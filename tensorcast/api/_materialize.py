@@ -45,6 +45,7 @@ class MaterializationPayload:
     descriptors: Sequence[TensorPayloadDescriptor]
     payload_iter: Callable[[], PayloadIterator]
     replica_uuid: str
+    generation: int | None = None
     state_dict: dict[str, torch.Tensor] | None = None
     disk_path: str | None = None
     view_index_bytes: bytes | None = None

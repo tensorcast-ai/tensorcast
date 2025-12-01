@@ -27,6 +27,10 @@ class _MeterState:
         self._latency: _Histogram | None = None
         self._errors: _Counter | None = None
         self._retries: _Counter | None = None
+        self._cache_hits: _Counter | None = None
+        self._cache_misses: _Counter | None = None
+        self._cache_evictions: _Counter | None = None
+        self._cache_invalidations: _Counter | None = None
         self._disabled = False
 
     @property
@@ -72,11 +76,35 @@ class _MeterState:
                     unit="1",
                     description="Retry attempts for TensorCast Store client operations.",
                 )
+                self._cache_hits = meter.create_counter(
+                    name="tc_store_artifact_cache_hits_total",
+                    unit="1",
+                    description="Artifact cache hits in the TensorCast Store client.",
+                )
+                self._cache_misses = meter.create_counter(
+                    name="tc_store_artifact_cache_misses_total",
+                    unit="1",
+                    description="Artifact cache misses in the TensorCast Store client.",
+                )
+                self._cache_evictions = meter.create_counter(
+                    name="tc_store_artifact_cache_evictions_total",
+                    unit="1",
+                    description="Artifact cache evictions in the TensorCast Store client.",
+                )
+                self._cache_invalidations = meter.create_counter(
+                    name="tc_store_artifact_cache_invalidations_total",
+                    unit="1",
+                    description="Artifact cache invalidations in the TensorCast Store client.",
+                )
             except Exception as exc:  # noqa: BLE001
                 self._disabled = True
                 self._latency = None
                 self._errors = None
                 self._retries = None
+                self._cache_hits = None
+                self._cache_misses = None
+                self._cache_evictions = None
+                self._cache_invalidations = None
                 _logger.debug("Failed to initialise store OTel metrics", exc_info=exc)
                 return False
         return True
@@ -160,6 +188,54 @@ class _MeterState:
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store retry counter", exc_info=True)
 
+    def increment_cache_hit(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._cache_hits is None:
+            return
+        try:
+            self._cache_hits.add(1, attributes={"daemon": daemon})
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache hit counter", exc_info=True)
+
+    def increment_cache_miss(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._cache_misses is None:
+            return
+        try:
+            self._cache_misses.add(1, attributes={"daemon": daemon})
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache miss counter", exc_info=True)
+
+    def increment_cache_eviction(self, daemon: str, *, reason: str | None) -> None:
+        if not self.ensure():
+            return
+        if self._cache_evictions is None:
+            return
+        attributes = {"daemon": daemon}
+        if reason:
+            attributes["reason"] = reason
+        try:
+            self._cache_evictions.add(1, attributes=attributes)
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache eviction counter", exc_info=True)
+
+    def increment_cache_invalidation(self, daemon: str, *, reason: str | None) -> None:
+        if not self.ensure():
+            return
+        if self._cache_invalidations is None:
+            return
+        attributes = {"daemon": daemon}
+        if reason:
+            attributes["reason"] = reason
+        try:
+            self._cache_invalidations.add(1, attributes=attributes)
+        except Exception:  # noqa: BLE001
+            _logger.debug(
+                "Failed to increment cache invalidation counter", exc_info=True
+            )
+
 
 _METRICS = _MeterState()
 
@@ -198,3 +274,19 @@ def increment_retry(
     selection: str | None = None,
 ) -> None:
     _METRICS.increment_retries(verb, daemon, status, source=source, selection=selection)
+
+
+def increment_artifact_cache_hit(daemon: str) -> None:
+    _METRICS.increment_cache_hit(daemon)
+
+
+def increment_artifact_cache_miss(daemon: str) -> None:
+    _METRICS.increment_cache_miss(daemon)
+
+
+def increment_artifact_cache_eviction(daemon: str, *, reason: str | None) -> None:
+    _METRICS.increment_cache_eviction(daemon, reason=reason)
+
+
+def increment_artifact_cache_invalidation(daemon: str, *, reason: str | None) -> None:
+    _METRICS.increment_cache_invalidation(daemon, reason=reason)

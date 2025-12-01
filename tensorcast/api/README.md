@@ -16,6 +16,21 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
+## Artifact Handles & Metadata Cache
+
+- `tensorcast.artifact(...)` / `Store.artifact(...)` provide lazy handles that
+  expose metadata (`tensor_names`, `tensor_meta`, `describe`) and selective
+  materialization (`tensor_dict(names=...)`, `tensor(name, ...)`) without
+  changing the eager `get*` APIs.
+- Handles are bound to the originating `Store`; materialization after
+  `Store.close()` or `Artifact.release()` raises
+  `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
+  remains readable.
+- The runtime now maintains an `ArtifactCache` for canonical indices. Defaults
+  can be tuned with `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS` (600s) and
+  `TENSORCAST_STORE_CACHE_MAX_ENTRIES` (1000). Metrics are emitted for cache
+  hits, misses, evictions (`reason=ttl|lru`), and invalidations (`reason=*`).
+
 ## Materialization v2 (descriptor streaming)
 
 - `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.

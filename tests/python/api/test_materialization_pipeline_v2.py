@@ -106,6 +106,7 @@ def _make_payload(
     replica_uuid: str = "r1",
     gate: threading.Event | None = None,
     on_iter: Callable[[], None] | None = None,
+    generation: int | None = None,
 ) -> MaterializationPayload:
     descriptors: list[TensorPayloadDescriptor] = []
     index: dict[str, list[object]] = {}
@@ -150,6 +151,7 @@ def _make_payload(
         view_data_hash=None,
         source=None,
         device_uuid=None,
+        generation=generation,
     )
 
 
@@ -256,3 +258,22 @@ def test_disk_fallback_verify_flag_passed():
     runtime.close()
 
     assert captured["verify_checksums"] is False
+
+
+def test_materialize_subset_preserves_generation():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    payload = _make_payload({"a": torch.ones(1), "b": torch.zeros(1)}, generation=5)
+
+    pipeline.set_materialize_fn(lambda **_kwargs: payload)
+    materialized, _ = pipeline.materialize_subset(
+        artifact_id="aid",
+        key=None,
+        device=0,
+        fallback=None,
+        tensor_names=["a"],
+    )
+    runtime.close()
+
+    assert materialized.generation == 5
