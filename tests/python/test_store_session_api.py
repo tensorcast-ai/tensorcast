@@ -55,6 +55,7 @@ class FakeDaemonCtl:
         self.keepalive_calls: list[tuple[str, int, int]] = []
         self.server_address = "fake://daemon"
         self.resolve_calls: list[str] = []
+        self.resolve_disk_calls: list[tuple[str, bool]] = []
 
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
@@ -62,6 +63,26 @@ class FakeDaemonCtl:
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
         self.resolve_calls.append(key)
         return self.resolves.get(key, (None, None))
+
+    def resolve_artifact_from_disk_v2(
+        self, *, disk_path: str, verify_checksums: bool = True
+    ):
+        self.resolve_disk_calls.append((disk_path, bool(verify_checksums)))
+        artifact_id = None
+        for resolved_id, mapped_path in self.resolves.values():
+            if mapped_path == disk_path and resolved_id:
+                artifact_id = resolved_id
+                break
+
+        class _Resp:
+            pass
+
+        resp = _Resp()
+        resp.artifact_id = artifact_id or ""
+        resp.disk_path = disk_path
+        resp.canonical_index_bytes = json.dumps({}, separators=(",", ":")).encode("utf-8")
+        resp.generation = 0
+        return resp
 
     def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:  # noqa: D401
         self.keepalive_calls.append((registration_id, ttl_ms, epoch))
