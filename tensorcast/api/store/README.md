@@ -17,10 +17,14 @@ managing clients manually.
   `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
   continue to work.
 - `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
-  artifacts via the daemon `ResolveArtifactFromDisk` RPC, seeding
-  `ArtifactCache` with `canonical_index_bytes` + `generation` and binding a
-  disk-first `FallbackOptions` so materialization prefers the local files
-  without re-fetching metadata.
+  artifacts via the daemon `ResolveArtifactFromDisk` RPC. The daemon validates
+  descriptor multihashes when `verify_checksums=True`, returns canonical
+  `canonical_index_bytes` + `generation`, and seeds `ArtifactCache` while
+  binding a disk-first `FallbackOptions` so materialization prefers the local
+  files without extra resolver RPCs.
+  Set `verify_checksums=False` on `FallbackOptions.for_disk(...)` to allow
+  descriptor-free local development; checksum validation (and descriptor
+  requirements) remain the default in production.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -35,6 +39,9 @@ managing clients manually.
   and metadata caches so repeated calls avoid daemon lookups.
 - `artifact.view_builder()` exposes a fluent builder for chaining multiple view
   operations before building a child handle.
+- Nested slice operations are collapsed into a single narrow so storage offsets
+  are computed exactly once in the derived view (no double-application of the
+  parent slice).
 
 ## Batching, Async, and Prefetch
 
@@ -52,7 +59,8 @@ managing clients manually.
 `FallbackOptions` now supports explicit source preferences:
 
 - `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P; prefer an existing local replica
+- `prefer="local"` — disallow P2P; prefer an existing local replica without
+  requiring a disk fallback path
 - `prefer="p2p"` — allow remote transfer
 - `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
   mapping
@@ -83,6 +91,12 @@ Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
 - Invalidation hooks run after registration, deregistration, and materialization
   errors (`NOT_FOUND`/`FAILED_PRECONDITION`) to keep key→artifact mappings and
   cached indices consistent.
+- Disk lookups honor cache entries keyed by `disk_path` (not just
+  `artifact_id`) to bypass resolver RPCs; mismatched `disk_path` or `generation`
+  values trigger cache invalidation and a fresh daemon fetch.
 - Disk resolution (`ResolveArtifactFromDisk`) seeds the cache with
   `canonical_index_bytes`, `generation`, and `disk_path` so repeated
   `from_disk` calls avoid extra daemon RPCs and preserve generation metadata.
+- Metadata hydration (`_ensure_metadata`) applies `_set_metadata` while holding
+  the artifact’s reentrant lock so concurrent callers never observe partially
+  populated canonical metadata.

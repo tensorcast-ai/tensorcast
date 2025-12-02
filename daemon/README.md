@@ -62,6 +62,7 @@ flowchart TB
 
 - Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`.
 - Loading v2 (gated): `MaterializeByKey`/`MaterializeReplica` with descriptor payloads plus `GetMaterializeCapabilities` (SDK probe) under `StoreDaemonServiceV2`. Descriptors are derived from UMA view plans (offset/stride/byte-length) when a view is requested so the exported buffer layout matches the planner, and disk fallbacks stay daemon-owned via `DiskFallbackHint` (respecting `verify_checksums`).
+- Disk fallbacks honor `verify_checksums` on `DiskFallbackHint`/`MaterializeReplicaRequest` and propagate the flag into engine `MaterializeHints` so checksum/descriptor validation is enforced by default but can be disabled for local development.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.

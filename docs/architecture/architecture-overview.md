@@ -77,6 +77,12 @@ graph TD
   exposes metadata (`tensor_names`, `describe`) and selective tensor fetch
   without changing the eager `get*` APIs. Handles surface
   `FAILED_PRECONDITION` if used after `Store.close()`.
+- **Disk-backed Handles**: `tensorcast.from_disk(path)` routes through the
+  daemon (`ResolveArtifactFromDisk`) so disk paths stay daemon-owned. The RPC
+  enforces whitelist entries, validates descriptor multihashes when requested
+  (`verify_checksums=true`), returns canonical index bytes + generation, and
+  seeds the SDK cache with `{artifact_id, disk_path}` for reuse across
+  materialization, views, and unloads.
 - **Metadata Cache**: A process-wide `ArtifactCache` stores canonical indices
   (default TTL 600s, max 1000 entries) to avoid repeated daemon lookups.
   Tunables: `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS`,

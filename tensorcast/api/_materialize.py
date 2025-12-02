@@ -255,11 +255,7 @@ def materialize_artifact_v2(
     if view_data_hash is None and view_subset_hash:
         view_data_hash = view_subset_hash.hex()
 
-    canonical_index_bytes = (
-        bytes(response.canonical_index_bytes)
-        if hasattr(response, "canonical_index_bytes")
-        else b""
-    )
+    canonical_index_bytes = bytes(response.canonical_index_bytes)
     raw_generation = int(getattr(response, "generation", 0))
     generation_value: int | None = raw_generation if raw_generation != 0 else None
     if generation_value is None and generation_hint is not None:

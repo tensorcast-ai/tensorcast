@@ -310,6 +310,11 @@ class StoreRuntimeContext:
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
+    def get_artifact_index_by_disk_path(
+        self, disk_path: str
+    ) -> ArtifactCacheEntry | None:
+        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
+
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)
 

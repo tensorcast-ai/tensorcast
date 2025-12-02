@@ -167,6 +167,10 @@ message MaterializeReplicaRequest {
   optional string artifact_id = 9; // Content-addressed ID (mi2:...)
   optional string disk_path = 10; // On-disk path for legacy/disk loads
 
+  // When true, enforce descriptor/index checksum validation for disk-backed
+  // artifacts. Defaults to true for backward compatibility.
+  optional bool verify_checksums = 12;
+
   // Note: legacy field disk_path = 1 removed in favor of unified disk_path = 10
 
   string replica_uuid = 2;

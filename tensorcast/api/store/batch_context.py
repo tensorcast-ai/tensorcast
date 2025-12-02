@@ -17,6 +17,7 @@ import torch
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api.store.types import ArtifactError
+from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
 
 if TYPE_CHECKING:
@@ -314,8 +315,8 @@ class PrefetchTicket:
                     resp.ticket.status if resp and resp.HasField("ticket") else None
                 )
                 if status not in (
-                    store_daemon_v2_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-                    store_daemon_v2_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_UNSPECIFIED,
+                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
+                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_UNSPECIFIED,
                 ):
                     store_metrics.record_prefetch_event(
                         runtime.daemon_endpoint, status="ready"

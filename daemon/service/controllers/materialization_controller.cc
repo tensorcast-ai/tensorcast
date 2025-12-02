@@ -9,6 +9,7 @@
 #include <future>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "google/protobuf/util/time_util.h"
@@ -95,7 +97,26 @@ absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_d
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::optional<std::string>> load_artifact_id_from_descriptor(const std::filesystem::path& artifact_dir) {
+void record_disk_resolution_outcome(std::string_view outcome) {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_resolve_total");
+    if (counter) {
+      counter->Add(1, {{"outcome", std::string(outcome)}});
+    }
+  } catch (...) {
+  }
+}
+
+struct DescriptorMetadata {
+  bool found{false};
+  std::optional<std::string> artifact_id;
+  std::optional<std::string> index_multihash;
+  std::optional<std::string> data_multihash;
+};
+
+absl::StatusOr<DescriptorMetadata> load_descriptor_metadata(const std::filesystem::path& artifact_dir) {
+  DescriptorMetadata metadata;
   const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
   std::error_code ec;
   if (!std::filesystem::exists(descriptor_path, ec)) {
@@ -103,8 +124,9 @@ absl::StatusOr<std::optional<std::string>> load_artifact_id_from_descriptor(cons
       return absl::ErrnoToStatus(
           ec.value(), absl::StrCat("Failed to stat artifact_descriptor.json at ", descriptor_path.string()));
     }
-    return std::optional<std::string>{};
+    return metadata;
   }
+  metadata.found = true;
   std::ifstream in(descriptor_path);
   if (!in.is_open()) {
     return absl::PermissionDeniedError(
@@ -113,25 +135,60 @@ absl::StatusOr<std::optional<std::string>> load_artifact_id_from_descriptor(cons
   try {
     nlohmann::json j;
     in >> j;
-    if (!j.contains("artifact_id")) {
-      return absl::FailedPreconditionError(
-          absl::StrCat("artifact_descriptor.json missing artifact_id at ", descriptor_path.string()));
-    }
-    if (!j["artifact_id"].is_string()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("artifact_descriptor.json artifact_id must be string at ", descriptor_path.string()));
-    }
-    const std::string raw_artifact_id = j["artifact_id"].get<std::string>();
-    const std::string artifact_id = std::string(absl::StripAsciiWhitespace(raw_artifact_id));
-    if (artifact_id.empty()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("artifact_descriptor.json artifact_id empty at ", descriptor_path.string()));
-    }
-    return std::optional<std::string>(artifact_id);
+    const auto get_string = [&](const char* key) -> std::optional<std::string> {
+      auto it = j.find(key);
+      if (it == j.end() || it->is_null()) {
+        return std::optional<std::string>{};
+      }
+      if (!it->is_string()) {
+        throw std::invalid_argument(absl::StrCat(key, " must be a string"));
+      }
+      const std::string trimmed = std::string(absl::StripAsciiWhitespace(it->get<std::string>()));
+      if (trimmed.empty()) {
+        return std::optional<std::string>{};
+      }
+      return trimmed;
+    };
+    metadata.artifact_id = get_string("artifact_id");
+    metadata.index_multihash = get_string("index_multihash");
+    metadata.data_multihash = get_string("data_multihash");
   } catch (const std::exception& ex) {
     return absl::InvalidArgumentError(
         absl::StrCat("Failed to parse artifact_descriptor.json at ", descriptor_path.string(), ": ", ex.what()));
   }
+  return metadata;
+}
+
+absl::Status validate_descriptor_against_index(
+    const DescriptorMetadata& descriptor,
+    const store::loader::IndexInfo& index_info,
+    bool verify_checksums) {
+  if (!verify_checksums) {
+    return absl::OkStatus();
+  }
+  if (!descriptor.found) {
+    return absl::FailedPreconditionError("artifact_descriptor.json required when verify_checksums=true");
+  }
+  if (!descriptor.index_multihash.has_value() || descriptor.index_multihash->empty()) {
+    return absl::FailedPreconditionError("index_multihash missing from artifact_descriptor.json");
+  }
+  auto computed_or = common::compute_index_multihash(
+      std::optional<std::string>(index_info.canonical_index_json), /*index_key_hex=*/"");
+  if (!computed_or.ok()) {
+    return computed_or.status();
+  }
+  if (*descriptor.index_multihash != *computed_or) {
+    return absl::FailedPreconditionError("index_multihash mismatch for disk artifact");
+  }
+  if (descriptor.artifact_id.has_value() && descriptor.data_multihash.has_value() &&
+      !descriptor.data_multihash->empty()) {
+    const std::string expected_artifact_id =
+        absl::StrCat("mi2:", *descriptor.index_multihash, ":", *descriptor.data_multihash);
+    if (*descriptor.artifact_id != expected_artifact_id) {
+      return absl::FailedPreconditionError("artifact_id does not match descriptor multihashes");
+    }
+  }
+  return absl::OkStatus();
 }
 
 SourcePreference to_hint_preference(v1::SourcePreference preference) {
@@ -473,6 +530,9 @@ grpc::Status MaterializationController::materialize_replica(
   const v1::SourcePreference preference = req.preference();
   const bool prefer_disk = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
   const bool prefer_p2p = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
+  const bool verify_checksums = req.has_verify_checksums() ? req.verify_checksums() : true;
+
+  span->SetAttribute("tc.store.verify_checksums", verify_checksums);
 
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.device.uuid", req.device_uuid());
@@ -491,6 +551,8 @@ grpc::Status MaterializationController::materialize_replica(
   if (!request_has_artifact && !request_has_disk) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id or disk_path is required"};
   }
+
+  const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
 
   std::optional<std::filesystem::path> normalized_disk_path;
   if (request_has_disk) {
@@ -522,33 +584,47 @@ grpc::Status MaterializationController::materialize_replica(
     }
   }
 
-  std::optional<std::string> descriptor_artifact_id;
+  DescriptorMetadata descriptor_meta;
+  std::optional<store::loader::IndexInfo> disk_index;
   if (normalized_disk_path.has_value()) {
-    auto artifact_id_or = load_artifact_id_from_descriptor(*normalized_disk_path);
-    if (!artifact_id_or.ok()) {
+    auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
+    if (!descriptor_or.ok()) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(artifact_id_or.status());
+      return to_grpc_status(descriptor_or.status());
     }
-    descriptor_artifact_id = *artifact_id_or;
-    if (prefer_disk) {
+    descriptor_meta = *descriptor_or;
+    if (verify_checksums && !descriptor_meta.found) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "artifact_descriptor.json required when verify_checksums=true"};
+    }
+    if (verify_checksums) {
+      auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
+      if (!index_or.ok()) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return to_grpc_status(index_or.status());
+      }
+      auto validation_status = validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
+      if (!validation_status.ok()) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return to_grpc_status(validation_status);
+      }
+      disk_index = std::move(*index_or);
+    } else if (prefer_disk) {
       auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
       if (!idx_status.ok()) {
         resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
         return to_grpc_status(idx_status);
-      }
-      if (!descriptor_artifact_id.has_value()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::NOT_FOUND, "artifact_descriptor.json required when preference=PREFER_DISK"};
       }
     }
   }
 
   std::optional<std::string> artifact_id =
       request_has_artifact ? std::optional<std::string>(req.artifact_id()) : std::nullopt;
-  if (!artifact_id.has_value()) {
-    artifact_id = descriptor_artifact_id;
+  if (!artifact_id.has_value() && descriptor_meta.artifact_id.has_value()) {
+    artifact_id = descriptor_meta.artifact_id;
   }
-  if (artifact_id.has_value() && descriptor_artifact_id.has_value() && *artifact_id != *descriptor_artifact_id) {
+  if (artifact_id.has_value() && descriptor_meta.artifact_id.has_value() &&
+      *artifact_id != *descriptor_meta.artifact_id) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::FAILED_PRECONDITION, "artifact_id mismatch between request and artifact_descriptor.json"};
   }
@@ -566,8 +642,6 @@ grpc::Status MaterializationController::materialize_replica(
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required when preference=PREFER_P2P"};
   }
-
-  const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
 
   // View identity handling
   std::optional<ViewSpec> view_spec;
@@ -674,6 +748,8 @@ grpc::Status MaterializationController::materialize_replica(
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
+  hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
+                                  : store::loading::MaterializeHints::Verify::NONE;
   hints.source_preference = to_hint_preference(preference);
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
@@ -745,7 +821,9 @@ grpc::Status MaterializationController::materialize_replica(
   }
   if (resp.view_index_json().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
     // Prefer disk-local canonical index to avoid Global Store dependency for disk loads.
-    if (normalized_disk_path.has_value()) {
+    if (disk_index.has_value()) {
+      resp.set_view_index_json(disk_index->canonical_index_json);
+    } else if (normalized_disk_path.has_value()) {
       auto local_index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
       if (local_index_or.ok()) {
         resp.set_view_index_json(local_index_or->canonical_index_json);
@@ -911,11 +989,13 @@ grpc::Status MaterializationController::materialize_replica_v2(
     const v2::MaterializeReplicaRequest& req,
     v2::MaterializeReplicaResponse& resp) {
   v1::MaterializeReplicaRequest v1_req;
+  v1_req.set_verify_checksums(true);
   if (req.has_artifact_id() && !req.artifact_id().empty()) {
     v1_req.set_artifact_id(req.artifact_id());
   }
   if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
     v1_req.set_disk_path(req.disk_fallback().disk_path());
+    v1_req.set_verify_checksums(req.disk_fallback().verify_checksums());
   }
   v1_req.set_replica_uuid(req.replica_uuid());
   v1_req.set_device_uuid(req.device_uuid());
@@ -1078,14 +1158,17 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
   auto& span = rctx.span();
   const bool verify_checksums = req.verify_checksums();
   if (req.disk_path().empty()) {
+    record_disk_resolution_outcome("invalid_argument");
     return {StatusCode::INVALID_ARGUMENT, "disk_path is required"};
   }
   if (d_.is_shutting_down.load()) {
+    record_disk_resolution_outcome("unavailable");
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
   auto normalized_or = normalize_disk_path(req.disk_path());
   if (!normalized_or.ok()) {
+    record_disk_resolution_outcome("invalid_argument");
     return to_grpc_status(normalized_or.status());
   }
   const auto& normalized = *normalized_or;
@@ -1100,6 +1183,7 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     if (!allowed) {
       record_disk_path_denied();
       LOG(WARNING) << "disk_path not permitted by whitelist: " << normalized;
+      record_disk_resolution_outcome("whitelist_denied");
       return {StatusCode::INVALID_ARGUMENT, "disk_path not permitted by daemon whitelist"};
     }
   }
@@ -1109,21 +1193,55 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
   }
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
 
-  auto artifact_id_or = load_artifact_id_from_descriptor(normalized);
-  if (!artifact_id_or.ok()) {
-    return to_grpc_status(artifact_id_or.status());
+  auto descriptor_or = load_descriptor_metadata(normalized);
+  if (!descriptor_or.ok()) {
+    record_disk_resolution_outcome("invalid_descriptor");
+    return to_grpc_status(descriptor_or.status());
   }
-  if (artifact_id_or->has_value()) {
-    resp.set_artifact_id(**artifact_id_or);
-    span->SetAttribute("tc.artifact.id", **artifact_id_or);
+  const DescriptorMetadata& descriptor = *descriptor_or;
+  if (descriptor.artifact_id.has_value()) {
+    resp.set_artifact_id(*descriptor.artifact_id);
+    span->SetAttribute("tc.artifact.id", *descriptor.artifact_id);
+  }
+
+  auto index_presence_status = ensure_tensor_index_present(normalized);
+  if (!index_presence_status.ok()) {
+    record_disk_resolution_outcome("not_found");
+    return to_grpc_status(index_presence_status);
   }
 
   auto index_or = store::loader::read_from_artifact_dir(normalized, /*target_device_id=*/0);
   if (!index_or.ok()) {
+    record_disk_resolution_outcome("not_found");
     return to_grpc_status(index_or.status());
   }
+
+  auto validation_status = validate_descriptor_against_index(descriptor, *index_or, verify_checksums);
+  if (!validation_status.ok()) {
+    record_disk_resolution_outcome("checksum_failed");
+    return to_grpc_status(validation_status);
+  }
+
+  if (!resp.artifact_id().empty() && descriptor.artifact_id.has_value() &&
+      *descriptor.artifact_id != resp.artifact_id()) {
+    record_disk_resolution_outcome("checksum_failed");
+    return to_grpc_status(
+        absl::FailedPreconditionError("artifact_id mismatch between resolved descriptor and request"));
+  }
+  if (resp.artifact_id().empty() && descriptor.index_multihash.has_value() && descriptor.data_multihash.has_value() &&
+      !descriptor.index_multihash->empty() && !descriptor.data_multihash->empty()) {
+    const std::string artifact_id = absl::StrCat("mi2:", *descriptor.index_multihash, ":", *descriptor.data_multihash);
+    resp.set_artifact_id(artifact_id);
+    if (rctx.allow_high_card_attrs()) {
+      span->SetAttribute("tc.artifact.id", artifact_id);
+    }
+  }
+
   resp.set_canonical_index_bytes(index_or->canonical_index_json);
-  resp.set_generation(compute_generation_from_index(index_or->canonical_index_json));
+  const uint64_t generation = compute_generation_from_index(index_or->canonical_index_json);
+  resp.set_generation(generation);
+  span->SetAttribute("tc.artifact.generation", static_cast<int64_t>(generation));
+  record_disk_resolution_outcome("ok");
   rctx.mark_success();
   return Status::OK;
 }

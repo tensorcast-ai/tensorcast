@@ -80,8 +80,10 @@ def _compose_narrow(
 
     if parent is not None:
         _validate(parent)
-        ops.append(parent)
     if child is None:
+        if parent is None:
+            return ops
+        ops.append(parent)
         return ops
 
     _validate(child)
@@ -101,7 +103,10 @@ def _compose_narrow(
     narrowed_length = parent.length
     if child.start + child.length > narrowed_length:
         raise ArtifactError(
-            f"Slice [{child.start}, {child.start + child.length}) exceeds narrowed length {narrowed_length} for '{tensor_name}'",
+            (
+                f"Slice [{child.start}, {child.start + child.length}) exceeds "
+                f"narrowed length {narrowed_length} for '{tensor_name}'"
+            ),
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )
@@ -385,7 +390,7 @@ class ViewSpecComposer:
         view_entries: list[CanonicalIndexEntry] = []
         for name in names:
             entry = base_entries[name]
-            ops = ()
+            ops: Sequence[TensorViewOp] = ()
             if view_spec is not None:
                 ops = view_spec.tensor_ops.get(name, ())
             view_entries.append(_apply_view_ops(entry, ops))

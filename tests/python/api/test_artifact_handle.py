@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import weakref
 from typing import cast
@@ -113,6 +114,9 @@ class _RuntimeStub:
 
     def get_artifact_index_cached(self, artifact_id: str):
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
+
+    def get_artifact_index_by_disk_path(self, disk_path: str):
+        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
 
     def invalidate_artifact(self, artifact_id: str | None, *, key=None, reason=None) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
@@ -320,3 +324,82 @@ def test_from_disk_resolves_once_and_caches_generation():
     assert cached.canonical_index_bytes == canonical_bytes
     assert cached.generation == 11
     assert cached.disk_path == "/tmp/artifact"
+
+
+def test_from_disk_uses_cached_entry_for_disk_path():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes, disk_generation=5, disk_artifact_id="disk-aid")
+    runtime = _RuntimeStub(client)
+    cache_entry = ArtifactCacheEntry(
+        artifact_id="disk-aid",
+        canonical_index_bytes=canonical_bytes,
+        parsed_index=canonical_index_from_bytes(canonical_bytes),
+        generation=5,
+        disk_path="/tmp/artifact",
+        expires_at=time.monotonic() + 5.0,
+    )
+    runtime.cache_artifact_index(cache_entry)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        disk_path="/tmp/artifact",
+        fallback=FallbackOptions.for_disk("/tmp/artifact"),
+    )
+
+    desc = artifact.describe()
+
+    assert desc.artifact_id == "disk-aid"
+    assert desc.generation == 5
+    assert client.resolve_calls == []
+    assert client.get_index_calls == 0
+
+
+def test_disk_cache_mismatch_invalidates_and_refetches():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    stale_entry = ArtifactCacheEntry(
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        parsed_index=canonical_index_from_bytes(canonical_bytes),
+        generation=1,
+        disk_path="/other/path",
+        expires_at=time.monotonic() + 5.0,
+    )
+    runtime.cache_artifact_index(stale_entry)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store), artifact_id="aid", disk_path="/real/path"
+    )
+
+    _ = artifact.tensor_names
+
+    assert client.get_index_calls == 1
+    refreshed = runtime.get_artifact_index_cached("aid")
+    assert refreshed is not None
+    assert refreshed.disk_path == "/real/path"
+
+
+def test_ensure_metadata_sets_under_lock(monkeypatch):
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+
+    lock_checked = threading.Event()
+    original_set_metadata = Artifact._set_metadata
+
+    def _wrapped(self, *args, **kwargs):
+        if not self._lock._is_owned():
+            raise AssertionError("metadata updated without holding artifact lock")
+        lock_checked.set()
+        return original_set_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(Artifact, "_set_metadata", _wrapped)
+
+    assert artifact.tensor_names == ("foo",)
+    assert lock_checked.is_set()

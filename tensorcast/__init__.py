@@ -125,6 +125,7 @@ from tensorcast.api import (  # noqa: E402
     save_dict,
 )
 from tensorcast.api.store import (  # noqa: E402
+    from_disk,
     get,
     get_async,
     get_into,
@@ -157,6 +158,7 @@ __all__ = [
     "GetArtifactOptions",
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
+    "from_disk",
     "ArtifactDescriptor",
     "store",
     "register",

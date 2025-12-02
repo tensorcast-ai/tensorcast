@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
@@ -20,8 +19,10 @@ from tensorcast.api._materialize import (
     materialize_artifact_v2,
 )
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
+from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
+    canonical_index_to_bytes,
     validate_targets,
 )
 from tensorcast.api.store.retry import (
@@ -528,6 +529,8 @@ class MaterializationPipeline:
         artifact_id: str | None,
         key: str | None,
         fallback: FallbackOptions | None,
+        *,
+        disk_path_hint: str | None = None,
     ) -> tuple[str | None, str | None]:
         if artifact_id and key:
             raise ArtifactError(
@@ -542,7 +545,7 @@ class MaterializationPipeline:
                     disk_path = fallback.disk_path.strip()
                 else:
                     disk_path = fallback.disk_path
-            if disk_path:
+            if disk_path or disk_path_hint:
                 return None, None
             raise ArtifactError(
                 "Either artifact_id or key is required",
@@ -645,17 +648,10 @@ class MaterializationPipeline:
         canonical_count: int | None = None
         if canonical_index_bytes:
             try:
-                index_obj = json.loads(canonical_index_bytes)
-                canonical_count = len(index_obj)
+                index_obj = canonical_index_from_bytes(canonical_index_bytes)
+                canonical_count = len(index_obj.entries)
                 if bytes_total == 0:
-                    names = descriptor_names or list(index_obj.keys())
-                    for name in names:
-                        if (
-                            name in index_obj
-                            and isinstance(index_obj[name], list)
-                            and len(index_obj[name]) > 1
-                        ):
-                            bytes_total += int(index_obj[name][1])
+                    bytes_total = int(index_obj.total_size_bytes)
             except Exception:  # noqa: BLE001
                 canonical_count = None
 
@@ -750,6 +746,7 @@ class MaterializationPipeline:
         resolved_artifact_id = artifact_id
         canonical_hint: bytes | None = canonical_index_hint
         generation_hint: int | None = None
+        cached_entry: ArtifactCacheEntry | None = None
         fallback_opts = fallback
         verify_checksums = (
             bool(fallback_opts.verify_checksums) if fallback_opts else True
@@ -765,8 +762,14 @@ class MaterializationPipeline:
         allow_p2p = True if fallback_opts is None else bool(fallback_opts.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        requested_disk = effective_prefer == "disk" or bool(
-            fallback_opts and fallback_opts.disk_path
+        requested_disk = (
+            effective_prefer == "disk"
+            or bool(fallback_opts and fallback_opts.disk_path)
+            or bool(disk_path)
+        )
+        # Local-only preference disables P2P but should not force a disk fallback.
+        disk_required = requested_disk or (
+            not allow_p2p and effective_prefer != "local"
         )
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
@@ -774,6 +777,21 @@ class MaterializationPipeline:
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
         elif effective_prefer == "disk":
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+        if (
+            disk_path
+            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        ):
+            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+        if disk_path and fallback_opts is None:
+            allow_p2p = False
+
+        if disk_path and canonical_hint is None:
+            cached_entry = self._runtime.get_artifact_index_by_disk_path(disk_path)
+            if cached_entry is not None:
+                canonical_hint = cached_entry.canonical_index_bytes
+                generation_hint = cached_entry.generation
+                if cached_entry.artifact_id:
+                    resolved_artifact_id = cached_entry.artifact_id
 
         if fallback_opts and (requested_disk or not allow_p2p):
             disk_path, resolved_artifact_id, disk_error = (
@@ -786,7 +804,12 @@ class MaterializationPipeline:
             )
             if disk_path:
                 requested_disk = True
-                if effective_prefer == "disk":
+                disk_required = True
+                if (
+                    effective_prefer == "disk"
+                    or preference
+                    == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                ):
                     preference = (
                         store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                     )
@@ -809,7 +832,7 @@ class MaterializationPipeline:
                         },
                     )
                 resolved_artifact_id = resolved_artifact_id or artifact_id
-            if not allow_p2p and not disk_path:
+            if disk_required and not disk_path:
                 if disk_error is not None:
                     raise ArtifactError(
                         f"Disk fallback lookup failed: {disk_error}",
@@ -832,6 +855,17 @@ class MaterializationPipeline:
                     resolved_artifact_id = disk_meta.artifact_id
                 if getattr(disk_meta, "generation", 0):
                     generation_hint = int(disk_meta.generation)
+                if canonical_hint and resolved_artifact_id:
+                    parsed_index = canonical_index_from_bytes(canonical_hint)
+                    cache_entry = ArtifactCacheEntry(
+                        artifact_id=resolved_artifact_id,
+                        canonical_index_bytes=canonical_hint,
+                        parsed_index=parsed_index,
+                        generation=generation_hint,
+                        disk_path=disk_path,
+                        expires_at=time.monotonic(),
+                    )
+                    self._runtime.cache_artifact_index(cache_entry)
             except Exception as exc:  # noqa: BLE001
                 if not allow_p2p:
                     raise map_materialization_error(exc) from exc
@@ -925,19 +959,19 @@ class MaterializationPipeline:
                     status_code="NOT_FOUND",
                     retryable=False,
                 )
-            requested = set(tensor_names)
+            requested_names = tuple(tensor_names)
+            requested = set(requested_names)
             base_payload = result
             filtered_descriptors = tuple(
                 desc for desc in result.descriptors if desc.name in requested
             )
             try:
-                index_obj = json.loads(base_payload.canonical_index_bytes)
-                filtered_index = {
-                    name: meta for name, meta in index_obj.items() if name in requested
-                }
-                canonical_bytes = json.dumps(
-                    filtered_index, separators=(",", ":")
-                ).encode("utf-8")
+                canonical_index = canonical_index_from_bytes(
+                    base_payload.canonical_index_bytes
+                )
+                canonical_bytes = canonical_index_to_bytes(
+                    canonical_index, requested_names
+                )
             except Exception:  # noqa: BLE001
                 canonical_bytes = base_payload.canonical_index_bytes
 
@@ -1232,7 +1266,7 @@ class MaterializationPipeline:
     ) -> tuple[MaterializationPayload, int]:
         resolved_fallback = fallback or self._runtime.opts.fallback
         artifact_id, key = self._resolve_identifiers(
-            artifact_id, key, resolved_fallback
+            artifact_id, key, resolved_fallback, disk_path_hint=disk_path_hint
         )
         self._fallback.ensure_supported(resolved_fallback)
         device_id = self._resolve_device_selector(device, resolved_fallback)

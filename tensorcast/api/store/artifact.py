@@ -461,7 +461,8 @@ class Artifact:
             raise
         cached = runtime.get_artifact_index_cached(artifact_id)
         if cached:
-            self._hydrate_from_cache_entry(cached)
+            with self._lock:
+                self._hydrate_from_cache_entry(cached)
             return True
         try:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
@@ -476,12 +477,14 @@ class Artifact:
                 return False
             raise error from exc
         canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-        self._set_metadata(
-            canonical_index_bytes,
-            canonical_index,
-            generation=self._generation,
-            disk_path=self._disk_path_hint,
-        )
+        with self._lock:
+            if self._canonical_index is None or self._canonical_index_bytes is None:
+                self._set_metadata(
+                    canonical_index_bytes,
+                    canonical_index,
+                    generation=self._generation,
+                    disk_path=self._disk_path_hint,
+                )
         runtime.cache_artifact_index(
             ArtifactCacheEntry(
                 artifact_id=artifact_id,
@@ -606,6 +609,11 @@ class Artifact:
                 self._artifact_id = artifact_id
                 return artifact_id
             if self._disk_path_hint:
+                cached = runtime.get_artifact_index_by_disk_path(self._disk_path_hint)
+                if cached and cached.artifact_id:
+                    self._artifact_id = cached.artifact_id
+                    self._hydrate_from_cache_entry(cached)
+                    return cached.artifact_id
                 verify_checksums = True
                 if self._fallback is not None:
                     verify_checksums = bool(self._fallback.verify_checksums)
@@ -674,6 +682,10 @@ class Artifact:
                 retryable=False,
             )
         artifact_id = self._ensure_identified()
+        cache_generation: int | None = None
+        cache_disk_path: str | None = None
+        generation_hint: int | None = None
+        disk_path_hint: str | None = None
         with self._lock:
             if (
                 self._canonical_index is not None
@@ -682,33 +694,71 @@ class Artifact:
                 return self._canonical_index
             cached = runtime.get_artifact_index_cached(artifact_id)
             if cached:
-                self._hydrate_from_cache_entry(cached)
-                assert self._canonical_index is not None
-                return self._canonical_index
-            try:
-                canonical_index_bytes = (
-                    runtime.ensure_client().get_artifact_index_by_id(artifact_id)
+                has_disk_mismatch = bool(
+                    self._disk_path_hint
+                    and cached.disk_path
+                    and cached.disk_path != self._disk_path_hint
                 )
-            except Exception as exc:  # noqa: BLE001
-                raise map_materialization_error(exc) from exc
-            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-        self._set_metadata(
-            canonical_index_bytes,
-            canonical_index,
-            generation=self._generation,
-            disk_path=self._disk_path_hint,
-        )
+                has_generation_mismatch = bool(
+                    self._generation is not None
+                    and cached.generation is not None
+                    and cached.generation != self._generation
+                )
+                if has_disk_mismatch or has_generation_mismatch:
+                    runtime.invalidate_artifact(
+                        artifact_id,
+                        reason="disk_path_mismatch"
+                        if has_disk_mismatch
+                        else "generation_mismatch",
+                    )
+                else:
+                    self._hydrate_from_cache_entry(cached)
+                    assert self._canonical_index is not None
+                    return self._canonical_index
+            generation_hint = self._generation
+            disk_path_hint = self._disk_path_hint
+        try:
+            canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
+                artifact_id
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise map_materialization_error(exc) from exc
+        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        with self._lock:
+            if (
+                self._canonical_index is not None
+                and self._canonical_index_bytes is not None
+            ):
+                result_index = self._canonical_index
+                cache_bytes = self._canonical_index_bytes or canonical_index_bytes
+                cache_generation = self._generation
+                cache_disk_path = self._disk_path_hint
+            else:
+                generation_value = self._generation
+                if generation_value is None:
+                    generation_value = generation_hint
+                disk_path_value = self._disk_path_hint or disk_path_hint
+                self._set_metadata(
+                    canonical_index_bytes,
+                    canonical_index,
+                    generation=generation_value,
+                    disk_path=disk_path_value,
+                )
+                result_index = canonical_index
+                cache_bytes = canonical_index_bytes
+                cache_generation = self._generation
+                cache_disk_path = self._disk_path_hint
         runtime.cache_artifact_index(
             ArtifactCacheEntry(
                 artifact_id=artifact_id,
-                canonical_index_bytes=canonical_index_bytes,
-                parsed_index=canonical_index,
-                generation=self._generation,
-                disk_path=self._disk_path_hint,
+                canonical_index_bytes=cache_bytes,
+                parsed_index=result_index,
+                generation=cache_generation,
+                disk_path=cache_disk_path,
                 expires_at=time.monotonic(),
             )
         )
-        return canonical_index
+        return result_index
 
     def _effective_index(self) -> CanonicalIndex:
         base_index = self._ensure_metadata()

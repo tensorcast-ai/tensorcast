@@ -2,8 +2,13 @@
 
 import torch
 
+from tensorcast.api._view_ops import NarrowOp
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
-from tensorcast.api.store.view_composer import ViewSpecComposer
+from tensorcast.api.store.view_composer import (
+    ViewSpecComposer,
+    _apply_view_ops,
+    _compose_narrow,
+)
 
 
 def _index() -> CanonicalIndex:
@@ -84,3 +89,34 @@ def test_view_composer_transpose_hash_stable():
     h1 = composer.hash_view_spec(spec, subset=("a", "b"))
     h2 = composer.hash_view_spec(spec, subset=("a", "b"))
     assert h1 == h2
+
+
+def test_compose_narrow_collapses_parent_and_child():
+    parent = NarrowOp(dim=1, start=1, length=2)
+    child = NarrowOp(dim=1, start=1, length=1)
+    ops = _compose_narrow(
+        base_shape=(4, 4),
+        parent=parent,
+        child=child,
+        tensor_name="a",
+    )
+    assert len(ops) == 1
+    fused = ops[0]
+    assert isinstance(fused, NarrowOp)
+    assert fused.start == 2
+    assert fused.length == 1
+
+
+def test_compose_narrow_storage_offset_applies_once():
+    base_entry = _index().entries[0]
+    parent = NarrowOp(dim=0, start=2, length=2)
+    child = NarrowOp(dim=0, start=1, length=1)
+    ops = _compose_narrow(
+        base_shape=base_entry.shape,
+        parent=parent,
+        child=child,
+        tensor_name="a",
+    )
+    view_entry = _apply_view_ops(base_entry, ops)
+    expected_offset = (parent.start + child.start) * base_entry.stride[0]
+    assert view_entry.storage_offset == expected_offset
