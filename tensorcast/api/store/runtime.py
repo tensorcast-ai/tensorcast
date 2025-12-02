@@ -19,6 +19,7 @@ from opentelemetry.trace import Span, SpanKind
 
 from tensorcast.api._register import RegisteredLease
 from tensorcast.api._runtime import require_runtime
+from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import (
     RetryPolicy,
@@ -96,6 +97,13 @@ class StoreRuntimeContext:
         self._key_cache_lock = threading.RLock()
         self._key_cache: dict[str, _KeyCacheEntry] = {}
         self._key_cache_ttl_seconds = self._configure_key_cache_ttl()
+        self._artifact_cache_ttl_seconds = self._configure_index_cache_ttl()
+        self._artifact_cache_max_entries = self._configure_index_cache_size()
+        self._artifact_cache = ArtifactCache(
+            daemon_endpoint=self._daemon_endpoint,
+            ttl_seconds=self._artifact_cache_ttl_seconds,
+            max_entries=self._artifact_cache_max_entries,
+        )
         self._closed = False
 
         self._init_session_record()
@@ -150,6 +158,36 @@ class StoreRuntimeContext:
         if value <= 0:
             return 0.0
         return value
+
+    def _configure_index_cache_ttl(self) -> float:
+        raw = os.getenv("TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS")
+        if raw is None or raw == "":
+            return 600.0
+        try:
+            value = float(raw)
+        except ValueError:
+            logger.warning(
+                "store.index_cache_ttl.invalid",
+                extra={"tc.store.daemon": self._daemon_endpoint, "ttl": raw},
+            )
+            return 600.0
+        if value <= 0:
+            return 0.0
+        return value
+
+    def _configure_index_cache_size(self) -> int:
+        raw = os.getenv("TENSORCAST_STORE_CACHE_MAX_ENTRIES")
+        if raw is None or raw == "":
+            return 1000
+        try:
+            value = int(raw)
+        except ValueError:
+            logger.warning(
+                "store.index_cache_size.invalid",
+                extra={"tc.store.daemon": self._daemon_endpoint, "size": raw},
+            )
+            return 1000
+        return max(0, value)
 
     def _active_lease_count(self) -> int:
         with self._leases_lock:
@@ -257,6 +295,33 @@ class StoreRuntimeContext:
         self.cache_key_mapping(key, artifact_id=resolved_id, disk_path=resolved_path)
         return resolved_id, resolved_path
 
+    def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
+        return self._artifact_cache.get_artifact_index_cached(artifact_id)
+
+    def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
+        self._artifact_cache.cache_artifact_index(entry)
+
+    def invalidate_artifact(
+        self,
+        artifact_id: str | None,
+        *,
+        key: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if artifact_id:
+            self._artifact_cache.invalidate_artifact(artifact_id, reason=reason)
+        with self._key_cache_lock:
+            keys_to_remove = []
+            for cached_key, cached_entry in self._key_cache.items():
+                matches_artifact = bool(
+                    artifact_id and cached_entry.artifact_id == artifact_id
+                )
+                matches_key = bool(key is not None and cached_key == key)
+                if matches_artifact or matches_key:
+                    keys_to_remove.append(cached_key)
+            for cached_key in keys_to_remove:
+                del self._key_cache[cached_key]
+
     def _record_session_start(self, capabilities: StoreCapabilities) -> None:
         attributes: dict[str, SpanAttributeValue] = {
             "tc.store.session_id": self._session_id,
@@ -362,6 +427,13 @@ class StoreRuntimeContext:
         self._key_cache_lock = threading.RLock()
         self._key_cache = {}
         self._key_cache_ttl_seconds = self._configure_key_cache_ttl()
+        self._artifact_cache_ttl_seconds = self._configure_index_cache_ttl()
+        self._artifact_cache_max_entries = self._configure_index_cache_size()
+        self._artifact_cache = ArtifactCache(
+            daemon_endpoint=self._daemon_endpoint,
+            ttl_seconds=self._artifact_cache_ttl_seconds,
+            max_entries=self._artifact_cache_max_entries,
+        )
         self._init_session_record()
 
     def ensure_client(self) -> DaemonCtl:
@@ -388,6 +460,7 @@ class StoreRuntimeContext:
         self._executor_handle.close()
         with self._key_cache_lock:
             self._key_cache.clear()
+        self._artifact_cache.clear()
         self._update_session_record(activity=True, closed=True)
 
     # ------------------------------------------------------------------

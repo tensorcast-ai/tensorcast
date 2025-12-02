@@ -73,6 +73,14 @@ graph TD
 - **Interface**: Uses the functional facade (`tensorcast.get`, `tensorcast.get_into`) backed by the shared Store to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
+- **Lazy Handles**: `tensorcast.artifact(...)` returns a store-bound handle that
+  exposes metadata (`tensor_names`, `describe`) and selective tensor fetch
+  without changing the eager `get*` APIs. Handles surface
+  `FAILED_PRECONDITION` if used after `Store.close()`.
+- **Metadata Cache**: A process-wide `ArtifactCache` stores canonical indices
+  (default TTL 600s, max 1000 entries) to avoid repeated daemon lookups.
+  Tunables: `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS`,
+  `TENSORCAST_STORE_CACHE_MAX_ENTRIES`.
 
 ## Key Design Principles
 

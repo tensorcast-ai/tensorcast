@@ -45,12 +45,16 @@ class MaterializationPayload:
     descriptors: Sequence[TensorPayloadDescriptor]
     payload_iter: Callable[[], PayloadIterator]
     replica_uuid: str
+    generation: int | None = None
     state_dict: dict[str, torch.Tensor] | None = None
     disk_path: str | None = None
     view_index_bytes: bytes | None = None
     view_data_hash: str | None = None
     source: store_daemon_pb2.MaterializationSource | None = None
     device_uuid: str | None = None
+    ticket_replica_uuid: str | None = None
+    ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
+    ticket_created_at_ts: float | None = None
 
 
 def _tensor_payload_from_proto(
@@ -94,18 +98,11 @@ def materialize_artifact_v2(
         raise ValueError("Either artifact_id, key, or disk_path_hint is required")
     if view is not None and view_id is not None:
         raise ValueError("Specify at most one of view or view_id")
-    if artifact_id is None and (view is not None or view_id is not None):
-        raise ValueError("artifact_id is required when requesting a view")
 
     ensure_client_otel("tensorcast-client", role="client")
     tracer = trace.get_tracer(__name__)
 
     opts = options or GetArtifactOptions()
-    if not opts.wait_for_completion:
-        raise DaemonUnavailable(
-            "wait_for_completion=False is not supported for materialize_artifact_v2"
-        )
-
     dev_id = resolve_device(device_id)
     (
         pinned_ms,
@@ -209,10 +206,21 @@ def materialize_artifact_v2(
                 "artifact_id, key, or disk_path_hint is required for materialize_artifact_v2"
             )
 
+    ticket_replica_uuid: str | None = None
+    ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
+    ticket_created_at_ts: float | None = None
+    if response.HasField("ticket"):
+        ticket_replica_uuid = response.ticket.replica_uuid or None
+        ticket_status = response.ticket.status
+        try:
+            ticket_created_at_ts = response.ticket.created_at.ToDatetime().timestamp()
+        except Exception:  # noqa: BLE001
+            ticket_created_at_ts = None
+
     handle_bytes = b""
     if response.HasField("mem_handle"):
         handle_bytes = response.mem_handle.cuda_ipc_handle
-    if not handle_bytes:
+    if wait_for_completion and not handle_bytes:
         raise DaemonUnavailable(
             "Daemon returned empty mem_handle for materialization v2"
         )
@@ -247,9 +255,15 @@ def materialize_artifact_v2(
         _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
         for desc in response.payloads
     ]
-    cuda_memory_ptr = get_cuda_memory_ptr(dev_id, handle_bytes)
+    cuda_memory_ptr = (
+        get_cuda_memory_ptr(dev_id, handle_bytes) if handle_bytes else None
+    )
 
     def _iter() -> PayloadIterator:
+        if cuda_memory_ptr is None:
+            raise DaemonUnavailable(
+                "Materialization payload is missing a mem_handle; tensor data is not available"
+            )
         for desc in descriptors:
             meta_state_dict = {
                 desc.name: (
@@ -296,6 +310,9 @@ def materialize_artifact_v2(
         view_data_hash=None,
         source=materialized_source,
         device_uuid=device_uuid,
+        ticket_replica_uuid=ticket_replica_uuid,
+        ticket_status=ticket_status,
+        ticket_created_at_ts=ticket_created_at_ts,
     )
 
 

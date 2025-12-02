@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
+import weakref
 from collections.abc import Callable, Mapping, Sequence
 
 import torch
@@ -22,6 +23,7 @@ from tensorcast.api._region_cache import (
 )
 from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
+from tensorcast.api.store.artifact import Artifact, ArtifactDescriptor, TensorMeta
 from tensorcast.api.store.async_ops import ArtifactFuture
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.materialization import MaterializationPipeline
@@ -188,6 +190,22 @@ class Store:
     # ------------------------------------------------------------------
     # Retrieval APIs
     # ------------------------------------------------------------------
+    def artifact(
+        self,
+        *,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        disk_path: str | None = None,
+        fallback: FallbackOptions | None = None,
+    ) -> Artifact:
+        return Artifact(
+            store_ref=weakref.ref(self),
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+
     def get(
         self,
         *,
@@ -362,13 +380,15 @@ class Store:
     ) -> DeregisterArtifactOutcome:
         client = self._runtime.ensure_client()
         drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
-        return client.deregister_artifact(
+        outcome = client.deregister_artifact(
             artifact_id,
             wait_for_drain=bool(wait),
             drain_timeout_ms=drain_ms,
             extend_ttl_ms=extend_ttl_ms,
             device_id=device_id,
         )
+        self._runtime.invalidate_artifact(artifact_id, key=None, reason="deregister")
+        return outcome
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -743,7 +763,31 @@ def get_into_async(
     )
 
 
+def artifact(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    disk_path: str | None = None,
+    fallback: FallbackOptions | None = None,
+) -> Artifact:
+    return _coerce_store().artifact(
+        artifact_id=artifact_id,
+        key=key,
+        disk_path=disk_path,
+        fallback=fallback,
+    )
+
+
+def from_disk(path: str, *, fallback: FallbackOptions | None = None) -> Artifact:
+    effective_fallback = fallback or FallbackOptions(
+        disk_path=path, prefer_disk=True, allow_p2p=False
+    )
+    return _coerce_store().artifact(disk_path=path, fallback=effective_fallback)
+
+
 __all__ = [
+    "Artifact",
+    "ArtifactDescriptor",
     "ArtifactError",
     "ArtifactFuture",
     "ArtifactStatusCode",
@@ -758,8 +802,11 @@ __all__ = [
     "StoreCapabilities",
     "Store",
     "StoreOptions",
+    "TensorMeta",
     "TensorDict",
     "TransformPlacement",
+    "artifact",
+    "from_disk",
     "store",
     "shutdown_process_store",
     "register",

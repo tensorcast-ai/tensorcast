@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Mapping, Sequence
 
 from tensorcast.api._view_ops import (
@@ -12,6 +13,7 @@ from tensorcast.api._view_ops import (
     _coerce_slice_spec,
     build_view_spec,
 )
+from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.types import ArtifactError, CanonicalIndex
@@ -106,9 +108,9 @@ class ViewOrchestrator:
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None,
         view_id: str | None,
     ) -> ResolvedViewInputs:
-        client = self._runtime.ensure_client()
         resolved_artifact_id, resolved_key = self._resolve_identifiers(artifact_id, key)
         disk_path_hint: str | None = None
+        cached_entry: ArtifactCacheEntry | None = None
         if resolved_artifact_id is None:
             assert resolved_key is not None
             resolved_artifact_id, disk_path_hint = (
@@ -120,6 +122,10 @@ class ViewOrchestrator:
                     status_code="NOT_FOUND",
                     retryable=False,
                 )
+        if resolved_artifact_id:
+            cached_entry = self._runtime.get_artifact_index_cached(resolved_artifact_id)
+            if cached_entry and cached_entry.disk_path and not disk_path_hint:
+                disk_path_hint = cached_entry.disk_path
 
         if view_id is not None:
             if slices or transpose:
@@ -147,8 +153,29 @@ class ViewOrchestrator:
                 retryable=False,
             )
 
-        canonical_index_bytes = client.get_artifact_index_by_id(resolved_artifact_id)
-        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        canonical_index_bytes = (
+            cached_entry.canonical_index_bytes if cached_entry else None
+        )
+        canonical_index: CanonicalIndex | None = (
+            cached_entry.parsed_index if cached_entry else None
+        )
+        if canonical_index_bytes is None:
+            client = self._runtime.ensure_client()
+            canonical_index_bytes = client.get_artifact_index_by_id(
+                resolved_artifact_id
+            )
+        if canonical_index is None:
+            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        if cached_entry is None:
+            cache_entry = ArtifactCacheEntry(
+                artifact_id=resolved_artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                parsed_index=canonical_index,
+                generation=None,
+                disk_path=disk_path_hint,
+                expires_at=time.monotonic(),
+            )
+            self._runtime.cache_artifact_index(cache_entry)
         build_result = self._build_view_spec(
             canonical_index=canonical_index,
             slices=slices,
