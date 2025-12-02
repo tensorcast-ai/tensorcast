@@ -13,10 +13,12 @@ import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping
 
+import grpc
 import torch
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api.store.types import ArtifactError
+from tensorcast.daemon_ctl import PrefetchRpcError
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
 
@@ -288,6 +290,13 @@ class PrefetchTicket:
             )
         return runtime
 
+    def _update_ticket_expiry(self, ticket: store_daemon_v2_pb2.ReplicaTicket) -> None:
+        try:
+            if ticket.HasField("expires_at"):
+                self.expires_at = ticket.expires_at.ToDatetime().timestamp()
+        except Exception:  # noqa: BLE001
+            return
+
     def wait(self, timeout: float | None = None) -> bool:
         if self.is_expired:
             store_metrics.record_prefetch_event(
@@ -311,19 +320,47 @@ class PrefetchTicket:
                 return False
             try:
                 resp = client.query_replica_status(ticket)
-                status = (
-                    resp.ticket.status if resp and resp.HasField("ticket") else None
+            except PrefetchRpcError as exc:
+                if getattr(exc, "retryable", False):
+                    time.sleep(0.05)
+                    continue
+                status = getattr(exc, "status_code", "UNKNOWN")
+                store_metrics.record_prefetch_event(
+                    runtime.daemon_endpoint, status=f"rpc_error_{status}"
                 )
-                if status not in (
-                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_UNSPECIFIED,
+                return False
+            except grpc.RpcError as exc:  # noqa: BLE001
+                code = exc.code()
+                if code in (
+                    grpc.StatusCode.UNAVAILABLE,
+                    grpc.StatusCode.DEADLINE_EXCEEDED,
                 ):
-                    store_metrics.record_prefetch_event(
-                        runtime.daemon_endpoint, status="ready"
-                    )
-                    return True
+                    time.sleep(0.05)
+                    continue
+                return False
             except Exception:
                 return False
+            if resp is None or not resp.HasField("ticket"):
+                return False
+            ticket = resp.ticket
+            self._update_ticket_expiry(ticket)
+            status = ticket.status
+            if (
+                status
+                == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
+            ):
+                store_metrics.record_prefetch_event(
+                    runtime.daemon_endpoint, status="failed"
+                )
+                return False
+            if (
+                status
+                == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+            ):
+                store_metrics.record_prefetch_event(
+                    runtime.daemon_endpoint, status="ready"
+                )
+                return True
             time.sleep(0.05)
 
     def cancel(self) -> None:

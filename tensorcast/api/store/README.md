@@ -66,7 +66,16 @@ managing clients manually.
   mapping
 
 Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
-`replica_uuid` hints the daemon to reuse a prefetched replica.
+`replica_uuid` hints the daemon to reuse a prefetched replica. Source
+preferences are honored for both artifact_id and key-backed materialization
+paths so disk/local policies aren’t dropped when fetching by key.
+
+## Streaming Copies
+
+`get_into` / `get_into_async` stream directly from the descriptor iterator
+returned by `materialize_artifact_v2` and validate targets using canonical or
+view index bytes. No intermediate `state_dict` is rebuilt, and cancellation
+continues to release staged replicas promptly.
 
 ## Feature Toggles
 

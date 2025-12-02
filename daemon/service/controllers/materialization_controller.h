@@ -59,6 +59,16 @@ class MaterializationController {
       const v2::ResolveArtifactFromDiskRequest& req,
       v2::ResolveArtifactFromDiskResponse& resp);
 
+  grpc::Status query_replica_status(
+      RpcContext& rctx,
+      const v2::QueryReplicaStatusRequest& req,
+      v2::QueryReplicaStatusResponse& resp);
+
+  grpc::Status release_replica(
+      RpcContext& rctx,
+      const v2::ReleaseReplicaRequest& req,
+      v2::ReleaseReplicaResponse& resp);
+
   grpc::Status get_artifact_index_by_id(
       RpcContext& rctx,
       const v1::GetArtifactIndexByIdRequest& req,

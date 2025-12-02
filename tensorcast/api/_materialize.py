@@ -177,6 +177,8 @@ def materialize_artifact_v2(
                 return_response=True,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
+                preference=preference_value,
+                verify_checksums=verify_checksums,
             )
             if not isinstance(response, store_daemon_v2_pb2.MaterializeByKeyResponse):
                 raise DaemonUnavailable(

@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/materialization_controller.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -20,6 +21,7 @@
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
@@ -1086,6 +1088,7 @@ grpc::Status MaterializationController::materialize_replica_v2(
     auto* ticket = resp.mutable_ticket();
     ticket->set_replica_uuid(req.replica_uuid());
     ticket->set_status(v1_resp.status());
+    ticket->set_device_uuid(req.device_uuid());
     *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
   }
   return status;
@@ -1095,60 +1098,80 @@ grpc::Status MaterializationController::materialize_by_key_v2(
     RpcContext& rctx,
     const v2::MaterializeByKeyRequest& req,
     v2::MaterializeByKeyResponse& resp) {
-  v1::MaterializeByKeyRequest v1_req;
-  v1_req.set_key(req.key());
-  v1_req.set_device_id(req.device_id());
-  v1_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
-  v1_req.set_replica_uuid(req.replica_uuid());
-  v1_req.set_pid(req.pid());
+  auto& span = rctx.span();
+  span->SetAttribute("tc.key", req.key());
 
-  v1::MaterializeByKeyResponse v1_resp;
-  auto status = materialize_by_key(rctx, v1_req, v1_resp);
+  if (req.key().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+  if (d_.is_shutting_down.load()) {
+    resp.set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  auto mapping_or = d_.engine.resolve_key_mapping(req.key());
+  if (!mapping_or.ok()) {
+    resp.set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(mapping_or.status());
+  }
+  const auto& mapping = *mapping_or;
+  span->SetAttribute("tc.artifact.id", mapping.artifact_id);
+
+  if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
+    resp.set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+  }
+
+  v2::MaterializeReplicaRequest derived_req;
+  derived_req.set_artifact_id(mapping.artifact_id);
+  derived_req.set_replica_uuid(req.replica_uuid());
+  derived_req.set_device_uuid(
+      d_.devices.From(v1::DeviceType::DEVICE_TYPE_GPU, /*device_uuid=*/"", req.device_id()).uuid);
+  derived_req.set_target_device_type(v1::DeviceType::DEVICE_TYPE_GPU);
+  derived_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
+  derived_req.set_pid(req.pid());
+  derived_req.set_preference(req.preference());
+  derived_req.set_wait_for_completion(req.wait_for_completion());
+  if (!mapping.disk_path.empty()) {
+    derived_req.mutable_disk_fallback()->set_disk_path(mapping.disk_path);
+    derived_req.mutable_disk_fallback()->set_verify_checksums(true);
+  }
+  for (const auto& name : req.tensor_names()) {
+    derived_req.add_tensor_names(name);
+  }
+  if (!req.view_subset_hash().empty()) {
+    derived_req.set_view_subset_hash(req.view_subset_hash());
+  }
+
+  v2::MaterializeReplicaResponse derived_resp;
+  auto status = materialize_replica_v2(rctx, derived_req, derived_resp);
   if (!status.ok()) {
     return status;
   }
 
-  resp.set_status(v1_resp.status());
-  resp.set_artifact_id(v1_resp.artifact_id());
-  resp.set_used_disk_path(v1_resp.used_disk_path());
-  resp.set_source(v1_resp.source());
-  if (v1_resp.has_mem_handle()) {
-    resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
+  resp.set_status(derived_resp.status());
+  resp.set_artifact_id(derived_resp.artifact_id());
+  if (!derived_resp.disk_path().empty()) {
+    resp.set_used_disk_path(derived_resp.disk_path());
+  } else if (!mapping.disk_path.empty()) {
+    resp.set_used_disk_path(mapping.disk_path);
   }
-
-  auto layout_or = resolve_layout_json_by_key(v1_resp, d_.engine);
-  if (!layout_or.ok()) {
-    return to_grpc_status(layout_or.status());
+  resp.set_source(derived_resp.source());
+  resp.set_canonical_index_bytes(derived_resp.canonical_index_bytes());
+  resp.set_generation(derived_resp.generation());
+  resp.set_view_index_bytes(derived_resp.view_index_bytes());
+  if (derived_resp.has_mem_handle()) {
+    resp.mutable_mem_handle()->CopyFrom(derived_resp.mem_handle());
   }
-  const uint64_t generation = compute_generation_from_index(*layout_or);
-  resp.set_canonical_index_bytes(*layout_or);
-  resp.set_generation(generation);
-
-  auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), /*device_uuid=*/"");
-  if (!desc_or.ok()) {
-    return to_grpc_status(desc_or.status());
+  if (derived_resp.has_view_subset()) {
+    resp.mutable_view_subset()->CopyFrom(derived_resp.view_subset());
   }
-  for (auto& desc : desc_or->descriptors) {
+  if (derived_resp.has_ticket()) {
+    resp.mutable_ticket()->CopyFrom(derived_resp.ticket());
+  }
+  for (auto& desc : *derived_resp.mutable_payloads()) {
     *resp.add_payloads() = std::move(desc);
   }
-  if (!req.view_subset_hash().empty() || !desc_or->included_names.empty()) {
-    auto* subset = resp.mutable_view_subset();
-    if (!req.view_subset_hash().empty()) {
-      subset->set_subset_hash(req.view_subset_hash());
-    }
-    for (const auto& name : desc_or->included_names) {
-      subset->add_tensor_names(name);
-    }
-  }
-  if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
-    auto* ticket = resp.mutable_ticket();
-    ticket->set_replica_uuid(req.replica_uuid());
-    ticket->set_status(v1_resp.status());
-    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
-  }
-  // Fill view index bytes with resolved canonical to aid clients that expect a layout hint.
-  resp.set_view_index_bytes(*layout_or);
-  return status;
+  return Status::OK;
 }
 
 grpc::Status MaterializationController::resolve_artifact_from_disk(
@@ -1237,11 +1260,115 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     }
   }
 
-  resp.set_canonical_index_bytes(index_or->canonical_index_json);
-  const uint64_t generation = compute_generation_from_index(index_or->canonical_index_json);
+  std::string canonical_index_bytes = index_or->canonical_index_json;
+  auto canonicalized_or = store::loader::canonicalize_from_raw_json(canonical_index_bytes, /*target_device_id=*/0);
+  if (canonicalized_or.ok()) {
+    canonical_index_bytes = std::move(canonicalized_or->canonical_index_json);
+  }
+  resp.set_canonical_index_bytes(canonical_index_bytes);
+  const uint64_t generation = compute_generation_from_index(canonical_index_bytes);
   resp.set_generation(generation);
   span->SetAttribute("tc.artifact.generation", static_cast<int64_t>(generation));
   record_disk_resolution_outcome("ok");
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status MaterializationController::query_replica_status(
+    RpcContext& rctx,
+    const v2::QueryReplicaStatusRequest& req,
+    v2::QueryReplicaStatusResponse& resp) {
+  auto& span = rctx.span();
+  if (!req.has_ticket() || req.ticket().replica_uuid().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
+  }
+  if (d_.is_shutting_down.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  const std::string replica_uuid = req.ticket().replica_uuid();
+  span->SetAttribute("tc.replica.id", replica_uuid);
+
+  auto* ticket = resp.mutable_ticket();
+  ticket->set_replica_uuid(replica_uuid);
+  if (!req.ticket().device_uuid().empty()) {
+    ticket->set_device_uuid(req.ticket().device_uuid());
+  }
+
+  auto entry = d_.sessions.get(replica_uuid);
+  if (!entry.has_value()) {
+    ticket->set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_UNSPECIFIED);
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  if (!entry->key.device.uuid.empty()) {
+    ticket->set_device_uuid(entry->key.device.uuid);
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+  if (entry->expiry > now) {
+    const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(entry->expiry - now);
+    const absl::Time expires_at = absl::Now() + absl::Microseconds(remaining.count());
+    const int64_t micros = absl::ToUnixMicros(expires_at);
+    auto* ts = ticket->mutable_expires_at();
+    ts->set_seconds(micros / 1'000'000);
+    ts->set_nanos(static_cast<int32_t>((micros % 1'000'000) * 1'000));
+  }
+
+  const auto ready_status = entry->ready.wait_for(std::chrono::seconds(0));
+  if (ready_status == std::future_status::ready) {
+    const absl::Status ready = entry->ready.get();
+    if (ready.ok()) {
+      ticket->set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+    } else {
+      ticket->set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    }
+  } else {
+    ticket->set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_UNSPECIFIED);
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status MaterializationController::release_replica(
+    RpcContext& rctx,
+    const v2::ReleaseReplicaRequest& req,
+    v2::ReleaseReplicaResponse& resp) {
+  auto& span = rctx.span();
+  if (!req.has_ticket() || req.ticket().replica_uuid().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
+  }
+  if (d_.is_shutting_down.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  const std::string replica_uuid = req.ticket().replica_uuid();
+  span->SetAttribute("tc.replica.id", replica_uuid);
+
+  auto entry = d_.sessions.get(replica_uuid);
+  if (!entry.has_value()) {
+    resp.set_released(false);
+    rctx.mark_success();
+    return Status::OK;
+  }
+  const auto key = entry->key;
+  if (d_.lifecycle && key.device.type == DeviceType::GPU) {
+    SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
+    for (int32_t pid : d_.refs.pids(key)) {
+      const auto status = d_.lifecycle->release_use_lease(subj, pid);
+      if (!status.ok()) {
+        LOG(WARNING) << "release_use_lease failed for replica_uuid=" << replica_uuid << ": " << status;
+      }
+    }
+  }
+  for (int32_t pid : d_.refs.pids(key)) {
+    d_.refs.drop_ref(key, pid);
+  }
+  const int rc = d_.engine.unload_replica(key);
+  if (rc != 0) {
+    return {StatusCode::INTERNAL, absl::StrFormat("unload_replica() returned %d", rc)};
+  }
+  d_.sessions.erase(replica_uuid);
+  resp.set_released(true);
   rctx.mark_success();
   return Status::OK;
 }

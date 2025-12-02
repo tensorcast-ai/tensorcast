@@ -23,7 +23,6 @@ from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
     canonical_index_to_bytes,
-    validate_targets,
 )
 from tensorcast.api.store.retry import (
     compute_retry_delay,
@@ -364,15 +363,12 @@ class MaterializationPipeline:
         )
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
-            canonical_index = canonical_index_from_bytes(layout_bytes)
-            pairs = validate_targets(
-                canonical_index=canonical_index,
+            self._stream_into_targets(
+                payload=payload,
                 target=target,
-                source=self._payload_state_dict(payload),
                 device_id=device_id,
+                layout_bytes=layout_bytes,
             )
-            for tgt, src in pairs:
-                tgt.copy_(src)
         finally:
             self._release_materialized(payload, self._runtime.ensure_client())
 
@@ -419,18 +415,13 @@ class MaterializationPipeline:
                         materialized.view_index_bytes
                         or materialized.canonical_index_bytes
                     )
-                    canonical_index = canonical_index_from_bytes(layout_bytes)
-                    source_map = self._payload_state_dict(materialized)
-                    pairs = validate_targets(
-                        canonical_index=canonical_index,
+                    self._stream_into_targets(
+                        payload=materialized,
                         target=target,
-                        source=source_map,
                         device_id=device_id,
+                        layout_bytes=layout_bytes,
+                        cancel_event=cancel_event,
                     )
-                    for tgt, src in pairs:
-                        if cancel_event.is_set():
-                            raise CancelledError
-                        tgt.copy_(src)
                 finally:
                     if materialized is not None:
                         self._release_materialized(
@@ -509,15 +500,12 @@ class MaterializationPipeline:
         )
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
-            layout_index = canonical_index_from_bytes(layout_bytes)
-            pairs = validate_targets(
-                canonical_index=layout_index,
+            self._stream_into_targets(
+                payload=payload,
                 target=target,
-                source=self._payload_state_dict(payload),
                 device_id=device_id,
+                layout_bytes=layout_bytes,
             )
-            for tgt, src in pairs:
-                tgt.copy_(src)
         finally:
             self._release_materialized(payload, self._runtime.ensure_client())
 
@@ -619,6 +607,81 @@ class MaterializationPipeline:
         for desc, tensor in payload.payload_iter():
             state[desc.name] = tensor
         return state
+
+    def _stream_into_targets(
+        self,
+        *,
+        payload: MaterializationPayload,
+        target: Mapping[str, torch.Tensor],
+        device_id: int,
+        layout_bytes: bytes,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        canonical_index = canonical_index_from_bytes(layout_bytes)
+        expected: dict[str, torch.Tensor] = {}
+        target_device = (
+            next(iter(target.values())).device
+            if target
+            else torch.device("cuda", device_id)
+        )
+        expected_device = target_device
+        if target_device.type == "cuda":
+            expected_device = torch.device("cuda", device_id)
+        for entry in canonical_index.entries:
+            tensor_name = entry.name
+            if tensor_name not in target:
+                raise ArtifactError(
+                    f"Target tensor '{tensor_name}' missing",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            tgt = target[tensor_name]
+            if not isinstance(tgt, torch.Tensor):
+                raise ArtifactError(
+                    f"Target '{tensor_name}' must be a tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tgt.device != expected_device:
+                raise ArtifactError(
+                    f"Target tensor '{tensor_name}' on {tgt.device}, expected {expected_device}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tuple(tgt.shape) != entry.shape:
+                raise ArtifactError(
+                    f"Target tensor '{tensor_name}' shape {tuple(tgt.shape)} != {entry.shape}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tgt.dtype != entry.dtype:
+                raise ArtifactError(
+                    f"Target tensor '{tensor_name}' dtype {tgt.dtype} != {entry.dtype}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            expected[tensor_name] = tgt
+
+        seen: set[str] = set()
+        for desc, tensor in payload.payload_iter():
+            if cancel_event is not None and cancel_event.is_set():
+                raise CancelledError
+            target_tensor = expected.get(desc.name)
+            if target_tensor is None:
+                raise ArtifactError(
+                    f"Unexpected tensor '{desc.name}' in materialization payload",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            target_tensor.copy_(tensor)
+            seen.add(desc.name)
+        missing = [name for name in expected if name not in seen]
+        if missing:
+            raise ArtifactError(
+                f"Materialization payload missing tensors: {', '.join(missing)}",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
 
     def _summarize_materialized(
         self,

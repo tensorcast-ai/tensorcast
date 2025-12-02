@@ -94,6 +94,15 @@ def _inc_rpc_retry(
     return cur
 
 
+class PrefetchRpcError(RuntimeError):
+    """Structured error for prefetch RPCs with retryability metadata."""
+
+    def __init__(self, message: str, *, retryable: bool, status_code: str) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
 def get_host_pid() -> int:
     """Get the host PID of the current process.
 
@@ -118,6 +127,35 @@ def get_host_pid() -> int:
 
     # Fallback to regular PID if host PID cannot be determined
     return os.getpid()
+
+
+def _prefetch_rpc_error(method_name: str, exc: grpc.RpcError) -> PrefetchRpcError:
+    try:
+        code = exc.code()
+    except Exception:
+        code = None
+    retryable_codes = {
+        grpc.StatusCode.UNAVAILABLE,
+        grpc.StatusCode.INTERNAL,
+        grpc.StatusCode.UNKNOWN,
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+        grpc.StatusCode.CANCELLED,
+    }
+    retryable = code in retryable_codes
+    code_name = "UNKNOWN"
+    with suppress(Exception):
+        if code is not None:
+            code_name = code.name
+    detail = ""
+    with suppress(Exception):
+        detail = exc.details() or ""
+    if not detail:
+        detail = str(exc)
+    return PrefetchRpcError(
+        f"{method_name} RPC failed with status={code_name}: {detail}",
+        retryable=bool(retryable),
+        status_code=str(code_name),
+    )
 
 
 # This is a singleton class that manages the checkpoint
@@ -545,7 +583,7 @@ class DaemonCtl:
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
-                raise
+                raise _prefetch_rpc_error("QueryReplicaStatus", e) from e
         return response
 
     def release_replica(
@@ -563,7 +601,7 @@ class DaemonCtl:
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
-                raise
+                raise _prefetch_rpc_error("ReleaseReplica", e) from e
         return response
 
     @overload
@@ -750,6 +788,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        verify_checksums: bool = True,
     ) -> store_daemon_v2_pb2.MaterializeByKeyResponse: ...
 
     @overload
@@ -765,6 +804,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        verify_checksums: bool = True,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
 
     @overload
@@ -780,6 +820,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        verify_checksums: bool = True,
     ) -> tuple[bytes, str, str]: ...
 
     def materialize_by_key_v2(
@@ -793,6 +834,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        verify_checksums: bool = True,
     ) -> (
         store_daemon_v2_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
@@ -806,6 +848,7 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeByKeyV2") as span:
+            span.set_attribute("tc.store.verify_checksums", bool(verify_checksums))
             request = store_daemon_v2_pb2.MaterializeByKeyRequest(
                 key=key,
                 device_id=int(device_id),

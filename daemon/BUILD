@@ -669,6 +669,7 @@ cc_test(
     name = "resolve_artifact_from_disk_test",
     srcs = ["resolve_artifact_from_disk_test.cc"],
     deps = [
+        ":grpc_service_impl",
         ":ipc_region_registry_lib",
         ":lip_manager_lib",
         ":materialization_controller_lib",

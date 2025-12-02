@@ -18,6 +18,7 @@
 #include "core/testing/common.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/device_resolver.h"
+#include "daemon/grpc_service_impl.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/lip_manager.h"
@@ -130,6 +131,47 @@ TEST_CASE(
   REQUIRE_FALSE(resp.artifact_id().empty());
   REQUIRE(resp.generation() == generation_from_bytes(resp.canonical_index_bytes()));
   REQUIRE_FALSE(resp.canonical_index_bytes().empty());
+}
+
+TEST_CASE(
+    "ResolveArtifactFromDisk canonical bytes match materialization response",
+    "[daemon][disk][resolve][materialize]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_parity";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  ResolveFixture fix;
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest req;
+  req.set_disk_path(artifact_dir.string());
+  req.set_verify_checksums(true);
+  ResolveArtifactFromDiskResponse resp;
+  auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE_FALSE(resp.canonical_index_bytes().empty());
+
+  tensorcast::daemon::StoreDaemonServiceV2Impl svc(fix.controller, /*allow_high_card_attrs=*/true);
+  grpc::ServerContext mctx;
+  tensorcast::daemon::v2::MaterializeReplicaRequest mreq;
+  mreq.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
+  mreq.mutable_disk_fallback()->set_verify_checksums(true);
+  mreq.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_CPU);
+  mreq.set_preference(tensorcast::daemon::v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  mreq.set_replica_uuid("parity");
+  mreq.set_wait_for_completion(true);
+  tensorcast::daemon::v2::MaterializeReplicaResponse mresp;
+  auto materialize_status = svc.MaterializeReplica(&mctx, &mreq, &mresp);
+
+  REQUIRE(materialize_status.ok());
+  REQUIRE(mresp.status() == tensorcast::daemon::v1::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  REQUIRE(mresp.source() == tensorcast::daemon::v1::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE(mresp.canonical_index_bytes() == resp.canonical_index_bytes());
+  REQUIRE(mresp.generation() == resp.generation());
 }
 
 TEST_CASE("ResolveArtifactFromDisk enforces whitelist and missing paths", "[daemon][disk][resolve]") {

@@ -372,6 +372,16 @@ class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
       const v2::GetMaterializeCapabilitiesRequest* req,
       v2::GetMaterializeCapabilitiesResponse* resp) override;
 
+  grpc::Status QueryReplicaStatus(
+      grpc::ServerContext* ctx,
+      const v2::QueryReplicaStatusRequest* req,
+      v2::QueryReplicaStatusResponse* resp) override;
+
+  grpc::Status ReleaseReplica(
+      grpc::ServerContext* ctx,
+      const v2::ReleaseReplicaRequest* req,
+      v2::ReleaseReplicaResponse* resp) override;
+
  private:
   MaterializationController& materialization_controller_;
   bool allow_high_card_attrs_{false};

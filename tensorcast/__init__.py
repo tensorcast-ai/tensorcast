@@ -125,6 +125,10 @@ from tensorcast.api import (  # noqa: E402
     save_dict,
 )
 from tensorcast.api.store import (  # noqa: E402
+    BatchContext,
+    PrefetchTicket,
+    artifact,
+    artifact_async,
     from_disk,
     get,
     get_async,
@@ -160,6 +164,9 @@ __all__ = [
     "build_indices_from_safetensors",
     "from_disk",
     "ArtifactDescriptor",
+    "artifact",
+    "artifact_async",
+    "BatchContext",
     "store",
     "register",
     "register_async",
@@ -170,5 +177,6 @@ __all__ = [
     "get_async",
     "get_into",
     "get_into_async",
+    "PrefetchTicket",
     "BuildConfigMismatchError",
 ]

@@ -206,6 +206,22 @@ Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
   return Status::OK;
 }
 
+Status StoreDaemonServiceV2Impl::QueryReplicaStatus(
+    grpc::ServerContext* ctx,
+    const v2::QueryReplicaStatusRequest* req,
+    v2::QueryReplicaStatusResponse* resp) {
+  RpcContext rctx{"QueryReplicaStatusV2", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.query_replica_status(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceV2Impl::ReleaseReplica(
+    grpc::ServerContext* ctx,
+    const v2::ReleaseReplicaRequest* req,
+    v2::ReleaseReplicaResponse* resp) {
+  RpcContext rctx{"ReleaseReplicaV2", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.release_replica(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
     const v1::LockTransportChunksRequest* req,
