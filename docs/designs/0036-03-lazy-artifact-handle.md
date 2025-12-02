@@ -83,8 +83,8 @@ See `0036-02-artifact-handle-core.md` for the base handle + store binding diagra
 Phase 1 already introduced the v2 selective-materialization RPC. Phase 3 adds two incremental capabilities required for prefetch tickets and explicit source policies:
 
 - **Replica Tickets** – `MaterializeReplicaResponse` now carries an optional `ReplicaTicket { string replica_uuid, string device_uuid, google.protobuf.Timestamp expires_at, LoadStatus status }` whenever `wait_for_completion=false`. The SDK surfaces that via `Artifact.prefetch()` and later passes the `replica_uuid` back through `Materialize*` requests. Two lightweight RPCs are added:
-  - `QueryReplicaStatus(ReplicaTicket)` – returns `{status, expires_at}` so the SDK can await readiness without reissuing a materialize call.
-  - `ReleaseReplica(ReplicaTicket)` – allows explicit cleanup when the ticket is abandoned before consumption.
+  - `QueryReplicaStatus(QueryReplicaStatusRequest)` – accepts a request wrapper containing the `ReplicaTicket` and returns `{status, expires_at}` so the SDK can await readiness without reissuing a materialize call.
+  - `ReleaseReplica(ReleaseReplicaRequest)` – accepts the same wrapper pattern to allow explicit cleanup when the ticket is abandoned before consumption.
 - **Source Preferences** – `SourcePreference preference` and `DiskFallbackHint` (disk path + checksum policy) become first-class request fields. They are wired directly from the extended `FallbackOptions` documented below so that daemon-side schedulers can differentiate `local_only`, `disk-first`, or `p2p` requests without relying on heuristics.
 
 All other protocol changes (tensor-name subsets, descriptor iterators) remain as defined in `0036-01`.
@@ -174,7 +174,7 @@ SliceSpec = slice | tuple[int, slice]
 
 > **See Phase 4**: The `tc.from_disk(path)` entry point is fully specified in [0036-04-disk-artifact-variant.md](./0036-04-disk-artifact-variant.md).
 
-**Summary**: `tc.from_disk(path)` returns a standard `Artifact` (not a special subclass) by going through the same Store session / daemon gRPC flow. The view composition, batching, and prefetch APIs defined in this document work identically with disk-backed artifacts.
+**Summary**: `tc.from_disk(path)` returns a standard `Artifact` (not a special subclass) by going through the same Store session / daemon gRPC flow. The daemon RPC `ResolveArtifactFromDisk` returns `{artifact_id, canonical_index_bytes, generation}` and the SDK hydrates `ArtifactCache` with those bytes so metadata access avoids a second fetch. Materialization then flows through `MaterializeReplica` with `SourcePreference=DISK` and the same descriptor schema (`{name, shape, stride, buffer_offset, byte_length, storage_offset, dtype, device_uuid}`) used for P2P artifacts. The view composition, batching, and prefetch APIs defined in this document work identically with disk-backed artifacts.
 
 ### Extended FallbackOptions
 

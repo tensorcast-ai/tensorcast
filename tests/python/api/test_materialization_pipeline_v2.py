@@ -16,6 +16,7 @@ from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
 from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +36,14 @@ def _patch_validate_targets(monkeypatch):
         return pairs
 
     monkeypatch.setattr(mat_mod, "validate_targets", _pair)
+
+
+def test_materialization_proto_alignment():
+    resp = store_daemon_v2_pb2.MaterializeReplicaResponse()
+    assert hasattr(resp, "canonical_index_bytes")
+    assert hasattr(resp, "view_index_bytes")
+    assert hasattr(resp, "generation")
+    assert not hasattr(resp, "canonical_index_json")
 
 
 class _DummySpan:

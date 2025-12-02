@@ -10,7 +10,7 @@ from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 
 
-def _make_entry(artifact_id: str) -> ArtifactCacheEntry:
+def _make_entry(artifact_id: str, generation: int | None = None) -> ArtifactCacheEntry:
     entry = CanonicalIndexEntry(
         name="x",
         dtype=torch.float32,
@@ -25,7 +25,7 @@ def _make_entry(artifact_id: str) -> ArtifactCacheEntry:
         artifact_id=artifact_id,
         canonical_index_bytes=b'{"x":[0,4,[1],[1],"float32",0]}',
         parsed_index=index,
-        generation=None,
+        generation=generation,
         disk_path=None,
         expires_at=time.monotonic(),
     )
@@ -40,6 +40,14 @@ def test_cache_hit_and_ttl_expiry():
     assert cached.hit_count == 1
     time.sleep(0.02)
     assert cache.get_artifact_index_cached("a1") is None
+
+
+def test_cache_round_trip_preserves_generation():
+    cache = ArtifactCache(daemon_endpoint="daemon", ttl_seconds=10, max_entries=2)
+    cache.cache_artifact_index(_make_entry("g1", generation=9))
+    cached = cache.get_artifact_index_cached("g1")
+    assert cached is not None
+    assert cached.generation == 9
 
 
 def test_cache_lru_eviction():

@@ -9,7 +9,10 @@ import "tensorcast/daemon/v1/store_daemon.proto";
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
+  rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
   rpc GetMaterializeCapabilities(GetMaterializeCapabilitiesRequest) returns (GetMaterializeCapabilitiesResponse) {}
+  rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
+  rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
 }
 
 message DiskFallbackHint {
@@ -37,6 +40,8 @@ message ReplicaTicket {
   string replica_uuid = 1;
   tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
   google.protobuf.Timestamp created_at = 3;
+  string device_uuid = 4;
+  google.protobuf.Timestamp expires_at = 5;
 }
 
 message MaterializeReplicaRequest {
@@ -73,11 +78,12 @@ message MaterializeReplicaResponse {
   tensorcast.daemon.v1.MemCopyHandle mem_handle = 3;
   tensorcast.daemon.v1.MaterializeReplicaStatus status = 4;
   tensorcast.daemon.v1.MaterializationSource source = 5;
-  bytes canonical_index_json = 6;
+  bytes canonical_index_bytes = 6;
   ViewSubset view_subset = 7;
   repeated TensorPayloadDescriptor payloads = 8;
   ReplicaTicket ticket = 9;
-  bytes view_index_json = 10;
+  bytes view_index_bytes = 10;
+  uint64 generation = 11;
 }
 
 message MaterializeByKeyRequest {
@@ -101,15 +107,44 @@ message MaterializeByKeyResponse {
   string used_disk_path = 3;
   tensorcast.daemon.v1.MemCopyHandle mem_handle = 4;
   tensorcast.daemon.v1.MaterializationSource source = 5;
-  bytes canonical_index_json = 6;
+  bytes canonical_index_bytes = 6;
   ViewSubset view_subset = 7;
   repeated TensorPayloadDescriptor payloads = 8;
   ReplicaTicket ticket = 9;
-  bytes view_index_json = 10;
+  bytes view_index_bytes = 10;
+  uint64 generation = 11;
+}
+
+message ResolveArtifactFromDiskRequest {
+  string disk_path = 1;
+  bool verify_checksums = 2;
+}
+
+message ResolveArtifactFromDiskResponse {
+  string artifact_id = 1;
+  string disk_path = 2;
+  bytes canonical_index_bytes = 3;
+  uint64 generation = 4;
 }
 
 message GetMaterializeCapabilitiesRequest {}
 
 message GetMaterializeCapabilitiesResponse {
   bool supports_view_subset_hash = 1;
+}
+
+message QueryReplicaStatusResponse {
+  ReplicaTicket ticket = 1;
+}
+
+message QueryReplicaStatusRequest {
+  ReplicaTicket ticket = 1;
+}
+
+message ReleaseReplicaRequest {
+  ReplicaTicket ticket = 1;
+}
+
+message ReleaseReplicaResponse {
+  bool released = 1;
 }

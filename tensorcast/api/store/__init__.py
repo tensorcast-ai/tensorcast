@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 import weakref
 from collections.abc import Callable, Mapping, Sequence
@@ -25,6 +26,11 @@ from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api.store.artifact import Artifact, ArtifactDescriptor, TensorMeta
 from tensorcast.api.store.async_ops import ArtifactFuture
+from tensorcast.api.store.batch_context import (
+    BatchContext,
+    MaterializationBatcher,
+    PrefetchTicket,
+)
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
@@ -78,6 +84,20 @@ class Store:
             self._runtime,
             self._views,
             materialize_fn=materialize_fn or materialize_artifact_v2,
+        )
+        self._enable_batcher = os.getenv(
+            "TENSORCAST_STORE_ENABLE_BATCHER", "1"
+        ).lower() not in ("0", "false", "no")
+        self._enable_prefetch = os.getenv(
+            "TENSORCAST_STORE_ENABLE_PREFETCH", "1"
+        ).lower() not in ("0", "false", "no")
+        self._batcher: MaterializationBatcher | None = (
+            MaterializationBatcher(
+                self._runtime,
+                self._materialization,
+            )
+            if self._enable_batcher
+            else None
         )
 
     def set_register_fn(self, register_fn: Callable[..., RegistrationResult]) -> None:
@@ -198,13 +218,38 @@ class Store:
         disk_path: str | None = None,
         fallback: FallbackOptions | None = None,
     ) -> Artifact:
+        effective_fallback = fallback
+        if disk_path and fallback is None:
+            effective_fallback = FallbackOptions.for_disk(disk_path)
         return Artifact(
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
             disk_path=disk_path,
+            fallback=effective_fallback,
+        )
+
+    async def artifact_async(
+        self,
+        *,
+        artifact_id: str | None = None,
+        key: str | None = None,
+        disk_path: str | None = None,
+        fallback: FallbackOptions | None = None,
+    ) -> Artifact:
+        return self.artifact(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
             fallback=fallback,
         )
+
+    def from_disk(
+        self, path: str, *, fallback: FallbackOptions | None = None
+    ) -> Artifact:
+        disk_path = os.fspath(path)
+        effective_fallback = fallback or FallbackOptions.for_disk(str(disk_path))
+        return self.artifact(disk_path=str(disk_path), fallback=effective_fallback)
 
     def get(
         self,
@@ -405,7 +450,16 @@ class Store:
     def closed(self) -> bool:
         return self._runtime.closed
 
+    @property
+    def batcher(self) -> MaterializationBatcher:
+        if self._batcher is None:
+            raise RuntimeError("Materialization batcher is disabled")
+        return self._batcher
+
     def close(self) -> None:
+        with contextlib.suppress(Exception):
+            if self._batcher is not None:
+                self._batcher.close()
         self._runtime.close()
 
 
@@ -778,11 +832,23 @@ def artifact(
     )
 
 
-def from_disk(path: str, *, fallback: FallbackOptions | None = None) -> Artifact:
-    effective_fallback = fallback or FallbackOptions(
-        disk_path=path, prefer_disk=True, allow_p2p=False
+async def artifact_async(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    disk_path: str | None = None,
+    fallback: FallbackOptions | None = None,
+) -> Artifact:
+    return await _coerce_store().artifact_async(
+        artifact_id=artifact_id,
+        key=key,
+        disk_path=disk_path,
+        fallback=fallback,
     )
-    return _coerce_store().artifact(disk_path=path, fallback=effective_fallback)
+
+
+def from_disk(path: str, *, fallback: FallbackOptions | None = None) -> Artifact:
+    return _coerce_store().from_disk(path, fallback=fallback)
 
 
 __all__ = [
@@ -796,6 +862,8 @@ __all__ = [
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",
+    "MaterializationBatcher",
+    "PrefetchTicket",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",
@@ -806,9 +874,11 @@ __all__ = [
     "TensorDict",
     "TransformPlacement",
     "artifact",
+    "artifact_async",
     "from_disk",
     "store",
     "shutdown_process_store",
+    "BatchContext",
     "register",
     "register_async",
     "put",

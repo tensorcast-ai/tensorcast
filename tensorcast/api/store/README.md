@@ -16,12 +16,56 @@ managing clients manually.
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
   `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
   continue to work.
+- `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
+  artifacts via the daemon `ResolveArtifactFromDisk` RPC, seeding
+  `ArtifactCache` with `canonical_index_bytes` + `generation` and binding a
+  disk-first `FallbackOptions` so materialization prefers the local files
+  without re-fetching metadata.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
   remains readable for debugging.
 - `with_fallback(...)` clones a handle with different fallback hints; eager
   `get*` APIs remain unchanged.
+
+## View Composition
+
+- `artifact.view(...)`, `.subset(...)`, and `.slice(...)` return derived
+  handles with composed view specs. Parent/child handles keep independent locks
+  and metadata caches so repeated calls avoid daemon lookups.
+- `artifact.view_builder()` exposes a fluent builder for chaining multiple view
+  operations before building a child handle.
+
+## Batching, Async, and Prefetch
+
+- Use `with artifact.batch(device="cuda:0")` to coalesce multiple tensor fetches
+  into a single RPC while keeping sync semantics.
+- Async consumers can `await artifact.tensor_async(...)` or
+  `await artifact.tensor_dict_async(...)`; calls are coalesced by the process
+  `MaterializationBatcher` (1ms window) on the store event loop.
+- `artifact.prefetch(device=...)` issues background materialization
+  (`wait_for_completion=False`) and returns a `PrefetchTicket`; the handle
+  carries the ticket’s `replica_uuid` via `FallbackOptions` for the next fetch.
+
+## Fallback Preferences
+
+`FallbackOptions` now supports explicit source preferences:
+
+- `prefer="auto"` (default) — daemon chooses optimal source
+- `prefer="local"` — disallow P2P; prefer an existing local replica
+- `prefer="p2p"` — allow remote transfer
+- `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
+  mapping
+
+Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
+`replica_uuid` hints the daemon to reuse a prefetched replica.
+
+## Feature Toggles
+
+- `TENSORCAST_STORE_ENABLE_BATCHER` (default: enabled) — disable to bypass the
+  async batcher and route `tensor_async` through direct fetches.
+- `TENSORCAST_STORE_ENABLE_PREFETCH` (default: enabled) — disable to prevent
+  `Artifact.prefetch()` from issuing background materialization.
 
 ## Metadata Cache
 
@@ -39,3 +83,6 @@ managing clients manually.
 - Invalidation hooks run after registration, deregistration, and materialization
   errors (`NOT_FOUND`/`FAILED_PRECONDITION`) to keep key→artifact mappings and
   cached indices consistent.
+- Disk resolution (`ResolveArtifactFromDisk`) seeds the cache with
+  `canonical_index_bytes`, `generation`, and `disk_path` so repeated
+  `from_disk` calls avoid extra daemon RPCs and preserve generation metadata.

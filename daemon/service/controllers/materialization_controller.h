@@ -54,6 +54,11 @@ class MaterializationController {
       const v2::MaterializeByKeyRequest& req,
       v2::MaterializeByKeyResponse& resp);
 
+  grpc::Status resolve_artifact_from_disk(
+      RpcContext& rctx,
+      const v2::ResolveArtifactFromDiskRequest& req,
+      v2::ResolveArtifactFromDiskResponse& resp);
+
   grpc::Status get_artifact_index_by_id(
       RpcContext& rctx,
       const v1::GetArtifactIndexByIdRequest& req,

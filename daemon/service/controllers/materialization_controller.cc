@@ -3,12 +3,14 @@
 #include "daemon/service/controllers/materialization_controller.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <future>
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
@@ -16,9 +18,11 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/span.h"
 #include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
 
+#include "core/common/artifact_hash.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
@@ -155,6 +159,21 @@ v1::MaterializationSource to_proto_source(MaterializationSource source) {
     default:
       return v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
   }
+}
+
+uint64_t compute_generation_from_index(std::string_view canonical_index_json) {
+  if (canonical_index_json.empty()) {
+    return 0;
+  }
+  const auto digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(
+          reinterpret_cast<const uint8_t*>(canonical_index_json.data()), canonical_index_json.size()));
+  uint64_t value = 0;
+  const size_t limit = std::min<size_t>(8, digest.size());
+  for (size_t i = 0; i < limit; ++i) {
+    value = (value << 8) | static_cast<uint64_t>(digest[i]);
+  }
+  return value;
 }
 
 absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
@@ -935,14 +954,16 @@ grpc::Status MaterializationController::materialize_replica_v2(
     resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
   }
   if (!v1_resp.view_index_json().empty()) {
-    resp.set_view_index_json(v1_resp.view_index_json());
+    resp.set_view_index_bytes(v1_resp.view_index_json());
   }
 
   auto layout_or = resolve_layout_json(v1_resp, req, d_.engine);
   if (!layout_or.ok()) {
     return to_grpc_status(layout_or.status());
   }
-  resp.set_canonical_index_json(*layout_or);
+  const uint64_t generation = compute_generation_from_index(*layout_or);
+  resp.set_canonical_index_bytes(*layout_or);
+  resp.set_generation(generation);
 
   std::optional<DescriptorBuildResult> desc_result;
   if (req.view_identity_case() == v2::MaterializeReplicaRequest::kView && v1_resp.view_index_json().empty()) {
@@ -1019,7 +1040,9 @@ grpc::Status MaterializationController::materialize_by_key_v2(
   if (!layout_or.ok()) {
     return to_grpc_status(layout_or.status());
   }
-  resp.set_canonical_index_json(*layout_or);
+  const uint64_t generation = compute_generation_from_index(*layout_or);
+  resp.set_canonical_index_bytes(*layout_or);
+  resp.set_generation(generation);
 
   auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), /*device_uuid=*/"");
   if (!desc_or.ok()) {
@@ -1043,9 +1066,66 @@ grpc::Status MaterializationController::materialize_by_key_v2(
     ticket->set_status(v1_resp.status());
     *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
   }
-  // Fill view index JSON with resolved canonical to aid clients that expect a layout hint.
-  resp.set_view_index_json(*layout_or);
+  // Fill view index bytes with resolved canonical to aid clients that expect a layout hint.
+  resp.set_view_index_bytes(*layout_or);
   return status;
+}
+
+grpc::Status MaterializationController::resolve_artifact_from_disk(
+    RpcContext& rctx,
+    const v2::ResolveArtifactFromDiskRequest& req,
+    v2::ResolveArtifactFromDiskResponse& resp) {
+  auto& span = rctx.span();
+  const bool verify_checksums = req.verify_checksums();
+  if (req.disk_path().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "disk_path is required"};
+  }
+  if (d_.is_shutting_down.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto normalized_or = normalize_disk_path(req.disk_path());
+  if (!normalized_or.ok()) {
+    return to_grpc_status(normalized_or.status());
+  }
+  const auto& normalized = *normalized_or;
+  if (whitelist_enforced_) {
+    bool allowed = false;
+    for (const auto& prefix : disk_path_whitelist_) {
+      if (path_has_prefix(normalized, prefix)) {
+        allowed = true;
+        break;
+      }
+    }
+    if (!allowed) {
+      record_disk_path_denied();
+      LOG(WARNING) << "disk_path not permitted by whitelist: " << normalized;
+      return {StatusCode::INVALID_ARGUMENT, "disk_path not permitted by daemon whitelist"};
+    }
+  }
+  resp.set_disk_path(normalized.string());
+  if (rctx.allow_high_card_attrs()) {
+    span->SetAttribute("tc.disk.path", normalized.string());
+  }
+  span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+
+  auto artifact_id_or = load_artifact_id_from_descriptor(normalized);
+  if (!artifact_id_or.ok()) {
+    return to_grpc_status(artifact_id_or.status());
+  }
+  if (artifact_id_or->has_value()) {
+    resp.set_artifact_id(**artifact_id_or);
+    span->SetAttribute("tc.artifact.id", **artifact_id_or);
+  }
+
+  auto index_or = store::loader::read_from_artifact_dir(normalized, /*target_device_id=*/0);
+  if (!index_or.ok()) {
+    return to_grpc_status(index_or.status());
+  }
+  resp.set_canonical_index_bytes(index_or->canonical_index_json);
+  resp.set_generation(compute_generation_from_index(index_or->canonical_index_json));
+  rctx.mark_success();
+  return Status::OK;
 }
 
 grpc::Status MaterializationController::get_artifact_index_by_id(
