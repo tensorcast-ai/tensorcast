@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 
 import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast._C import get_cuda_memory_ptr, restore_tensors
+from tensorcast._C import get_cuda_memory_ptr
 from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
@@ -35,7 +36,7 @@ class TensorPayloadDescriptor:
     device_uuid: str | None = None
 
 
-PayloadIterator = Iterator[tuple[TensorPayloadDescriptor, torch.Tensor]]
+PayloadIterator = Iterator[tuple[TensorPayloadDescriptor, memoryview]]
 
 
 @dataclass(frozen=True)
@@ -295,32 +296,25 @@ def materialize_artifact_v2(
     cuda_memory_ptr = (
         get_cuda_memory_ptr(dev_id, handle_bytes) if handle_bytes else None
     )
+    total_bytes = 0
+    if descriptors:
+        total_bytes = max(
+            int(desc.buffer_offset + desc.byte_length) for desc in descriptors
+        )
 
     def _iter() -> PayloadIterator:
         if cuda_memory_ptr is None:
             raise DaemonUnavailable(
                 "Materialization payload is missing a mem_handle; tensor data is not available"
             )
+        if total_bytes <= 0:
+            return
+        base_buffer = (ctypes.c_char * total_bytes).from_address(int(cuda_memory_ptr))
+        base_view = memoryview(base_buffer)
         for desc in descriptors:
-            meta_state_dict = {
-                desc.name: (
-                    list(desc.shape),
-                    list(desc.stride),
-                    desc.dtype,
-                    int(desc.storage_offset),
-                )
-            }
-            tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
-                dev_id: {desc.name: int(desc.buffer_offset)}
-            }
-            memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
-            tensors = restore_tensors(
-                meta_state_dict,
-                memory_ptrs,
-                tensor_offsets,
-                True,
-            )
-            yield desc, tensors[desc.name]
+            start = int(desc.buffer_offset)
+            end = start + int(desc.byte_length)
+            yield desc, base_view[start:end]
 
     if opts.enable_verification:
         verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000

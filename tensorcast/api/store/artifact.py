@@ -220,7 +220,7 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
-        payload, _ = pipeline.materialize_subset(
+        payload, device_id = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
             device=device,
@@ -235,7 +235,7 @@ class Artifact:
         )
         try:
             self._update_metadata_from_payload(payload, runtime)
-            state = pipeline._payload_state_dict(payload)
+            state = pipeline._payload_state_dict(payload, device_id=device_id)
             if requested_names is None:
                 return state
             return {name: state[name] for name in requested_names}
@@ -327,8 +327,9 @@ class Artifact:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        self._ensure_identified()
         loop = asyncio.get_running_loop()
+        if self._artifact_id is None:
+            await loop.run_in_executor(None, self._ensure_identified)
         view_hash = None
         if self._view_metadata is not None:
             view_hash = self._view_metadata.view_data_hash

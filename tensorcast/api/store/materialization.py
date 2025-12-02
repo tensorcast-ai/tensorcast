@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import threading
 import time
@@ -12,10 +13,12 @@ from typing import TypedDict
 import torch
 from opentelemetry.trace import Status, StatusCode
 
+from tensorcast._C import restore_tensors
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._materialize import (
     MaterializationPayload,
+    TensorPayloadDescriptor,
     materialize_artifact_v2,
 )
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
@@ -163,7 +166,7 @@ class MaterializationPipeline:
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
     ) -> dict[str, torch.Tensor]:
-        payload, _ = self._perform_get_with_retry(
+        payload, device_id = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
             device=device,
@@ -173,17 +176,20 @@ class MaterializationPipeline:
             options_override=options,
             tensor_names=tensor_names,
         )
-        state = self._payload_state_dict(payload)
-        if tensor_names:
-            missing = [name for name in tensor_names if name not in state]
-            if missing:
-                raise ArtifactError(
-                    f"Materialization payload missing tensors: {', '.join(missing)}",
-                    status_code="NOT_FOUND",
-                    retryable=False,
-                )
-            state = {name: state[name] for name in tensor_names}
-        return state
+        try:
+            state = self._payload_state_dict(payload, device_id=device_id)
+            if tensor_names:
+                missing = [name for name in tensor_names if name not in state]
+                if missing:
+                    raise ArtifactError(
+                        f"Materialization payload missing tensors: {', '.join(missing)}",
+                        status_code="NOT_FOUND",
+                        retryable=False,
+                    )
+                state = {name: state[name] for name in tensor_names}
+            return state
+        finally:
+            self._release_materialized(payload, self._runtime.ensure_client())
 
     def materialize_subset(
         self,
@@ -246,7 +252,7 @@ class MaterializationPipeline:
                 placement, has_transpose=resolved.has_transpose
             )
 
-        payload, _ = self._perform_get_with_retry(
+        payload, device_id = self._perform_get_with_retry(
             method="get_view",
             artifact_id=resolved.artifact_id,
             key=None,
@@ -260,7 +266,10 @@ class MaterializationPipeline:
             canonical_index_hint=resolved.canonical_index_bytes,
             disk_path_hint=resolved.disk_path_hint,
         )
-        return self._payload_state_dict(payload)
+        try:
+            return self._payload_state_dict(payload, device_id=device_id)
+        finally:
+            self._release_materialized(payload, self._runtime.ensure_client())
 
     def get_async(
         self,
@@ -279,7 +288,7 @@ class MaterializationPipeline:
         def _task() -> dict[str, torch.Tensor]:
             materialized: MaterializationPayload | None = None
             try:
-                materialized, _ = self._perform_get_with_retry(
+                materialized, device_id = self._perform_get_with_retry(
                     artifact_id=artifact_id,
                     key=key,
                     device=device,
@@ -299,7 +308,7 @@ class MaterializationPipeline:
                     )
                     materialized = None
                     raise CancelledError
-                return self._payload_state_dict(materialized)
+                return self._payload_state_dict(materialized, device_id=device_id)
             except CancelledError as exc:
                 raise ArtifactError(
                     "Retrieval cancelled",
@@ -590,7 +599,7 @@ class MaterializationPipeline:
         return int(selector)
 
     def _payload_state_dict(
-        self, payload: MaterializationPayload
+        self, payload: MaterializationPayload, *, device_id: int | None = None
     ) -> dict[str, torch.Tensor]:
         if payload.descriptors and payload.state_dict is not None:
             missing = [
@@ -604,8 +613,10 @@ class MaterializationPipeline:
                 )
             return {d.name: payload.state_dict[d.name] for d in payload.descriptors}
         state: dict[str, torch.Tensor] = {}
-        for desc, tensor in payload.payload_iter():
-            state[desc.name] = tensor
+        for desc, tensor_view in payload.payload_iter():
+            state[desc.name] = self._tensor_from_segment(
+                desc, tensor_view, device_id=device_id
+            )
         return state
 
     def _stream_into_targets(
@@ -673,7 +684,8 @@ class MaterializationPipeline:
                     status_code="DATA_LOSS",
                     retryable=False,
                 )
-            target_tensor.copy_(tensor)
+            source_tensor = self._tensor_from_segment(desc, tensor, device_id=device_id)
+            target_tensor.copy_(source_tensor)
             seen.add(desc.name)
         missing = [name for name in expected if name not in seen]
         if missing:
@@ -682,6 +694,50 @@ class MaterializationPipeline:
                 status_code="DATA_LOSS",
                 retryable=False,
             )
+
+    def _tensor_from_segment(
+        self,
+        desc: TensorPayloadDescriptor,
+        segment: memoryview | torch.Tensor,
+        *,
+        device_id: int | None,
+    ) -> torch.Tensor:
+        if isinstance(segment, torch.Tensor):
+            return segment
+        if device_id is None:
+            raise ArtifactError(
+                "Materialization payload missing device context",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        try:
+            start_ptr = ctypes.addressof(ctypes.c_char.from_buffer(segment))
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                "Materialization payload is not backed by a writable buffer",
+                status_code="DATA_LOSS",
+                retryable=False,
+            ) from exc
+        base_ptr = int(start_ptr - int(desc.buffer_offset))
+        meta_state_dict = {
+            desc.name: (
+                list(desc.shape),
+                list(desc.stride),
+                desc.dtype,
+                int(desc.storage_offset),
+            )
+        }
+        tensor_offsets = {device_id: {desc.name: int(desc.buffer_offset)}}
+        memory_ptrs = {device_id: base_ptr}
+        tensors = restore_tensors(meta_state_dict, memory_ptrs, tensor_offsets, True)
+        tensor = tensors.get(desc.name)
+        if tensor is None:
+            raise ArtifactError(
+                f"Tensor '{desc.name}' missing from materialized payload",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        return tensor
 
     def _summarize_materialized(
         self,

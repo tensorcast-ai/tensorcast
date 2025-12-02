@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import ctypes
 import json
 import threading
 import time
@@ -73,12 +74,13 @@ def test_materialize_by_key_forwards_preferences(monkeypatch):
             resp.ticket.status = resp.status
             return resp
 
+    backing = ctypes.create_string_buffer(b"\x01\x00\x00\x00")
+
     monkeypatch.setattr("tensorcast.api._materialize.device_uuid_for", lambda _dev: "gpu-0")
     monkeypatch.setattr("tensorcast.api._materialize.resolve_device", lambda _dev: 0)
-    monkeypatch.setattr("tensorcast.api._materialize.get_cuda_memory_ptr", lambda *_args, **_kwargs: 1)
     monkeypatch.setattr(
-        "tensorcast.api._materialize.restore_tensors",
-        lambda *_args, **_kwargs: {"w": torch.ones(1)},
+        "tensorcast.api._materialize.get_cuda_memory_ptr",
+        lambda *_args, **_kwargs: ctypes.addressof(backing),
     )
 
     payload = materialize_artifact_v2(

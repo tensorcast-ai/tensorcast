@@ -120,6 +120,8 @@ class MaterializationPayload:
    - `get_into()` copies descriptor-sized chunks directly into the caller’s tensors without building temporaries.
    - `get_view()` reuses the iterator but rehydrates only the requested view subset.
 
+Implementation note: the iterator now yields `memoryview` slices backed by the shared allocation and eager `get`/`get_view` callers release the materialized replica immediately after consumption to avoid pinning daemon state.
+
 This preserves public compatibility while allowing the forthcoming lazy artifact layer to request descriptors directly.
 
 ### Disk parity via daemon

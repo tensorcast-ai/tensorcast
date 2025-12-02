@@ -142,7 +142,9 @@ class _PipelineStub:
         self.calls.append(kwargs)
         return self.payload, 0
 
-    def _payload_state_dict(self, payload: MaterializationPayload):
+    def _payload_state_dict(
+        self, payload: MaterializationPayload, device_id: int | None = None
+    ):
         if payload.state_dict is not None:
             return dict(payload.state_dict)
         state: dict[str, torch.Tensor] = {}
