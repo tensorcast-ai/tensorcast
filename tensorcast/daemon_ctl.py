@@ -528,6 +528,44 @@ class DaemonCtl:
                 raise RuntimeError("GetMaterializeCapabilities failed") from e
         return response
 
+    def query_replica_status(
+        self, ticket: store_daemon_v2_pb2.ReplicaTicket
+    ) -> store_daemon_v2_pb2.QueryReplicaStatusResponse:
+        with self._client_span("Client/QueryReplicaStatus") as span:
+            request = store_daemon_v2_pb2.QueryReplicaStatusRequest(ticket=ticket)
+            try:
+                response: store_daemon_v2_pb2.QueryReplicaStatusResponse = (
+                    self._unary_call(
+                        self.stub_v2.QueryReplicaStatus,
+                        request,
+                        timeout=5.0,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def release_replica(
+        self, ticket: store_daemon_v2_pb2.ReplicaTicket
+    ) -> store_daemon_v2_pb2.ReleaseReplicaResponse:
+        with self._client_span("Client/ReleaseReplica") as span:
+            request = store_daemon_v2_pb2.ReleaseReplicaRequest(ticket=ticket)
+            try:
+                response: store_daemon_v2_pb2.ReleaseReplicaResponse = self._unary_call(
+                    self.stub_v2.ReleaseReplica,
+                    request,
+                    timeout=5.0,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     @overload
     def materialize_by_artifact_id_v2(
         self,
@@ -545,6 +583,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
+        view_subset_hash: bytes | None = None,
     ) -> store_daemon_v2_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -564,6 +603,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
+        view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -583,6 +623,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
+        view_subset_hash: bytes | None = None,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -600,6 +641,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
+        view_subset_hash: bytes | None = None,
     ) -> (
         store_daemon_v2_pb2.MaterializeReplicaResponse
         | bytes
@@ -631,6 +673,8 @@ class DaemonCtl:
                 request.disk_fallback.verify_checksums = bool(verify_checksums)
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
+            if view_subset_hash:
+                request.view_subset_hash = view_subset_hash
             if view is not None:
                 request.view.CopyFrom(view)
             elif view_id:
@@ -705,6 +749,7 @@ class DaemonCtl:
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
+        view_subset_hash: bytes | None = None,
     ) -> store_daemon_v2_pb2.MaterializeByKeyResponse: ...
 
     @overload
@@ -719,6 +764,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
+        view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
 
     @overload
@@ -733,6 +779,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
+        view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, str, str]: ...
 
     def materialize_by_key_v2(
@@ -745,6 +792,7 @@ class DaemonCtl:
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
+        view_subset_hash: bytes | None = None,
     ) -> (
         store_daemon_v2_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
@@ -770,6 +818,8 @@ class DaemonCtl:
             )
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
+            if view_subset_hash:
+                request.view_subset_hash = view_subset_hash
             try:
                 response: store_daemon_v2_pb2.MaterializeByKeyResponse = (
                     self._unary_call(
@@ -843,6 +893,44 @@ class DaemonCtl:
         if return_response:
             return response
         return (handle_bytes, used_disk_path, artifact_id)
+
+    def resolve_artifact_from_disk_v2(
+        self, *, disk_path: str, verify_checksums: bool = True
+    ) -> store_daemon_v2_pb2.ResolveArtifactFromDiskResponse:
+        if not disk_path:
+            raise ValueError("disk_path is required")
+        with self._client_span("Client/ResolveArtifactFromDiskV2") as span:
+            request = store_daemon_v2_pb2.ResolveArtifactFromDiskRequest(
+                disk_path=disk_path, verify_checksums=bool(verify_checksums)
+            )
+            try:
+                return self._unary_call(
+                    self.stub_v2.ResolveArtifactFromDisk,
+                    request,
+                    timeout=15.0,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(e.details() or str(e)) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise FileNotFoundError(
+                        e.details() or "artifact not found on disk"
+                    ) from e
+                if code == grpc.StatusCode.PERMISSION_DENIED:
+                    raise PermissionError(
+                        e.details() or "disk_path not permitted"
+                    ) from e
+                raise RuntimeError(
+                    f"ResolveArtifactFromDiskV2 RPC failed: {e.details() or str(e)}"
+                ) from e
 
     def materialize_by_key(
         self,

@@ -362,6 +362,11 @@ class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
       const v2::MaterializeByKeyRequest* req,
       v2::MaterializeByKeyResponse* resp) override;
 
+  grpc::Status ResolveArtifactFromDisk(
+      grpc::ServerContext* ctx,
+      const v2::ResolveArtifactFromDiskRequest* req,
+      v2::ResolveArtifactFromDiskResponse* resp) override;
+
   grpc::Status GetMaterializeCapabilities(
       grpc::ServerContext* ctx,
       const v2::GetMaterializeCapabilitiesRequest* req,

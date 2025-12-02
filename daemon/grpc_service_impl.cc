@@ -188,6 +188,14 @@ Status StoreDaemonServiceV2Impl::MaterializeByKey(
   return materialization_controller_.materialize_by_key_v2(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceV2Impl::ResolveArtifactFromDisk(
+    grpc::ServerContext* ctx,
+    const v2::ResolveArtifactFromDiskRequest* req,
+    v2::ResolveArtifactFromDiskResponse* resp) {
+  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.resolve_artifact_from_disk(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
     grpc::ServerContext* ctx,
     const v2::GetMaterializeCapabilitiesRequest* /*req*/,

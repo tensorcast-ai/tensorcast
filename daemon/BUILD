@@ -666,6 +666,24 @@ cc_test(
 )
 
 cc_test(
+    name = "resolve_artifact_from_disk_test",
+    srcs = ["resolve_artifact_from_disk_test.cc"],
+    deps = [
+        ":ipc_region_registry_lib",
+        ":lip_manager_lib",
+        ":materialization_controller_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time:time",
+        "@abseil-cpp//absl/types:span",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_status_test",
     srcs = ["grpc_service_impl_status_test.cc"],
     deps = [

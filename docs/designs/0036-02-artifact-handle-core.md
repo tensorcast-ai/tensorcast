@@ -99,7 +99,7 @@ Phase 2 adds `ArtifactCache` alongside the key cache so metadata can be reused a
 - `Store.artifact(...) -> Artifact`
 - `tensorcast.from_disk(path) -> Artifact` (convenience wrapper, see Phase 4)
 
-Factories require at least one of `key`, `artifact_id`, or `disk_path`. Multiple identifiers may be provided; handles keep all known hints so cloning/serialization works even after resolution. When `disk_path` is provided, the factory calls the daemon to resolve the artifact identity from the disk path (the daemon reads `tensor_index.json` and computes/verifies the artifact ID). All construction paths return the same `Artifact` type—there is no special subclass for disk-backed artifacts. They capture a `weakref.ref[Store]` to avoid keeping the Store alive indefinitely.
+Factories require at least one of `key`, `artifact_id`, or `disk_path`. Multiple identifiers may be provided; handles keep all known hints so cloning/serialization works even after resolution. When `disk_path` is provided, the factory issues the daemon RPC `ResolveArtifactFromDisk` to return `{artifact_id, canonical_index_bytes, generation}` and hydrates the process `ArtifactCache` with that result. All construction paths return the same `Artifact` type—there is no special subclass for disk-backed artifacts. They capture a `weakref.ref[Store]` to avoid keeping the Store alive indefinitely.
 
 > **Note**: The `disk_path=` parameter and `from_disk()` function are defined here for completeness but are fully implemented in Phase 4 (`0036-04-disk-artifact-variant.md`).
 
@@ -209,6 +209,7 @@ flowchart TB
 #### Cache behavior
 
 - Process-wide `ArtifactCache` stores `{artifact_id, disk_path, canonical_index_bytes, parsed_index, generation, expires_at}`.
+- Canonical metadata always flows through the v2 surfaces as `canonical_index_bytes` (and optional `view_index_bytes`), paired with a `generation` counter. Handles and caches treat missing generation as `None` but preserve any non-zero value returned by the daemon.
 - Entries expire after `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS` (default 600s) or when `StoreRuntimeContext.invalidate_artifact()` is called.
 - Maximum entries default to 1000 (`TENSORCAST_STORE_CACHE_MAX_ENTRIES`), evicted via LRU on insert.
 - Fork handling: `_after_fork_child()` rebuilds the cache to avoid inheriting stale mutexes.
@@ -263,7 +264,7 @@ All three construction paths (`key=`, `artifact_id=`, `disk_path=`) converge to 
 - `exists()`: shallow existence probe without tensor transfer.
   - `key` handle → check `_key_cache`, then `resolve_key_mapping_cached`; on miss, RPC to daemon.
   - `artifact_id` handle → try `ArtifactCache`; on miss, call `get_artifact_index_by_id` (lightweight metadata RPC). Cache the result on success.
-  - `disk_path` handle → read local `tensor_index.json` to compute/verify artifact id (Phase 4 full path), fallback to daemon lookup in Phase 2 if local parse fails.
+  - `disk_path` handle → call `ResolveArtifactFromDisk` to return `{artifact_id, canonical_index_bytes, generation}`, hydrate `ArtifactCache`, and reuse the cached bytes for materialization.
   - Errors bubble as `ArtifactError` with retryable flag based on daemon response; NOT_FOUND invalidates caches for that id/key.
 - `release()`: idempotent; marks handle invalid for future materialization but leaves cached metadata readable for diagnostics. `exists()` still works post-release (metadata-only).
 

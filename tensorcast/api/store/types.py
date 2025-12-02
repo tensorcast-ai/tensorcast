@@ -61,12 +61,33 @@ class RetryPolicy:
 
 @dataclass(frozen=True)
 class FallbackOptions:
-    """Disk fallback hints; verify_checksums is retained for compatibility but is a no-op."""
+    """Source selection and replica hints for materialization."""
 
+    prefer: Literal["auto", "local", "p2p", "disk"] = "auto"
     disk_path: str | None = None
-    prefer_disk: bool = False
     allow_p2p: bool = True
     verify_checksums: bool = True
+    prefer_disk: bool | None = None  # Deprecated compatibility flag
+    replica_uuid: str | None = None
+
+    @classmethod
+    def for_disk(cls, path: str, *, verify: bool = True) -> "FallbackOptions":
+        return cls(
+            prefer="disk",
+            disk_path=path,
+            allow_p2p=False,
+            verify_checksums=verify,
+            prefer_disk=True,
+        )
+
+    @classmethod
+    def local_only(cls) -> "FallbackOptions":
+        return cls(
+            prefer="local",
+            allow_p2p=False,
+            verify_checksums=True,
+            prefer_disk=False,
+        )
 
 
 @dataclass(frozen=True)

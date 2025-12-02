@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import torch
 
@@ -78,6 +78,28 @@ def canonical_index_from_bytes(
         total_size_bytes=total,
         avbs_hash=avbs_hash,
     )
+
+
+def canonical_index_to_bytes(
+    canonical_index: CanonicalIndex, names: Sequence[str] | None = None
+) -> bytes:
+    selected = canonical_index.entries
+    if names is not None:
+        requested = set(names)
+        selected = tuple(
+            entry for entry in canonical_index.entries if entry.name in requested
+        )
+    data: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+    for entry in selected:
+        data[entry.name] = (
+            int(entry.segment_offset),
+            int(entry.size_bytes),
+            list(entry.shape),
+            list(entry.stride),
+            str(entry.dtype),
+            int(entry.storage_offset),
+        )
+    return json.dumps(data, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
 def canonical_index_from_result(result: RegistrationResult) -> CanonicalIndex:
@@ -201,6 +223,7 @@ def validate_targets(
 
 __all__ = [
     "canonical_index_from_bytes",
+    "canonical_index_to_bytes",
     "canonical_index_from_result",
     "dtype_from_string",
     "lease_handle_from_result",

@@ -77,11 +77,19 @@ We introduce the following protobuf changes under a new `tensorcast.proto.daemon
   - `string replica_uuid` (explicit, reused by prefetch later)
 - `MaterializeReplicaResponse`
   - `repeated TensorPayloadDescriptor payloads`
-  - `bytes canonical_index_json`
+  - `bytes canonical_index_bytes`
+  - `bytes view_index_bytes`
+  - `uint64 generation`
   - `ViewSubset view_subset` (optional, used when the server applies slicing)
   - `ReplicaTicket ticket` (populated when `wait_for_completion=false`)
+- `ResolveArtifactFromDisk` (new RPC)
+  - `string disk_path`
+  - `bool verify_checksums`
+  - returns `{artifact_id, canonical_index_bytes, generation}` for cache hydration without materializing
 
-`TensorPayloadDescriptor` is a thin schema containing `{ string name, uint32 dtype, string device_uuid, uint64 buffer_offset, uint64 byte_length, repeated uint64 stride }`. The daemon uses UMA layout information to only emit descriptors for requested tensors and writes contiguous slices into the exported IPC buffer. Disk loaders use the same message to describe byte ranges in POSIX files.
+Canonical index fields are standardized as `canonical_index_bytes` / `view_index_bytes` (never `*_json`) and always paired with `generation` so caches and disk resolution stay in sync across SDK layers.
+
+`TensorPayloadDescriptor` is a thin schema containing `{ string name, string dtype, string device_uuid, uint64 buffer_offset, uint64 byte_length, uint64 storage_offset, repeated int64 shape, repeated int64 stride }`. The daemon uses UMA layout information to only emit descriptors for requested tensors and writes contiguous slices into the exported IPC buffer. Disk loaders use the same message to describe byte ranges in POSIX files.
 
 The daemon keeps the existing v1 RPCs alive until all SDKs upgrade, but the Python client switches entirely to v2 because the new iterator contract depends on descriptors.
 
@@ -143,7 +151,8 @@ gRPC: MaterializeReplicaRequest(
         ▼
 MaterializeReplicaResponse(
     payloads=[TensorPayloadDescriptor, ...],
-    canonical_index_json=...,
+    canonical_index_bytes=...,
+    generation=...,
 )
         │
         ▼
@@ -215,4 +224,3 @@ All newly introduced Python names follow the SDK naming rules in `AGENTS.md`. Pr
 - `core/store/materialization/dataplane/sources/file_partition_source.h`
 - `core/store/materialization/dataplane/view/view_plan_source.h`
 - `core/store/materialization/contracts/view/view_plan.h` — `SelectionPlan` definition
-

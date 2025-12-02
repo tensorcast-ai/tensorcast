@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import contextlib
 import logging
@@ -104,6 +105,13 @@ class StoreRuntimeContext:
             ttl_seconds=self._artifact_cache_ttl_seconds,
             max_entries=self._artifact_cache_max_entries,
         )
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name="tensorcast-store-loop",
+        )
+        self._loop_thread.start()
         self._closed = False
 
         self._init_session_record()
@@ -116,6 +124,10 @@ class StoreRuntimeContext:
     # ------------------------------------------------------------------
     def _create_client(self) -> DaemonCtl:
         return self._client_factory(self._daemon_endpoint)
+
+    def _run_loop(self) -> None:
+        asyncio.set_event_loop(self._loop)
+        self._loop.run_forever()
 
     @staticmethod
     def _default_capabilities() -> StoreCapabilities:
@@ -298,6 +310,11 @@ class StoreRuntimeContext:
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
+    def get_artifact_index_by_disk_path(
+        self, disk_path: str
+    ) -> ArtifactCacheEntry | None:
+        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
+
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)
 
@@ -434,6 +451,13 @@ class StoreRuntimeContext:
             ttl_seconds=self._artifact_cache_ttl_seconds,
             max_entries=self._artifact_cache_max_entries,
         )
+        self._loop = asyncio.new_event_loop()
+        self._loop_thread = threading.Thread(
+            target=self._run_loop,
+            daemon=True,
+            name="tensorcast-store-loop",
+        )
+        self._loop_thread.start()
         self._init_session_record()
 
     def ensure_client(self) -> DaemonCtl:
@@ -458,6 +482,12 @@ class StoreRuntimeContext:
                 self._client = None
         self.release_all_leases()
         self._executor_handle.close()
+        with contextlib.suppress(Exception):
+            self._loop.call_soon_threadsafe(self._loop.stop)
+        if hasattr(self, "_loop_thread") and self._loop_thread.is_alive():
+            self._loop_thread.join(timeout=1.0)
+        with contextlib.suppress(Exception):
+            self._loop.close()
         with self._key_cache_lock:
             self._key_cache.clear()
         self._artifact_cache.clear()
@@ -540,6 +570,10 @@ class StoreRuntimeContext:
     @property
     def opts(self) -> StoreOptions:
         return self._opts
+
+    @property
+    def event_loop(self) -> asyncio.AbstractEventLoop:
+        return self._loop
 
     @property
     def closed(self) -> bool:

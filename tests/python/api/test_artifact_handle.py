@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 import weakref
 from typing import cast
 
@@ -12,7 +14,8 @@ import torch
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api.store import Store
 from tensorcast.api.store.artifact import Artifact
-from tensorcast.api.store.cache import ArtifactCache
+from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
+from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
 from tensorcast.api.store.retry import build_retry_policies
 
@@ -52,14 +55,39 @@ def _build_payload(tensors: dict[str, torch.Tensor]) -> tuple[bytes, Materializa
 
 
 class _ClientStub:
-    def __init__(self, canonical_index_bytes: bytes) -> None:
+    def __init__(
+        self,
+        canonical_index_bytes: bytes,
+        *,
+        disk_generation: int | None = None,
+        disk_artifact_id: str | None = None,
+    ) -> None:
         self.canonical_index_bytes = canonical_index_bytes
+        self.disk_generation = disk_generation
+        self.disk_artifact_id = disk_artifact_id
         self.unloaded: list[tuple[str, str]] = []
         self.get_index_calls = 0
+        self.resolve_calls: list[tuple[str, bool]] = []
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         self.get_index_calls += 1
         return self.canonical_index_bytes
+
+    def resolve_artifact_from_disk_v2(
+        self, *, disk_path: str, verify_checksums: bool = True
+    ):
+        self.resolve_calls.append((disk_path, bool(verify_checksums)))
+        generation = self.disk_generation if self.disk_generation is not None else 0
+
+        class _Resp:
+            pass
+
+        resp = _Resp()
+        resp.artifact_id = self.disk_artifact_id or f"disk:{disk_path}"
+        resp.disk_path = disk_path
+        resp.canonical_index_bytes = self.canonical_index_bytes
+        resp.generation = generation
+        return resp
 
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append((replica_uuid, disk_path))
@@ -86,6 +114,9 @@ class _RuntimeStub:
 
     def get_artifact_index_cached(self, artifact_id: str):
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
+
+    def get_artifact_index_by_disk_path(self, disk_path: str):
+        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
 
     def invalidate_artifact(self, artifact_id: str | None, *, key=None, reason=None) -> None:
         self._artifact_cache.invalidate_artifact(artifact_id or "", reason=reason)
@@ -227,6 +258,28 @@ def test_with_fallback_handles_multiple_identifiers():
     assert clone.tensor_names == ("foo",)
 
 
+def test_describe_uses_cached_generation_without_fetch():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    cache_entry = ArtifactCacheEntry(
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        parsed_index=canonical_index_from_bytes(canonical_bytes),
+        generation=42,
+        disk_path=None,
+        expires_at=time.monotonic() + 1.0,
+    )
+    runtime.cache_artifact_index(cache_entry)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+
+    desc = artifact.describe()
+
+    assert desc.generation == 42
+    assert runtime._client.get_index_calls == 0
+
+
 def test_from_dict_accepts_key_and_artifact_id():
     canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
@@ -242,3 +295,111 @@ def test_from_dict_accepts_key_and_artifact_id():
     assert restored.artifact_id == "aid"
     assert restored.key == "mapped"
     assert restored.tensor_names == ("foo",)
+
+
+def test_from_disk_resolves_once_and_caches_generation():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(
+        canonical_bytes, disk_generation=11, disk_artifact_id="disk-aid"
+    )
+    runtime = _RuntimeStub(client)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        disk_path="/tmp/artifact",
+        fallback=FallbackOptions.for_disk("/tmp/artifact"),
+    )
+
+    desc = artifact.describe()
+    repeat = artifact.describe()
+
+    assert desc.artifact_id == "disk-aid"
+    assert desc.generation == 11
+    assert repeat.generation == 11
+    assert client.resolve_calls == [("/tmp/artifact", True)]
+    assert client.get_index_calls == 0
+    cached = runtime.get_artifact_index_cached("disk-aid")
+    assert cached is not None
+    assert cached.canonical_index_bytes == canonical_bytes
+    assert cached.generation == 11
+    assert cached.disk_path == "/tmp/artifact"
+
+
+def test_from_disk_uses_cached_entry_for_disk_path():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes, disk_generation=5, disk_artifact_id="disk-aid")
+    runtime = _RuntimeStub(client)
+    cache_entry = ArtifactCacheEntry(
+        artifact_id="disk-aid",
+        canonical_index_bytes=canonical_bytes,
+        parsed_index=canonical_index_from_bytes(canonical_bytes),
+        generation=5,
+        disk_path="/tmp/artifact",
+        expires_at=time.monotonic() + 5.0,
+    )
+    runtime.cache_artifact_index(cache_entry)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        disk_path="/tmp/artifact",
+        fallback=FallbackOptions.for_disk("/tmp/artifact"),
+    )
+
+    desc = artifact.describe()
+
+    assert desc.artifact_id == "disk-aid"
+    assert desc.generation == 5
+    assert client.resolve_calls == []
+    assert client.get_index_calls == 0
+
+
+def test_disk_cache_mismatch_invalidates_and_refetches():
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    stale_entry = ArtifactCacheEntry(
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+        parsed_index=canonical_index_from_bytes(canonical_bytes),
+        generation=1,
+        disk_path="/other/path",
+        expires_at=time.monotonic() + 5.0,
+    )
+    runtime.cache_artifact_index(stale_entry)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store), artifact_id="aid", disk_path="/real/path"
+    )
+
+    _ = artifact.tensor_names
+
+    assert client.get_index_calls == 1
+    refreshed = runtime.get_artifact_index_cached("aid")
+    assert refreshed is not None
+    assert refreshed.disk_path == "/real/path"
+
+
+def test_ensure_metadata_sets_under_lock(monkeypatch):
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    client = _ClientStub(canonical_bytes)
+    runtime = _RuntimeStub(client)
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(store_ref=_store_ref(store), artifact_id="aid")
+
+    lock_checked = threading.Event()
+    original_set_metadata = Artifact._set_metadata
+
+    def _wrapped(self, *args, **kwargs):
+        if not self._lock._is_owned():
+            raise AssertionError("metadata updated without holding artifact lock")
+        lock_checked.set()
+        return original_set_metadata(self, *args, **kwargs)
+
+    monkeypatch.setattr(Artifact, "_set_metadata", _wrapped)
+
+    assert artifact.tensor_names == ("foo",)
+    assert lock_checked.is_set()

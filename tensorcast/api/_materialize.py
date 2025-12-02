@@ -55,6 +55,7 @@ class MaterializationPayload:
     ticket_replica_uuid: str | None = None
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
     ticket_created_at_ts: float | None = None
+    ticket_expires_at_ts: float | None = None
 
 
 def _tensor_payload_from_proto(
@@ -91,6 +92,10 @@ def materialize_artifact_v2(
     preference: store_daemon_pb2.SourcePreference | None = None,
     tensor_names: Sequence[str] | None = None,
     verify_checksums: bool = True,
+    view_subset_hash: bytes | None = None,
+    replica_uuid: str | None = None,
+    view_index_hint: bytes | None = None,
+    generation_hint: int | None = None,
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
@@ -122,7 +127,7 @@ def materialize_artifact_v2(
         wait_for_completion=wait_for_completion,
     )
 
-    replica_uuid = new_uuid()
+    replica_uuid_value = replica_uuid or new_uuid()
     disk_path: str | None = disk_path_hint
     view_index_bytes: bytes | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
@@ -142,7 +147,7 @@ def materialize_artifact_v2(
         if artifact_id is not None:
             response = client.materialize_by_artifact_id_v2(
                 artifact_id=artifact_id,
-                replica_uuid=replica_uuid,
+                replica_uuid=replica_uuid_value,
                 device_uuid=device_uuid_for(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
@@ -154,6 +159,7 @@ def materialize_artifact_v2(
                 preference=preference_value,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
+                view_subset_hash=view_subset_hash,
             )
             if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
@@ -164,12 +170,13 @@ def materialize_artifact_v2(
         elif key is not None:
             response = client.materialize_by_key_v2(
                 key=key or "",
-                replica_uuid=replica_uuid,
+                replica_uuid=replica_uuid_value,
                 device_id=int(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 return_response=True,
                 tensor_names=tensor_names,
+                view_subset_hash=view_subset_hash,
             )
             if not isinstance(response, store_daemon_v2_pb2.MaterializeByKeyResponse):
                 raise DaemonUnavailable(
@@ -182,7 +189,7 @@ def materialize_artifact_v2(
             # The daemon loads directly from disk via DiskFallbackHint.
             response = client.materialize_by_artifact_id_v2(
                 artifact_id="",
-                replica_uuid=replica_uuid,
+                replica_uuid=replica_uuid_value,
                 device_uuid=device_uuid_for(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
@@ -194,6 +201,7 @@ def materialize_artifact_v2(
                 preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
+                view_subset_hash=view_subset_hash,
             )
             if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
@@ -209,6 +217,7 @@ def materialize_artifact_v2(
     ticket_replica_uuid: str | None = None
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
     ticket_created_at_ts: float | None = None
+    ticket_expires_at_ts: float | None = None
     if response.HasField("ticket"):
         ticket_replica_uuid = response.ticket.replica_uuid or None
         ticket_status = response.ticket.status
@@ -216,6 +225,13 @@ def materialize_artifact_v2(
             ticket_created_at_ts = response.ticket.created_at.ToDatetime().timestamp()
         except Exception:  # noqa: BLE001
             ticket_created_at_ts = None
+        try:
+            if response.ticket.HasField("expires_at"):
+                ticket_expires_at_ts = (
+                    response.ticket.expires_at.ToDatetime().timestamp()
+                )
+        except Exception:  # noqa: BLE001
+            ticket_expires_at_ts = None
 
     handle_bytes = b""
     if response.HasField("mem_handle"):
@@ -225,24 +241,43 @@ def materialize_artifact_v2(
             "Daemon returned empty mem_handle for materialization v2"
         )
 
-    canonical_index_bytes = (
-        bytes(response.canonical_index_json)
-        if hasattr(response, "canonical_index_json")
-        else b""
-    )
+    view_data_hash: str | None = None
+    try:
+        subset_hash_bytes = (
+            bytes(response.view_subset.subset_hash)
+            if hasattr(response, "view_subset")
+            else b""
+        )
+        if subset_hash_bytes:
+            view_data_hash = subset_hash_bytes.hex()
+    except Exception:  # noqa: BLE001
+        view_data_hash = None
+    if view_data_hash is None and view_subset_hash:
+        view_data_hash = view_subset_hash.hex()
+
+    canonical_index_bytes = bytes(response.canonical_index_bytes)
+    raw_generation = int(getattr(response, "generation", 0))
+    generation_value: int | None = raw_generation if raw_generation != 0 else None
+    if generation_value is None and generation_hint is not None:
+        generation_value = generation_hint
     if canonical_index_bytes:
         resolved_artifact_id = response.artifact_id or artifact_id or key or ""
     else:
-        if canonical_index_hint is not None:
-            canonical_index_bytes = canonical_index_hint
+        fallback_hint = canonical_index_hint or view_index_hint
+        if fallback_hint is not None:
+            canonical_index_bytes = fallback_hint
             resolved_artifact_id = artifact_id or key or ""
+            if generation_value is None and generation_hint is not None:
+                generation_value = generation_hint
         else:
             raise IndexParseError(
                 f"Failed to fetch canonical index for artifact_id={artifact_id or key or ''}"
             )
 
-    if hasattr(response, "view_index_json") and response.view_index_json:
-        view_index_bytes = bytes(response.view_index_json)
+    if hasattr(response, "view_index_bytes") and response.view_index_bytes:
+        view_index_bytes = bytes(response.view_index_bytes)
+    elif view_index_hint is not None:
+        view_index_bytes = view_index_hint
 
     # Translate descriptors from proto into SDK form.
     device_uuid: str | None
@@ -292,7 +327,7 @@ def materialize_artifact_v2(
             args=(
                 client,
                 artifact_id or key or "",
-                replica_uuid,
+                replica_uuid_value,
                 verification_timeout_ms,
             ),
             daemon=True,
@@ -304,15 +339,17 @@ def materialize_artifact_v2(
         canonical_index_bytes=canonical_index_bytes,
         descriptors=tuple(descriptors),
         payload_iter=_iter,
-        replica_uuid=replica_uuid,
+        replica_uuid=replica_uuid_value,
         disk_path=disk_path,
         view_index_bytes=view_index_bytes,
-        view_data_hash=None,
+        view_data_hash=view_data_hash,
         source=materialized_source,
         device_uuid=device_uuid,
         ticket_replica_uuid=ticket_replica_uuid,
         ticket_status=ticket_status,
         ticket_created_at_ts=ticket_created_at_ts,
+        ticket_expires_at_ts=ticket_expires_at_ts,
+        generation=generation_value,
     )
 
 
