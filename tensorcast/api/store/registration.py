@@ -323,8 +323,9 @@ class RegistrationPipeline:
                 retryable=False,
             )
         resolved_key = key
-        options = options_override
-        if options is not None:
+        options: RegisterArtifactOptions
+        if options_override is not None:
+            options = options_override
             if options.plan is not plan:
                 options = options.model_copy(update={"plan": plan})
             if plan is PlanType.VRAM_LEASED and not options.lease_in_place:
