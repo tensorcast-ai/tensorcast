@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import torch
 from opentelemetry import trace
@@ -120,11 +120,12 @@ def materialize_artifact_v2(
         runtime_address=daemon_address,
     )
 
-    opts = replace(
-        opts,
-        pinned_allocation_timeout_ms=pinned_ms,
-        enable_verification=enable_ver,
-        wait_for_completion=wait_for_completion,
+    opts = opts.model_copy(
+        update={
+            "pinned_allocation_timeout_ms": pinned_ms,
+            "enable_verification": enable_ver,
+            "wait_for_completion": wait_for_completion,
+        }
     )
 
     replica_uuid_value = replica_uuid or new_uuid()

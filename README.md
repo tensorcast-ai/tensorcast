@@ -164,6 +164,16 @@ latest = handle.tensor_dict(device="cuda:0")
 
 buffers = {"layer.weight": torch.empty_like(state_dict["layer.weight"])}
 handle.tensor_dict_into(buffers, device="cuda:0")
+
+# Stream a single tensor directly into an existing buffer without populating a
+# full mapping. TensorCast copies only the requested tensor.
+target = torch.empty_like(state_dict["layer.weight"])
+handle.tensor_into("layer.weight", target, device="cuda:0")
+
+# Issue background materialization without mutating the original handle.
+prefetched, ticket = handle.prefetch(device="cuda:0")
+ticket.wait(timeout=5.0)
+prefetched.tensor_dict(device="cuda:0")
 ```
 
 For advanced scenarios (async verbs, fine-grained inspection, or direct access to diagnostics) use

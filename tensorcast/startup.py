@@ -41,6 +41,7 @@ from tensorcast.daemon_ctl import (
 )
 from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
+from tensorcast.proto.config.v1 import common_pb2 as cfg_common_pb
 from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
 
 _current_ctx: Context | None = None
@@ -183,7 +184,9 @@ def _build_embedded_daemon_config(
     cfg.checkpoint.streaming.num_buffers = 2
     cfg.checkpoint.streaming.io_chunk_bytes = 128 * 1024 * 1024
     cfg.checkpoint.streaming.pinned_pool_bytes = 512 * 1024 * 1024
-    cfg.observability.logging.level = cfg_pb.Observability.LOG_LEVEL_INFO
+    cfg.observability.logging.level = (
+        cfg_common_pb.Observability.LogLevel.LOG_LEVEL_INFO
+    )
     cfg.meta.description = "Embedded default daemon config (tensorcast.startup)"
     return cfg
 

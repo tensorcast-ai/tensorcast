@@ -92,9 +92,10 @@ graph TD
 - **Batching & Async**: `BatchContext` batches sync fetches; async
   `.tensor_async()`/`.tensor_dict_async()` coalesce via `MaterializationBatcher`
   on the store event loop.
-- **Prefetch Tickets**: `prefetch(wait_for_completion=False)` returns replica
-  tickets propagated through `FallbackOptions.replica_uuid` to reuse staged
-  replicas without reloading.
+- **Prefetch Tickets**: `prefetch(wait_for_completion=False)` returns a cloned
+  handle plus a replica ticket. The clone carries the ticket’s
+  `replica_uuid` hint while the original handle remains untouched; callers use
+  the ticket to `wait()` or `cancel()` the staged replica before materializing.
 
 ## Key Design Principles
 

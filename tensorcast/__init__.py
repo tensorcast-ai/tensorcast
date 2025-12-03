@@ -106,6 +106,7 @@ validate_cuda_backend_consistency()
 # Public package interface remains unchanged below.
 # -----------------------------------------------------------------------------
 
+import tensorcast.api.store as _store_api  # noqa: E402
 from tensorcast._version import __version__  # noqa: E402
 from tensorcast.api import (  # noqa: E402
     Artifact,
@@ -140,6 +141,39 @@ from tensorcast.api.store import (  # noqa: E402
 )
 from tensorcast.startup import init, is_initialized, shutdown  # noqa: E402
 
+
+def artifact(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    disk_path: str | None = None,
+    fallback: FallbackOptions | str | None = None,
+) -> Artifact:
+    """Return a process Store-backed Artifact handle."""
+    return _store_api.artifact(
+        artifact_id=artifact_id,
+        key=key,
+        disk_path=disk_path,
+        fallback=fallback,
+    )
+
+
+async def artifact_async(
+    *,
+    artifact_id: str | None = None,
+    key: str | None = None,
+    disk_path: str | None = None,
+    fallback: FallbackOptions | str | None = None,
+) -> Artifact:
+    """Async shortcut for creating Artifact handles."""
+    return await _store_api.artifact_async(
+        artifact_id=artifact_id,
+        key=key,
+        disk_path=disk_path,
+        fallback=fallback,
+    )
+
+
 __all__ = [
     "__version__",
     "init",
@@ -168,6 +202,8 @@ __all__ = [
     "register_view",
     "put",
     "put_async",
+    "artifact",
+    "artifact_async",
     "register_vram_region",
     "unregister_vram_region",
     "deregister_artifact",

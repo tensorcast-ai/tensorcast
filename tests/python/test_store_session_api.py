@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import json
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, replace, field
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence, cast
 
@@ -14,6 +15,7 @@ import pytest
 import torch
 
 import tensorcast.api.store as store_mod
+from tensorcast import daemon_ctl
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api._register import (
@@ -31,9 +33,8 @@ from tensorcast.api.store import (
 )
 from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.common.identity import ArtifactIdKind
-from tensorcast import daemon_ctl
-from tensorcast.types import ArtifactDescriptor, ServerConfig
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.types import ArtifactDescriptor, ServerConfig
 
 
 class FakeHandle:
@@ -48,6 +49,7 @@ class FakeHandle:
 @dataclass
 class FakeDaemonCtl:
     resolves: dict[str, tuple[str | None, str | None]]
+    materialized_by_id: dict[str, MaterializationPayload] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.unload_calls: list[tuple[str, str]] = []
@@ -56,6 +58,7 @@ class FakeDaemonCtl:
         self.server_address = "fake://daemon"
         self.resolve_calls: list[str] = []
         self.resolve_disk_calls: list[tuple[str, bool]] = []
+        self.index_by_id: dict[str, bytes] = {}
 
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
@@ -92,6 +95,14 @@ class FakeDaemonCtl:
         self.unload_calls.append((replica_uuid, disk_path))
         return True
 
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        if artifact_id in self.index_by_id:
+            return self.index_by_id[artifact_id]
+        materialized = self.materialized_by_id.get(artifact_id)
+        if materialized is not None:
+            return materialized.canonical_index_bytes
+        raise RuntimeError(f"artifact index not found for {artifact_id}")
+
     def close(self) -> None:
         self.closed = True
 
@@ -103,6 +114,9 @@ class FakeEnvironment:
     block_registration: bool
     register_started: threading.Event
     materialized_by_id: dict[str, MaterializationPayload]
+
+    def __post_init__(self) -> None:
+        self.client.materialized_by_id = self.materialized_by_id
 
     def add_materialized(
         self,
@@ -140,6 +154,7 @@ class FakeEnvironment:
             offset += size_bytes
         canonical = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
         canonical_index_bytes = canonical
+        self.client.index_by_id[artifact_id] = canonical_index_bytes
 
         def _iter():
             for desc in descriptors:
@@ -335,6 +350,7 @@ def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
         register_started=threading.Event(),
         materialized_by_id={},
     )
+    client.materialized_by_id = env.materialized_by_id
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
     store = store_mod.Store(
@@ -411,6 +427,7 @@ def test_artifact_tensor_dict_into_copies_tensors(
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
@@ -435,6 +452,7 @@ def test_artifact_tensor_dict_into_unloads_replica(
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
@@ -461,6 +479,7 @@ def test_artifact_tensor_dict_into_unloads_on_validation_error(
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
@@ -495,8 +514,9 @@ def test_artifact_tensor_dict_async_releases_replica(
     env.add_materialized(artifact_id, {"w": torch.ones(2, dtype=torch.float32)}, replica_uuid="rep-100")
 
     artifact = store.artifact(artifact_id=artifact_id)
-    future = artifact.tensor_dict_async(device=torch.device("cuda", 0))
-    result = future.result(timeout=1.0)
+    result = asyncio.get_event_loop().run_until_complete(
+        artifact.tensor_dict_async(device=torch.device("cuda", 0))
+    )
     assert torch.allclose(result["w"], torch.ones(2, dtype=torch.float32))
     assert ("rep-100", "") in env.client.unload_calls
 
@@ -515,6 +535,7 @@ def test_artifact_tensor_into_unloads_replica(
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
@@ -541,6 +562,7 @@ def test_artifact_tensor_into_unloads_on_validation_error(
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
@@ -559,6 +581,14 @@ def test_store_get_prefers_disk_when_available(
 ) -> None:
     store, env = store_env
     disk_called: dict[str, str | store_daemon_pb2.SourcePreference | None] = {}
+    tensor = torch.zeros(1, dtype=torch.float32)
+    size_bytes = int(tensor.element_size() * tensor.numel())
+    canonical_index_bytes = json.dumps(
+        {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    env.client.index_by_id["disk-artifact"] = canonical_index_bytes
+    env.client.resolves["does-not-matter"] = ("disk-artifact", "/tmp/artifact")
 
     def fake_materialize(
         *,
@@ -568,12 +598,6 @@ def test_store_get_prefers_disk_when_available(
     ) -> MaterializationPayload:
         disk_called["path"] = disk_path_hint
         disk_called["preference"] = preference
-        tensor = torch.zeros(1, dtype=torch.float32)
-        size_bytes = int(tensor.element_size() * tensor.numel())
-        canonical_index_bytes = json.dumps(
-            {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
-            separators=(",", ":"),
-        ).encode("utf-8")
         descriptor = TensorPayloadDescriptor(
             name="t",
             dtype=str(tensor.dtype),
@@ -639,6 +663,9 @@ def test_store_key_resolution_cache_reuses_mapping(
     )
 
     fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
+
+    # Warm the key mapping cache so disk fallback has a resolved path.
+    store._runtime.resolve_key_mapping_cached(key=key)
 
     artifact = store.artifact(key=key, fallback=fallback)
     first = artifact.tensor_dict(device=torch.device("cuda", 0))

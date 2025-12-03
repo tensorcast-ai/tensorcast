@@ -7,10 +7,13 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from tensorcast.api._config import GetArtifactOptions, RegisterArtifactOptions
+from tensorcast.api._config import (
+    GetArtifactOptions,
+    PlanType,
+    RegisterArtifactOptions,
+)
 from tensorcast.api._errors import InvalidPlan
 from tensorcast.api.store.types import FallbackOptions, StoreOptions
-from tensorcast.api._config import PlanType
 
 
 def test_register_options_coerce_plan_string() -> None:
@@ -28,7 +31,8 @@ def test_register_options_reject_unknown_plan() -> None:
 
 def test_register_options_are_frozen() -> None:
     opts = RegisterArtifactOptions()
-    with pytest.raises(TypeError):
+    assert opts.plan is PlanType.VRAM_LEASED
+    with pytest.raises((TypeError, ValidationError)):
         opts.plan = PlanType.VRAM_LEASED
 
 
@@ -46,7 +50,7 @@ def test_store_options_parse_fallback_string() -> None:
     assert opts.fallback.prefer == "disk"
     assert opts.fallback.disk_path == "/tmp/cache"
     # Ensure frozen model cannot be mutated
-    with pytest.raises(TypeError):
+    with pytest.raises((TypeError, ValidationError)):
         opts.fallback.disk_path = "/other"
 
 

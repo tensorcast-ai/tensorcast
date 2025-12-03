@@ -11,6 +11,10 @@ managing clients manually.
   bound to the process `Store`. Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
+- `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
+  tensor directly into the provided buffer. Only the requested tensor must be
+  present in the target mapping, so multi-tensor artifacts no longer require
+  pre-allocating placeholders for every entry when using the helper.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`,
   `disk_path`). At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
@@ -51,8 +55,12 @@ managing clients manually.
   `await artifact.tensor_dict_async(...)`; calls are coalesced by the process
   `MaterializationBatcher` (1ms window) on the store event loop.
 - `artifact.prefetch(device=...)` issues background materialization
-  (`wait_for_completion=False`) and returns a `PrefetchTicket`; the handle
-  carries the ticket’s `replica_uuid` via `FallbackOptions` for the next fetch.
+  (`wait_for_completion=False`) and returns a tuple of
+  `(prefetched_handle, PrefetchTicket)`. The returned handle is a clone whose
+  fallback carries the ticket’s `replica_uuid`, allowing callers to opt into the
+  hint without mutating the original handle. Use the ticket to `wait()` or
+  `cancel()` the staged replica before materializing tensors from the cloned
+  handle.
 
 ## Fallback Preferences
 

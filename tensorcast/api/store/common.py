@@ -173,24 +173,43 @@ def validate_targets(
     target: Mapping[str, torch.Tensor],
     source: Mapping[str, torch.Tensor],
     device_id: int,
+    required_names: Sequence[str] | None = None,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     validated: list[tuple[torch.Tensor, torch.Tensor]] = []
     device = torch.device("cuda", device_id)
-    for entry in canonical_index.entries:
-        if entry.name not in target:
+    entries_by_name = {entry.name: entry for entry in canonical_index.entries}
+    if required_names is None:
+        ordered_names = [entry.name for entry in canonical_index.entries]
+    else:
+        ordered_names = []
+        seen: set[str] = set()
+        for name in required_names:
+            if name in seen:
+                continue
+            if name not in entries_by_name:
+                raise ArtifactError(
+                    f"Tensor '{name}' not found in artifact",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            ordered_names.append(name)
+            seen.add(name)
+    for name in ordered_names:
+        entry = entries_by_name[name]
+        if name not in target:
             raise ArtifactError(
-                f"Target tensor '{entry.name}' missing",
+                f"Target tensor '{name}' missing",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if entry.name not in source:
+        if name not in source:
             raise ArtifactError(
-                f"Source tensor '{entry.name}' missing",
+                f"Source tensor '{name}' missing",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
-        tgt = target[entry.name]
-        src = source[entry.name]
+        tgt = target[name]
+        src = source[name]
         if not isinstance(tgt, torch.Tensor):
             raise ArtifactError(
                 f"Target '{entry.name}' must be a tensor",

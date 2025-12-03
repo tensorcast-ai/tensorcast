@@ -3,12 +3,7 @@
 import torch
 from typing import Any
 
-from tensorcast import (
-    FallbackOptions,
-    GetArtifactOptions,
-    get,
-    startup,
-)
+from tensorcast import FallbackOptions, artifact, startup
 
 
 def compare_tensor_dicts(
@@ -103,13 +98,11 @@ if __name__ == "__main__":
                 allow_p2p=False,
                 verify_checksums=False,
             )
-            options = GetArtifactOptions(enable_verification=False)
             device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
-            sc_state_dict = get(
-                device=device_selector,
+            sc_state_dict = artifact(
+                disk_path=path_to_sc_model_dir,
                 fallback=fallback,
-                options=options,
-            )
+            ).tensor_dict(device=device_selector)
         finally:
             startup.shutdown()
 

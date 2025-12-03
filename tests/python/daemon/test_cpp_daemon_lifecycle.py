@@ -19,9 +19,10 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
+
+import pytest
 import yaml
 import grpc
-import pytest
 
 from tensorcast.cli_utils.proc import (
     build_daemon_process_env,
@@ -40,6 +41,7 @@ from tensorcast.proto.global_store.v1 import (
 )
 from concurrent.futures import ThreadPoolExecutor
 
+pytestmark = pytest.mark.requires_cuda_or_fake
 
 def _get_free_port() -> int:
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:

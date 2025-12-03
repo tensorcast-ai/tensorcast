@@ -13,6 +13,8 @@ from tensorcast.api import save_dict
 from tensorcast.api._io_disk import load_dict_from_disk
 
 
+pytestmark = pytest.mark.requires_cuda_or_fake
+
 @pytest.fixture
 def has_cuda():
     """Whether CUDA is available on the test host."""

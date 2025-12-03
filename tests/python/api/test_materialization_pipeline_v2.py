@@ -33,9 +33,17 @@ def _force_cuda(monkeypatch):
 def _patch_validate_targets(monkeypatch):
     from tensorcast.api.store import materialization as mat_mod
 
-    def _pair(*, canonical_index, target, source, device_id):
+    def _pair(
+        *, canonical_index, target, source, device_id, required_names=None
+    ):
         pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
-        for entry in canonical_index.entries:
+        names = (
+            required_names
+            if required_names is not None
+            else [entry.name for entry in canonical_index.entries]
+        )
+        for name in names:
+            entry = next(e for e in canonical_index.entries if e.name == name)
             pairs.append((target[entry.name], source[entry.name]))
         return pairs
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping, TypeAlias
+from typing import Literal, Mapping
 
 import torch
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -14,6 +14,9 @@ from tensorcast.types import ServerConfig
 TensorDict = Mapping[str, torch.Tensor]
 
 SpanAttributeValue = bool | int | float | str
+
+
+FallbackPreference = Literal["auto", "local", "p2p", "disk"]
 
 ArtifactStatusCode = Literal[
     "OK",
@@ -65,8 +68,6 @@ class FallbackOptions(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    FallbackPreference: TypeAlias = Literal["auto", "local", "p2p", "disk"]
-
     prefer: FallbackPreference = "auto"
     disk_path: str | None = None
     allow_p2p: bool = True
@@ -75,7 +76,7 @@ class FallbackOptions(BaseModel):
     replica_uuid: str | None = None
 
     @staticmethod
-    def _to_prefer_literal(value: str) -> "FallbackPreference":
+    def _to_prefer_literal(value: str) -> FallbackPreference:
         normalized = value.strip().lower()
         if normalized == "auto":
             return "auto"
@@ -93,7 +94,7 @@ class FallbackOptions(BaseModel):
 
     @field_validator("prefer", mode="before")
     @classmethod
-    def _normalize_prefer(cls, value: object) -> "FallbackPreference":
+    def _normalize_prefer(cls, value: object) -> FallbackPreference:
         normalized = "auto" if value is None else str(value).strip().lower()
         return cls._to_prefer_literal(normalized)
 
@@ -225,6 +226,7 @@ class StoreCapabilities:
 __all__ = [
     "ArtifactError",
     "ArtifactStatusCode",
+    "FallbackPreference",
     "CanonicalIndex",
     "CanonicalIndexEntry",
     "FallbackOptions",

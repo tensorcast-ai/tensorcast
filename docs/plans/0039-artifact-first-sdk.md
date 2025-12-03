@@ -74,6 +74,7 @@ Implement the artifact-first SDK surface defined in Design 0039: embed a default
 - [ ] Run lint/format/type checks: `uv run ruff check .`, `uv run ruff format .`, `uv run pyright ./tensorcast`.
 - [ ] Run relevant Python tests: `uv run pytest tests/python/...` (targeted modules).
   - Test execution pending locally (`uv` not available in current environment); rerun in CI or with `uv` installed.
+- [x] Added regression coverage for `tc.artifact` exports, `Artifact.prefetch()` clone semantics, `tensor_into` subset copy, and plan defaults via `tests/python/api/test_public_surface.py`, `tests/python/api/test_artifact_handle.py`, and `tests/python/api/test_config_models.py`.
 
 # Phase 7: Test suite cleanup for interface removal
 - [x] Audit and update tests under `tests/python` that reference removed eager helpers (`get`, `get_into`, `get_view`, `get_view_into`, `register_kv_block`) to handle-first APIs (`artifact().tensor_dict`, `.tensor_dict_into`, `.tensor`, views via `.view()`, region reuse via standard `register`).

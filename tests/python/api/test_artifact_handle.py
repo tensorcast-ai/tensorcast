@@ -6,7 +6,8 @@ import json
 import threading
 import time
 import weakref
-from typing import cast
+from dataclasses import replace
+from typing import Sequence, cast
 
 import pytest
 import torch
@@ -16,8 +17,8 @@ from tensorcast.api.store import Store
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
 from tensorcast.api.store.retry import build_retry_policies
+from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
 
 
 def _build_payload(tensors: dict[str, torch.Tensor]) -> tuple[bytes, MaterializationPayload]:
@@ -136,6 +137,7 @@ class _PipelineStub:
     def __init__(self, payload: MaterializationPayload) -> None:
         self.payload = payload
         self.calls: list[dict[str, object]] = []
+        self.get_into_calls: list[dict[str, object]] = []
         self.released: list[str] = []
 
     def materialize_subset(self, **kwargs):
@@ -162,7 +164,25 @@ class _PipelineStub:
         key: str | None,
         device,
         fallback,
+        options=None,
+        tensor_names: Sequence[str] | None = None,
+        view_spec=None,
+        view_data_hash=None,
+        view_index_hint=None,
+        replica_uuid=None,
     ) -> None:
+        self.get_into_calls.append(
+            {
+                "artifact_id": artifact_id,
+                "key": key,
+                "device": device,
+                "tensor_names": tuple(tensor_names) if tensor_names else None,
+                "view_spec": view_spec,
+                "view_data_hash": view_data_hash,
+                "view_index_hint": view_index_hint,
+                "replica_uuid": replica_uuid,
+            }
+        )
         state = self._payload_state_dict(self.payload)
         for name, tensor in state.items():
             if name in target:
@@ -200,6 +220,59 @@ def test_tensor_subset_materialization_and_release():
     assert set(result.keys()) == {"bar"}
     assert pipeline.calls and pipeline.calls[0]["tensor_names"] == ("bar",)
     assert ("replica-1", "") in runtime._client.unloaded
+
+
+def test_tensor_into_materializes_subset_only():
+    tensors = {
+        "foo": torch.zeros(2, dtype=torch.float32),
+        "bar": torch.ones(2, dtype=torch.float32),
+    }
+    canonical_bytes, payload = _build_payload(tensors)
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    target = torch.zeros(2, dtype=torch.float32)
+    artifact.tensor_into("bar", target, device=torch.device("cpu"))
+
+    assert torch.allclose(target, tensors["bar"])
+    assert pipeline.get_into_calls
+    assert pipeline.get_into_calls[0]["tensor_names"] == ("bar",)
+
+
+def test_prefetch_returns_clone_and_ticket():
+    tensors = {"foo": torch.ones(1, dtype=torch.float32)}
+    canonical_bytes, payload = _build_payload(tensors)
+    payload = replace(
+        payload,
+        ticket_replica_uuid="prefetch-replica",
+        ticket_created_at_ts=time.monotonic(),
+        ticket_expires_at_ts=time.monotonic() + 5.0,
+    )
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    prefetched, ticket = artifact.prefetch(device="cpu")
+
+    assert prefetched is not artifact
+    assert prefetched.artifact_id == "aid"
+    assert ticket.replica_uuid == "prefetch-replica"
+    prefetched_snapshot = prefetched.to_dict()
+    fallback_snapshot = prefetched_snapshot["fallback"]
+    assert fallback_snapshot is not None
+    assert fallback_snapshot["replica_uuid"] == ticket.replica_uuid
+    assert artifact.to_dict()["fallback"] is None
 
 
 def test_release_blocks_materialization():

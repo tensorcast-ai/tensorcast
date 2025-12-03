@@ -13,6 +13,7 @@ import duckdb
 import pytest
 
 from tests.python.utils.ports import get_free_port, get_free_port_pair
+from tests.python.utils.hardware import has_cuda_or_fake
 
 # Configure logging for tests
 logging.basicConfig(
@@ -29,6 +30,16 @@ def pytest_configure(config: pytest.Config) -> None:
     clean even when those plugins are not installed in the environment.
     """
     config.addinivalue_line("markers", "timeout: per-test timeout in seconds")
+    config.addinivalue_line(
+        "markers",
+        "requires_cuda_or_fake: skip test when neither CUDA nor the fake CUDA backend is available",
+    )
+
+
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Skip tests that require CUDA when neither real nor fake backend is present."""
+    if "requires_cuda_or_fake" in item.keywords and not has_cuda_or_fake():
+        pytest.skip("CUDA driver unavailable and fake CUDA backend not enabled")
 
 
 @pytest.fixture(scope="function")

@@ -365,11 +365,13 @@ class MaterializationPipeline:
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
             canonical_index = canonical_index_from_bytes(layout_bytes)
+            requested = tuple(tensor_names) if tensor_names else None
             pairs = validate_targets(
                 canonical_index=canonical_index,
                 target=target,
                 source=self._payload_state_dict(payload),
                 device_id=device_id,
+                required_names=requested,
             )
             for tgt, src in pairs:
                 tgt.copy_(src)
@@ -421,11 +423,13 @@ class MaterializationPipeline:
                     )
                     canonical_index = canonical_index_from_bytes(layout_bytes)
                     source_map = self._payload_state_dict(materialized)
+                    requested = tuple(tensor_names) if tensor_names else None
                     pairs = validate_targets(
                         canonical_index=canonical_index,
                         target=target,
                         source=source_map,
                         device_id=device_id,
+                        required_names=requested,
                     )
                     for tgt, src in pairs:
                         if cancel_event.is_set():
@@ -796,7 +800,7 @@ class MaterializationPipeline:
                     resolved_artifact_id = cached_entry.artifact_id
 
         if fallback_opts and (requested_disk or not allow_p2p):
-            disk_path, resolved_artifact_id, disk_error = (
+            resolved_path, resolved_artifact_id, disk_error = (
                 self._fallback.resolve_disk_path(
                     fallback=fallback_opts,
                     client=client,
@@ -804,6 +808,8 @@ class MaterializationPipeline:
                     artifact_id=artifact_id,
                 )
             )
+            if resolved_path:
+                disk_path = resolved_path
             if disk_path:
                 requested_disk = True
                 disk_required = True

@@ -78,7 +78,7 @@ class PlanType(Enum):
 class RegisterArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    plan: PlanType = PlanType.VRAM_COALESCED
+    plan: PlanType = PlanType.VRAM_LEASED
     p2p_prefer: str = "vram"
     max_inflight_bytes: int = 512 * 1024 * 1024
     release_on_tensor_commit: bool = True

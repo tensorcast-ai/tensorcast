@@ -5,33 +5,32 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import json
-import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Sequence
 
 import grpc
 import pytest
 import torch
 
 from tensorcast import _C
-from tensorcast.api.store import (
-    CanonicalIndex,
-    CanonicalIndexEntry,
-    Store,
-    StoreOptions,
-    ArtifactError,
-)
-from tensorcast.api.store import materialization as materialization_mod
-from tensorcast.api.store.materialization import MaterializationPipeline
-from tensorcast.api.store.retry import map_registration_error
-from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api._view_ops import (
     NarrowOp,
     ResolvedViewInputs,
     TransposeOp,
     ViewSpecBuildResult,
 )
-from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
+from tensorcast.api.store import (
+    ArtifactError,
+    CanonicalIndex,
+    CanonicalIndexEntry,
+    Store,
+    StoreOptions,
+)
+from tensorcast.api.store import materialization as materialization_mod
+from tensorcast.api.store.materialization import MaterializationPipeline
+from tensorcast.api.store.retry import map_registration_error
+from tensorcast.api.store.views import ViewOrchestrator
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 
@@ -363,6 +362,7 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
         target: dict[str, torch.Tensor],
         source: dict[str, torch.Tensor],
         device_id: int,
+        required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         captured_index["shapes"] = [entry.shape for entry in canonical_index.entries]
         return [(target["weights"], source["weights"])]
@@ -458,7 +458,7 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
 
 
 def test_register_view_server_placement_error_guidance() -> None:
-    store = _fresh_store()
+    _fresh_store()
     failure = _PlacementRpcError(
         "SERVER placement for view registration requires GPU transpose support on device 0; "
         "retry with placement=CLIENT (mock device missing)"
