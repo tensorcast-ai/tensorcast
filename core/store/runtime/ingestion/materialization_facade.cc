@@ -89,7 +89,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_replic
   if (!request_or.ok()) {
     return request_or.status();
   }
-  return materialization_service_->Execute(request_or.value());
+  return materialization_service_->execute(request_or.value());
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_disk(

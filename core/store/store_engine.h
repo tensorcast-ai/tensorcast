@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -15,6 +16,8 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "core/store/memory_tier_budget.h"
+#include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
@@ -169,6 +172,13 @@ class StoreEngine {
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */
   [[nodiscard]] std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;
+
+  [[nodiscard]] std::optional<MemoryTierBudget::Snapshot> get_memory_tier_snapshot() const;
+  [[nodiscard]] std::optional<MemoryTierConfig> get_memory_tier_config() const;
+  absl::StatusOr<components::MemoryTierLeaseDescriptor> acquire_memory_tier_lease(
+      const components::MemoryTierLeaseDescriptor& lease);
+  absl::StatusOr<components::MemoryTierLeaseDescriptor> release_memory_tier_lease(
+      const components::MemoryTierLeaseDescriptor& lease);
 
   // Replica management
   // ─────────────────────────────────────────────────────────────────────

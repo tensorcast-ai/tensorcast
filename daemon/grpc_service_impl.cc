@@ -172,6 +172,40 @@ Status StoreDaemonServiceImpl::WaitReplicaVerification(
   return materialization_controller_->wait_verification(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceV2Impl::MaterializeReplica(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeReplicaRequest* req,
+    v2::MaterializeReplicaResponse* resp) {
+  RpcContext rctx{"MaterializeReplicaV2", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.materialize_replica_v2(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceV2Impl::MaterializeByKey(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeByKeyRequest* req,
+    v2::MaterializeByKeyResponse* resp) {
+  RpcContext rctx{"MaterializeByKeyV2", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.materialize_by_key_v2(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceV2Impl::ResolveArtifactFromDisk(
+    grpc::ServerContext* ctx,
+    const v2::ResolveArtifactFromDiskRequest* req,
+    v2::ResolveArtifactFromDiskResponse* resp) {
+  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.resolve_artifact_from_disk(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
+    grpc::ServerContext* ctx,
+    const v2::GetMaterializeCapabilitiesRequest* /*req*/,
+    v2::GetMaterializeCapabilitiesResponse* resp) {
+  RpcContext rctx{"GetMaterializeCapabilities", *ctx, allow_high_card_attrs_};
+  resp->set_supports_view_subset_hash(true);
+  rctx.mark_success();
+  return Status::OK;
+}
+
 Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
     const v1::LockTransportChunksRequest* req,

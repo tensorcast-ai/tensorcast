@@ -179,7 +179,7 @@ Materialization uses a staged ingestion pipeline, orchestrated by `Materializati
 `MaterializationService` centralizes the logic that used to live inside `StoreEngine::materialize_replica`:
 
 - Requests are validated via `loading::MaterializationRequest::Create`, which normalizes `MaterializeHints`, resolves `VariantRequest` data, and checks that CPU/GPU device IDs map to known `DeviceKey`s before any UMA allocations occur.
-- `MaterializeMode::AUTO` first calls `MaterializeOrchestrator::run()` to negotiate a remote transport with Global Store (via `CommunicationManager`). When a transport session is granted the request flows through `ingest_from_p2p`; if not, the service only falls back to disk when `hints.disk_path` is populated.
+- Artifact identifiers are validated when prefixed with `mi2:`/`cgid:` but local/test identifiers without a canonical prefix are still accepted for CPU/GPU loads.
 - `MaterializeMode::LOAD_ONLY` requires a disk path and never attempts P2P; `MaterializeMode::COPY_ONLY` copies from an already resident GPU replica, reusing UMA metadata.
 - View-aware hints (`MaterializeHints::variant`) propagate canonical + view identifiers into the ingestion pipeline so the resulting `ReplicaKey` encodes `view_id`, and verification helpers recompute `view_data_hash` via `ViewHashComputer`.
 - Dependencies are injected with `MaterializationDeps`: `ReplicaRuntime` for reuse/allocation, the shared `PinnedBufferPool`, `ChunkAwareLoadingStrategy`, `TransferService`, and planner utilities. Tests override these via `MaterializationHooks` to inject fake pipelines, mutate completion events, or short-circuit results without touching production wiring.

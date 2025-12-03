@@ -1,16 +1,21 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include <atomic>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "catch2/catch_test_macros.hpp"
+#include "core/store/memory_tier_budget.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/store_engine_options.h"
 
+using tensorcast::store::MemoryTierBudget;
+using tensorcast::store::MemoryTierConfig;
 using tensorcast::store::StoreEngineOptions;
 using tensorcast::store::runtime::RegistrationEvent;
 using tensorcast::store::runtime::RuntimeContext;
@@ -31,6 +36,64 @@ StoreEngineOptions MakeContextOptions() {
 }
 
 } // namespace
+
+TEST_CASE("MemoryTierBudget fails fast on invalid capacities", "[runtime][memory_tier][budget]") {
+  MemoryTierConfig cfg;
+  cfg.enable_preemptible_memory = false;
+  cfg.preemptible_limit_bytes = 0;
+  cfg.preemptible_low_watermark_ratio = 0.5;
+
+  cfg.stable_bytes = 0;
+  auto budget_zero = MemoryTierBudget::from_config(cfg, /*host_dram_bytes=*/1024, /*pinned_pool_bytes=*/0);
+  REQUIRE_FALSE(budget_zero.ok());
+  CHECK(budget_zero.status().code() == absl::StatusCode::kInvalidArgument);
+
+  cfg.stable_bytes = 900;
+  auto budget_pinned_over = MemoryTierBudget::from_config(cfg, /*host_dram_bytes=*/512, /*pinned_pool_bytes=*/600);
+  REQUIRE_FALSE(budget_pinned_over.ok());
+  CHECK(budget_pinned_over.status().code() == absl::StatusCode::kInvalidArgument);
+
+  cfg.stable_bytes = 512;
+  auto budget_uma_over = MemoryTierBudget::from_config(cfg, /*host_dram_bytes=*/256, /*pinned_pool_bytes=*/32);
+  REQUIRE_FALSE(budget_uma_over.ok());
+  CHECK(budget_uma_over.status().code() == absl::StatusCode::kInvalidArgument);
+
+  cfg.stable_bytes = 128;
+  auto budget_ok = MemoryTierBudget::from_config(cfg, /*host_dram_bytes=*/512, /*pinned_pool_bytes=*/64);
+  REQUIRE(budget_ok.ok());
+  CHECK(budget_ok->snapshot().stable_total_bytes == cfg.stable_bytes);
+  CHECK(budget_ok->snapshot().preemptible_total_bytes == 0);
+}
+
+TEST_CASE("RuntimeContext validates memory tier thresholds before startup", "[runtime][context][memory_tier]") {
+  StoreEngineOptions opts = MakeContextOptions();
+  MemoryTierConfig cfg;
+  cfg.enable_preemptible_memory = true;
+  cfg.preemptible_limit_bytes = 1024;
+  cfg.stable_bytes = 1024;
+  cfg.preemptible_low_watermark_ratio = 1.2;
+  opts.memory_tier_config = cfg;
+
+  RuntimeContext bad_watermark(opts);
+  auto status = bad_watermark.start();
+  REQUIRE_FALSE(status.ok());
+  CHECK(status.code() == absl::StatusCode::kInvalidArgument);
+
+  cfg.preemptible_low_watermark_ratio = 0.5;
+  cfg.stable_bytes = std::numeric_limits<uint64_t>::max() / 4;
+  opts.memory_tier_config = cfg;
+  RuntimeContext bad_capacity(opts);
+  status = bad_capacity.start();
+  REQUIRE_FALSE(status.ok());
+  CHECK(status.code() == absl::StatusCode::kInvalidArgument);
+
+  cfg.stable_bytes = 1024;
+  opts.memory_tier_config = cfg;
+  RuntimeContext ok_context(opts);
+  status = ok_context.start();
+  REQUIRE(status.ok());
+  ok_context.shutdown();
+}
 
 TEST_CASE("RuntimeContext publishes events and drains", "[runtime][context]") {
   RuntimeContext context(MakeContextOptions());

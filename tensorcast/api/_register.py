@@ -47,6 +47,7 @@ from tensorcast.api._indices import (
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
+from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.common.identity import ArtifactIdKind, validate_client_generated_id
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
@@ -65,10 +66,6 @@ from tensorcast.types import (
 # Internal alignment hint for layout computation.
 # Currently unused by the underlying calculator but kept for API clarity.
 DEFAULT_ALIGN = 1
-
-
-NormalizedViewOp = Mapping[str, int | str]
-NormalizedViewOps = Mapping[str, Sequence[NormalizedViewOp]]
 
 
 @dataclass
@@ -630,10 +627,11 @@ def _merge_canonical_ranges(
 
 def _compute_view_plan_metadata(
     canonical_index_bytes: bytes,
-    normalized_ops: NormalizedViewOps,
+    build_result: ViewSpecBuildResult,
 ) -> ViewPlanMetadata:
-    if not normalized_ops:
+    if build_result.is_identity:
         raise TensorCastError("View registration requires explicit view operations")
+    normalized_ops = build_result.to_normalized_dict()
     native_plan = compute_view_registration_plan(canonical_index_bytes, normalized_ops)
     forward = native_plan["forward"]
     write_chunks = tuple(
@@ -723,7 +721,7 @@ def _torch_dtype_from_string(dtype_str: str) -> torch.dtype:
 
 def _materialize_canonical_tensors(
     canonical_index_bytes: bytes,
-    normalized_ops: NormalizedViewOps,
+    build_result: ViewSpecBuildResult,
     tensors: Mapping[str, torch.Tensor],
 ) -> dict[str, torch.Tensor]:
     tensor_meta_index, _ = _tensor_indices_from_canonical_index_bytes(
@@ -740,15 +738,15 @@ def _materialize_canonical_tensors(
         if tensor_cpu.device.type != "cpu":
             tensor_cpu = tensor_cpu.to(torch.device("cpu"), non_blocking=False)
         tensor_cpu = tensor_cpu.contiguous()
-        ops = list(normalized_ops.get(name, []))
+        ops = list(build_result.tensor_ops.get(name, ()))
         # Apply inverse operations (reverse order)
         for op in reversed(ops):
-            if op["type"] == "transpose":
-                tensor_cpu = tensor_cpu.transpose(int(op["dim0"]), int(op["dim1"]))
-            elif op["type"] == "narrow":
-                dim = int(op["dim"])
-                start = int(op["start"])
-                length = int(op["length"])
+            if isinstance(op, TransposeOp):
+                tensor_cpu = tensor_cpu.transpose(int(op.dim0), int(op.dim1))
+            elif isinstance(op, NarrowOp):
+                dim = int(op.dim)
+                start = int(op.start)
+                length = int(op.length)
                 full = torch.zeros(
                     tuple(int(d) for d in shape),
                     dtype=tensor_cpu.dtype,
@@ -758,7 +756,9 @@ def _materialize_canonical_tensors(
                 full[tuple(slice_spec)].copy_(tensor_cpu)
                 tensor_cpu = full
             else:
-                raise TensorCastError(f"Unsupported view operation type: {op['type']}")
+                raise TensorCastError(
+                    f"Unsupported view operation type: {type(op).__name__}"
+                )
         # Ensure dtype matches canonical requirements
         target_dtype = _torch_dtype_from_string(dtype_str)
         if tensor_cpu.dtype != target_dtype:
@@ -942,6 +942,7 @@ class _LeaseUploader:
                         base_addr=0,
                         length=length_bytes,
                         dst_offset=int(dst_offset),
+                        storage_id=storage_id,
                     )
                 )
                 storages_payload.append(

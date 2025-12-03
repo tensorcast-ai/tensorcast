@@ -460,9 +460,52 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const std::unordered_map<int, std::unordered_map<std::string, uint64_t>>& tensor_device_offsets,
     const bool from_ipc_shm) {
 #ifdef USE_FAKE_CUDA
-  // Stub implementation for fake CUDA
-  LOG(FATAL) << "restore_tensors is not supported in fake CUDA mode";
-  return {};
+  // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
+  std::unordered_map<std::string, torch::Tensor> state_dict;
+  std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
+
+  for (const auto& [device, tensor_offset] : tensor_device_offsets) {
+    for (const auto& p : tensor_offset) {
+      const std::string name = p.first;
+      const uint64_t offset = p.second;
+
+      if (memory_base_address.find(device) == memory_base_address.end()) {
+        continue;
+      }
+      std::uint64_t base_address = memory_base_address.at(device);
+      auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
+      at::ScalarType dtype = string_to_scalar_type(type_str);
+
+      const size_t element_size = c10::elementSize(dtype);
+      const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
+      const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
+
+      torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
+
+      std::shared_ptr<void> owner;
+      auto it = owners.find(base_address);
+      if (it == owners.end()) {
+        owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm](void* ptr) {
+          absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+          if (!status.ok()) {
+            LOG(WARNING) << "fake restore_tensors: release failed: " << status;
+          }
+        });
+        owners.emplace(base_address, owner);
+      } else {
+        owner = it->second;
+      }
+
+      torch::Tensor tensor = torch::from_blob(
+          reinterpret_cast<void*>(data_address),
+          torch::IntArrayRef(sizes),
+          torch::IntArrayRef(strides),
+          [owner](void*) mutable { owner.reset(); },
+          options);
+      state_dict[name] = tensor;
+    }
+  }
+  return state_dict;
 #else
   std::unordered_map<std::string, torch::Tensor> state_dict;
   std::unordered_set<std::uint64_t> handled_memory;

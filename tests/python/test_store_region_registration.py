@@ -1,7 +1,7 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import types
 import sys
+import types
 
 import pytest
 
@@ -11,21 +11,34 @@ sys.modules.setdefault(
     types.SimpleNamespace(get_cuda_memory_handle=lambda device_id, base_ptr: b"fake-handle"),
 )
 
-from tensorcast.api.store import Store
+from tensorcast.api.store import Store, StoreOptions
 from tensorcast.types import VramRegionHandle
 from tensorcast.api import _region_cache as region_cache
 
 
 @pytest.fixture
 def store(monkeypatch) -> Store:
-    s = Store("dummy:0")
+    client = types.SimpleNamespace()
+    runtime = types.SimpleNamespace(
+        daemon_endpoint="dummy:0",
+        opts=StoreOptions(),
+        retry_policies={},
+        ensure_client=lambda: client,
+        operation_span=lambda *args, **kwargs: types.SimpleNamespace(
+            __enter__=lambda self: self,
+            __exit__=lambda *exc: False,
+            add_event=lambda *a, **k: None,
+            set_attribute=lambda *a, **k: None,
+            set_status=lambda *a, **k: None,
+            record_exception=lambda *a, **k: None,
+        ),
+    )
+    s = Store("dummy:0", runtime=runtime)
 
     # Fake CUDA handle exporter (redundant with sys.modules stub but keeps isolation per test)
     monkeypatch.setattr("tensorcast.api.store.get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
 
     # Fake daemon client with register/unregister methods
-    client = types.SimpleNamespace()
-
     def _register_vram_region(*, device_id: int, size_bytes: int, ttl_ms: int, cuda_ipc_handle: bytes, region_name: str | None = None):
         assert device_id >= 0
         assert size_bytes > 0
@@ -40,7 +53,6 @@ def store(monkeypatch) -> Store:
     client.register_vram_region = _register_vram_region
     client.unregister_vram_region = _unregister_vram_region
 
-    monkeypatch.setattr(s, "_ensure_client", lambda: client)
     return s
 
 
@@ -65,5 +77,3 @@ def test_register_and_unregister_vram_region_updates_cache(store: Store):
     assert ok is True
     dev_regions2 = region_cache.get_regions_for_device(device_id)
     assert all(r.region_id != "region:test123" for r in dev_regions2)
-
-

@@ -8,14 +8,14 @@ import threading
 import time
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import Any, Callable, cast
+from typing import Any, Callable, Sequence, cast
 
 import pytest
 import torch
 
 import tensorcast.api.store as store_mod
 from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
-from tensorcast.api._materialize import MaterializedArtifact
+from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api._register import (
     BuildContext,
     CoalescedLayout,
@@ -29,7 +29,9 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
+from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.common.identity import ArtifactIdKind
+from tensorcast import daemon_ctl
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -53,6 +55,7 @@ class FakeDaemonCtl:
         self.keepalive_calls: list[tuple[str, int, int]] = []
         self.server_address = "fake://daemon"
         self.resolve_calls: list[str] = []
+        self.resolve_disk_calls: list[tuple[str, bool]] = []
 
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
@@ -60,6 +63,26 @@ class FakeDaemonCtl:
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
         self.resolve_calls.append(key)
         return self.resolves.get(key, (None, None))
+
+    def resolve_artifact_from_disk_v2(
+        self, *, disk_path: str, verify_checksums: bool = True
+    ):
+        self.resolve_disk_calls.append((disk_path, bool(verify_checksums)))
+        artifact_id = None
+        for resolved_id, mapped_path in self.resolves.values():
+            if mapped_path == disk_path and resolved_id:
+                artifact_id = resolved_id
+                break
+
+        class _Resp:
+            pass
+
+        resp = _Resp()
+        resp.artifact_id = artifact_id or ""
+        resp.disk_path = disk_path
+        resp.canonical_index_bytes = json.dumps({}, separators=(",", ":")).encode("utf-8")
+        resp.generation = 0
+        return resp
 
     def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:  # noqa: D401
         self.keepalive_calls.append((registration_id, ttl_ms, epoch))
@@ -79,7 +102,7 @@ class FakeEnvironment:
     futures: list[FakeHandle]
     block_registration: bool
     register_started: threading.Event
-    materialized_by_id: dict[str, MaterializedArtifact]
+    materialized_by_id: dict[str, MaterializationPayload]
 
     def add_materialized(
         self,
@@ -90,26 +113,45 @@ class FakeEnvironment:
     ) -> None:
         if replica_uuid is None:
             replica_uuid = f"replica-{artifact_id}"
-        index: dict[str, tuple[int, int, list[int], list[int], str, int]] = {}
+        index: dict[str, list[object]] = {}
+        descriptors: list[TensorPayloadDescriptor] = []
         offset = 0
         for name, tensor in tensors.items():
             size_bytes = int(tensor.element_size() * tensor.nelement())
-            index[name] = (
+            index[name] = [
                 offset,
                 size_bytes,
                 list(map(int, tensor.shape)),
                 list(map(int, tensor.stride())),
                 str(tensor.dtype),
                 int(tensor.storage_offset()),
+            ]
+            descriptors.append(
+                TensorPayloadDescriptor(
+                    name=name,
+                    dtype=str(tensor.dtype),
+                    shape=tuple(map(int, tensor.shape)),
+                    stride=tuple(map(int, tensor.stride())),
+                    buffer_offset=offset,
+                    byte_length=size_bytes,
+                    storage_offset=int(tensor.storage_offset()),
+                )
             )
             offset += size_bytes
         canonical = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self.materialized_by_id[artifact_id] = MaterializedArtifact(
+        canonical_index_bytes = canonical
+
+        def _iter():
+            for desc in descriptors:
+                yield desc, tensors[desc.name]
+
+        self.materialized_by_id[artifact_id] = MaterializationPayload(
             artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            descriptors=tuple(descriptors),
+            payload_iter=_iter,
             state_dict=tensors,
-            canonical_index_bytes=canonical,
             replica_uuid=replica_uuid,
-            disk_path=None,
         )
 
     def make_registration_result(
@@ -222,8 +264,12 @@ class FakeEnvironment:
         placement: int | None = None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
-    ) -> MaterializedArtifact:
-        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint
+        preference: int | None = None,
+        tensor_names: Sequence[str] | None = None,
+        verify_checksums: bool = True,
+        **_: Any,
+    ) -> MaterializationPayload:
+        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, preference, tensor_names, verify_checksums
         disk_hint = disk_path_hint
         if artifact_id is not None and artifact_id in self.materialized_by_id:
             resolved = self.materialized_by_id[artifact_id]
@@ -239,9 +285,16 @@ class FakeEnvironment:
             resolved = None
         if resolved is None:
             raise RuntimeError("artifact not found")
+        resolved_source = resolved.source or (
+            store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
+            if disk_hint
+            else store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
+        )
         if disk_hint is not None and resolved.disk_path != disk_hint:
-            resolved = replace(resolved, disk_path=disk_hint)
+            resolved = replace(resolved, disk_path=disk_hint, source=resolved_source)
             self.materialized_by_id[resolved.artifact_id] = resolved
+        elif resolved.source != resolved_source:
+            resolved = replace(resolved, source=resolved_source)
         return resolved
 
 
@@ -270,6 +323,10 @@ def _make_registered_artifact(
 
 @pytest.fixture
 def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
+    # Reset global daemon client singleton to avoid address mismatches across tests
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     client = FakeDaemonCtl(resolves={})
     env = FakeEnvironment(
         client=client,
@@ -280,10 +337,11 @@ def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
     )
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
-    monkeypatch.setattr(store_mod, "_register_artifact_core", env.fake_register)
-    monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
-
-    store = store_mod.Store("fake://daemon")
+    store = store_mod.Store(
+        "fake://daemon",
+        register_fn=env.fake_register,
+        materialize_fn=env.fake_materialize,
+    )
     return store, env
 
 
@@ -348,7 +406,6 @@ def test_store_get_into_copies_tensors(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -357,7 +414,7 @@ def test_store_get_into_copies_tensors(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     store.get_into(target, artifact_id="artifact-1", device=torch.device("cuda", 0))
     assert torch.allclose(target["bias"], state["bias"])
@@ -372,7 +429,6 @@ def test_store_get_into_unloads_replica(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -381,7 +437,7 @@ def test_store_get_into_unloads_replica(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     store.get_into(target, artifact_id="artifact-release", device=torch.device("cuda", 0))
 
@@ -398,7 +454,6 @@ def test_store_get_into_unloads_on_validation_error(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def failing_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -407,7 +462,7 @@ def test_store_get_into_unloads_on_validation_error(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
-    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
     with pytest.raises(ArtifactError):
         store.get_into(target, artifact_id="artifact-invalid", device=torch.device("cuda", 0))
@@ -444,7 +499,7 @@ def test_store_get_async_cancel_unloads_replica(
         cancel_event: threading.Event | None,
         span: Any = None,
         **kwargs: Any,
-    ) -> MaterializedArtifact:
+    ) -> MaterializationPayload:
         cancel_ready.set()
         assert cancel_event is not None
         while not cancel_event.is_set():
@@ -452,7 +507,11 @@ def test_store_get_async_cancel_unloads_replica(
         assert artifact_id is not None
         return env.materialized_by_id[artifact_id]
 
-    monkeypatch.setattr(store, "_materialize", slow_materialize.__get__(store, Store))
+    monkeypatch.setattr(
+        store._materialization,
+        "_materialize",
+        slow_materialize.__get__(store._materialization, store._materialization.__class__),
+    )
 
     future = store.get_async(artifact_id=artifact_id, device=torch.device("cuda", 0))
     assert cancel_ready.wait(timeout=1.0)
@@ -471,7 +530,6 @@ def test_store_get_into_async_unloads_replica(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def fake_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -480,7 +538,7 @@ def test_store_get_into_async_unloads_replica(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         return [(target["bias"], source["bias"])]
 
-    monkeypatch.setattr(store, "_validate_targets", fake_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     future = store.get_into_async(
         target,
@@ -502,7 +560,6 @@ def test_store_get_into_async_unloads_on_validation_error(
     target = {"bias": torch.zeros(3, dtype=torch.float32)}
 
     def failing_validate(
-        self: Store,
         *,
         canonical_index: Any,
         target: dict[str, torch.Tensor],
@@ -511,7 +568,7 @@ def test_store_get_into_async_unloads_on_validation_error(
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
 
-    monkeypatch.setattr(store, "_validate_targets", failing_validate.__get__(store, Store))
+    monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
     future = store.get_into_async(
         target,
@@ -529,38 +586,47 @@ def test_store_get_prefers_disk_when_available(
     store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, env = store_env
-    disk_called = {}
+    disk_called: dict[str, str | store_daemon_pb2.SourcePreference | None] = {}
 
-    def fake_materialize_from_disk(
-        self: Store,
+    def fake_materialize(
         *,
-        disk_path: str,
-        artifact_id: str | None,
-        device_id: int,
-        verify_checksums: bool,
-    ) -> MaterializedArtifact:
-        disk_called["path"] = disk_path
-        return MaterializedArtifact(
-            artifact_id=artifact_id or "disk-artifact",
-            state_dict={"t": torch.zeros(1, dtype=torch.float32)},
-            canonical_index_bytes=json.dumps(
-                {
-                    "t": [
-                        0,
-                        4,
-                        [1],
-                        [1],
-                        "torch.float32",
-                        0,
-                    ]
-                },
-                separators=(",", ":"),
-            ).encode("utf-8"),
-            replica_uuid="",
-            disk_path=disk_path,
+        disk_path_hint: str | None,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        **_: Any,
+    ) -> MaterializationPayload:
+        disk_called["path"] = disk_path_hint
+        disk_called["preference"] = preference
+        tensor = torch.zeros(1, dtype=torch.float32)
+        size_bytes = int(tensor.element_size() * tensor.numel())
+        canonical_index_bytes = json.dumps(
+            {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+            separators=(",", ":"),
+        ).encode("utf-8")
+        descriptor = TensorPayloadDescriptor(
+            name="t",
+            dtype=str(tensor.dtype),
+            shape=tuple(tensor.shape),
+            stride=tuple(tensor.stride()),
+            buffer_offset=0,
+            byte_length=size_bytes,
+            storage_offset=int(tensor.storage_offset()),
         )
 
-    monkeypatch.setattr(store, "_materialize_from_disk", fake_materialize_from_disk.__get__(store, Store))
+        def _iter():
+            yield descriptor, tensor
+
+        return MaterializationPayload(
+            artifact_id="disk-artifact",
+            canonical_index_bytes=canonical_index_bytes,
+            descriptors=(descriptor,),
+            payload_iter=_iter,
+            state_dict={"t": tensor},
+            replica_uuid="rep-disk",
+            disk_path=disk_path_hint,
+            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK,
+        )
+
+    store.set_materialize_fn(fake_materialize)
 
     result = store.get(
         key="does-not-matter",
@@ -568,6 +634,7 @@ def test_store_get_prefers_disk_when_available(
         device=torch.device("cuda", 0),
     )
     assert disk_called["path"] == "/tmp/artifact"
+    assert disk_called["preference"] == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     assert "t" in result
 
 
@@ -594,27 +661,11 @@ def test_store_key_resolution_cache_reuses_mapping(
     env.add_materialized(artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache")
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
-    monkeypatch.setattr(store_mod, "materialize_artifact", env.fake_materialize)
-
-    def fake_materialize_from_disk(
-        self: Store,
-        *,
-        disk_path: str,
-        artifact_id: str | None,
-        device_id: int,
-        verify_checksums: bool,
-    ) -> MaterializedArtifact:
-        assert disk_path == disk_path_value
-        target_id = artifact_id or artifact_id_value
-        return env.materialized_by_id[target_id]
-
-    monkeypatch.setattr(
-        store_mod.Store,
-        "_materialize_from_disk",
-        fake_materialize_from_disk,
+    store = store_mod.Store(
+        "fake://daemon",
+        materialize_fn=env.fake_materialize,
     )
 
-    store = store_mod.Store("fake://daemon")
     fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
 
     first = store.get(key=key, fallback=fallback, device=torch.device("cuda", 0))
@@ -799,9 +850,12 @@ def test_get_into_async_function_delegates_to_session(
 
 
 def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     class DummyStore:
         def __init__(
-            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None
+            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
         ) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
@@ -812,6 +866,7 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()
@@ -827,11 +882,82 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
     assert first.closed
 
 
+def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
+    created: list[DummyStore] = []
+
+    class DummyStore:
+        def __init__(
+            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
+        ) -> None:
+            del runtime
+            self.daemon_endpoint = daemon_endpoint
+            self.opts = opts
+            self.closed = False
+            self.register_calls: list[tuple[dict[str, torch.Tensor], dict[str, object]]] = []
+            created.append(self)
+
+        def register(
+            self,
+            tensors: dict[str, torch.Tensor],
+            *,
+            artifact_id: str | None = None,
+            key: str | None = None,
+            options: RegisterArtifactOptions | None = None,
+            ttl_ms: int | None = None,
+        ) -> DummyStore:
+            self.register_calls.append(
+                (
+                    tensors,
+                    {
+                        "artifact_id": artifact_id,
+                        "key": key,
+                        "options": options,
+                        "ttl_ms": ttl_ms,
+                    },
+                )
+            )
+            return self
+
+        def close(self) -> None:
+            self.closed = True
+
+    runtime_handle = SimpleNamespace(address="fake://daemon")
+    monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(
+        store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={})
+    )
+    monkeypatch.setattr(store_mod, "Store", DummyStore)
+
+    store_mod.shutdown_process_store()
+
+    first = cast(DummyStore, store_mod.store())
+    assert created == [first]
+
+    first.close()
+    assert first.closed is True
+
+    result = cast(DummyStore, store_mod.register({"w": torch.ones(1)}))
+
+    assert len(created) == 2
+    assert result is created[-1]
+    assert result is not first
+    assert first.register_calls == []
+    assert created[-1].register_calls
+
+    store_mod.shutdown_process_store()
+
+
 def test_store_force_recreate_and_option_refresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    daemon_ctl._CLIENT_INSTANCE = None
+    daemon_ctl._CLIENT_ADDRESS = None
+
     class DummyStore:
-        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None) -> None:
+        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None, runtime=None) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
             self.closed = False
@@ -844,6 +970,7 @@ def test_store_force_recreate_and_option_refresh(
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()

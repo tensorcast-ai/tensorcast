@@ -12,9 +12,21 @@ _VerificationInfo = Dict[str, Union[int, List[int]]]
 _DeviceId = Union[int, torch.device]
 _PathLike = Union[str, os.PathLike[str]]
 
+
+# -----------------------------------------------------------------------------
+# Build configuration
+# -----------------------------------------------------------------------------
+
+
+def is_fake_cuda() -> bool:
+    """Returns True if this extension was built with the fake CUDA backend."""
+    ...
+
+
 # -----------------------------------------------------------------------------
 # Tensor save / load helpers
 # -----------------------------------------------------------------------------
+
 
 def save_tensors(
     tensor_names: Sequence[str],
@@ -55,9 +67,11 @@ def restore_tensors_from_disk(
     device_id: int = -1,
 ) -> Dict[str, torch.Tensor]: ...
 
+
 # -----------------------------------------------------------------------------
 # CUDA memory helpers
 # -----------------------------------------------------------------------------
+
 
 def allocate_cuda_memory(
     device_id: int,
@@ -88,11 +102,14 @@ def close_cuda_memory_handle(
 
 def inspect_or_generate_descriptor(disk_path: _PathLike) -> Mapping[str, Union[str, int]]: ...
 
+
 def build_canonical_index_from_safetensors(artifact: _PathLike) -> bytes: ...
+
 
 # -----------------------------------------------------------------------------
 # Verification utilities
 # -----------------------------------------------------------------------------
+
 
 def generate_artifact_verification_info(
     disk_path: _PathLike,

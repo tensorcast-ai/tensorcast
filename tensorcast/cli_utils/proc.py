@@ -262,4 +262,6 @@ def ensure_cpp_daemon_binary() -> Path:
     if p.exists() and os.access(p, os.X_OK):
         return p
 
-    raise ServiceError("tensorcast_daemon binary not found.")
+    raise ServiceError(
+        "tensorcast_daemon binary not found. Build it with bazel build //daemon:tensorcast_daemon."
+    )

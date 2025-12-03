@@ -24,8 +24,10 @@
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
+#include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/types/direct_write_grant.h"
@@ -45,7 +47,7 @@ class ReplicaLoadController {
   /**
    * @brief Constructs a ReplicaLoadController.
    * @param artifact_identifier A unique name for the replica, used for logging.
-   * @param local_device_id The target local GPU device ID.
+   * @param device_key Canonical device binding for this replica (GPU or CPU).
    * @param pinned_pool Shared pool for allocating pinned CPU memory.
    * @param artifact_chunk_bytes UMA chunk granularity for this replica.
    * @param max_buffer_bytes The maximum buffer size in bytes for streaming transfers (default 1 GB).
@@ -57,13 +59,14 @@ class ReplicaLoadController {
    */
   ReplicaLoadController(
       std::string artifact_identifier,
-      int local_device_id,
+      DeviceKey device_key,
       const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
       size_t artifact_chunk_bytes,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
       uint64_t artifact_size,
-      std::optional<std::string> view_id = std::nullopt);
+      std::optional<std::string> view_id = std::nullopt,
+      std::optional<MemoryTierConfig> memory_tier_config = std::nullopt);
 
   ~ReplicaLoadController() noexcept;
 
@@ -73,11 +76,19 @@ class ReplicaLoadController {
   ReplicaLoadController(ReplicaLoadController&&) = delete;
   ReplicaLoadController& operator=(ReplicaLoadController&&) = delete;
 
+  [[nodiscard]] std::shared_ptr<UnifiedMemoryAuthority> memory_authority() const {
+    return memory_coordinator_;
+  }
+
   /**
    * @brief Gets the configured artifact size.
    * @return uint64_t Artifact size in bytes, or 0 if not set.
    */
   [[nodiscard]] uint64_t get_artifact_size() const noexcept;
+
+  [[nodiscard]] const std::optional<MemoryTierConfig>& memory_tier_config() const noexcept {
+    return memory_tier_config_;
+  }
 
   /**
    * @brief Gets the configured local CUDA device ID (or -1 if not yet set).
@@ -273,6 +284,10 @@ class ReplicaLoadController {
    */
   [[nodiscard]] absl::Status mark_cpu_preemptible(float ratio = 1.0F) ABSL_LOCKS_EXCLUDED(mutex_);
 
+  void set_memory_tier_budget(std::shared_ptr<MemoryTierBudget> budget) {
+    memory_coordinator_->set_memory_tier_budget(std::move(budget));
+  }
+
   /**
    * @brief Get missing chunks for a target location.
    * @param target Target memory location.
@@ -370,6 +385,10 @@ class ReplicaLoadController {
   void record_failure_and_fail_(common::memory::MemoryLocation location, std::string message)
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  [[nodiscard]] bool preemptible_enabled_locked_() const;
+  [[nodiscard]] UnifiedMemoryAuthority::PostGpuLoadPolicy select_post_gpu_policy(
+      UnifiedMemoryAuthority::PostGpuLoadPolicy preferred) const;
+
   // ----------------------------------------------------------------------
   // Refactor: CPU/GPU pods to group related members under a single lock
   // ----------------------------------------------------------------------
@@ -406,6 +425,8 @@ class ReplicaLoadController {
   GpuPod gpu_ ABSL_GUARDED_BY(mutex_);
 
   const uint64_t artifact_size_;
+
+  const std::optional<MemoryTierConfig> memory_tier_config_;
 
   // Memory Pools (immutable handles; lock-free reads)
   const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_pool_;

@@ -12,6 +12,7 @@
 #include <thread>
 #include <vector>
 
+#include "core/communicator/base/constants.h"
 #include "core/communicator/transport/net_dev.h"
 
 namespace tensorcast::communicator::transport {
@@ -26,6 +27,8 @@ class RdmaContext {
  public:
   RdmaContext();
   ~RdmaContext();
+
+  net_dev_t get_best_dev(int dev_type, int dev_id, int rail_id, const std::string& key);
 
   net_dev_t get_dev(const std::string& name);
 
@@ -43,6 +46,8 @@ class RdmaContext {
    */
   std::string get_best_dev_name(int gpu_id);
 
+  net_dev_t get_dev_by_rail(int rail_id);
+
   rdma_transport_t create_transport(const std::string& dev_name);
 
   // Expose list of RDMA devices for warmup/registration.
@@ -56,12 +61,15 @@ class RdmaContext {
     qp_timeout_ = qp_timeout;
     qp_retry_ = qp_retry;
   }
+
   int traffic_class() const {
     return traffic_class_;
   }
+
   int qp_timeout() const {
     return qp_timeout_;
   }
+
   int qp_retry() const {
     return qp_retry_;
   }
@@ -70,15 +78,18 @@ class RdmaContext {
   misc::result_t ibv_init();
 
   std::vector<net_dev_t> devs_;
+  std::unordered_map<int, net_dev_t> rail_devs_;
   std::vector<rdma_thread_t> io_threads_;
   std::array<net_dev_t, 16> dev_vector_;
   int traffic_class_ = 186;
   int qp_timeout_ = 20;
   int qp_retry_ = 7;
 };
+
 using rdma_context_t = std::shared_ptr<RdmaContext>;
 
 class RdmaTransport;
+
 class RdmaThread {
  public:
   explicit RdmaThread(net_dev_t dev);

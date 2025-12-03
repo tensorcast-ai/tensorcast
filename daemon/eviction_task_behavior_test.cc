@@ -38,7 +38,7 @@ static ReplicaKey commit_small_gpu_replica(StoreEngine& engine, const std::strin
   StoreEngine::ArtifactRegistration reg;
   reg.artifact_id = artifact_id;
   reg.tensor_index_data = std::string("{\"tensors\":[{\"name\":\"x\",\"offset\":0,\"length\":8}]}\n");
-  reg.schema_version = "v2";
+  reg.schema_version = "v3";
   reg.encoding = "json";
   reg.device_id = 0;
   reg.total_size_bytes = 8;

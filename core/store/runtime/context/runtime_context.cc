@@ -5,12 +5,14 @@
 #include <string>
 #include <utility>
 
-#include "absl/log/check.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/memory/host_memory.h"
 
 namespace {
 constexpr char kDefaultP2PHost[] = "0.0.0.0";
@@ -46,7 +48,10 @@ absl::Status RuntimeContext::start() {
   if (started_) {
     return absl::OkStatus();
   }
-  validate_options();
+  auto validate_status = validate_options();
+  if (!validate_status.ok()) {
+    return validate_status;
+  }
   auto comm_status = initialize_communication_manager();
   if (!comm_status.ok()) {
     return comm_status;
@@ -58,6 +63,18 @@ absl::Status RuntimeContext::start() {
   auto gs_status = initialize_global_store_client();
   if (!gs_status.ok()) {
     LOG(WARNING) << "RuntimeContext: GlobalStoreClient init failed: " << gs_status;
+  }
+  if (options_.memory_tier_config.has_value()) {
+    auto host_cap_or = common::memory::detect_host_memory_capacity_bytes();
+    if (!host_cap_or.ok()) {
+      return host_cap_or.status();
+    }
+    auto budget_or =
+        MemoryTierBudget::from_config(*options_.memory_tier_config, *host_cap_or, options_.memory_pool_size);
+    if (!budget_or.ok()) {
+      return budget_or.status();
+    }
+    memory_tier_budget_ = std::make_shared<MemoryTierBudget>(std::move(*budget_or));
   }
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
   started_ = true;
@@ -142,15 +159,48 @@ const ingestion::IngestionEventHub* RuntimeContext::ingestion_event_hub() const 
   return ingestion_event_hub_.get();
 }
 
-void RuntimeContext::validate_options() const {
-  ABSL_CHECK_GT(options_.tx_slice_bytes, 0) << "Pinned buffer slice size must be non-zero";
-  ABSL_CHECK_EQ(artifact_chunk_bytes_ % options_.tx_slice_bytes, 0)
-      << "artifact_chunk_bytes must be a multiple of tx_slice_bytes";
+absl::Status RuntimeContext::validate_options() const {
+  if (options_.tx_slice_bytes == 0) {
+    return absl::InvalidArgumentError("Pinned buffer slice size must be non-zero");
+  }
+  if (artifact_chunk_bytes_ % options_.tx_slice_bytes != 0) {
+    return absl::InvalidArgumentError("artifact_chunk_bytes must be a multiple of tx_slice_bytes");
+  }
   const size_t pool_block = memory_pool_->slice_bytes();
-  ABSL_CHECK_EQ(pool_block % common::memory::PinnedBufferPool::kDirectIOAlignment, 0)
-      << "Pinned buffer block size must be aligned to DIRECT_IO";
-  ABSL_CHECK_EQ(pool_block % common::memory::PinnedBufferPool::kMemoryAlignment, 0)
-      << "Pinned buffer block size must be aligned to page size";
+  if (pool_block % common::memory::PinnedBufferPool::kDirectIOAlignment != 0) {
+    return absl::InvalidArgumentError("Pinned buffer block size must be aligned to DIRECT_IO");
+  }
+  if (pool_block % common::memory::PinnedBufferPool::kMemoryAlignment != 0) {
+    return absl::InvalidArgumentError("Pinned buffer block size must be aligned to page size");
+  }
+
+  if (options_.memory_tier_config.has_value()) {
+    const auto& tiers = *options_.memory_tier_config;
+    if (tiers.stable_bytes == 0) {
+      return absl::InvalidArgumentError("engine.memory_tiers.stable_bytes must be greater than 0 when configured");
+    }
+    if (tiers.preemptible_low_watermark_ratio <= 0.0 || tiers.preemptible_low_watermark_ratio >= 1.0) {
+      return absl::InvalidArgumentError("engine.memory_tiers.preemptible_low_watermark_ratio must be between 0 and 1");
+    }
+    auto host_capacity_or = common::memory::detect_host_memory_capacity_bytes();
+    if (!host_capacity_or.ok()) {
+      return host_capacity_or.status();
+    }
+    const uint64_t host_bytes = *host_capacity_or;
+    const uint64_t pinned_pool_bytes = options_.memory_pool_size;
+    const uint64_t uma_capacity = (host_bytes > pinned_pool_bytes) ? (host_bytes - pinned_pool_bytes) : 0;
+    if (tiers.stable_bytes > uma_capacity) {
+      return absl::InvalidArgumentError(
+          absl::StrFormat(
+              "engine.memory_tiers.stable_bytes=%llu exceeds UMA capacity %llu bytes (host=%llu pinned_pool=%llu)",
+              static_cast<uint64_t>(tiers.stable_bytes),
+              static_cast<uint64_t>(uma_capacity),
+              static_cast<uint64_t>(host_bytes),
+              static_cast<uint64_t>(pinned_pool_bytes)));
+    }
+  }
+
+  return absl::OkStatus();
 }
 
 absl::Status RuntimeContext::initialize_device_manager() {

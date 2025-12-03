@@ -4,6 +4,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/components/device_manager.h"
 
 namespace tensorcast::store::loading {
@@ -29,9 +30,30 @@ absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(
     }
     request.canonical_artifact_id_ = variant->canonical_artifact_id;
     request.requested_view_id_ = variant->view_id;
+
+    auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id_);
+    if (!id_kind_or.ok()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "VariantIdentity.canonical_artifact_id must be a valid mi2: or cgid: identifier: ",
+              id_kind_or.status().message()));
+    }
   } else {
     request.canonical_artifact_id_ = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
     request.requested_view_id_.reset();
+
+    if (!hints.artifact_id.empty()) {
+      const auto id_kind = tensorcast::common::infer_artifact_id_kind(request.canonical_artifact_id_);
+      if (id_kind == tensorcast::common::ArtifactIdKind::kMi2 || id_kind == tensorcast::common::ArtifactIdKind::kCgid) {
+        auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id_);
+        if (!id_kind_or.ok()) {
+          return absl::InvalidArgumentError(
+              absl::StrCat(
+                  "MaterializeHints.artifact_id must be a valid mi2: or cgid: identifier: ",
+                  id_kind_or.status().message()));
+        }
+      }
+    }
   }
 
   if (request.canonical_artifact_id_.empty()) {

@@ -193,3 +193,5 @@ external
 
 tensorcast/schema.sql
 docs/drafts
+
+.vscode/

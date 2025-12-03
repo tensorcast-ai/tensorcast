@@ -27,6 +27,14 @@ class _MeterState:
         self._latency: _Histogram | None = None
         self._errors: _Counter | None = None
         self._retries: _Counter | None = None
+        self._cache_hits: _Counter | None = None
+        self._cache_misses: _Counter | None = None
+        self._cache_evictions: _Counter | None = None
+        self._cache_invalidations: _Counter | None = None
+        self._batch_hits: _Counter | None = None
+        self._batch_coalesced: _Counter | None = None
+        self._batch_latency: _Histogram | None = None
+        self._prefetch_events: _Counter | None = None
         self._disabled = False
 
     @property
@@ -72,76 +80,302 @@ class _MeterState:
                     unit="1",
                     description="Retry attempts for TensorCast Store client operations.",
                 )
+                self._cache_hits = meter.create_counter(
+                    name="tc_store_artifact_cache_hits_total",
+                    unit="1",
+                    description="Artifact cache hits in the TensorCast Store client.",
+                )
+                self._cache_misses = meter.create_counter(
+                    name="tc_store_artifact_cache_misses_total",
+                    unit="1",
+                    description="Artifact cache misses in the TensorCast Store client.",
+                )
+                self._cache_evictions = meter.create_counter(
+                    name="tc_store_artifact_cache_evictions_total",
+                    unit="1",
+                    description="Artifact cache evictions in the TensorCast Store client.",
+                )
+                self._cache_invalidations = meter.create_counter(
+                    name="tc_store_artifact_cache_invalidations_total",
+                    unit="1",
+                    description="Artifact cache invalidations in the TensorCast Store client.",
+                )
+                self._batch_hits = meter.create_counter(
+                    name="tc_store_batch_hits_total",
+                    unit="1",
+                    description="Count of batcher-served tensor fetches.",
+                )
+                self._batch_coalesced = meter.create_counter(
+                    name="tc_store_batch_coalesced_total",
+                    unit="1",
+                    description="Count of coalesced batch RPCs.",
+                )
+                self._batch_latency = meter.create_histogram(
+                    name="tc_store_batch_window_seconds",
+                    unit="s",
+                    description="Observed batch coalescing window durations.",
+                )
+                self._prefetch_events = meter.create_counter(
+                    name="tc_store_prefetch_events_total",
+                    unit="1",
+                    description="Prefetch ticket lifecycle events.",
+                )
             except Exception as exc:  # noqa: BLE001
                 self._disabled = True
                 self._latency = None
                 self._errors = None
                 self._retries = None
+                self._cache_hits = None
+                self._cache_misses = None
+                self._cache_evictions = None
+                self._cache_invalidations = None
+                self._batch_hits = None
+                self._batch_coalesced = None
+                self._batch_latency = None
+                self._prefetch_events = None
                 _logger.debug("Failed to initialise store OTel metrics", exc_info=exc)
                 return False
         return True
 
     def record_latency(
-        self, verb: str, daemon: str, status: str, duration_s: float
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        duration_s: float,
+        *,
+        source: str | None = None,
+        selection: str | None = None,
     ) -> None:
         if not self.ensure():
             return
         assert self._latency is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
-            self._latency.record(
-                max(duration_s, 0.0),
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._latency.record(max(duration_s, 0.0), attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to record store latency", exc_info=True)
 
-    def increment_errors(self, verb: str, daemon: str, status: str) -> None:
+    def increment_errors(
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        *,
+        source: str | None = None,
+        selection: str | None = None,
+    ) -> None:
         if not self.ensure():
             return
         assert self._errors is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
-            self._errors.add(
-                1,
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._errors.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store error counter", exc_info=True)
 
-    def increment_retries(self, verb: str, daemon: str, status: str) -> None:
+    def increment_retries(
+        self,
+        verb: str,
+        daemon: str,
+        status: str,
+        *,
+        source: str | None = None,
+        selection: str | None = None,
+    ) -> None:
         if not self.ensure():
             return
         assert self._retries is not None
+        attributes = {
+            "verb": verb,
+            "daemon": daemon,
+            "status": status,
+        }
+        if source:
+            attributes["source"] = source
+        if selection:
+            attributes["selection"] = selection
         try:
-            self._retries.add(
-                1,
-                attributes={
-                    "verb": verb,
-                    "daemon": daemon,
-                    "status": status,
-                },
-            )
+            self._retries.add(1, attributes=attributes)
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to increment store retry counter", exc_info=True)
+
+    def increment_cache_hit(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._cache_hits is None:
+            return
+        try:
+            self._cache_hits.add(1, attributes={"daemon": daemon})
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache hit counter", exc_info=True)
+
+    def increment_cache_miss(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._cache_misses is None:
+            return
+        try:
+            self._cache_misses.add(1, attributes={"daemon": daemon})
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache miss counter", exc_info=True)
+
+    def increment_cache_eviction(self, daemon: str, *, reason: str | None) -> None:
+        if not self.ensure():
+            return
+        if self._cache_evictions is None:
+            return
+        attributes = {"daemon": daemon}
+        if reason:
+            attributes["reason"] = reason
+        try:
+            self._cache_evictions.add(1, attributes=attributes)
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment cache eviction counter", exc_info=True)
+
+    def increment_cache_invalidation(self, daemon: str, *, reason: str | None) -> None:
+        if not self.ensure():
+            return
+        if self._cache_invalidations is None:
+            return
+        attributes = {"daemon": daemon}
+        if reason:
+            attributes["reason"] = reason
+        try:
+            self._cache_invalidations.add(1, attributes=attributes)
+        except Exception:  # noqa: BLE001
+            _logger.debug(
+                "Failed to increment cache invalidation counter", exc_info=True
+            )
+
+    def increment_batch_hit(self, daemon: str, *, coalesced: bool) -> None:
+        if not self.ensure():
+            return
+        if self._batch_hits is None:
+            return
+        attrs = {"daemon": daemon, "coalesced": coalesced}
+        try:
+            self._batch_hits.add(1, attributes=attrs)
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment batch hit counter", exc_info=True)
+
+    def increment_batch_coalesced(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._batch_coalesced is None:
+            return
+        try:
+            self._batch_coalesced.add(1, attributes={"daemon": daemon})
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to increment batch coalesced counter", exc_info=True)
+
+    def record_batch_latency(self, daemon: str, duration_s: float) -> None:
+        if not self.ensure():
+            return
+        if self._batch_latency is None:
+            return
+        try:
+            self._batch_latency.record(
+                max(duration_s, 0.0), attributes={"daemon": daemon}
+            )
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to record batch latency", exc_info=True)
+
+    def record_prefetch_event(self, daemon: str, status: str) -> None:
+        if not self.ensure():
+            return
+        if self._prefetch_events is None:
+            return
+        try:
+            self._prefetch_events.add(
+                1, attributes={"daemon": daemon, "status": status}
+            )
+        except Exception:  # noqa: BLE001
+            _logger.debug("Failed to record prefetch event", exc_info=True)
 
 
 _METRICS = _MeterState()
 
 
-def observe_latency(verb: str, daemon: str, status: str, duration_s: float) -> None:
-    _METRICS.record_latency(verb, daemon, status, duration_s)
+def observe_latency(
+    verb: str,
+    daemon: str,
+    status: str,
+    duration_s: float,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
+) -> None:
+    _METRICS.record_latency(
+        verb, daemon, status, duration_s, source=source, selection=selection
+    )
 
 
-def increment_error(verb: str, daemon: str, status: str) -> None:
-    _METRICS.increment_errors(verb, daemon, status)
+def increment_error(
+    verb: str,
+    daemon: str,
+    status: str,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
+) -> None:
+    _METRICS.increment_errors(verb, daemon, status, source=source, selection=selection)
 
 
-def increment_retry(verb: str, daemon: str, status: str) -> None:
-    _METRICS.increment_retries(verb, daemon, status)
+def increment_retry(
+    verb: str,
+    daemon: str,
+    status: str,
+    *,
+    source: str | None = None,
+    selection: str | None = None,
+) -> None:
+    _METRICS.increment_retries(verb, daemon, status, source=source, selection=selection)
+
+
+def increment_artifact_cache_hit(daemon: str) -> None:
+    _METRICS.increment_cache_hit(daemon)
+
+
+def increment_artifact_cache_miss(daemon: str) -> None:
+    _METRICS.increment_cache_miss(daemon)
+
+
+def increment_artifact_cache_eviction(daemon: str, *, reason: str | None) -> None:
+    _METRICS.increment_cache_eviction(daemon, reason=reason)
+
+
+def increment_artifact_cache_invalidation(daemon: str, *, reason: str | None) -> None:
+    _METRICS.increment_cache_invalidation(daemon, reason=reason)
+
+
+def increment_batch_hit(daemon: str, *, coalesced: bool) -> None:
+    _METRICS.increment_batch_hit(daemon, coalesced=coalesced)
+
+
+def increment_batch_coalesced(daemon: str) -> None:
+    _METRICS.increment_batch_coalesced(daemon)
+
+
+def record_batch_latency(daemon: str, duration_s: float) -> None:
+    _METRICS.record_batch_latency(daemon, duration_s)
+
+
+def record_prefetch_event(daemon: str, status: str) -> None:
+    _METRICS.record_prefetch_event(daemon, status)

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import contextlib
+import json
 import threading
-from typing import Any, cast
 from types import SimpleNamespace
+from typing import Any
 
 import grpc
 import pytest
@@ -15,11 +17,21 @@ from tensorcast import _C
 from tensorcast.api.store import (
     CanonicalIndex,
     CanonicalIndexEntry,
-    MaterializedArtifact,
     Store,
     StoreOptions,
     ArtifactError,
 )
+from tensorcast.api.store import materialization as materialization_mod
+from tensorcast.api.store.materialization import MaterializationPipeline
+from tensorcast.api.store.retry import map_registration_error
+from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.api._view_ops import (
+    NarrowOp,
+    ResolvedViewInputs,
+    TransposeOp,
+    ViewSpecBuildResult,
+)
+from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 
@@ -49,18 +61,100 @@ def _make_three_dim_index() -> CanonicalIndex:
     return CanonicalIndex(entries=(entry,), total_size_bytes=entry.size_bytes, avbs_hash="")
 
 
+def _make_payload(
+    tensors: dict[str, torch.Tensor],
+    *,
+    replica_uuid: str = "replica",
+    canonical_index_bytes: bytes | None = None,
+    view_index_bytes: bytes | None = None,
+) -> MaterializationPayload:
+    descriptors: list[TensorPayloadDescriptor] = []
+    index: dict[str, list[object]] = {}
+    offset = 0
+    for name, tensor in tensors.items():
+        size_bytes = int(tensor.element_size() * tensor.numel())
+        index[name] = [
+            offset,
+            size_bytes,
+            list(map(int, tensor.shape)),
+            list(map(int, tensor.stride())),
+            str(tensor.dtype),
+            int(tensor.storage_offset()),
+        ]
+        descriptors.append(
+            TensorPayloadDescriptor(
+                name=name,
+                dtype=str(tensor.dtype),
+                shape=tuple(map(int, tensor.shape)),
+                stride=tuple(map(int, tensor.stride())),
+                buffer_offset=offset,
+                byte_length=size_bytes,
+                storage_offset=int(tensor.storage_offset()),
+            )
+        )
+        offset += size_bytes
+    canonical_bytes = canonical_index_bytes or json.dumps(index, separators=(",", ":")).encode("utf-8")
+
+    def _iter():
+        for desc in descriptors:
+            yield desc, tensors[desc.name]
+
+    return MaterializationPayload(
+        artifact_id="artifact-123",
+        canonical_index_bytes=canonical_bytes,
+        descriptors=tuple(descriptors),
+        payload_iter=_iter,
+        state_dict=dict(tensors),
+        replica_uuid=replica_uuid,
+        view_index_bytes=view_index_bytes,
+    )
+
+
+class _DummyExecutor:
+    def submit(self, fn, *args, **kwargs):
+        fut: concurrent.futures.Future[Any] = concurrent.futures.Future()
+        try:
+            fut.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # noqa: BLE001
+            fut.set_exception(exc)
+        return fut
+
+
+class _DummyRuntime:
+    def __init__(self, client: Any | None = None) -> None:
+        self._client = client or SimpleNamespace(get_artifact_index_by_id=lambda _: b"{}")
+        self.daemon_endpoint = "dummy"
+        self.session_id = "sess"
+        self.opts = StoreOptions()
+        self.retry_policies: dict[str, object] = {}
+        self.executor = _DummyExecutor()
+        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+
+    def ensure_client(self) -> Any:
+        return self._client
+
+    def operation_span(self, *_args, **_kwargs):
+        span = SimpleNamespace(
+            add_event=lambda *a, **k: None,
+            set_attribute=lambda *a, **k: None,
+            set_status=lambda *a, **k: None,
+            record_exception=lambda *a, **k: None,
+        )
+        return contextlib.nullcontext(span)
+
+    def track_future(self, _future: Any) -> None:
+        return None
+
+    def resolve_key_mapping_cached(self, key: str) -> tuple[str | None, str | None]:
+        return self._key_cache.get(key, (None, None))
+
+    def cache_key_mapping(self, key: str, artifact_id: str | None, disk_path: str | None) -> None:
+        self._key_cache[key] = (artifact_id, disk_path)
+
+
 def _fresh_store() -> Store:
-    store = object.__new__(Store)
-    store._opts = StoreOptions()
-    store._retry_policies = {}
-    store._daemon_endpoint = "dummy"
-    store._session_id = "sess"
-    store._pending_futures = set()
-    store._key_cache = {}
-    store._key_cache_lock = threading.RLock()
-    store._metadata_lock = threading.RLock()
-    store._metadata = {}
-    return store
+    runtime = _DummyRuntime()
+    return Store("dummy:0", runtime=runtime)
 
 
 class _PlacementRpcError(grpc.RpcError):
@@ -77,126 +171,131 @@ class _PlacementRpcError(grpc.RpcError):
 def test_build_view_spec_narrow_normalizes_length() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    view_spec, has_transpose, ops = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices={"weights": (slice(32, 96),)},
         transpose=None,
     )
-    assert view_spec is not None
-    assert not has_transpose
-    assert "weights" in view_spec.tensors
-    view_ops = view_spec.tensors["weights"].ops
+    assert isinstance(result, ViewSpecBuildResult)
+    assert result.proto is not None
+    assert not result.has_transpose
+    assert "weights" in result.proto.tensors
+    view_ops = result.proto.tensors["weights"].ops
     assert len(view_ops) == 1
     narrow = view_ops[0].narrow
     assert narrow.dim == 0
     assert narrow.start == 32
     assert narrow.length == 64
-    assert ops["weights"][0]["type"] == "narrow"
+    assert result.tensor_ops["weights"][0] == NarrowOp(dim=0, start=32, length=64)
 
 
 def test_build_view_spec_identity_returns_none() -> None:
     store = _fresh_store()
     canonical = _make_canonical_index()
-    view_spec, has_transpose, _ = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices={"weights": (slice(0, 256),)},
         transpose=None,
     )
-    assert view_spec is None
-    assert not has_transpose
+    assert result.proto is None
+    assert result.is_identity
+    assert not result.has_transpose
 
 
 def test_build_view_spec_transpose_canonicalizes_sequence() -> None:
     store = _fresh_store()
     canonical = _make_three_dim_index()
-    view_spec, has_transpose, ops_map = Store._build_view_spec(
-        store,
+    result = store._views._build_view_spec(
         canonical_index=canonical,
         slices=None,
         transpose={"tensor": [(0, 1), (0, 2)]},
     )
-    assert view_spec is not None
-    assert has_transpose
-    ops = view_spec.tensors["tensor"].ops
+    assert result.proto is not None
+    assert result.has_transpose
+    ops = result.proto.tensors["tensor"].ops
     # Canonical ordering should be deterministic
     assert [(op.transpose.dim0, op.transpose.dim1) for op in ops] == [(0, 2), (1, 2)]
-    assert len(ops_map["tensor"]) == 2
-    assert ops_map["tensor"][0]["type"] == "transpose"
+    assert len(result.tensor_ops["tensor"]) == 2
+    assert all(isinstance(op, TransposeOp) for op in result.tensor_ops["tensor"])
+
+
+def test_build_view_spec_rejects_non_mapping_inputs() -> None:
+    store = _fresh_store()
+    canonical = _make_canonical_index()
+    with pytest.raises(ArtifactError, match="Slice spec must be a mapping"):
+        store._views._build_view_spec(
+            canonical_index=canonical,
+            slices=[(slice(0, 1),)],
+            transpose=None,
+        )
+    with pytest.raises(ArtifactError, match="Transpose spec must be a mapping"):
+        store._views._build_view_spec(
+            canonical_index=canonical,
+            slices=None,
+            transpose=[(0, 1)],
+        )
 
 
 def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
     fake_spec = store_daemon_pb2.ViewSpec()
     fake_spec.tensors["weights"].ops.add().narrow.dim = 0
     fake_spec.tensors["weights"].ops[-1].narrow.start = 0
     fake_spec.tensors["weights"].ops[-1].narrow.length = 16
 
-    def fake_resolve(
-        self,
+    build_result = ViewSpecBuildResult(
+        proto=fake_spec,
+        tensor_ops={"weights": [NarrowOp(dim=0, start=0, length=16)]},
+    )
+
+    def fake_resolve_inputs(
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
-        assert client is fake_client
-        return "artifact-123", b"{}", fake_spec, False, None, {
-            "weights": [{"type": "narrow", "dim": 0, "start": 0, "length": 16}]
-        }
+    ) -> ResolvedViewInputs:
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=b"{}",
+            build_result=build_result,
+        )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve_inputs.__get__(store._views, ViewOrchestrator),
+    )
 
-    fake_span = SimpleNamespace(
-        add_event=lambda *args, **kwargs: None,
-        set_attribute=lambda *args, **kwargs: None,
-        set_status=lambda *args, **kwargs: None,
-        record_exception=lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        Store,
-        "_operation_span",
-        lambda self, *args, **kwargs: contextlib.nullcontext(fake_span),
-    )
-    monkeypatch.setattr(
-        store,
-        "_operation_span",
-        lambda *args, **kwargs: contextlib.nullcontext(fake_span),
-    )
     placement_value = store_daemon_pb2.TransformPlacement.TRANSFORM_PLACEMENT_SERVER
     monkeypatch.setattr(
-        Store,
-        "_resolve_transform_placement",
-        lambda self, placement, has_transpose: placement_value,
+        store._views,
+        "resolve_transform_placement",
+        lambda placement, *, has_transpose, for_registration=False: placement_value,
     )
-    materialized = MaterializedArtifact(
-        artifact_id="artifact-123",
-        state_dict={"weights": torch.zeros(16)},
+    payload = _make_payload(
+        {"weights": torch.zeros(16)},
         canonical_index_bytes=b"{}",
         replica_uuid="replica",
     )
     captured: dict[str, Any] = {}
 
-    def fake_perform(self, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializationPayload, int]:
         captured.update(kwargs)
-        return materialized, 0
+        return payload, 0
 
-    monkeypatch.setattr(Store, "_perform_get_with_retry", fake_perform)
+    monkeypatch.setattr(
+        store._materialization,
+        "_perform_get_with_retry",
+        fake_perform.__get__(store._materialization, MaterializationPipeline),
+    )
 
-    result = Store.get_view(store, artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
-    assert result is materialized.state_dict
+    result = store.get_view(artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
+    assert set(result.keys()) == {"weights"}
+    assert payload.state_dict is not None
+    assert result["weights"] is payload.state_dict["weights"]
     assert captured["artifact_id"] == "artifact-123"
     assert captured["view"] is fake_spec
     assert captured["placement"] == placement_value
@@ -205,56 +304,56 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
 
     layout_index_json = (
         b'{"weights":[0,16,[16],[1],"torch.float32",0]}'
     )
-    materialized = MaterializedArtifact(
-        artifact_id="artifact-123",
-        state_dict={"weights": torch.ones(16)},
+    payload = _make_payload(
+        {"weights": torch.ones(16)},
         canonical_index_bytes=b"{}",
         replica_uuid="replica",
         view_index_bytes=layout_index_json,
     )
 
     def fake_resolve(
-        self,
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
-        return "artifact-123", b"{}", None, False, None, {}
+    ) -> ResolvedViewInputs:
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=b"{}",
+            build_result=ViewSpecBuildResult.identity(),
+        )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve.__get__(store._views, ViewOrchestrator),
+    )
 
-    def fake_perform(self, **kwargs: Any) -> tuple[MaterializedArtifact, int]:
-        return materialized, 0
+    def fake_perform(self: MaterializationPipeline, **kwargs: Any) -> tuple[MaterializationPayload, int]:
+        return payload, 0
 
-    monkeypatch.setattr(Store, "_perform_get_with_retry", fake_perform)
+    monkeypatch.setattr(
+        store._materialization,
+        "_perform_get_with_retry",
+        fake_perform.__get__(store._materialization, MaterializationPipeline),
+    )
     released: dict[str, Any] = {}
     monkeypatch.setattr(
-        Store,
+        store._materialization,
         "_release_materialized",
-        lambda self, mat, client: released.setdefault("called", True),
+        lambda mat, client: released.setdefault("called", True),
     )
 
     captured_index: dict[str, Any] = {}
 
     def fake_validate(
-        self,
         *,
         canonical_index: CanonicalIndex,
         target: dict[str, torch.Tensor],
@@ -264,10 +363,10 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
         captured_index["shapes"] = [entry.shape for entry in canonical_index.entries]
         return [(target["weights"], source["weights"])]
 
-    monkeypatch.setattr(Store, "_validate_targets", fake_validate)
+    monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     target = {"weights": torch.zeros(16)}
-    Store.get_view_into(store, target, artifact_id="artifact-123", view_id=None, slices={"weights": (slice(0, 16),)})
+    store.get_view_into(target, artifact_id="artifact-123", view_id=None, slices={"weights": (slice(0, 16),)})
     assert torch.allclose(target["weights"], torch.ones(16))
     assert captured_index["shapes"] == [(16,)]
     assert released.get("called") is True
@@ -288,8 +387,6 @@ def test_compute_view_registration_plan_binding_narrow() -> None:
 
 def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_client = object()
-    monkeypatch.setattr(Store, "_ensure_client", lambda self: fake_client)
 
     canonical_index = b'{"weights":[0,16,[4],[1],"torch.float32",0]}'
     view_spec = store_daemon_pb2.ViewSpec()
@@ -299,32 +396,29 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
     narrow.length = 2
 
     def fake_resolve(
-        self,
+        self: ViewOrchestrator,
         *,
-        client: Any,
         artifact_id: str | None,
         key: str | None,
         slices: Any,
         transpose: Any,
         view_id: str | None,
-    ) -> tuple[
-        str,
-        bytes | None,
-        store_daemon_pb2.ViewSpec | None,
-        bool,
-        str | None,
-        dict[str, list[dict[str, int | str]]],
-    ]:
-        return (
-            "artifact-123",
-            canonical_index,
-            view_spec,
-            False,
-            None,
-            {"weights": [{"type": "narrow", "dim": 0, "start": 1, "length": 2}]},
+    ) -> ResolvedViewInputs:
+        build_result = ViewSpecBuildResult(
+            proto=view_spec,
+            tensor_ops={"weights": [NarrowOp(dim=0, start=1, length=2)]},
+        )
+        return ResolvedViewInputs.from_build_result(
+            artifact_id="artifact-123",
+            canonical_index_bytes=canonical_index,
+            build_result=build_result,
         )
 
-    monkeypatch.setattr(Store, "_resolve_view_inputs", fake_resolve)
+    monkeypatch.setattr(
+        store._views,
+        "resolve_view_inputs",
+        fake_resolve.__get__(store._views, ViewOrchestrator),
+    )
 
     captured: dict[str, Any] = {}
 
@@ -333,11 +427,14 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
         captured["view_registration"] = kwargs.get("view_registration")
         return SimpleNamespace()
 
-    monkeypatch.setattr(Store, "_perform_registration", fake_perform)
+    monkeypatch.setattr(
+        store._registration,
+        "_perform_registration",
+        fake_perform.__get__(store._registration, store._registration.__class__),
+    )
 
     view_tensor = torch.tensor([10.0, 20.0], dtype=torch.float32)
-    result = Store.register_view(
-        store,
+    result = store.register_view(
         tensors={"weights": view_tensor},
         artifact_id="artifact-123",
         placement="CLIENT",
@@ -357,7 +454,7 @@ def test_register_view_server_placement_error_guidance() -> None:
         "retry with placement=CLIENT (mock device missing)"
     )
 
-    mapped = store._map_registration_error(failure)
+    mapped = map_registration_error(failure)
     assert isinstance(mapped, ArtifactError)
     assert mapped.status_code == "FAILED_PRECONDITION"
     assert mapped.retryable is False

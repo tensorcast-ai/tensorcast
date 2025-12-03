@@ -36,7 +36,7 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   breq.set_owner_pid(getpid());
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data("{}");
-  idx->set_schema_version("v2");
+  idx->set_schema_version("v3");
   idx->set_encoding("json");
   tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);

@@ -234,7 +234,6 @@ def ensure_external_symlink() -> None:
         root_dir: Path = get_root_dir()
         link_path: Path = root_dir / "external"
 
-        # Only act if link/dir doesn't exist
         if link_path.exists():
             return
 
@@ -246,6 +245,7 @@ def ensure_external_symlink() -> None:
         )
         target_path = Path(output_base) / "external"
 
+        # Create the symlink
         os.symlink(str(target_path), str(link_path))
         print(f"Created symlink: {link_path} -> {target_path}")
     except Exception as e:
@@ -465,8 +465,10 @@ class BuildExtensionCommand(BuildExtension):
     description = "Builds the package extension"
     def initialize_options(self):
         BuildExtension.initialize_options(self)
+
     def finalize_options(self):
         BuildExtension.finalize_options(self)
+
     def run(self):
         global PRE_CXX11_ABI, USE_FAKE_CUDA
         build_checkpoint_runtime_and_daemon(

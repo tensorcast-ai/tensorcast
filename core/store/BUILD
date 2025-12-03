@@ -72,10 +72,27 @@ sc_cc_library(
 
 sc_header_only_library(
     name = "store_engine_options",
-    hdrs = ["store_engine_options.h"],
+    hdrs = [
+        "memory_tier_config.h",
+        "store_engine_options.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:const_granularity_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "memory_tier_budget",
+    srcs = ["memory_tier_budget.cc"],
+    hdrs = ["memory_tier_budget.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":store_engine_options",
+        "//core/common:host_memory_lib",
+        "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -102,6 +119,7 @@ sc_cc_library(
         "//core/store/replica:chunk_state",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/global_store/v1:global_store_grpc_cc",
+        "//proto/tensorcast/memory_tier/v1:memory_tier_grpc_cc",
         "@abseil-cpp//absl/strings:str_format",
         "@abseil-cpp//absl/time",
         "@gsl",
@@ -234,6 +252,7 @@ sc_cc_library(
         ":device_types",
         ":eviction_service",
         ":global_store_client",
+        ":memory_tier_budget",
         ":store_engine_options",
         ":view_utils",
         ":worker_identity",
@@ -315,6 +334,24 @@ cc_test(
         "@catch2//:catch2_main",
         "@gsl",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "store_engine_p2p_rdma_loader_test",
+    srcs = ["store_engine_p2p_rdma_loader_test.cc"],
+    tags = [
+        "rdma",
+        "requires_cuda",
+    ],
+    deps = [
+        ":store_engine",
+        "//core/common",
+        "//core/communicator:engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
     ],
 )
 

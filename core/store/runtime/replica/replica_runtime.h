@@ -69,7 +69,7 @@ class ReplicaRuntime {
 
   std::shared_ptr<replica::Replica> get_or_create_replica(
       const std::string& artifact_identifier,
-      const replica::ReplicaConfig& config);
+      replica::ReplicaConfig config);
 
   int clear_mem();
 

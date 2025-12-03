@@ -37,6 +37,71 @@ CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat
 CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_node_id ON workers (node_id);
 CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
+-- Memory tier telemetry snapshots (short retention)
+CREATE TABLE IF NOT EXISTS memory_tier_snapshots (
+    node_id TEXT NOT NULL,
+    epoch_ns BIGINT NOT NULL,
+    stable_total_bytes BIGINT NOT NULL,
+    stable_used_bytes BIGINT NOT NULL,
+    preemptible_total_bytes BIGINT NOT NULL,
+    preemptible_marked_bytes BIGINT NOT NULL,
+    faults_per_sec REAL NOT NULL,
+    rehydrate_p99_ns BIGINT NOT NULL,
+    enable_preemptible BOOLEAN NOT NULL,
+    memory_tier_config_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (node_id, epoch_ns)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_tier_snapshots_node_epoch ON memory_tier_snapshots(node_id, epoch_ns);
+
+-- Latest per-node memory tier state derived from telemetry snapshots
+CREATE OR REPLACE VIEW node_memory_tier_latest AS
+WITH ranked AS (
+    SELECT
+        node_id,
+        stable_total_bytes,
+        stable_used_bytes,
+        preemptible_total_bytes,
+        preemptible_marked_bytes,
+        faults_per_sec,
+        rehydrate_p99_ns,
+        enable_preemptible,
+        memory_tier_config_json,
+        epoch_ns,
+        ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY epoch_ns DESC) AS rn
+    FROM memory_tier_snapshots
+)
+SELECT
+    node_id,
+    stable_total_bytes,
+    stable_used_bytes,
+    preemptible_total_bytes,
+    preemptible_marked_bytes,
+    faults_per_sec,
+    rehydrate_p99_ns,
+    enable_preemptible,
+    memory_tier_config_json,
+    epoch_ns AS snapshot_epoch_ns
+FROM ranked
+WHERE rn = 1;
+
+-- Memory tier leases with UMA chunk ordinals for replay/audit
+CREATE TABLE IF NOT EXISTS memory_tier_leases (
+    lease_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    kind TEXT CHECK (kind IN ('stable','preemptible')) NOT NULL,
+    artifact_id TEXT NOT NULL,
+    chunk_range JSON NOT NULL,
+    chunk_ids JSON NOT NULL,
+    ledger_version BIGINT NOT NULL,
+    bytes BIGINT NOT NULL,
+    workload_id TEXT NOT NULL,
+    state TEXT CHECK (state IN ('pending','active','revoking','expired')) NOT NULL DEFAULT 'pending',
+    request_id TEXT NOT NULL,
+    ack_epoch_ns BIGINT,
+    issued_at_ns BIGINT NOT NULL,
+    expires_at_ns BIGINT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_tier_leases_node_artifact ON memory_tier_leases(node_id, artifact_id, state);
 
 -- Artifacts: content-addressed artifact IDs (design-0007)
 CREATE TABLE IF NOT EXISTS artifacts (

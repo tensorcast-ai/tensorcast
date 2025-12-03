@@ -12,6 +12,7 @@
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
+#include "tensorcast/memory_tier/v1/memory_tier.pb.h"
 
 namespace tensorcast::store::testing {
 
@@ -25,6 +26,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> registered_replicas;
   std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
   std::vector<components::VariantViewUpdate> view_updates;
+  std::vector<components::MemoryTierStatusPayload> memory_tier_statuses;
+  std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -199,6 +202,49 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::Status revoke_key_mapping(std::string_view) override {
     return absl::UnimplementedError("revoke_key_mapping not supported in test stub");
+  }
+
+  absl::Status publish_memory_tier_status(const components::MemoryTierStatusPayload& status) override {
+    memory_tier_statuses.push_back(status);
+    return absl::OkStatus();
+  }
+
+  absl::StatusOr<components::MemoryTierLeaseDescriptor> request_memory_tier_lease(
+      const components::MemoryTierLeaseDescriptor& request) override {
+    memory_tier_leases.push_back(request);
+    return request;
+  }
+
+  absl::StatusOr<components::MemoryTierLeaseDescriptor> acknowledge_memory_tier_lease(
+      const components::MemoryTierLeaseAckPayload& ack) override {
+    components::MemoryTierLeaseDescriptor lease;
+    lease.lease_id = ack.lease_id;
+    lease.node_id = ack.node_id;
+    lease.artifact_id = ack.artifact_id;
+    lease.chunk_ids = ack.chunk_ids;
+    lease.chunk_start = ack.chunk_start;
+    lease.chunk_count = ack.chunk_count;
+    lease.ledger_version = ack.ledger_version;
+    lease.bytes = ack.bytes;
+    lease.request_id = ack.request_id;
+    lease.state = components::MemoryTierLeaseState::kActive;
+    memory_tier_leases.push_back(lease);
+    return lease;
+  }
+
+  absl::StatusOr<std::vector<components::MemoryTierLeaseDescriptor>> list_memory_tier_leases(
+      std::string_view) override {
+    return memory_tier_leases;
+  }
+
+  absl::StatusOr<components::MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override {
+    for (auto& l : memory_tier_leases) {
+      if (l.lease_id == lease_id) {
+        l.state = components::MemoryTierLeaseState::kRevoking;
+        return l;
+      }
+    }
+    return absl::NotFoundError("lease not found");
   }
 
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}

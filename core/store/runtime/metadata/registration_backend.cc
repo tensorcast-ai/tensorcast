@@ -610,7 +610,13 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         .verification_json = verification_json};
     absl::Status registration_status = publisher_->publish_registration(publication);
     if (!registration_status.ok()) {
-      return registration_status;
+      // GlobalStore not connected - skip publication in standalone mode.
+      // Local registration remains valid; artifact is usable on this node.
+      if (absl::IsFailedPrecondition(registration_status)) {
+        LOG(INFO) << "Skipping GlobalStore publication (not connected): " << registration_status.message();
+      } else {
+        return registration_status;
+      }
     }
   }
 

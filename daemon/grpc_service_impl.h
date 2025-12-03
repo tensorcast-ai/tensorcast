@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <deque>
+#include <filesystem>
 #include <memory>
 
 #include "absl/synchronization/mutex.h"
@@ -31,6 +32,7 @@
 #include "grpcpp/grpcpp.h"
 #include "gsl/pointers"
 #include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -63,6 +65,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     // ordering (artifact_id, device_id). If false (default), uses numeric
     // index tokens.
     bool use_cursor_pagination{false};
+
+    std::vector<std::filesystem::path> disk_path_whitelist;
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
@@ -93,7 +97,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .lip = *lip_bridge_,
         .devices = devices_,
         .is_shutting_down = is_shutting_down_,
-        .lifecycle = lifecycle_mgr_.get()};
+        .lifecycle = lifecycle_mgr_.get(),
+        .disk_path_whitelist = opts_.disk_path_whitelist};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
         .engine = *engine_,
@@ -271,6 +276,10 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::GetLoadedReplicasV2Request* req,
       v1::GetLoadedReplicasV2Response* resp) override;
 
+  MaterializationController& materialization_controller() const {
+    return *materialization_controller_;
+  }
+
   // Expose current ref-count for a given replica key (for HA state reporting)
   size_t ref_count_for(const store::loading::ReplicaKey& key) const {
     return refs_.ref_count(key);
@@ -336,6 +345,36 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+};
+
+class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
+ public:
+  StoreDaemonServiceV2Impl(MaterializationController& materialization_controller, bool allow_high_card_attrs)
+      : materialization_controller_(materialization_controller), allow_high_card_attrs_(allow_high_card_attrs) {}
+
+  grpc::Status MaterializeReplica(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeReplicaRequest* req,
+      v2::MaterializeReplicaResponse* resp) override;
+
+  grpc::Status MaterializeByKey(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeByKeyRequest* req,
+      v2::MaterializeByKeyResponse* resp) override;
+
+  grpc::Status ResolveArtifactFromDisk(
+      grpc::ServerContext* ctx,
+      const v2::ResolveArtifactFromDiskRequest* req,
+      v2::ResolveArtifactFromDiskResponse* resp) override;
+
+  grpc::Status GetMaterializeCapabilities(
+      grpc::ServerContext* ctx,
+      const v2::GetMaterializeCapabilitiesRequest* req,
+      v2::GetMaterializeCapabilitiesResponse* resp) override;
+
+ private:
+  MaterializationController& materialization_controller_;
+  bool allow_high_card_attrs_{false};
 };
 
 } // namespace tensorcast::daemon

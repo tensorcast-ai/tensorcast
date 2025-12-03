@@ -18,10 +18,17 @@ message Database {
   string db_file = 1;
 }
 
+message MemoryTierPolicy {
+  google.protobuf.Duration snapshot_retention = 1;
+  uint32 snapshot_max_rows = 2;
+  google.protobuf.Duration publish_interval = 3;
+}
+
 message WorkerPolicy {
   google.protobuf.Duration heartbeat_timeout = 1;
   google.protobuf.Duration cleanup_interval = 2;
   google.protobuf.Duration default_heartbeat_interval = 3;
+  MemoryTierPolicy memory_tiers = 4;
 }
 
 message GlobalStoreConfig {

@@ -1,5 +1,6 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -82,6 +83,15 @@ int main(int argc, char** argv) {
         cfg.engine().pinned_allocation_timeout().nanos() / 1000000);
   }
   opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
+  if (cfg.engine().has_memory_tiers()) {
+    store::MemoryTierConfig tiers;
+    const auto& mt = cfg.engine().memory_tiers();
+    tiers.enable_preemptible_memory = mt.enable_preemptible();
+    tiers.stable_bytes = mt.stable_bytes();
+    tiers.preemptible_limit_bytes = mt.preemptible_limit_bytes();
+    tiers.preemptible_low_watermark_ratio = mt.preemptible_low_watermark_ratio();
+    opts.memory_tier_config = tiers;
+  }
 
   // Communicator setup (always create; RDMA enable is a config toggle inside engine)
   std::shared_ptr<store::components::CommunicationManager> comm_mgr;
@@ -170,8 +180,12 @@ int main(int argc, char** argv) {
   svc_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)
   svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
+  for (const auto& prefix : cfg.engine().disk_path_whitelist()) {
+    svc_opts.disk_path_whitelist.emplace_back(prefix);
+  }
 
   daemon::StoreDaemonServiceImpl service(engine, svc_opts);
+  daemon::StoreDaemonServiceV2Impl service_v2(service.materialization_controller(), svc_opts.allow_high_card_attrs);
 
   // gRPC server
   const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
@@ -230,6 +244,7 @@ int main(int argc, char** argv) {
   builder.AddChannelArgument("grpc.tcp_nodelay", cfg.server().grpc().tcp_nodelay() ? 1 : 0);
   builder.AddChannelArgument("grpc.so_reuseport", cfg.server().grpc().so_reuseport() ? 1 : 0);
   builder.RegisterService(&service);
+  builder.RegisterService(&service_v2);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   LOG(INFO) << "tensorcast-daemon listening on " << listen_addr;
 

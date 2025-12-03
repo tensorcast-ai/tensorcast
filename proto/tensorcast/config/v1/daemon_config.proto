@@ -69,11 +69,24 @@ message Engine {
   uint64 tx_slice_bytes = 2;
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
   uint64 artifact_chunk_bytes = 3;
+  message MemoryTiers {
+    // When false, UMA will operate in stable-only mode and skip preemptible markings.
+    bool enable_preemptible = 1;
+    // Minimum stable CPU bytes reserved for UMA-managed artifacts (after subtracting pinned pool).
+    uint64 stable_bytes = 2;
+    // Optional cap for preemptible pool. Ignored when enable_preemptible=false.
+    uint64 preemptible_limit_bytes = 3;
+    // Low watermark ratio used by preemptible pressure loop.
+    double preemptible_low_watermark_ratio = 4;
+  }
   // Reserve legacy identifiers to avoid accidental reuse
   reserved "chunk_bytes", "cpu_chunk_size_bytes";
   uint32 streaming_buffer_max_concurrent_sessions = 4;
   google.protobuf.Duration pinned_allocation_timeout = 5;
   string p2p_fallback_disk_dir = 6;
+  // Whitelisted disk path prefixes for daemon-side materialization. Empty list allows all paths.
+  repeated string disk_path_whitelist = 7;
+  MemoryTiers memory_tiers = 10;
 }
 
 message CheckpointStreaming {

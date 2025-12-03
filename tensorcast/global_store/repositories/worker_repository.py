@@ -4,12 +4,38 @@
 
 import time
 
-from tensorcast.global_store.config import get_config
-from tensorcast.global_store.models import Worker
+from tensorcast.global_store.config import GlobalStoreConfig, get_config
+from tensorcast.global_store.models import Worker, WorkerMemoryTierState
 from tensorcast.global_store.repositories.base import BaseRepository
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
+
+_WORKER_SELECT = """
+    SELECT
+        workers.worker_id,
+        workers.node_id,
+        workers.node_address,
+        workers.grpc_port,
+        workers.p2p_port,
+        workers.mem_pool_total_size,
+        workers.mem_pool_available_size,
+        workers.accepting_new_requests,
+        workers.registered_at,
+        workers.last_heartbeat,
+        mt.stable_total_bytes,
+        mt.stable_used_bytes,
+        mt.preemptible_total_bytes,
+        mt.preemptible_marked_bytes,
+        mt.faults_per_sec,
+        mt.rehydrate_p99_ns,
+        mt.enable_preemptible,
+        mt.memory_tier_config_json,
+        mt.snapshot_epoch_ns
+    FROM workers
+    LEFT JOIN node_memory_tier_latest AS mt
+        ON mt.node_id = workers.node_id
+"""
 
 
 class WorkerRepository(BaseRepository):
@@ -19,7 +45,8 @@ class WorkerRepository(BaseRepository):
         """Find a worker by ID."""
         cursor = self.get_cursor()
         result = cursor.execute(
-            "SELECT * FROM workers WHERE worker_id = ?", [worker_id]
+            f"{_WORKER_SELECT} WHERE workers.worker_id = ?",
+            [worker_id],
         ).fetchone()
 
         if result:
@@ -30,9 +57,9 @@ class WorkerRepository(BaseRepository):
         """Find a worker by address and port."""
         cursor = self.get_cursor()
         result = cursor.execute(
-            """
-            SELECT * FROM workers
-            WHERE node_address = ? AND grpc_port = ?
+            f"""
+            {_WORKER_SELECT}
+            WHERE workers.node_address = ? AND workers.grpc_port = ?
             """,
             [node_address, grpc_port],
         ).fetchone()
@@ -49,7 +76,8 @@ class WorkerRepository(BaseRepository):
             """
             INSERT INTO workers (
                 worker_id, node_id, node_address, grpc_port, p2p_port,
-                mem_pool_total_size, mem_pool_available_size, accepting_new_requests
+                mem_pool_total_size, mem_pool_available_size,
+                accepting_new_requests
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
@@ -215,20 +243,23 @@ class WorkerRepository(BaseRepository):
     def find_active(self, include_unavailable: bool = False) -> list[Worker]:
         """Find all active workers."""
         cursor = self.get_cursor()
-        config = get_config()
+        try:
+            config = get_config()
+        except RuntimeError:
+            config = GlobalStoreConfig()
 
-        query = """
-            SELECT * FROM workers
-            WHERE EXTRACT(epoch FROM last_heartbeat) > ?
+        query = f"""
+            {_WORKER_SELECT}
+            WHERE EXTRACT(epoch FROM workers.last_heartbeat) > ?
         """
         # Use configured heartbeat timeout instead of hardcoded value
         timeout_seconds = config.heartbeat_timeout_ms / 1000.0
         params = [time.time() - timeout_seconds]
 
         if not include_unavailable:
-            query += " AND accepting_new_requests = TRUE"
+            query += " AND workers.accepting_new_requests = TRUE"
 
-        query += " ORDER BY last_heartbeat DESC"
+        query += " ORDER BY workers.last_heartbeat DESC"
 
         result = cursor.execute(query, params)
         workers = [self._row_to_model(row) for row in result.fetchall()]
@@ -239,7 +270,7 @@ class WorkerRepository(BaseRepository):
     def list_all_workers(self) -> list[Worker]:
         """List all workers in the database."""
         cursor = self.get_cursor()
-        result = cursor.execute("SELECT * FROM workers ORDER BY registered_at DESC")
+        result = cursor.execute(f"{_WORKER_SELECT} ORDER BY workers.registered_at DESC")
         return [self._row_to_model(row) for row in result.fetchall()]
 
     def mark_as_stale(self, worker_id: str) -> bool:
@@ -287,10 +318,10 @@ class WorkerRepository(BaseRepository):
         cursor = self.get_cursor()
 
         result = cursor.execute(
-            """
-            SELECT * FROM workers
-            WHERE EXTRACT(epoch FROM last_heartbeat) < ?
-            ORDER BY last_heartbeat DESC
+            f"""
+            {_WORKER_SELECT}
+            WHERE EXTRACT(epoch FROM workers.last_heartbeat) < ?
+            ORDER BY workers.last_heartbeat DESC
             """,
             [recovery_time],
         )
@@ -329,6 +360,20 @@ class WorkerRepository(BaseRepository):
 
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""
+        memory_tier_state = None
+        if row[10] is not None:
+            memory_tier_state = WorkerMemoryTierState(
+                stable_total_bytes=row[10],
+                stable_used_bytes=row[11],
+                preemptible_total_bytes=row[12],
+                preemptible_marked_bytes=row[13],
+                faults_per_sec=row[14] or 0.0,
+                rehydrate_p99_ns=row[15] or 0,
+                enable_preemptible=bool(row[16]),
+                memory_tier_config_json=row[17] or "{}",
+                snapshot_epoch_ns=row[18] or 0,
+            )
+
         return Worker(
             worker_id=row[0],
             node_id=row[1],
@@ -340,6 +385,7 @@ class WorkerRepository(BaseRepository):
             accepting_new_requests=row[7],
             registered_at=row[8],
             last_heartbeat=row[9],
+            memory_tier_state=memory_tier_state,
         )
 
     # ---------------------------------------------------------------------
@@ -350,10 +396,10 @@ class WorkerRepository(BaseRepository):
         """Find the most recent worker registered on the given node_id."""
         cursor = self.get_cursor()
         row = cursor.execute(
-            """
-            SELECT * FROM workers
-            WHERE node_id = ?
-            ORDER BY registered_at DESC
+            f"""
+            {_WORKER_SELECT}
+            WHERE workers.node_id = ?
+            ORDER BY workers.registered_at DESC
             LIMIT 1
             """,
             [node_id],

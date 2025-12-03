@@ -26,7 +26,7 @@ def generate_artifact_id_from_path(artifact_path: str | Path) -> dict:
         "artifact_id": desc["artifact_id"],
         "index_multihash": desc["index_multihash"],
         "data_multihash": desc["data_multihash"],
-        "schema_version": desc.get("schema_version", "v2"),
+        "schema_version": desc.get("schema_version", "v3"),
         "encoding": desc.get("encoding", "json"),
         "total_size": int(desc.get("total_size", 0)),
     }
