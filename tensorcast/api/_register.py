@@ -775,7 +775,7 @@ def _materialize_canonical_tensors(
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
 ) -> CoalescedPlan | LeasePlan:
-    plan_type = options.plan
+    plan_type: PlanType = options.plan
     if plan_type is PlanType.VRAM_COALESCED:
         return CoalescedPlan(
             kind="coalesced",
@@ -1056,7 +1056,7 @@ def _register_artifact_core(
     tracer = trace.get_tracer(__name__)
 
     if force_lease_in_place:
-        plan_type = PlanType.VRAM_LEASED
+        plan_type: PlanType = PlanType.VRAM_LEASED
         plan_model = LeasePlan(
             kind="lease",
             min_tensor_bytes=options.min_tensor_bytes,

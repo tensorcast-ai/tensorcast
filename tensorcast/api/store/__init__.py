@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 import torch
 
 from tensorcast._C import get_cuda_memory_handle
-from tensorcast.api._config import GetArtifactOptions, PlanType, RegisterArtifactOptions
+from tensorcast.api._config import RegisterArtifactOptions
 from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
@@ -216,11 +216,11 @@ class Store:
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
-        fallback: FallbackOptions | None = None,
+        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
-        effective_fallback = fallback
-        if disk_path and fallback is None:
-            effective_fallback = FallbackOptions.for_disk(disk_path)
+        effective_fallback = FallbackOptions.parse(fallback)
+        if disk_path and effective_fallback is None:
+            effective_fallback = FallbackOptions.for_disk(str(disk_path))
         return Artifact(
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
@@ -235,7 +235,7 @@ class Store:
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
-        fallback: FallbackOptions | None = None,
+        fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
             artifact_id=artifact_id,
@@ -245,133 +245,13 @@ class Store:
         )
 
     def from_disk(
-        self, path: str, *, fallback: FallbackOptions | None = None
+        self, path: str, *, fallback: FallbackOptions | str | None = None
     ) -> Artifact:
         disk_path = os.fspath(path)
-        effective_fallback = fallback or FallbackOptions.for_disk(str(disk_path))
+        effective_fallback = FallbackOptions.parse(fallback)
+        if effective_fallback is None:
+            effective_fallback = FallbackOptions.for_disk(str(disk_path))
         return self.artifact(disk_path=str(disk_path), fallback=effective_fallback)
-
-    def get(
-        self,
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> dict[str, torch.Tensor]:
-        return self._materialization.get(
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-            options=options,
-        )
-
-    def get_view(
-        self,
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        slices: Mapping[str, Sequence[object]] | None = None,
-        transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-        view_id: str | None = None,
-        placement: str | None = None,
-        device: torch.device | str | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> dict[str, torch.Tensor]:
-        return self._materialization.get_view(
-            artifact_id=artifact_id,
-            key=key,
-            slices=slices,
-            transpose=transpose,
-            view_id=view_id,
-            placement=placement,
-            device=device,
-            options=options,
-            resolver=self._views.resolve_view_inputs,
-        )
-
-    def get_view_into(
-        self,
-        target: dict[str, torch.Tensor],
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        slices: Mapping[str, Sequence[object]] | None = None,
-        transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-        view_id: str | None = None,
-        placement: str | None = None,
-        device: torch.device | str | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> None:
-        self._materialization.get_view_into(
-            target,
-            artifact_id=artifact_id,
-            key=key,
-            slices=slices,
-            transpose=transpose,
-            view_id=view_id,
-            placement=placement,
-            device=device,
-            options=options,
-            resolver=self._views.resolve_view_inputs,
-        )
-
-    def get_async(
-        self,
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> ArtifactFuture[dict[str, torch.Tensor]]:
-        return self._materialization.get_async(
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-            options=options,
-        )
-
-    def get_into(
-        self,
-        target: dict[str, torch.Tensor],
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> None:
-        self._materialization.get_into(
-            target,
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-            options=options,
-        )
-
-    def get_into_async(
-        self,
-        target: dict[str, torch.Tensor],
-        *,
-        artifact_id: str | None = None,
-        key: str | None = None,
-        device: torch.device | str | None = None,
-        fallback: FallbackOptions | None = None,
-        options: GetArtifactOptions | None = None,
-    ) -> ArtifactFuture[None]:
-        return self._materialization.get_into_async(
-            target,
-            artifact_id=artifact_id,
-            key=key,
-            device=device,
-            fallback=fallback,
-            options=options,
-        )
 
     # ------------------------------------------------------------------
     # Region-backed registration
@@ -582,22 +462,6 @@ def register_async(
     )
 
 
-def register_kv_block(
-    tensor: torch.Tensor,
-    block_hash: str,
-    *,
-    ttl_ms: int | None = None,
-) -> RegisteredArtifact:
-    artifact_id = f"cgid:kv:{block_hash}"
-    opts = RegisterArtifactOptions(
-        plan=PlanType.VRAM_LEASED,
-        lease_in_place=True,
-    )
-    return _coerce_store().register(
-        {"kv": tensor}, artifact_id=artifact_id, options=opts, ttl_ms=ttl_ms
-    )
-
-
 def register_view(
     tensors: TensorDict,
     *,
@@ -697,132 +561,12 @@ def put_async(
     )
 
 
-def get(
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    device: torch.device | str | None = None,
-    fallback: FallbackOptions | None = None,
-    options: GetArtifactOptions | None = None,
-) -> dict[str, torch.Tensor]:
-    return _coerce_store().get(
-        artifact_id=artifact_id,
-        key=key,
-        device=device,
-        fallback=fallback,
-        options=options,
-    )
-
-
-def get_view(
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    slices: Mapping[str, Sequence[object]] | None = None,
-    transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-    view_id: str | None = None,
-    placement: str | None = None,
-    device: torch.device | str | None = None,
-    options: GetArtifactOptions | None = None,
-) -> dict[str, torch.Tensor]:
-    return _coerce_store().get_view(
-        artifact_id=artifact_id,
-        key=key,
-        slices=slices,
-        transpose=transpose,
-        view_id=view_id,
-        placement=placement,
-        device=device,
-        options=options,
-    )
-
-
-def get_view_into(
-    target: dict[str, torch.Tensor],
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    slices: Mapping[str, Sequence[object]] | None = None,
-    transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-    view_id: str | None = None,
-    placement: str | None = None,
-    device: torch.device | str | None = None,
-    options: GetArtifactOptions | None = None,
-) -> None:
-    _coerce_store().get_view_into(
-        target,
-        artifact_id=artifact_id,
-        key=key,
-        slices=slices,
-        transpose=transpose,
-        view_id=view_id,
-        placement=placement,
-        device=device,
-        options=options,
-    )
-
-
-def get_async(
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    device: torch.device | str | None = None,
-    fallback: FallbackOptions | None = None,
-    options: GetArtifactOptions | None = None,
-) -> ArtifactFuture[dict[str, torch.Tensor]]:
-    return _coerce_store().get_async(
-        artifact_id=artifact_id,
-        key=key,
-        device=device,
-        fallback=fallback,
-        options=options,
-    )
-
-
-def get_into(
-    target: dict[str, torch.Tensor],
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    device: torch.device | str | None = None,
-    fallback: FallbackOptions | None = None,
-    options: GetArtifactOptions | None = None,
-) -> None:
-    _coerce_store().get_into(
-        target,
-        artifact_id=artifact_id,
-        key=key,
-        device=device,
-        fallback=fallback,
-        options=options,
-    )
-
-
-def get_into_async(
-    target: dict[str, torch.Tensor],
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    device: torch.device | str | None = None,
-    fallback: FallbackOptions | None = None,
-    options: GetArtifactOptions | None = None,
-) -> ArtifactFuture[None]:
-    return _coerce_store().get_into_async(
-        target,
-        artifact_id=artifact_id,
-        key=key,
-        device=device,
-        fallback=fallback,
-        options=options,
-    )
-
-
 def artifact(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
-    fallback: FallbackOptions | None = None,
+    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     return _coerce_store().artifact(
         artifact_id=artifact_id,
@@ -837,7 +581,7 @@ async def artifact_async(
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
-    fallback: FallbackOptions | None = None,
+    fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
     return await _coerce_store().artifact_async(
         artifact_id=artifact_id,
@@ -847,7 +591,7 @@ async def artifact_async(
     )
 
 
-def from_disk(path: str, *, fallback: FallbackOptions | None = None) -> Artifact:
+def from_disk(path: str, *, fallback: FallbackOptions | str | None = None) -> Artifact:
     return _coerce_store().from_disk(path, fallback=fallback)
 
 
@@ -883,14 +627,7 @@ __all__ = [
     "register_async",
     "put",
     "put_async",
-    "get",
-    "get_async",
-    "get_view",
-    "get_view_into",
-    "get_into",
-    "get_into_async",
     "register_view",
-    "register_kv_block",
     "register_vram_region",
     "unregister_vram_region",
     "deregister_artifact",

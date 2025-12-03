@@ -7,8 +7,8 @@ import base64
 import threading
 import time
 import weakref
-from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Mapping, Sequence, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
 
@@ -27,6 +27,7 @@ from tensorcast.api.store.types import (
     CanonicalIndex,
     CanonicalIndexEntry,
     FallbackOptions,
+    FallbackPreference,
 )
 from tensorcast.api.store.view_composer import (
     ViewBuilder,
@@ -59,7 +60,27 @@ class ArtifactDescriptor:
     generation: int | None
 
 
-def _fallback_to_dict(fallback: FallbackOptions | None) -> dict[str, object] | None:
+class ArtifactSerializedFallback(TypedDict):
+    prefer: FallbackPreference
+    disk_path: str | None
+    prefer_disk: bool | None
+    allow_p2p: bool
+    verify_checksums: bool
+    replica_uuid: str | None
+
+
+class ArtifactSerialized(TypedDict):
+    artifact_id: str | None
+    key: str | None
+    disk_path: str | None
+    fallback: ArtifactSerializedFallback | None
+    canonical_index: str | None
+    generation: int | None
+
+
+def _fallback_to_dict(
+    fallback: FallbackOptions | None,
+) -> ArtifactSerializedFallback | None:
     if fallback is None:
         return None
     return {
@@ -74,7 +95,9 @@ def _fallback_to_dict(fallback: FallbackOptions | None) -> dict[str, object] | N
     }
 
 
-def _fallback_from_dict(data: Mapping[str, object] | None) -> FallbackOptions | None:
+def _fallback_from_dict(
+    data: ArtifactSerializedFallback | Mapping[str, object] | None,
+) -> FallbackOptions | None:
     if data is None:
         return None
     prefer_value = data.get("prefer")
@@ -107,7 +130,13 @@ def _meta_from_entry(entry: CanonicalIndexEntry) -> TensorMeta:
 
 
 class Artifact:
-    """Lazy handle to a TensorCast artifact."""
+    """Lazy handle to a TensorCast artifact.
+
+    Construction is non-blocking and does not trigger RPCs; identity and
+    metadata are resolved lazily on first materialization (`tensor*`,
+    `tensor_dict*`, or `exists()`), and view composition is purely local until
+    then.
+    """
 
     def __init__(
         self,
@@ -116,7 +145,7 @@ class Artifact:
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
-        fallback: FallbackOptions | None = None,
+        fallback: FallbackOptions | str | None = None,
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
         generation: int | None = None,
@@ -131,10 +160,12 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
+        self._fallback = FallbackOptions.parse(fallback)
         self._artifact_id = artifact_id
         self._key_hint = key
-        self._disk_path_hint = disk_path
-        self._fallback = fallback
+        self._disk_path_hint = disk_path or (
+            self._fallback.disk_path if self._fallback else None
+        )
         self._canonical_index_bytes = canonical_index_bytes
         self._canonical_index = canonical_index
         self._tensor_metas: dict[str, TensorMeta] | None = None
@@ -289,6 +320,44 @@ class Artifact:
             replica_uuid=replica_uuid,
         )
 
+    def tensor_into(
+        self,
+        name: str,
+        target_tensor: torch.Tensor,
+        *,
+        device: torch.device | str | None = None,
+    ) -> None:
+        if not isinstance(target_tensor, torch.Tensor):
+            raise ArtifactError(
+                "tensor_into target must be a torch.Tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        artifact_id = self._ensure_identified()
+        _, _, pipeline = self._require_components()
+        requested_names = (name,)
+        view_spec_proto = self._view_spec.proto if self._view_spec else None
+        view_data_hash = (
+            self._view_metadata.view_data_hash if self._view_metadata else None
+        )
+        view_index_hint = (
+            self._view_metadata.view_index_bytes if self._view_metadata else None
+        )
+        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        resolved_device = device if device is not None else target_tensor.device
+        pipeline.get_into(
+            {requested_names[0]: target_tensor},
+            artifact_id=artifact_id,
+            key=None,
+            device=resolved_device,
+            fallback=self._fallback,
+            view_spec=view_spec_proto,
+            view_data_hash=view_data_hash,
+            view_index_hint=view_index_hint,
+            replica_uuid=replica_uuid,
+            tensor_names=requested_names,
+        )
+
     def view(
         self,
         *,
@@ -296,6 +365,7 @@ class Artifact:
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
         names: Sequence[str] | None = None,
     ) -> Artifact:
+        """Return a derived lazy view; no RPCs occur until materialization or exists()."""
         return self._derive_view(
             slices=slices,
             transpose=transpose,
@@ -359,7 +429,9 @@ class Artifact:
             None, lambda: self.tensor_dict(device=device, names=names)
         )
 
-    def prefetch(self, *, device: torch.device | str) -> "PrefetchTicket":
+    def prefetch(
+        self, *, device: torch.device | str
+    ) -> tuple["Artifact", "PrefetchTicket"]:
         from tensorcast.api._config import GetArtifactOptions
 
         artifact_id = self._ensure_identified()
@@ -402,11 +474,11 @@ class Artifact:
         from tensorcast.api.store.batch_context import PrefetchTicket
 
         fallback_with_ticket = (
-            replace(self._fallback, replica_uuid=replica)
+            self._fallback.model_copy(update={"replica_uuid": replica})
             if self._fallback is not None
             else FallbackOptions(replica_uuid=replica)
         )
-        self._fallback = fallback_with_ticket
+        prefetched_handle = self.with_fallback(fallback_with_ticket)
         try:
             from tensorcast.api import _metrics as store_metrics
 
@@ -415,7 +487,7 @@ class Artifact:
             )
         except Exception:  # noqa: BLE001
             pass
-        return PrefetchTicket(
+        ticket = PrefetchTicket(
             replica_uuid=replica,
             artifact_id=artifact_id,
             device=torch.device(device),
@@ -424,14 +496,16 @@ class Artifact:
             view_hash=view_data_hash,
             runtime_ref=weakref.ref(runtime),
         )
+        return prefetched_handle, ticket
 
-    def with_fallback(self, fallback: FallbackOptions) -> Artifact:
+    def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:
+        parsed = FallbackOptions.parse(fallback)
         clone = Artifact(
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
             disk_path=self._disk_path_hint,
-            fallback=fallback,
+            fallback=parsed,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
             generation=self._generation,
@@ -444,6 +518,7 @@ class Artifact:
         return clone
 
     def exists(self) -> bool:
+        """Check existence lazily, surfacing ArtifactError on failures."""
         if self._canonical_index is not None:
             return True
         runtime = self._runtime_if_available()
@@ -464,6 +539,18 @@ class Artifact:
             with self._lock:
                 self._hydrate_from_cache_entry(cached)
             return True
+        disk_path_hint = self._disk_path_hint or (
+            self._fallback.disk_path if self._fallback else None
+        )
+        if disk_path_hint:
+            try:
+                disk_index = self._resolve_metadata_from_disk(runtime, disk_path_hint)
+            except ArtifactError as disk_error:
+                if disk_error.status_code != "NOT_FOUND":
+                    raise
+            else:
+                if disk_index is not None:
+                    return True
         try:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id
@@ -506,7 +593,7 @@ class Artifact:
         with self._lock:
             self._released = True
 
-    def to_dict(self) -> dict[str, object]:
+    def to_dict(self) -> ArtifactSerialized:
         encoded_index: str | None = None
         if self._canonical_index_bytes:
             encoded_index = base64.b64encode(self._canonical_index_bytes).decode(
@@ -668,6 +755,74 @@ class Artifact:
                 retryable=False,
             )
 
+    def _resolve_metadata_from_disk(
+        self, runtime: "StoreRuntimeContext", disk_path: str
+    ) -> CanonicalIndex | None:
+        cached = runtime.get_artifact_index_by_disk_path(disk_path)
+        if cached:
+            with self._lock:
+                self._hydrate_from_cache_entry(cached)
+                if (
+                    self._canonical_index is not None
+                    and self._canonical_index_bytes is not None
+                ):
+                    return self._canonical_index
+
+        verify_checksums = True
+        if self._fallback is not None:
+            verify_checksums = bool(self._fallback.verify_checksums)
+        try:
+            resolved = runtime.ensure_client().resolve_artifact_from_disk_v2(
+                disk_path=disk_path,
+                verify_checksums=verify_checksums,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise map_materialization_error(exc) from exc
+
+        resolved_artifact_id = (
+            getattr(resolved, "artifact_id", "") or self._artifact_id or None
+        )
+        resolved_disk_path = getattr(resolved, "disk_path", "") or disk_path
+        canonical_index_bytes = bytes(
+            getattr(resolved, "canonical_index_bytes", b"") or b""
+        )
+        generation_raw = getattr(resolved, "generation", 0)
+        generation = int(generation_raw) if generation_raw else None
+
+        canonical_index = (
+            canonical_index_from_bytes(canonical_index_bytes)
+            if canonical_index_bytes
+            else None
+        )
+        with self._lock:
+            if resolved_artifact_id and not self._artifact_id:
+                self._artifact_id = resolved_artifact_id
+            if resolved_disk_path:
+                self._disk_path_hint = resolved_disk_path
+            if canonical_index is not None:
+                self._set_metadata(
+                    canonical_index_bytes,
+                    canonical_index,
+                    generation=self._generation or generation,
+                    disk_path=resolved_disk_path,
+                )
+            elif generation is not None and self._generation is None:
+                self._generation = generation
+
+        if canonical_index is not None and resolved_artifact_id:
+            runtime.cache_artifact_index(
+                ArtifactCacheEntry(
+                    artifact_id=resolved_artifact_id,
+                    canonical_index_bytes=canonical_index_bytes,
+                    parsed_index=canonical_index,
+                    generation=generation,
+                    disk_path=resolved_disk_path,
+                    expires_at=time.monotonic(),
+                )
+            )
+            return canonical_index
+        return None
+
     def _ensure_metadata(self) -> CanonicalIndex:
         if (
             self._canonical_index is not None
@@ -686,6 +841,7 @@ class Artifact:
         cache_disk_path: str | None = None
         generation_hint: int | None = None
         disk_path_hint: str | None = None
+        force_remote_fetch = False
         with self._lock:
             if (
                 self._canonical_index is not None
@@ -704,7 +860,8 @@ class Artifact:
                     and cached.generation is not None
                     and cached.generation != self._generation
                 )
-                if has_disk_mismatch or has_generation_mismatch:
+                force_remote_fetch = bool(has_disk_mismatch or has_generation_mismatch)
+                if force_remote_fetch:
                     runtime.invalidate_artifact(
                         artifact_id,
                         reason="disk_path_mismatch"
@@ -716,7 +873,18 @@ class Artifact:
                     assert self._canonical_index is not None
                     return self._canonical_index
             generation_hint = self._generation
-            disk_path_hint = self._disk_path_hint
+            disk_path_hint = self._disk_path_hint or (
+                self._fallback.disk_path if self._fallback else None
+            )
+        if disk_path_hint and not force_remote_fetch:
+            try:
+                disk_index = self._resolve_metadata_from_disk(runtime, disk_path_hint)
+            except ArtifactError as disk_error:
+                if disk_error.status_code != "NOT_FOUND":
+                    raise
+            else:
+                if disk_index is not None:
+                    return disk_index
         try:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id

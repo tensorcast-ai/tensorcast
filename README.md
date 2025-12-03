@@ -134,7 +134,8 @@ ctx = init()  # or init(address="auto")
 
 # Force local launch (private session). If daemon_config_path is omitted,
 # init() will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml,
-# or examples/config/store_daemon_config.yaml.
+# examples/config/store_daemon_config.yaml, and finally an embedded loopback config
+# with ephemeral ports and a writable cache under ~/.tensorcast (or a temp dir).
 # Private launches do not publish ~/.tensorcast/current_session or meta.json and bind to 127.0.0.1.
 ctx = init(address="local", daemon_config_path="examples/config/store_daemon_config.yaml")
 
@@ -158,10 +159,21 @@ tc.init(address="auto")
 state_dict = {"layer.weight": torch.randn(8, 8, device="cuda")}
 
 registered = tc.register(state_dict, key="demo:model:001")
-latest = tc.get(key="demo:model:001", device="cuda:0")
+handle = tc.artifact(key="demo:model:001")
+latest = handle.tensor_dict(device="cuda:0")
 
 buffers = {"layer.weight": torch.empty_like(state_dict["layer.weight"])}
-tc.get_into(buffers, artifact_id=registered.artifact_id, device="cuda:0")
+handle.tensor_dict_into(buffers, device="cuda:0")
+
+# Stream a single tensor directly into an existing buffer without populating a
+# full mapping. TensorCast copies only the requested tensor.
+target = torch.empty_like(state_dict["layer.weight"])
+handle.tensor_into("layer.weight", target, device="cuda:0")
+
+# Issue background materialization without mutating the original handle.
+prefetched, ticket = handle.prefetch(device="cuda:0")
+ticket.wait(timeout=5.0)
+prefetched.tensor_dict(device="cuda:0")
 ```
 
 For advanced scenarios (async verbs, fine-grained inspection, or direct access to diagnostics) use

@@ -1,20 +1,16 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-import os
 from pathlib import Path
-from typing import Sequence, cast
+from typing import Sequence
 
+import pytest
 import torch
 
-from tensorcast import (
-    FallbackOptions,
-    GetArtifactOptions,
-    get,
-    save_dict,
-    startup,
-)
+from tensorcast import FallbackOptions, artifact, save_dict, startup
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
+
+pytestmark = pytest.mark.requires_cuda_or_fake
 
 
 def test_shared_storage_roundtrip(tmp_path):
@@ -66,14 +62,11 @@ def test_shared_storage_roundtrip(tmp_path):
                 allow_p2p=False,
                 verify_checksums=False,
             )
-            options = GetArtifactOptions(enable_verification=False)
             device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
-            loaded_state_dict = get(
+            loaded_state_dict = artifact(
                 artifact_id=descriptor["artifact_id"],
-                device=device_selector,
                 fallback=fallback,
-                options=options,
-            )
+            ).tensor_dict(device=device_selector)
         finally:
             startup.shutdown()
     finally:

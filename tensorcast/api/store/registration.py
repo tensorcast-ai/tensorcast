@@ -7,7 +7,6 @@ import logging
 import threading
 import time
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Callable, Sequence
 
 import torch
@@ -324,16 +323,17 @@ class RegistrationPipeline:
                 retryable=False,
             )
         resolved_key = key
-        options = options_override
-        if options is not None:
+        options: RegisterArtifactOptions
+        if options_override is not None:
+            options = options_override
             if options.plan is not plan:
-                options = replace(options, plan=plan)
+                options = options.model_copy(update={"plan": plan})
             if plan is PlanType.VRAM_LEASED and not options.lease_in_place:
-                options = replace(options, lease_in_place=True)
+                options = options.model_copy(update={"lease_in_place": True})
             if resolved_key is None:
                 resolved_key = options.key
             elif options.key != resolved_key:
-                options = replace(options, key=resolved_key)
+                options = options.model_copy(update={"key": resolved_key})
         else:
             options = RegisterArtifactOptions(
                 plan=plan,

@@ -68,7 +68,7 @@ tc.register(tensors, *,
 
 # Convenience wrappers (optional):
 # tc.register_cgid(tensors, cgid: str, *, key=None, ttl_ms=None)
-# tc.register_kv_block({"k": k, "v": v}, block_hash, *, ttl_ms=None)  # internally uses artifact_id=f"cgid:{block_hash}"
+# Deprecated helper: use `tc.register(..., artifact_id=f"cgid:{block_hash}")` to reuse KV layouts.
 ```
 
 Rules

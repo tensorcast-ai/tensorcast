@@ -1,0 +1,138 @@
+---
+slug: 0039-artifact-first-sdk
+title: Artifact-First TensorCast SDK API
+links: {}
+areas: ["sdk"]
+related_code:
+  - tensorcast/startup.py
+  - tensorcast/api/store/__init__.py
+  - tensorcast/api/store/artifact.py
+  - tensorcast/api/store/materialization.py
+  - tensorcast/api/store/registration.py
+---
+
+# Summary
+
+Define a single, artifact-first Python SDK surface that is easy to learn, consistent, and free of redundant entry points. The SDK assumes one daemon per process and exposes functional helpers plus a single handle type (`Artifact`). Retrieval flows are handle-driven; legacy eager verbs (`get`, `get_into`, `get_view`, etc.) will be removed after the migration in favor of `artifact(...).tensor_*`. Ingestion remains explicit via `register`/`put` and view registration. Region-backed flows stay available but clearly separated as lifecycle utilities.
+
+# Goals / Non-Goals
+
+Goals
+- One-concept-per-interface: each user goal maps to exactly one public function or method.
+- Artifact-first retrieval: all fetch, view, batch, async, and prefetch flows hang off `Artifact`.
+- Minimal, user-friendly parameters: hide internal knobs; keep enums small and intention-based.
+- Default “just works”: per-process daemon launch via `tc.init()`, lazy resolution, P2P-by-default retrieval with safe fallbacks.
+- Clean slate: remove redundant/legacy verbs once the new surface ships (no compatibility constraints).
+
+Non-Goals
+- Changing daemon/Global Store RPC schemas or wire formats (reuse existing v2 flows).
+- Altering C++ core, UMA, or transport internals.
+- Adding new persistence schemas (no `schema.sql` changes).
+
+# Architecture & Interfaces
+
+## Top-Level API (functional)
+
+- `tc.init(address="local", daemon_config_path=None, wait=True, timeout=20.0, show_daemon_logs=True, install_signal_handlers=False, fate_share_sigterm=False)`  
+  Launch or connect to a single per-process daemon (prefers launch); sets global daemon address used by the process Store.  
+  **Default config:** if no config path is provided and none is discoverable, the SDK falls back to an embedded minimal daemon config (loopback bind, ephemeral or standard port, default cache path) so `tc.init()` “just works” after install.
+- `tc.shutdown()`, `tc.is_initialized()`.
+- `tc.artifact(key=None, artifact_id=None, disk_path=None, fallback=None) -> Artifact`  
+  Lazy handle factory; no data transfer; resolves key/disk lazily on first touch. `artifact_async(...)` mirrors it.
+- `tc.from_disk(path, *, fallback=None) -> Artifact`  
+  Convenience wrapper for `disk_path=...`.
+- Ingestion:
+  - `tc.register(tensors, *, key=None, artifact_id=None, options=None, ttl_ms=None)` / `register_async(...)`.
+  - `tc.put(tensors, *, key=None, artifact_id=None, options=None, device=None)` / `put_async(...)`.
+  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None)`.
+- Region & lifecycle (advanced):
+  - `tc.register_vram_region(device_id, base_ptr, size_bytes, ttl_ms, name=None) -> VramRegionHandle`.
+  - `tc.unregister_vram_region(region_id, *, force=None) -> bool`.
+  - `tc.deregister_artifact(artifact_id, *, wait=True, drain_timeout_s=None, extend_ttl_ms=None, device_id=None) -> DeregisterArtifactOutcome`.
+
+Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_into` (sync/async); `store()` remains for advanced callers but is not required for common flows.
+
+## Artifact Handle (single retrieval surface)
+
+- Identity & metadata: `.artifact_id`, `.key`, `.tensor_names`, `.tensor_meta(name)`, `.describe()`, `.exists()`, `.is_valid`, `.release()`.
+- Materialization (sync): `.tensor_dict(device, names=None)`, `.tensor(name, device)`, `.tensor_dict_into(target, device=None)`.
+- Symmetry convenience: `.tensor_into(name, target_tensor, device=None)` streams a single tensor directly into the provided buffer without requiring placeholders for every tensor in the artifact.
+- Materialization (async): `.tensor_async(name, device)`, `.tensor_dict_async(device, names=None)`.
+- Views/composition: `.view(slices=None, transpose=None, names=None)`, `.subset(names)`, `.slice({...})`, `.view_builder()`.
+- Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=...) -> tuple[Artifact, PrefetchTicket]` so callers can opt into ticket-based fallbacks via a cloned handle.
+- Policy override: `.with_fallback(FallbackOptions(...))`.
+- Serialization (process-local): `.to_dict()`, `.from_dict(data, store)`.
+
+All retrieval flows pass through `MaterializationPipeline` with canonical index caching (`ArtifactCache`) and optional view metadata caching.
+
+## Region-Backed Layout Reuse (no KV-only helper)
+
+- Region registration (`register_vram_region` / `unregister_vram_region`) remains the single mechanism for reusing GPU slabs across multiple artifacts, regardless of payload type (KV blocks, rolling weights, activations).
+- Standard `register`/`put` automatically detect registered regions and emit region-backed leases; there is no KV-specific helper. Users publish multiple artifacts (e.g., weight v1/v2 on the same base_ptr) by calling `register` with different `artifact_id`/`key`; the runtime maps storages to regions and avoids duplicate handle exports.
+- For repeated updates of the same layout, callers should choose stable `artifact_id`/`key` conventions (e.g., `model:latest`, `model:v2`, `cgid:...`) and rely on region reuse rather than special-purpose APIs.
+
+## Options and Enums (user-friendly)
+
+- `FallbackOptions`: `prefer` = `"auto" | "local" | "p2p" | "disk"` (default `"auto"`); `disk_path`; `allow_p2p` (default `True`); `verify_checksums` (default `True`); `replica_uuid` (prefetch reuse). Helpers: `for_disk(path, verify=True)`, `local_only()`. Accept string shortcuts at the surface (e.g., `fallback="disk:/tmp/foo"` → `for_disk`).
+- `PlanType`: user-facing strings `plan="lease" | "copy"` (default `lease`), coerced internally to `PlanType.VRAM_LEASED` / `PlanType.VRAM_COALESCED`; enum remains for power users.
+- `RegisterArtifactOptions`: public-facing fields `plan`, `lease_in_place`, `max_inflight_bytes`, `release_on_tensor_commit`; accept string `plan` and map to enum internally; keep advanced knobs optional.
+- `GetArtifactOptions`: `prefer` (mirrors `FallbackOptions`), `wait_for_completion` (default `True`), `enable_verification` (default `True`), `transport_hold_ms` (advanced).
+- Devices: accept `str | torch.device`; default to current CUDA device if available, otherwise require explicit CPU with disk fallback.
+
+## Behavioral Notes
+
+- Lazy resolution: `artifact()` creates a handle; first access may resolve key→artifact_id via daemon (and GS behind it) and hydrate canonical index into `ArtifactCache`. No tensor bytes move until `tensor*`/`tensor_dict*`.
+- Lazy views: chaining `.view().slice().transpose()` builds view specs only; no RPCs or data transfer occur until `.tensor*`/`.tensor_dict*`/`.exists()`.
+- Single-process Store: all functional helpers delegate to the process Store (singleton); initialization flows through `StoreRuntimeContext` with `get_daemon_client`.
+- View composition: uses `ViewSpecComposer` and `ViewMetadataCache`; derived handles keep parent hints and share caches.
+- Prefetch: returns `(handle_clone, PrefetchTicket)`; the clone carries `replica_uuid` via `FallbackOptions` while the original handle stays untouched. Tickets expose `wait()`/`cancel()` for staged replicas.
+- Region-backed registration: unchanged semantics per 0021; clearly scoped as an advanced lifecycle path.
+- Error surfaces: constructing an `Artifact` handle never raises `NOT_FOUND`; `ArtifactError` is raised on materialization (`tensor*`, `tensor_dict*`, `tensor_dict_into`, `tensor_into`) or explicit checks (`exists()`) when identity/metadata resolution fails.
+
+## Naming Compliance (Python)
+
+- Public functions/methods use `snake_case`; classes use `PascalCase`; constants use `ALL_CAPS`, matching repo Python standards.
+- No relative imports in user-facing examples; absolute imports (`import tensorcast as tc`) remain canonical.
+
+## Flow Diagram
+
+```mermaid
+flowchart LR
+    U["User code<br>tc.artifact(...)"] --> H["Artifact handle<br>lazy id + metadata"]
+    H --> M["Materialization pipeline<br>(view, batch, prefetch)"]
+    M --> R["Runtime ctx + caches<br>(key cache, ArtifactCache)"]
+    R --> D["Daemon<br>(may consult Global Store)"]
+    D -->|replica| M
+    M -->|tensor bytes| U
+```
+
+# Schema Changes
+
+None. No persistent schema or proto schema changes are required; reuse existing materialization and registration RPCs.
+
+# Trade-offs & Risks
+
+- Removing `get`/`get_into` means users must adopt `Artifact` flows; mitigated by clearer, smaller surface and improved composability.
+- Lazy resolution can surprise users expecting pure local construction; mitigate by documenting `.exists()` / `.describe()` as explicit lightweight checks.
+- Coercing string enums improves ergonomics but risks typos; mitigate with validation and clear `ArtifactError` messages.
+
+# Compatibility & Acceptance Criteria
+
+- No backward-compatibility promise (project not yet GA); redundant verbs removed from public surface once this design is implemented.
+- Acceptance:
+  - Functional API limited to the set above; retrieval only via `Artifact` methods.
+  - `tc.init()` defaults to launch-per-process; docs updated accordingly.
+  - Options enforce small, intention-based enums with validation and clear errors.
+  - All public docs/README/AGENTS updated to reflect the new surface; legacy examples removed.
+  - Tests cover handle flows (sync/async), views, batch, prefetch, region lifecycle, and init/shutdown paths.
+
+# References
+
+- 0014-store-session-api-modernization.md
+- 0016-artifact-view-v1.md
+- 0021-region‑backed-registration.md
+- 0036-02-artifact-handle-core.md
+- 0036-03-lazy-artifact-handle.md
+- 0036-04-disk-artifact-variant.md
+- 0037-store-py-refactor.md
+- `tensorcast/api/store/__init__.py`, `tensorcast/api/store/artifact.py`, `tensorcast/startup.py`

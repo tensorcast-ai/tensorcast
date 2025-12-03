@@ -14,6 +14,7 @@ from tensorcast.api._indices import (
 from tensorcast.api._io_disk import save_dict
 from tensorcast.api._register import RegisteredLease, RegistrationResult
 from tensorcast.api.store import (
+    Artifact,
     ArtifactError,
     ArtifactFuture,
     FallbackOptions,
@@ -40,4 +41,5 @@ __all__ = [
     "build_indices_from_safetensors",
     "CommitResult",
     "ArtifactDescriptor",
+    "Artifact",
 ]
