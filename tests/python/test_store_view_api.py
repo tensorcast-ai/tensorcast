@@ -292,7 +292,11 @@ def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> 
         fake_perform.__get__(store._materialization, MaterializationPipeline),
     )
 
-    result = store.get_view(artifact_id="artifact-123", slices={"weights": (slice(0, 16),)})
+    result = store._materialization.get_view(
+        artifact_id="artifact-123",
+        slices={"weights": (slice(0, 16),)},
+        resolver=store._views.resolve_view_inputs,
+    )
     assert set(result.keys()) == {"weights"}
     assert payload.state_dict is not None
     assert result["weights"] is payload.state_dict["weights"]
@@ -366,7 +370,13 @@ def test_get_view_into_uses_layout_index(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(materialization_mod, "validate_targets", fake_validate)
 
     target = {"weights": torch.zeros(16)}
-    store.get_view_into(target, artifact_id="artifact-123", view_id=None, slices={"weights": (slice(0, 16),)})
+    store._materialization.get_view_into(
+        target,
+        artifact_id="artifact-123",
+        view_id=None,
+        slices={"weights": (slice(0, 16),)},
+        resolver=store._views.resolve_view_inputs,
+    )
     assert torch.allclose(target["weights"], torch.ones(16))
     assert captured_index["shapes"] == [(16,)]
     assert released.get("called") is True

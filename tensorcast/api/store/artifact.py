@@ -107,7 +107,13 @@ def _meta_from_entry(entry: CanonicalIndexEntry) -> TensorMeta:
 
 
 class Artifact:
-    """Lazy handle to a TensorCast artifact."""
+    """Lazy handle to a TensorCast artifact.
+
+    Construction is non-blocking and does not trigger RPCs; identity and
+    metadata are resolved lazily on first materialization (`tensor*`,
+    `tensor_dict*`, or `exists()`), and view composition is purely local until
+    then.
+    """
 
     def __init__(
         self,
@@ -116,7 +122,7 @@ class Artifact:
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
-        fallback: FallbackOptions | None = None,
+        fallback: FallbackOptions | str | None = None,
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
         generation: int | None = None,
@@ -134,7 +140,7 @@ class Artifact:
         self._artifact_id = artifact_id
         self._key_hint = key
         self._disk_path_hint = disk_path
-        self._fallback = fallback
+        self._fallback = FallbackOptions.parse(fallback)
         self._canonical_index_bytes = canonical_index_bytes
         self._canonical_index = canonical_index
         self._tensor_metas: dict[str, TensorMeta] | None = None
@@ -289,6 +295,21 @@ class Artifact:
             replica_uuid=replica_uuid,
         )
 
+    def tensor_into(
+        self,
+        name: str,
+        target_tensor: torch.Tensor,
+        *,
+        device: torch.device | str | None = None,
+    ) -> None:
+        if not isinstance(target_tensor, torch.Tensor):
+            raise ArtifactError(
+                "tensor_into target must be a torch.Tensor",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        self.tensor_dict_into({name: target_tensor}, device=device)
+
     def view(
         self,
         *,
@@ -296,6 +317,7 @@ class Artifact:
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
         names: Sequence[str] | None = None,
     ) -> Artifact:
+        """Return a derived lazy view; no RPCs occur until materialization or exists()."""
         return self._derive_view(
             slices=slices,
             transpose=transpose,
@@ -425,13 +447,14 @@ class Artifact:
             runtime_ref=weakref.ref(runtime),
         )
 
-    def with_fallback(self, fallback: FallbackOptions) -> Artifact:
+    def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:
+        parsed = FallbackOptions.parse(fallback)
         clone = Artifact(
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
             disk_path=self._disk_path_hint,
-            fallback=fallback,
+            fallback=parsed,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
             generation=self._generation,
@@ -444,6 +467,7 @@ class Artifact:
         return clone
 
     def exists(self) -> bool:
+        """Check existence lazily, surfacing ArtifactError on failures."""
         if self._canonical_index is not None:
             return True
         runtime = self._runtime_if_available()

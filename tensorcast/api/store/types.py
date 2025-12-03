@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Mapping
+from typing import Literal, Mapping, TypeAlias
 
 import torch
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from tensorcast.api._config import PlanType
 from tensorcast.types import ServerConfig
@@ -59,16 +60,50 @@ class RetryPolicy:
     jitter: float
 
 
-@dataclass(frozen=True)
-class FallbackOptions:
+class FallbackOptions(BaseModel):
     """Source selection and replica hints for materialization."""
 
-    prefer: Literal["auto", "local", "p2p", "disk"] = "auto"
+    model_config = ConfigDict(frozen=True)
+
+    FallbackPreference: TypeAlias = Literal["auto", "local", "p2p", "disk"]
+
+    prefer: FallbackPreference = "auto"
     disk_path: str | None = None
     allow_p2p: bool = True
     verify_checksums: bool = True
     prefer_disk: bool | None = None  # Deprecated compatibility flag
     replica_uuid: str | None = None
+
+    @staticmethod
+    def _to_prefer_literal(value: str) -> "FallbackPreference":
+        normalized = value.strip().lower()
+        if normalized == "auto":
+            return "auto"
+        if normalized == "local":
+            return "local"
+        if normalized == "p2p":
+            return "p2p"
+        if normalized == "disk":
+            return "disk"
+        raise ArtifactError(
+            f"Unknown fallback preference '{value}' (expected auto, local, p2p, or disk)",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
+
+    @field_validator("prefer", mode="before")
+    @classmethod
+    def _normalize_prefer(cls, value: object) -> "FallbackPreference":
+        normalized = "auto" if value is None else str(value).strip().lower()
+        return cls._to_prefer_literal(normalized)
+
+    @field_validator("disk_path", mode="before")
+    @classmethod
+    def _normalize_disk_path(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        path = str(value).strip()
+        return path or None
 
     @classmethod
     def for_disk(cls, path: str, *, verify: bool = True) -> "FallbackOptions":
@@ -89,11 +124,54 @@ class FallbackOptions:
             prefer_disk=False,
         )
 
+    @classmethod
+    def parse(cls, value: object) -> "FallbackOptions | None":
+        """Accept either a FallbackOptions instance or a string shortcut."""
+        if value is None:
+            return None
+        if isinstance(value, FallbackOptions):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.lower().startswith("disk:"):
+                path = raw.split(":", 1)[1]
+                if path.strip() == "":
+                    raise ArtifactError(
+                        "Fallback string 'disk:' requires a path, e.g. 'disk:/tmp/artifacts'",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+                return cls.for_disk(path)
+            normalized = raw.lower()
+            if normalized in {"auto", "local", "p2p", "disk"}:
+                if normalized == "local":
+                    return cls.local_only()
+                if normalized == "disk":
+                    return cls(
+                        prefer="disk",
+                        allow_p2p=False,
+                        prefer_disk=True,
+                    )
+                prefer_literal = cls._to_prefer_literal(normalized)
+                return cls(prefer=prefer_literal)
+        raise ArtifactError(
+            "Fallback must be a FallbackOptions instance or string "
+            "('auto', 'local', 'p2p', 'disk:/path')",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
 
-@dataclass(frozen=True)
-class StoreOptions:
+
+class StoreOptions(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     fallback: FallbackOptions | None = None
     retry_overrides: Mapping[str, RetryPolicy] | None = None
+
+    @field_validator("fallback", mode="before")
+    @classmethod
+    def _coerce_fallback(cls, value: object) -> FallbackOptions | None:
+        return FallbackOptions.parse(value)
 
 
 @dataclass(frozen=True)

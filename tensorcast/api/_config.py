@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import os
 import threading
-from dataclasses import dataclass
 from enum import Enum
+
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from tensorcast.api._errors import InvalidPlan
 
@@ -61,19 +62,22 @@ class PlanType(Enum):
     VRAM_LEASED = "vram_leased"
 
     @staticmethod
-    def parse(value: "PlanType | str") -> "PlanType":
+    def parse(value: object) -> "PlanType":
         if isinstance(value, PlanType):
             return value
         s = str(value).strip().lower()
-        if s in ("vram_coalesced", "coalesced"):
+        if s in ("vram_coalesced", "coalesced", "copy"):
             return PlanType.VRAM_COALESCED
         if s in ("vram_leased", "lease"):
             return PlanType.VRAM_LEASED
-        raise InvalidPlan(f"Unknown plan: {value}")
+        raise InvalidPlan(
+            f"Unknown plan '{value}'; expected 'lease' or 'copy' (or PlanType enum)."
+        )
 
 
-@dataclass(slots=True, frozen=True)
-class RegisterArtifactOptions:
+class RegisterArtifactOptions(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     plan: PlanType = PlanType.VRAM_COALESCED
     p2p_prefer: str = "vram"
     max_inflight_bytes: int = 512 * 1024 * 1024
@@ -87,20 +91,36 @@ class RegisterArtifactOptions:
     key: str | None = None
     disk_path: str | None = None
 
-    def __post_init__(self) -> None:
-        # Ensure plan is a PlanType; callers must pass PlanType per API contract.
-        if not isinstance(self.plan, PlanType):
-            raise TypeError("RegisterArtifactOptions.plan must be a PlanType")
+    @field_validator("plan", mode="before")
+    @classmethod
+    def _normalize_plan(cls, value: object) -> PlanType:
+        try:
+            return PlanType.parse(value)
+        except InvalidPlan:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise InvalidPlan(str(exc)) from exc
 
 
-@dataclass(slots=True, frozen=True)
-class GetArtifactOptions:
-    prefer: str = "p2p"  # "p2p" or "disk"
+class GetArtifactOptions(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     wait_for_completion: bool = True
     enable_verification: bool = True
     # Hint for P2P transport lock TTL extension; forwarded by daemons
     transport_hold_ms: int | None = None
+
+    @field_validator("prefer", mode="before")
+    @classmethod
+    def _normalize_prefer(cls, value: object) -> str:
+        normalized = "auto" if value is None else str(value).strip().lower()
+        if normalized not in {"auto", "local", "p2p", "disk"}:
+            raise ValueError(
+                "GetArtifactOptions.prefer must be one of: auto, local, p2p, disk"
+            )
+        return normalized
 
 
 __all__ = [

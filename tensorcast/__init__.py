@@ -108,6 +108,7 @@ validate_cuda_backend_consistency()
 
 from tensorcast._version import __version__  # noqa: E402
 from tensorcast.api import (  # noqa: E402
+    Artifact,
     ArtifactDescriptor,
     ArtifactError,
     ArtifactFuture,
@@ -125,17 +126,17 @@ from tensorcast.api import (  # noqa: E402
     save_dict,
 )
 from tensorcast.api.store import (  # noqa: E402
+    PrefetchTicket,
+    deregister_artifact,
     from_disk,
-    get,
-    get_async,
-    get_into,
-    get_into_async,
     put,
     put_async,
     register,
     register_async,
     register_view,
+    register_vram_region,
     store,
+    unregister_vram_region,
 )
 from tensorcast.startup import init, is_initialized, shutdown  # noqa: E402
 
@@ -159,6 +160,7 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "from_disk",
+    "Artifact",
     "ArtifactDescriptor",
     "store",
     "register",
@@ -166,9 +168,9 @@ __all__ = [
     "register_view",
     "put",
     "put_async",
-    "get",
-    "get_async",
-    "get_into",
-    "get_into_async",
+    "register_vram_region",
+    "unregister_vram_region",
+    "deregister_artifact",
+    "PrefetchTicket",
     "BuildConfigMismatchError",
 ]

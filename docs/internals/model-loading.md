@@ -11,7 +11,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT
-- Entrypoint: `tensorcast.get` / `tensorcast.get_into` (facade over the process Store)
+- Entrypoint: `tensorcast.artifact(...).tensor_dict` / `.tensor_dict_into` (facade over the process Store)
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
@@ -140,13 +140,11 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   return a `RegisteredArtifact` describing the canonical index, replica metadata, and lease handle
   when applicable. Both functions call into the shared Store and offer async variants via
   `tensorcast.store().register_async(...)`.
-- `tensorcast.get(...)` returns a materialised `dict[str, torch.Tensor]` by artifact id or key with
-  retry-aware fallback handling. `tensorcast.store().get_async(...)` exposes an `ArtifactFuture`
-  that supports `result()`, cancellation, and completion callbacks.
-- `tensorcast.get_into(...)` populates caller-provided tensors in-place. The Store validates shapes,
-  strides, and device placement before mutating buffers, zero-fills PAD segments to keep tensors
-  consistent on failure or cancellation, and unloads any daemon-backed VRAM replica as soon as the
-  copy (or validation error) completes. Asynchronous flows are available via `tensorcast.store()`.
+- Retrieval is handle-first: `tensorcast.artifact(...).tensor_dict(...)` streams tensors to the requested
+  device (sync) and `tensor_dict_async(...)` mirrors it asynchronously. In-place copies use
+  `artifact.tensor_dict_into(...)` or the convenience `artifact.tensor_into(name, target, ...)`.
+  The Store validates shapes/strides/device before mutating buffers, zero-fills PAD segments to keep
+  tensors consistent on failure, and unloads daemon-backed replicas immediately after copy/validation.
 - `StoreOptions` and per-call `FallbackOptions` express disk/P2P strategies without sprinkling
   policy flags across call sites.
 - Low-level lease feeding and commit orchestration are handled internally by the Store,
@@ -158,9 +156,9 @@ coalesced VRAM (CUDA IPC) for zero-copy use.
   - `PlanType.VRAM_COALESCED` (aliases: `"coalesced"`)
   - `PlanType.VRAM_LEASED` (aliases: `"lease"`)
 - `RegisterArtifactOptions` is now a frozen dataclass with slots for immutability.
-- Loading helpers with fixed return types now forward to the Store session:
-  - Synchronous: `tensorcast.get(...) -> dict[str, torch.Tensor]`
-  - Asynchronous: `tensorcast.store().get_async(...) -> ArtifactFuture[dict[str, torch.Tensor]]`
+- Loading helpers with fixed return types now hang off `Artifact`:
+  - Synchronous: `tensorcast.artifact(...).tensor_dict(...) -> dict[str, torch.Tensor]`
+  - Asynchronous: `tensorcast.artifact(...).tensor_dict_async(...) -> ArtifactFuture[dict[str, torch.Tensor]]`
 - `ArtifactFuture.done() / result(timeout) / cancel()` mirror the standard `concurrent.futures`
   contract. Cancellation propagates to daemon RPCs (`AbortRegisteredArtifact`, `RevokeRegisteredArtifact`)
   and records telemetry for observability.

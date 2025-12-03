@@ -138,7 +138,7 @@ The design maintains backward compatibility by marking new fields as optional an
 - Capability negotiation:
   - During session establishment, clients detect whether the daemon advertises `region_registration_capability`.
   - When absent, SDK silently keeps the legacy handle path and hides region APIs behind a runtime check (raising `UnsupportedFeatureError` if invoked).
-- Convenience helper: expose `Store.register_kv_block(kv_pair, block_hash, ttl_ms=...)` that enforces `artifact_id=f"cgid:kv:{block_hash}"`, registers backing regions first when needed, and emits metrics for reuse.
+- Convenience helper (removed in 0039): instead of `Store.register_kv_block(...)`, rely on standard `register(...)` with region reuse and consistent `artifact_id`/`key` conventions for KV layouts.
 
 ## Global Store (`tensorcast/global_store/`)
 

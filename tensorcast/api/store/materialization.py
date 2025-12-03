@@ -131,7 +131,7 @@ class FallbackResolver:
 
 
 class MaterializationPipeline:
-    """Retrieval orchestration for get/get_into/get_view flows."""
+    """Retrieval orchestration for artifact materialization and view flows."""
 
     def __init__(
         self,
@@ -615,6 +615,8 @@ class MaterializationPipeline:
                     retryable=False,
                 )
             return {d.name: payload.state_dict[d.name] for d in payload.descriptors}
+        if payload.state_dict is not None:
+            return dict(payload.state_dict)
         state: dict[str, torch.Tensor] = {}
         for desc, tensor in payload.payload_iter():
             state[desc.name] = tensor
