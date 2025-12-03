@@ -2,11 +2,16 @@
 slug: 0021-global-store-dashboard
 title: Global Store Dashboard (Design)
 status: accepted
-areas: ["global_store", "infra"]
+areas: ["global_store", "infra", "memory_tier", "dashboard"]
 related_code:
   - tensorcast/global_store/grpc_service.py
+  - tensorcast/global_store/memory_tier_grpc_service.py
+  - tensorcast/global_store/services/memory_tier_service.py
+  - tensorcast/global_store/repositories/memory_tier_snapshot_repository.py
+  - tensorcast/global_store/repositories/memory_tier_lease_repository.py
   - tensorcast/global_store/metrics.py
   - proto/tensorcast/global_store/v1/global_store.proto
+  - proto/tensorcast/memory_tier/v1/memory_tier.proto
   - tensorcast/global_store/README.md
   - tensorcast/dashboard/api.py
   - tensorcast/dashboard/gs_client.py
@@ -22,6 +27,13 @@ The initial delivery favors an independent service consisting of a Dashboard Bac
 
 The dashboard UI is optional. The Global Store service and the wider system operate normally without launching the dashboard.
 
+# Decision: Memory Tier Visibility
+
+The dashboard should surface the new UMA memory tier data to make stable/preemptible capacity and lease behavior observable. The Global Store now ingests telemetry snapshots and manages preemptible leases via `MemoryTierService`; operators need to see whether memory budgets, preemption enablement, and outstanding leases align with expectations. Scope:
+- Show the latest per-node memory tier snapshot (stable/preemptible capacity, marked/used bytes, faults/sec, rehydrate P99, enable_preemptible flag, config JSON) alongside worker basics.
+- List outstanding memory tier leases per node (pending/active/revoking) with artifact and chunk coverage to debug evictions and rehydrations.
+- No historical time-series: only the latest snapshot per node and live leases.
+
 # Goals / Non‑Goals
 
 Goals
@@ -29,6 +41,7 @@ Goals
 - Browsable lists: workers (heartbeats, pools, acceptance), replicas (filters + pagination via ListReplicasV2), recent transports.
 - Artifact insight: GetArtifactInfoById (replicas, view metadata, leaf coverage), QueryChunkLocations (chunk placement/state).
 - Health and metrics: optionally embed external metric panels; hide the section when not configured.
+- Memory tier observability: expose stable/preemptible capacity snapshots and outstanding leases to validate UMA memory tier behavior.
 - Operational safety: read‑only; no control‑plane mutations.
 
 Non‑Goals (initial)
@@ -36,6 +49,7 @@ Non‑Goals (initial)
 - No per‑daemon local logs/metrics streaming. (Future: optional node agents.)
 - No schema changes in DuckDB; no extra tables.
 - No mandatory metrics backend dependency; metrics section appears only when visualization config is provided.
+- No time-series explorer for memory tiers; only the most recent snapshot per node plus live leases.
 
 # Architecture & Interfaces
 
@@ -59,9 +73,11 @@ flowchart LR
 
   subgraph Global Store
     GSgRPC[GlobalStore gRPC]
+    MTSvc[MemoryTierService gRPC]
   end
 
   GSClient -.-> GSgRPC
+  GSClient -.-> MTSvc
 
   subgraph External Visualization (optional)
     GRAF[Grafana]
@@ -73,6 +89,7 @@ Rationale
 - Decouple: ship dashboard without modifying Global Store runtime; deploy independently.
 - Stability: reuse public gRPC; no private DB access. Metrics are optional via embedded external panels when configured.
 - Evolvability: later add optional node‑level agents if per‑daemon logs/metrics are needed.
+- Memory tier access: the backend reuses the same gRPC channel to call `MemoryTierService` (for leases) and extends the workers API to include the latest snapshot from `node_memory_tier_latest` (sourced from telemetry ingested by Global Store).
 
 ## JSON API (Dashboard Backend; REST only in MVP)
 
@@ -85,6 +102,8 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
 - `GET /api/workers?include_unavailable=0|1`
   - Maps to `ListActiveWorkers(include_unavailable)`.
   - Returns condensed worker rows with `worker_id, node_id, node_address, grpc_port, p2p_port, mem_pool_total/available, accepting_new_requests, last_heartbeat_ts, state_version, status`.
+  - Adds an optional `memory_tier` block per worker (when available from `node_memory_tier_latest`):
+    - `stable_total_bytes, stable_used_bytes, preemptible_total_bytes, preemptible_marked_bytes, faults_per_sec, rehydrate_p99_ns, enable_preemptible, memory_tier_config_json, snapshot_epoch_ns`.
 
 - `GET /api/replicas?artifact_id=&node_id=&node_address=&memory_type=&device_id=&page_token=&page_size=`
   - Maps to `ListReplicasV2` with filter fields and pagination.
@@ -107,6 +126,10 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
 - `GET /api/chunks?artifact_id=&chunk_indices=1,2,...`
   - Maps to `QueryChunkLocations`.
   - Returns flattened chunk placement/state records.
+
+- `GET /api/memory_tier/leases?node_id=&states=pending,active,revoking`
+  - Maps to `MemoryTierService.ListOutstandingLeases` (default state filter: pending+active+revoking).
+  - Returns live leases with `lease_id, node_id, kind, artifact_id, chunk_range {start,count}, chunk_ids[], ledger_version, bytes, workload_id, state, request_id, ack_epoch_ns, issued_at_ns, expires_at_ns`.
 
 Auxiliary endpoints
 - `GET /api/config` — returns sanitized UI configuration (Grafana host/UID/panels). No secrets.
@@ -193,7 +216,43 @@ Endpoints — request/response examples (aligned with `tensorcast/dashboard/sche
         "accepting_new_requests": true,
         "last_heartbeat_ts": "2025-01-24T12:00:03Z",
         "state_version": 42,
-        "status": "ACTIVE"
+        "status": "ACTIVE",
+        "memory_tier": {
+          "stable_total_bytes": 17179869184,
+          "stable_used_bytes": 8589934592,
+          "preemptible_total_bytes": 4294967296,
+          "preemptible_marked_bytes": 2147483648,
+          "faults_per_sec": 0.2,
+          "rehydrate_p99_ns": 5000000,
+          "enable_preemptible": true,
+          "memory_tier_config_json": "{\"tiers\":[\"stable\",\"preemptible\"]}",
+          "snapshot_epoch_ns": 1706097603000000000
+        }
+      }
+    ]
+  }
+  ```
+
+- GET `/api/memory_tier/leases?node_id=n-1&states=pending,active`
+  - Response 200
+  ```json
+  {
+    "leases": [
+      {
+        "lease_id": "abc123",
+        "node_id": "n-1",
+        "kind": "preemptible",
+        "artifact_id": "mi2:...",
+        "chunk_range": { "start": 0, "count": 4 },
+        "chunk_ids": [0, 1, 2, 3],
+        "ledger_version": 17,
+        "bytes": 134217728,
+        "workload_id": "trainer-42",
+        "state": "active",
+        "request_id": "mt_req_123",
+        "ack_epoch_ns": 1706097604000000000,
+        "issued_at_ns": 1706097603000000000,
+        "expires_at_ns": null
       }
     ]
   }

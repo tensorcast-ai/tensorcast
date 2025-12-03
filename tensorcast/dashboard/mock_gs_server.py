@@ -20,6 +20,7 @@ from google.protobuf.timestamp_pb2 import Timestamp
 
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.memory_tier.v1 import memory_tier_pb2, memory_tier_pb2_grpc
 
 
 def _ts_now() -> Timestamp:
@@ -185,10 +186,139 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
         )
 
 
+class MockMemoryTierService(memory_tier_pb2_grpc.MemoryTierServiceServicer):
+    async def PublishMemoryTierStatus(
+        self,
+        request: memory_tier_pb2.PublishMemoryTierStatusRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.PublishMemoryTierStatusResponse:
+        return memory_tier_pb2.PublishMemoryTierStatusResponse()
+
+    async def RequestMemoryTierLease(
+        self,
+        request: memory_tier_pb2.RequestMemoryTierLeaseRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.RequestMemoryTierLeaseResponse:
+        lease = memory_tier_pb2.MemoryTierLease(
+            lease_id="lease-1",
+            node_id=request.node_id or "node-1",
+            kind=request.kind or memory_tier_pb2.LEASE_KIND_PREEMPTIBLE,
+            artifact_id=request.artifact_id or "mi2:mock",
+            chunk_range=memory_tier_pb2.ChunkRange(start=0, count=4),
+            chunk_ids=[0, 1, 2, 3],
+            ledger_version=request.ledger_version or 1,
+            bytes=request.bytes or 128 * 1024**2,
+            workload_id=request.workload_id or "mock-workload",
+            state=memory_tier_pb2.LEASE_STATE_PENDING,
+            request_id=request.request_id or "req-1",
+            issued_at_ns=request.issued_at_ns or 0,
+            ack_epoch_ns=0,
+            expires_at_ns=0,
+        )
+        return memory_tier_pb2.RequestMemoryTierLeaseResponse(lease=lease)
+
+    async def AcknowledgeMemoryTierLease(
+        self,
+        request: memory_tier_pb2.AcknowledgeMemoryTierLeaseRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.AcknowledgeMemoryTierLeaseResponse:
+        lease = memory_tier_pb2.MemoryTierLease(
+            lease_id=request.lease_id or "lease-1",
+            node_id=request.node_id or "node-1",
+            kind=memory_tier_pb2.LEASE_KIND_PREEMPTIBLE,
+            artifact_id=request.artifact_id or "mi2:mock",
+            chunk_range=request.chunk_range
+            or memory_tier_pb2.ChunkRange(start=0, count=4),
+            chunk_ids=list(request.chunk_ids) or [0, 1, 2, 3],
+            ledger_version=request.ledger_version or 1,
+            bytes=request.bytes or 128 * 1024**2,
+            workload_id="mock-workload",
+            state=memory_tier_pb2.LEASE_STATE_ACTIVE,
+            request_id=request.request_id or "req-1",
+            issued_at_ns=request.ack_epoch_ns or 0,
+            ack_epoch_ns=request.ack_epoch_ns or 0,
+            expires_at_ns=0,
+        )
+        return memory_tier_pb2.AcknowledgeMemoryTierLeaseResponse(lease=lease)
+
+    async def RevokeMemoryTierLease(
+        self,
+        request: memory_tier_pb2.RevokeMemoryTierLeaseRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.RevokeMemoryTierLeaseResponse:
+        lease = memory_tier_pb2.MemoryTierLease(
+            lease_id=request.lease_id or "lease-1",
+            node_id="node-1",
+            kind=memory_tier_pb2.LEASE_KIND_PREEMPTIBLE,
+            artifact_id="mi2:mock",
+            chunk_range=memory_tier_pb2.ChunkRange(start=0, count=4),
+            chunk_ids=[0, 1, 2, 3],
+            ledger_version=1,
+            bytes=128 * 1024**2,
+            workload_id="mock-workload",
+            state=memory_tier_pb2.LEASE_STATE_REVOKING,
+            request_id="req-1",
+            issued_at_ns=0,
+            ack_epoch_ns=0,
+            expires_at_ns=0,
+        )
+        return memory_tier_pb2.RevokeMemoryTierLeaseResponse(lease=lease)
+
+    async def ListOutstandingLeases(
+        self,
+        request: memory_tier_pb2.ListOutstandingLeasesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.ListOutstandingLeasesResponse:
+        leases = [
+            memory_tier_pb2.MemoryTierLease(
+                lease_id="lease-1",
+                node_id=request.node_id or "node-1",
+                kind=memory_tier_pb2.LEASE_KIND_PREEMPTIBLE,
+                artifact_id="mi2:mock",
+                chunk_range=memory_tier_pb2.ChunkRange(start=0, count=4),
+                chunk_ids=[0, 1, 2, 3],
+                ledger_version=1,
+                bytes=128 * 1024**2,
+                workload_id="mock-workload",
+                state=memory_tier_pb2.LEASE_STATE_ACTIVE,
+                request_id="req-1",
+                issued_at_ns=0,
+                ack_epoch_ns=0,
+                expires_at_ns=0,
+            )
+        ]
+        return memory_tier_pb2.ListOutstandingLeasesResponse(leases=leases)
+
+    async def ListMemoryTierStatuses(
+        self,
+        request: memory_tier_pb2.ListMemoryTierStatusesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> memory_tier_pb2.ListMemoryTierStatusesResponse:
+        statuses = [
+            memory_tier_pb2.MemoryTierStatus(
+                node_id="node-1",
+                worker_id="worker-1",
+                stable_total_bytes=8 * 1024**3,
+                stable_used_bytes=2 * 1024**3,
+                preemptible_total_bytes=4 * 1024**3,
+                preemptible_marked_bytes=1 * 1024**3,
+                faults_per_sec=0.05,
+                rehydrate_p99_ns=5_000_000,
+                enable_preemptible=True,
+                memory_tier_config_json='{"tiers":["stable","preemptible"]}',
+                epoch_ns=int(datetime.now(tz=timezone.utc).timestamp() * 1e9),
+            )
+        ]
+        return memory_tier_pb2.ListMemoryTierStatusesResponse(statuses=statuses)
+
+
 async def _serve_async(port: int) -> None:
     server = grpc.aio.server()
     global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(
         MockGlobalStoreService(), server
+    )
+    memory_tier_pb2_grpc.add_MemoryTierServiceServicer_to_server(
+        MockMemoryTierService(), server
     )
     server.add_insecure_port(f"[::]:{port}")
     await server.start()

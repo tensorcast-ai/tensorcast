@@ -10,6 +10,7 @@ Key properties:
 
 - Read‑only; no control‑plane mutations
 - Reuses public Global Store gRPC; no direct DB access
+- Surfaces UMA memory tier telemetry and leases for observability
 - Optional static frontend can be served by the backend
 - Prometheus metrics exposed for the backend itself
 
@@ -86,6 +87,7 @@ Content type: `application/json; charset=utf-8`. Timestamps are RFC3339 (UTC, `.
 - `GET /api/workers?include_unavailable=0|1`
   - Maps to `ListActiveWorkers(include_unavailable)`.
   - Returns worker rows with `worker_id, node_id, node_address, grpc_port, p2p_port, mem_pool_total/available, accepting_new_requests, last_heartbeat_ts, state_version, status`.
+  - Includes optional `memory_tier` snapshot when available: `stable_total_bytes, stable_used_bytes, preemptible_total_bytes, preemptible_marked_bytes, faults_per_sec, rehydrate_p99_ns, enable_preemptible, memory_tier_config_json, snapshot_epoch_ns`.
 
 - `GET /api/replicas?artifact_id=&node_id=&node_address=&memory_type=&device_id=&page_token=&page_size=`
   - Maps to `ListReplicasV2` with filters & pagination.
@@ -100,6 +102,10 @@ Content type: `application/json; charset=utf-8`. Timestamps are RFC3339 (UTC, `.
 
 - `GET /api/chunks?artifact_id=&chunk_indices=1,2,...`
   - Maps to `QueryChunkLocations`. Returns flattened chunk placement/state records.
+
+- `GET /api/memory_tier/leases?node_id=&states=pending,active,revoking,expired`
+  - Maps to `MemoryTierService.ListOutstandingLeases`. Defaults to `pending,active,revoking` when no states are supplied.
+  - Returns live leases with chunk range and IDs, artifact, ledger version, bytes, workload, state, and timing fields (`ack_epoch_ns`, `issued_at_ns`, optional `expires_at_ns`).
 
 - `GET /api/config`
   - Returns sanitized UI configuration (e.g., Grafana host, dashboard UID, panel IDs). No secrets are exposed.
@@ -214,4 +220,3 @@ The mock implements minimal, static responses for:
 - ListReplicasV2
 - GetArtifactInfoById
 - QueryChunkLocations
-

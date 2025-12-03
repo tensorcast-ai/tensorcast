@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.memory_tier.v1 import memory_tier_pb2
 
 
 def _timestamp_to_datetime(timestamp: Timestamp | None) -> datetime | None:
@@ -96,6 +97,34 @@ class HealthResponse(BaseModel):
         return cls(status=HealthStatus.ERROR)
 
 
+class MemoryTierSnapshotEntry(BaseModel):
+    stable_total_bytes: int
+    stable_used_bytes: int
+    preemptible_total_bytes: int
+    preemptible_marked_bytes: int
+    faults_per_sec: float
+    rehydrate_p99_ns: int
+    enable_preemptible: bool
+    memory_tier_config_json: str
+    snapshot_epoch_ns: int
+
+    @classmethod
+    def from_proto(
+        cls, status: memory_tier_pb2.MemoryTierStatus
+    ) -> "MemoryTierSnapshotEntry":
+        return cls(
+            stable_total_bytes=status.stable_total_bytes,
+            stable_used_bytes=status.stable_used_bytes,
+            preemptible_total_bytes=status.preemptible_total_bytes,
+            preemptible_marked_bytes=status.preemptible_marked_bytes,
+            faults_per_sec=status.faults_per_sec,
+            rehydrate_p99_ns=status.rehydrate_p99_ns,
+            enable_preemptible=status.enable_preemptible,
+            memory_tier_config_json=status.memory_tier_config_json or "{}",
+            snapshot_epoch_ns=status.epoch_ns,
+        )
+
+
 class WorkerRow(BaseModel):
     worker_id: str
     node_id: str
@@ -108,12 +137,15 @@ class WorkerRow(BaseModel):
     last_heartbeat_ts: datetime | None
     state_version: int
     status: str
+    memory_tier: MemoryTierSnapshotEntry | None = None
 
     model_config = {"populate_by_name": True}
 
     @classmethod
     def from_proto(
-        cls, worker: global_store_pb2.ListActiveWorkersResponse.WorkerInfo
+        cls,
+        worker: global_store_pb2.ListActiveWorkersResponse.WorkerInfo,
+        memory_tier: MemoryTierSnapshotEntry | None = None,
     ) -> "WorkerRow":
         return cls(
             worker_id=worker.worker_id,
@@ -127,6 +159,7 @@ class WorkerRow(BaseModel):
             last_heartbeat_ts=_timestamp_to_datetime(worker.last_heartbeat_ts),
             state_version=worker.state_version,
             status=_connection_status_to_str(worker.status),
+            memory_tier=memory_tier,
         )
 
 
@@ -396,6 +429,62 @@ class ChunkLocationsResponse(BaseModel):
     ) -> "ChunkLocationsResponse":
         return cls(
             chunks=[ChunkLocationEntry.from_proto(loc) for loc in response.locations]
+        )
+
+
+class MemoryTierLeaseEntry(BaseModel):
+    lease_id: str
+    node_id: str
+    kind: str
+    artifact_id: str
+    chunk_range: CoverageRange
+    chunk_ids: list[int]
+    ledger_version: int
+    bytes: int
+    workload_id: str
+    state: str
+    request_id: str
+    ack_epoch_ns: int | None = None
+    issued_at_ns: int
+    expires_at_ns: int | None = None
+
+    @classmethod
+    def from_proto(
+        cls, lease: memory_tier_pb2.MemoryTierLease
+    ) -> "MemoryTierLeaseEntry":
+        return cls(
+            lease_id=lease.lease_id,
+            node_id=lease.node_id,
+            kind=memory_tier_pb2.LeaseKind.Name(lease.kind)
+            .removeprefix("LEASE_KIND_")
+            .lower(),
+            artifact_id=lease.artifact_id,
+            chunk_range=CoverageRange(
+                offset=lease.chunk_range.start, length=lease.chunk_range.count
+            ),
+            chunk_ids=list(lease.chunk_ids),
+            ledger_version=lease.ledger_version,
+            bytes=lease.bytes,
+            workload_id=lease.workload_id,
+            state=memory_tier_pb2.LeaseState.Name(lease.state)
+            .removeprefix("LEASE_STATE_")
+            .lower(),
+            request_id=lease.request_id,
+            ack_epoch_ns=lease.ack_epoch_ns or None,
+            issued_at_ns=lease.issued_at_ns,
+            expires_at_ns=lease.expires_at_ns or None,
+        )
+
+
+class MemoryTierLeasesResponse(BaseModel):
+    leases: list[MemoryTierLeaseEntry]
+
+    @classmethod
+    def from_proto(
+        cls, response: memory_tier_pb2.ListOutstandingLeasesResponse
+    ) -> "MemoryTierLeasesResponse":
+        return cls(
+            leases=[MemoryTierLeaseEntry.from_proto(lease) for lease in response.leases]
         )
 
 

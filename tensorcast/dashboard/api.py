@@ -2,6 +2,7 @@
 
 """FastAPI application factory for the Global Store dashboard backend."""
 
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 from time import perf_counter
@@ -27,13 +28,17 @@ from tensorcast.dashboard.schemas import (
     ErrorDetail,
     ErrorResponse,
     HealthResponse,
+    MemoryTierLeasesResponse,
+    MemoryTierSnapshotEntry,
     ReplicasResponse,
+    WorkerRow,
     WorkersResponse,
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import setup_otel
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.memory_tier.v1 import memory_tier_pb2
 
 logger = init_logger(__name__)
 
@@ -168,6 +173,33 @@ def _space_flags(space: str | None, view_id: str | None) -> tuple[bool, str | No
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="space must be either 'canonical' or 'view'",
     )
+
+
+def _parse_lease_states(raw: str | None) -> list[memory_tier_pb2.LeaseState] | None:
+    if raw is None or not raw.strip():
+        return [
+            memory_tier_pb2.LEASE_STATE_PENDING,
+            memory_tier_pb2.LEASE_STATE_ACTIVE,
+            memory_tier_pb2.LEASE_STATE_REVOKING,
+        ]
+    states: list[memory_tier_pb2.LeaseState] = []
+    allowed = {
+        "pending": memory_tier_pb2.LEASE_STATE_PENDING,
+        "active": memory_tier_pb2.LEASE_STATE_ACTIVE,
+        "revoking": memory_tier_pb2.LEASE_STATE_REVOKING,
+        "expired": memory_tier_pb2.LEASE_STATE_EXPIRED,
+    }
+    for token in raw.split(","):
+        name = token.strip().lower()
+        if not name:
+            continue
+        if name not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unsupported lease state '{name}'. Expected one of {', '.join(sorted(allowed))}",
+            )
+        states.append(allowed[name])
+    return states or None
 
 
 def _grpc_to_http_status(code: grpc.StatusCode) -> int:
@@ -351,10 +383,23 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
             default=False, description="Include workers marked unavailable"
         ),
     ) -> WorkersResponse:
-        response = await get_client_dependency(request).list_active_workers(
-            include_unavailable=include_unavailable
+        client = get_client_dependency(request)
+        workers_response, mt_statuses = await asyncio.gather(
+            client.list_active_workers(include_unavailable=include_unavailable),
+            client.list_memory_tier_statuses(node_id=None),
         )
-        return WorkersResponse.from_proto(response)
+        status_by_node = {
+            status.node_id: MemoryTierSnapshotEntry.from_proto(status)
+            for status in mt_statuses.statuses
+        }
+        workers = [
+            WorkerRow.from_proto(
+                worker,
+                status_by_node.get(worker.node_id),
+            )
+            for worker in workers_response.workers
+        ]
+        return WorkersResponse(workers=workers)
 
     @app.get("/api/replicas", response_model=ReplicasResponse)
     async def api_replicas(
@@ -417,6 +462,21 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
             artifact_id, indices
         )
         return ChunkLocationsResponse.from_proto(response)
+
+    @app.get("/api/memory_tier/leases", response_model=MemoryTierLeasesResponse)
+    async def api_memory_tier_leases(
+        request: Request,
+        node_id: str | None = Query(default=None),
+        states: str | None = Query(
+            default=None,
+            description="Comma-separated lease states (pending,active,revoking,expired)",
+        ),
+    ) -> MemoryTierLeasesResponse:
+        parsed_states = _parse_lease_states(states)
+        response = await get_client_dependency(request).list_memory_tier_leases(
+            node_id=node_id, states=parsed_states
+        )
+        return MemoryTierLeasesResponse.from_proto(response)
 
     @app.get("/api/config", include_in_schema=False)
     async def api_config(request: Request) -> JSONResponse:

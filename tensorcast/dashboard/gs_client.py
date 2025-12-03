@@ -16,6 +16,7 @@ from google.protobuf import wrappers_pb2
 from tensorcast.dashboard.metrics import GRPC_COUNTER, GRPC_LATENCY
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.memory_tier.v1 import memory_tier_pb2, memory_tier_pb2_grpc
 
 
 class GlobalStoreStatusError(RuntimeError):
@@ -59,6 +60,7 @@ class GlobalStoreClient:
         self._config = config
         self._channel: grpc.aio.Channel | None = None
         self._stub: global_store_pb2_grpc.GlobalStoreServiceStub | None = None
+        self._memory_tier_stub: memory_tier_pb2_grpc.MemoryTierServiceStub | None = None
         self._lock = asyncio.Lock()
 
     async def connect(self) -> None:
@@ -81,12 +83,14 @@ class GlobalStoreClient:
 
             self._channel = channel
             self._stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+            self._memory_tier_stub = memory_tier_pb2_grpc.MemoryTierServiceStub(channel)
 
     async def close(self) -> None:
         if self._channel is not None:
             await self._channel.close()
             self._channel = None
             self._stub = None
+            self._memory_tier_stub = None
 
     async def _call(
         self,
@@ -240,4 +244,42 @@ class GlobalStoreClient:
         assert isinstance(response, global_store_pb2.QueryChunkLocationsResponse)
         if response.status != global_store_pb2.Status.STATUS_OK:
             raise GlobalStoreStatusError("QueryChunkLocations", response.status)
+        return response
+
+    async def list_memory_tier_statuses(
+        self, node_id: str | None
+    ) -> memory_tier_pb2.ListMemoryTierStatusesResponse:
+        await self.connect()
+        assert self._memory_tier_stub is not None
+
+        request = memory_tier_pb2.ListMemoryTierStatusesRequest()
+        if node_id:
+            request.node_id = node_id
+
+        response = await self._call(
+            "ListMemoryTierStatuses",
+            self._memory_tier_stub.ListMemoryTierStatuses,
+            request,
+        )
+        assert isinstance(response, memory_tier_pb2.ListMemoryTierStatusesResponse)
+        return response
+
+    async def list_memory_tier_leases(
+        self, node_id: str | None, states: list[memory_tier_pb2.LeaseState] | None
+    ) -> memory_tier_pb2.ListOutstandingLeasesResponse:
+        await self.connect()
+        assert self._memory_tier_stub is not None
+
+        request = memory_tier_pb2.ListOutstandingLeasesRequest()
+        if node_id:
+            request.node_id = node_id
+        if states:
+            request.states.extend(states)
+
+        response = await self._call(
+            "ListOutstandingLeases",
+            self._memory_tier_stub.ListOutstandingLeases,
+            request,
+        )
+        assert isinstance(response, memory_tier_pb2.ListOutstandingLeasesResponse)
         return response

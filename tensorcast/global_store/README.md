@@ -199,6 +199,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - Persists telemetry snapshots with configurable retention (time-based and row-count-based)
 - Manages stable/preemptible memory lease states: `pending → acquired → released` or `pending → revoking → expired`
 - Feeds Prometheus gauges for capacity monitoring
+- Exposes `ListMemoryTierStatuses` to return the latest per-node telemetry snapshots and `ListOutstandingLeases` for live lease state
 
 ### ChunkService
 
