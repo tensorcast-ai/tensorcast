@@ -36,3 +36,16 @@ export function timeAgo(iso: string): string {
   const dday = Math.floor(h / 24);
   return `${dday}d ago`;
 }
+
+export function timeAgoNs(epochNs: number | null | undefined): string {
+  if (!epochNs) return '—';
+  const iso = new Date(epochNs / 1_000_000).toISOString();
+  return timeAgo(iso);
+}
+
+export function formatEpochNs(epochNs: number | null | undefined): string {
+  if (!epochNs) return '—';
+  const d = new Date(epochNs / 1_000_000);
+  if (Number.isNaN(d.getTime())) return String(epochNs);
+  return d.toISOString().replace('T', ' ').replace('Z', 'Z');
+}

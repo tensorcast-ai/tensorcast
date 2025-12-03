@@ -43,6 +43,7 @@ export default function Layout() {
                 Overview
               </NavItem>
               <NavItem to="/workers">Workers</NavItem>
+              <NavItem to="/memory-tier">Memory Tier</NavItem>
               <NavItem to="/replicas">Replicas</NavItem>
               {cfg.enabled ? <NavItem to="/metrics">Metrics</NavItem> : null}
             </NavigationMenuList>

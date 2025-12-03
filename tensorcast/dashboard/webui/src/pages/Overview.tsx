@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { formatBytes } from '@/utils/utils';
 import { NavLink } from 'react-router-dom';
+import { metricsConfig } from '@/utils/config';
 
 export default function Overview() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -13,6 +14,7 @@ export default function Overview() {
   const [replicasGPU, setReplicasGPU] = useState<number | null>(null);
   const [replicasDISK, setReplicasDISK] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const metrics = metricsConfig();
 
   useEffect(() => {
     let cancelled = false;
@@ -143,8 +145,13 @@ export default function Overview() {
               <NavLink to="/replicas">浏览 Replicas</NavLink>
             </Button>
             <Button asChild size="sm" variant="outline">
-              <NavLink to="/metrics">查看 Metrics</NavLink>
+              <NavLink to="/memory-tier">Memory Tier</NavLink>
             </Button>
+            {metrics.enabled ? (
+              <Button asChild size="sm" variant="ghost">
+                <NavLink to="/metrics">查看 Metrics</NavLink>
+              </Button>
+            ) : null}
           </div>
         </CardContent>
       </Card>

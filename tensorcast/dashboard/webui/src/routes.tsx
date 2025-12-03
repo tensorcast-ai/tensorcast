@@ -5,6 +5,7 @@ import Workers from './pages/Workers';
 import Replicas from './pages/Replicas';
 import ArtifactDetail from './pages/ArtifactDetail';
 import Metrics from './pages/Metrics';
+import MemoryTier from './pages/MemoryTier';
 
 export const router = createBrowserRouter(
   [
@@ -14,6 +15,7 @@ export const router = createBrowserRouter(
       children: [
         { index: true, element: <Overview /> },
         { path: 'workers', element: <Workers /> },
+        { path: 'memory-tier', element: <MemoryTier /> },
         { path: 'replicas', element: <Replicas /> },
         { path: 'artifacts/:artifactId', element: <ArtifactDetail /> },
         { path: 'metrics', element: <Metrics /> },

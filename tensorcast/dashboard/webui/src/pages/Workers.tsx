@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
-import { formatBytes, timeAgo } from '@/utils/utils';
+import { formatBytes, timeAgo, timeAgoNs } from '@/utils/utils';
 
 type Row = WorkersResponse['workers'][number];
 
@@ -103,6 +103,7 @@ export default function Workers() {
             <TableHead>Address</TableHead>
             <TableHead>Ports</TableHead>
             <TableHead>Pool</TableHead>
+            <TableHead>Memory Tier</TableHead>
             <TableHead>Accept</TableHead>
             <TableHead>Heartbeat</TableHead>
             <TableHead>Status</TableHead>
@@ -113,7 +114,7 @@ export default function Workers() {
             <>
               {Array.from({ length: 3 }).map((_, i) => (
                 <TableRow key={i}>
-                  {Array.from({ length: 8 }).map((__, j) => (
+                  {Array.from({ length: 9 }).map((__, j) => (
                     <TableCell key={j}><Skeleton className="h-4 w-full max-w-[160px]" /></TableCell>
                   ))}
                 </TableRow>
@@ -140,6 +141,32 @@ export default function Workers() {
                     <span className="text-muted-foreground">/</span>
                     <span>{formatBytes(r.mem_pool_total)}</span>
                   </div>
+                </TableCell>
+                <TableCell>
+                  {r.memory_tier ? (
+                    <div className="space-y-1 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">Stable</span>
+                        <span className="font-mono text-foreground">
+                          {formatBytes(r.memory_tier.stable_used_bytes)} / {formatBytes(r.memory_tier.stable_total_bytes)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-muted-foreground">Preemptible</span>
+                        <span className="font-mono text-foreground">
+                          {formatBytes(r.memory_tier.preemptible_marked_bytes)} / {formatBytes(r.memory_tier.preemptible_total_bytes)}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <Badge variant={r.memory_tier.enable_preemptible ? 'secondary' : 'outline'} className="text-[11px]">
+                          {r.memory_tier.enable_preemptible ? 'preemptible on' : 'preemptible off'}
+                        </Badge>
+                        <span>{timeAgoNs(r.memory_tier.snapshot_epoch_ns)}</span>
+                      </div>
+                    </div>
+                  ) : (
+                    <span className="text-muted-foreground">—</span>
+                  )}
                 </TableCell>
                 <TableCell>
                   {r.accepting_new_requests ? (

@@ -13,7 +13,20 @@ export type WorkersResponse = {
     last_heartbeat_ts: string; // RFC3339
     state_version: number;
     status: string; // ACTIVE|UNAVAILABLE|...
+    memory_tier?: MemoryTierSnapshot | null;
   }>;
+};
+
+export type MemoryTierSnapshot = {
+  stable_total_bytes: number;
+  stable_used_bytes: number;
+  preemptible_total_bytes: number;
+  preemptible_marked_bytes: number;
+  faults_per_sec: number;
+  rehydrate_p99_ns: number;
+  enable_preemptible: boolean;
+  memory_tier_config_json: string;
+  snapshot_epoch_ns: number;
 };
 
 export type ReplicaRow = {
@@ -67,6 +80,27 @@ export type ArtifactDetailResponse = {
     space_id: string;
     missing: Array<{ offset: number; length: number }>;
   }> | null;
+};
+
+export type MemoryTierLease = {
+  lease_id: string;
+  node_id: string;
+  kind: string;
+  artifact_id: string;
+  chunk_range: { offset: number; length: number };
+  chunk_ids: Array<number>;
+  ledger_version: number;
+  bytes: number;
+  workload_id: string;
+  state: string;
+  request_id: string;
+  ack_epoch_ns?: number | null;
+  issued_at_ns: number;
+  expires_at_ns?: number | null;
+};
+
+export type MemoryTierLeasesResponse = {
+  leases: Array<MemoryTierLease>;
 };
 
 function withApiBase(path: string): string {
@@ -123,5 +157,11 @@ export const api = {
     if (include.length) search.set('include', include.join(','));
     return getJson(`/api/artifacts/${encodeURIComponent(artifactId)}?${search.toString()}`);
   },
+  memoryTierLeases(params: { node_id?: string; states?: Array<string> }): Promise<MemoryTierLeasesResponse> {
+    const search = new URLSearchParams();
+    if (params.node_id) search.set('node_id', params.node_id);
+    if (params.states && params.states.length > 0) search.set('states', params.states.join(','));
+    const qs = search.toString();
+    return getJson(`/api/memory_tier/leases${qs ? `?${qs}` : ''}`);
+  },
 };
-
