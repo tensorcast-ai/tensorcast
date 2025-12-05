@@ -71,3 +71,36 @@ class MemoryTierSnapshotRepository(BaseRepository):
             """,
             [node_id, node_id, max_rows],
         )
+
+    def list_latest(self, node_id: str | None = None) -> list[MemoryTierSnapshot]:
+        """Return the most recent snapshot per node (optionally filtered by node)."""
+        cursor = self.get_cursor()
+        query = """
+            SELECT node_id, stable_total_bytes, stable_used_bytes,
+                   preemptible_total_bytes, preemptible_marked_bytes,
+                   faults_per_sec, rehydrate_p99_ns, enable_preemptible,
+                   memory_tier_config_json, snapshot_epoch_ns
+            FROM node_memory_tier_latest
+        """
+        params: list[object] = []
+        if node_id:
+            query += " WHERE node_id = ?"
+            params.append(node_id)
+
+        rows = cursor.execute(query, params).fetchall()
+        snapshots = [
+            MemoryTierSnapshot(
+                node_id=row[0],
+                stable_total_bytes=row[1],
+                stable_used_bytes=row[2],
+                preemptible_total_bytes=row[3],
+                preemptible_marked_bytes=row[4],
+                faults_per_sec=row[5],
+                rehydrate_p99_ns=row[6],
+                enable_preemptible=bool(row[7]),
+                memory_tier_config_json=row[8] or "{}",
+                epoch_ns=row[9],
+            )
+            for row in rows
+        ]
+        return snapshots

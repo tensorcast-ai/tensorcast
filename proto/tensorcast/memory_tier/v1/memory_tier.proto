@@ -116,10 +116,19 @@ message ListOutstandingLeasesResponse {
   repeated MemoryTierLease leases = 1;
 }
 
+message ListMemoryTierStatusesRequest {
+  string node_id = 1;
+}
+
+message ListMemoryTierStatusesResponse {
+  repeated MemoryTierStatus statuses = 1;
+}
+
 service MemoryTierService {
   rpc PublishMemoryTierStatus(PublishMemoryTierStatusRequest) returns (PublishMemoryTierStatusResponse);
   rpc RequestMemoryTierLease(RequestMemoryTierLeaseRequest) returns (RequestMemoryTierLeaseResponse);
   rpc AcknowledgeMemoryTierLease(AcknowledgeMemoryTierLeaseRequest) returns (AcknowledgeMemoryTierLeaseResponse);
   rpc RevokeMemoryTierLease(RevokeMemoryTierLeaseRequest) returns (RevokeMemoryTierLeaseResponse);
   rpc ListOutstandingLeases(ListOutstandingLeasesRequest) returns (ListOutstandingLeasesResponse);
+  rpc ListMemoryTierStatuses(ListMemoryTierStatusesRequest) returns (ListMemoryTierStatusesResponse);
 }

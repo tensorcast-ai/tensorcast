@@ -158,3 +158,7 @@ class MemoryTierService:
     ) -> list[MemoryTierLease]:
         """List active/pending/revoking leases for a node."""
         return self.lease_repository.list_outstanding(node_id, states)
+
+    def list_latest(self, node_id: str | None = None) -> list[MemoryTierSnapshot]:
+        """Return latest snapshot per node (optionally filtered by node_id)."""
+        return self.snapshot_repository.list_latest(node_id)
