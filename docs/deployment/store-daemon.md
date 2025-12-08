@@ -23,16 +23,13 @@ bazel build //daemon:tensorcast_daemon
 Use the unified YAML config and start via CLI:
 
 ```
-uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml
-
-If you omit --config, the CLI tries $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml, or examples/config/store_daemon_config.yaml.
-Use `--host` / `--port` to override the gRPC listen address for CI or sandboxed runs.
-By default, if `server.listen.host` is `0.0.0.0` or `127.0.0.1`, the daemon attempts to
-auto-detect a routable non-loopback IPv4 address to advertise to the Global Store. If the
-auto-detection fails (e.g., headless hosts without an UP interface), startup aborts with an
-`INVALID_ARGUMENT` prompting you to set `server.advertise.host` explicitly. Loopback or
-unspecified addresses are no longer accepted once Global Store integration is enabled.
+uv run -q python -m tensorcast.cli daemon start --global-store-mode auto
 ```
+
+If you omit `--config`, the CLI tries `$TENSORCAST_DAEMON_CONFIG` or
+`~/.tensorcast/config/daemon.yaml` and otherwise materializes an embedded
+loopback config (port=0, storage under `~/.tensorcast`). Set listen/advertise
+addresses through the config file instead of CLI flags.
 
 The CLI locates the binary from the wheel or development path automatically
 and extends ``LD_LIBRARY_PATH`` with the TensorCast shared library bundle as
@@ -42,15 +39,15 @@ namespace) that live inside the active Python environment. This allows the
 daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
 
-When launching in non-blocking mode (`tensorcast start --non-blocking`), the CLI now
-mirrors daemon stdout and stderr into the invoking terminal in addition to
-persisting them under `~/.tensorcast/sessions/<id>/logs`. Library callers can
-disable console mirroring by invoking `start_service(..., to_console=False)` if
-needed. The CLI also validates that the daemon process stays alive before
-waiting for the gRPC ready probe, failing fast with the daemon's exit code when
-configuration issues prevent startup. Failed launches leave the session log
-directory intact so the captured `daemon.out` / `daemon.err` streams remain
-available for troubleshooting.
+During startup, the CLI mirrors daemon stdout and stderr into the invoking
+terminal in addition to persisting them under `~/.tensorcast/sessions/<id>/logs`.
+Use `tensorcast daemon start --no-wait` to skip the readiness wait while still
+emitting logs; library callers can disable console mirroring by invoking
+`start_service(..., to_console=False)` if needed. The CLI also validates that
+the daemon process stays alive before waiting for the gRPC ready probe, failing
+fast with the daemon's exit code when configuration issues prevent startup.
+Failed launches leave the session log directory intact so the captured
+`daemon.out` / `daemon.err` streams remain available for troubleshooting.
 
 ## Manage Daemon Sessions
 
@@ -61,13 +58,13 @@ Common commands:
 
 ```
 # Status (connects to daemon gRPC if available, otherwise shows process info)
-uv run -q python -m tensorcast.cli status
+uv run -q python -m tensorcast.cli daemon status
 
 # Logs (stdout by default, --stderr for stderr; add -f to follow)
-uv run -q python -m tensorcast.cli logs -f
+uv run -q python -m tensorcast.cli daemon logs -f
 
 # Stop current session (SIGTERM with SIGKILL fallback)
-uv run -q python -m tensorcast.cli stop
+uv run -q python -m tensorcast.cli daemon stop
 ```
 
 ## Observability
@@ -76,7 +73,7 @@ Metrics are exposed via the unified system; the daemon no longer provides an HTT
 
 ### Store Client Sessions
 
-- `uv run tensorcast status` now prints a *Store Sessions* section after the daemon health report. Data is sourced from `~/.tensorcast/store_sessions/<session_id>.json`, which the Python SDK refreshes whenever a Store verb completes. Use this view to spot clients that still hold leases or in-flight futures before forcing revocation.
+- `uv run tensorcast daemon status` now prints a *Store Sessions* section after the daemon health report. Data is sourced from `~/.tensorcast/store_sessions/<session_id>.json`, which the Python SDK refreshes whenever a Store verb completes. Use this view to spot clients that still hold leases or in-flight futures before forcing revocation.
 - Each session entry includes daemon endpoint, client PID, timestamps, active lease count, pending futures, and any capabilities reported by `Store.__init__` (pool size, transfer slice, lease support).
 
 ### Store Client Metrics (Grafana Example)
@@ -117,10 +114,10 @@ Pair this panel with a counter visualization for `tc_store_operation_retries_tot
 
 ### Rollout checklist
 
-1. **Version alignment**: Ensure the staged Global Store schema, Store Daemon binary, and Python SDK wheel come from the same release. Run `uv run tensorcast --version` and `uv run tensorcast status` to confirm the daemon reports the expected build metadata.
+1. **Version alignment**: Ensure the staged Global Store schema, Store Daemon binary, and Python SDK wheel come from the same release. Run `uv run tensorcast --version` and `uv run tensorcast daemon status` to confirm the daemon reports the expected build metadata.
 2. **Pre-traffic validation**: Against staging, execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`. These suites cover lease renewal, VRAM leased-in-place flows, and daemon session lifecycle.
 3. **Metrics watch**: Monitor the OpenTelemetry metrics defined in [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md)—`tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total`—while introducing production traffic. Alert thresholds should track the historical p95 latency and error envelopes before legacy helpers are disabled.
-4. **Session audit**: Use `uv run tensorcast status` to inspect the *Store Sessions* section and verify the session registry under `~/.tensorcast/store_sessions` reflects active clients with the expected lease/future counts.
+4. **Session audit**: Use `uv run tensorcast daemon status` to inspect the *Store Sessions* section and verify the session registry under `~/.tensorcast/store_sessions` reflects active clients with the expected lease/future counts.
 5. **Release checklist**: Cross-check the deployment steps against the [Store Session Release Checklist](./store-session-release-checklist.md) before announcing completion.
 
 ### Backout checklist

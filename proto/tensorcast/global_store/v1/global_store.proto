@@ -419,9 +419,15 @@ message CompleteReplicaTransportResponse {
 // Simple ping request to verify connectivity.
 message HealthCheckRequest {}
 
-// Health check response returns OK if the server is reachable.
 message HealthCheckResponse {
   Status status = 1;
+  string cluster_token = 2;
+  string listen_address = 3;
+  string listen_host = 4;
+  uint32 listen_port = 5;
+  uint32 metrics_port = 6;
+  string version = 7;
+  string db_file = 8;
 }
 
 // ========== Chunk Directory Messages ==========

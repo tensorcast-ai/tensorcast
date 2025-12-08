@@ -38,7 +38,8 @@ class GlobalStoreConfig(BaseModel):
     memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
 
     # Server settings
-    port: int = 50051
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 50051
     max_workers: int = 10
 
     # Performance settings
@@ -49,10 +50,18 @@ class GlobalStoreConfig(BaseModel):
 
     # Metrics settings
     metrics_port: int = 8000
+    # Cluster identity (opaque token used to prevent split-brain)
+    cluster_token: Optional[str] = None
 
     class Config:
         # Match previous @dataclass(frozen=True) behaviour (immutability)
         frozen = True
+
+    @property
+    def port(self) -> int:
+        """Backwards-compatible alias for listen_port."""
+
+        return self.listen_port
 
     # Environment-based loader removed in final scheme
 
@@ -82,13 +91,23 @@ class GlobalStoreConfig(BaseModel):
         # Database
         db_file = Path(pb.database.db_file) if pb.database.db_file else None
         # Server
-        port = int(pb.server.listen.port) if pb.server.HasField("listen") else 50051
+        listen_host = "127.0.0.1"
+        listen_port = 50051
+        if pb.server.HasField("listen"):
+            listen_host = pb.server.listen.host or listen_host
+            listen_port = int(pb.server.listen.port or 0) or 0
         # Preserve default when field is absent; accept explicit 0 when provided
         server_section = data.get("server", {}) if isinstance(data, dict) else {}
         has_max_workers = isinstance(server_section, dict) and (
             "max_workers" in server_section
         )
         max_workers = int(pb.server.max_workers) if has_max_workers else 10
+        metrics_port = (
+            int(pb.server.metrics_port)
+            if pb.server.metrics_port
+            or (isinstance(server_section, dict) and "metrics_port" in server_section)
+            else 8000
+        )
 
         # Worker policy durations are in seconds+nanos
         def _dur_ms(dur) -> int:
@@ -141,12 +160,16 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_snapshot_retention_ms=max(0, snapshot_retention_ms),
             memory_tier_snapshot_max_rows=max(0, snapshot_max_rows),
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
-            port=port,
+            listen_host=listen_host or "127.0.0.1",
+            listen_port=listen_port if listen_port >= 0 else 0,
             max_workers=max_workers,
             transport_wait_retry_interval_ms=200,
             optimize_interval_ms=3_600_000,
             # Metrics port: keep default unless overridden elsewhere
-            metrics_port=8000,
+            metrics_port=metrics_port if metrics_port >= 0 else 0,
+            cluster_token=(pb.meta.cluster_token or None)
+            if pb.HasField("meta")
+            else None,
         )
 
     @staticmethod

@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
+import tempfile
 from pathlib import Path
 
 
@@ -33,12 +35,21 @@ def open_log_binary(path: Path):
     return open(path, "ab", buffering=0)
 
 
-def write_text_atomic(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
+def write_text_atomic(path: Path, text: str, mode: int = 0o600) -> None:
+    """Atomically write text to a path with restrictive permissions."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), prefix=path.name, suffix=".tmp"
+    )
+    tmp = Path(tmp_path)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         f.write(text)
         f.flush()
         os.fsync(f.fileno())
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     os.replace(tmp, path)
+    with contextlib.suppress(OSError):
+        os.chmod(path, mode)
+    with contextlib.suppress(FileNotFoundError):
+        os.remove(tmp_path)

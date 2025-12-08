@@ -72,13 +72,15 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
 
 - Development (from source):
   - Build once with Bazel: `bazel build //daemon:tensorcast_daemon`
-  - Start background: `uv run -q python -m tensorcast.cli start --non-blocking --config=examples/config/store_daemon_config.yaml`
-    - By default non-blocking start waits until the daemon is ready (timeout 20s). Use `--no-wait` to return immediately.
+  - Start Global Store (single-instance): `uv run -q python -m tensorcast.cli global start --listen-port 0 --wait`
+    - Status: `uv run -q python -m tensorcast.cli global status --json`
+    - Logs: `uv run -q python -m tensorcast.cli global logs -f`
+  - Start daemon (binds to existing GS or auto-starts if needed): `uv run -q python -m tensorcast.cli daemon start --global-store-mode auto`
+    - By default non-blocking start waits until the daemon is ready (timeout 30s). Use `--no-wait` to return immediately.
     - Customize readiness timeout: `--timeout 30`
-    - Override listen address for CI: `--host 127.0.0.1 --port 17073`
-  - Status: `uv run -q python -m tensorcast.cli status`
-  - Logs (follow): `uv run -q python -m tensorcast.cli logs -f`
-  - Stop: `uv run -q python -m tensorcast.cli stop`
+  - Status: `uv run -q python -m tensorcast.cli daemon status --json`
+  - Logs (follow): `uv run -q python -m tensorcast.cli daemon logs -f`
+  - Stop (owner cascades GS if it was started by daemon start): `uv run -q python -m tensorcast.cli daemon stop`
   - The CLI automatically locates the binary from `bazel-bin/daemon/tensorcast_daemon` or the packaged wheel.
 
 - Packaged (wheel) usage:
@@ -129,18 +131,22 @@ Use the unified, Linux-only launch/connect API from Python:
 ```python
 from tensorcast import init
 
-# Connect to current session or env TENSORCAST_ADDRESS if available
-ctx = init()  # or init(address="auto")
+# Connect to current runtime (prefers existing daemon + Global Store discovered from runtime state)
+ctx = init()
 
 # Force local launch (private session). If daemon_config_path is omitted,
-# init() will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/store_daemon_config.yaml,
-# examples/config/store_daemon_config.yaml, and finally an embedded loopback config
-# with ephemeral ports and a writable cache under ~/.tensorcast (or a temp dir).
-# Private launches do not publish ~/.tensorcast/current_session or meta.json and bind to 127.0.0.1.
-ctx = init(address="local", daemon_config_path="examples/config/store_daemon_config.yaml")
+# init() will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/config/daemon.yaml,
+# and finally an embedded loopback config with ephemeral ports and a writable cache
+# under ~/.tensorcast (or a temp dir).
+# Private launches do not publish ~/.tensorcast/current_session and bind to 127.0.0.1.
+ctx = init(
+    daemon_config_path="~/.tensorcast/config/daemon.yaml",
+    global_store_mode="auto",  # or "connect"/"start"/"none"
+    session_id="tc-private-demo",
+)
 
 # Connect to a specific daemon
-ctx = init(address="127.0.0.1:50052")
+ctx = init(address="127.0.0.1:50052", global_store_mode="connect")
 
 # Context is process-scoped and is automatically closed at process exit (atexit).
 # Call tensorcast.shutdown() to close early if needed.
@@ -154,7 +160,7 @@ the session state for you:
 import tensorcast as tc
 import torch
 
-tc.init(address="auto")
+tc.init()
 
 state_dict = {"layer.weight": torch.randn(8, 8, device="cuda")}
 
@@ -190,11 +196,11 @@ Notes on signals and cleanup:
   - `init(..., install_signal_handlers=True)` installs graceful handlers that stop the owned daemon and then exit.
   - `init(..., install_signal_handlers=True, fate_share_sigterm=True)` installs hard-exit handlers that immediately terminate the process to trigger PDEATHSIG (use sparingly).
 
-CLI-launched daemon sessions are recorded under `~/.tensorcast/sessions/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. The current session id is stored at `~/.tensorcast/current_session` for `address=auto` resolution. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
+CLI-launched daemon sessions are recorded under `~/.tensorcast/sessions/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. Global Store sessions live under `~/.tensorcast/global_sessions/<gid>`. The authoritative pointer for discovery is `~/.tensorcast/runtime/state.json` (daemon + Global Store + cluster_token); `~/.tensorcast/current_session` and `~/.tensorcast/current_global_session` are convenience pointers used by CLI defaults. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
 
-SDK launches via `init(address="local", ...)` are private: they do not update `current_session` or write `meta.json` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
+SDK launches via `init(..., session_id="tc-private-<uuid>")` are private: they do not update `current_session` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
 
-CLI duplicate protection: `tensorcast start` refuses to start a new local daemon if a current session is already healthy. Use `tensorcast restart` to stop and start, or `tensorcast stop` first.
+CLI duplicate protection: `tensorcast daemon start` refuses to start a new local daemon if a current session is already healthy. Use `tensorcast daemon restart` to stop and start, or `tensorcast daemon stop` first. If the daemon start also launched the Global Store, `tensorcast daemon stop` will cascade and stop it.
 
 ## Advanced SDK: RegisteredArtifact with Context Manager
 
@@ -318,12 +324,11 @@ Note that currently, P2P unit tests fail when being called by bazel test, and ne
 
 ## Run the Global Store Server
 ```bash
-# This script starts the Global Store service, which acts as a central registry
-# for discovering and managing distributed artifact replicas.
-# It listens for gRPC requests on the specified port.
-# Default port: 50051
-# Default workers: 10
-uv run -m tensorcast.global_store --config=examples/config/global_store_config.yaml
+# Start the Global Store service (single-instance). Default port: 50051, workers: 10.
+uv run -q python -m tensorcast.cli global start --config=examples/config/global_store_config.yaml --wait
+
+# Direct module entry remains available for debugging if needed:
+# uv run -m tensorcast.global_store --config=examples/config/global_store_config.yaml
 
 # Run the Global Store Server in Docker
 sudo docker run -d --name global-store -p 50051:50051 hub.i.basemind.com/tensorcast/global-store:2025.04.27-55f24

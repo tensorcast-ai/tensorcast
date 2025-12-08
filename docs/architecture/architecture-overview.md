@@ -182,10 +182,10 @@ Keepalive activity and cancellation outcomes are captured inside the same spans 
 
 The Python SDK persists lightweight session manifests under `~/.tensorcast/store_sessions/<session_id>.json`. Each file records the daemon endpoint, client PID, capabilities summary (`mem_pool_bytes`, `tx_slice_bytes`, transfer slice size), plus rolling counts of active leases and pending futures. Entries are refreshed whenever a verb executes, ensuring operators can audit abandoned leases or hung futures even if the client process exits unexpectedly.
 
-Running `uv run tensorcast status` now prints this registry after the daemon health report:
+Running `uv run tensorcast daemon status` now prints this registry after the daemon health report:
 
 ```
-$ uv run tensorcast status
+$ uv run tensorcast daemon status
 ...
 ==============================
 Store Sessions
@@ -211,10 +211,10 @@ Operators can prune stale entries manually or rely on the CLI output to identify
 
 ### Rollout procedure
 
-1. **Stage the release**: Deploy the aligned Global Store migration, Store Daemon binary, and Python SDK wheel to staging. Check the triplet by running `uv run tensorcast --version` and confirm the staged daemon advertises the expected build in `uv run tensorcast status`.
+1. **Stage the release**: Deploy the aligned Global Store migration, Store Daemon binary, and Python SDK wheel to staging. Check the triplet by running `uv run tensorcast --version` and confirm the staged daemon advertises the expected build in `uv run tensorcast daemon status`.
 2. **Run integration validation**: Execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` against the staged environment. These suites cover lease timers, LIP flows, and daemon session lifecycle with the Store-centric API.
 3. **Observe telemetry**: Monitor the OpenTelemetry metrics from [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md) while gradually shifting traffic. Track `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total` per verb in Grafana to ensure latency, error, and retry rates stay within historical limits.
-4. **Promote to production**: Roll the SDK wheel to production workers and restart clients. Use `uv run tensorcast status` to verify Store sessions register with accurate lease counts before decommissioning any remaining legacy helper usage.
+4. **Promote to production**: Roll the SDK wheel to production workers and restart clients. Use `uv run tensorcast daemon status` to verify Store sessions register with accurate lease counts before decommissioning any remaining legacy helper usage.
 5. **Reference the release checklist**: Follow the detailed steps in the [Store Session Release Checklist](../deployment/store-session-release-checklist.md) to coordinate broader launches and communications.
 
 ### Backout procedure

@@ -24,22 +24,22 @@ Use this checklist when promoting the Store-centric session API to any environme
   - `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`
 - Execute smoke benchmarks or representative workloads and record latency deltas versus the Phase 0 baseline.
 - Exercise the CLI:
-  - `uv run tensorcast status` shows Store sessions with reasonable lease/future counts.
-  - `uv run tensorcast cli get --key=<artifact>` (example workload) completes without warnings.
+  - `uv run tensorcast daemon status` shows Store sessions with reasonable lease/future counts.
+  - Sample workload completes via SDK helpers (e.g., `tensorcast.register` + `tensorcast.artifact(...).tensor_dict()`).
 
 ## Observability checks
 
 - Confirm OpenTelemetry exporters are wired and receiving spans named `Store/Register`, `Store/Put`, `Store/Get`, `Store/GetInto`.
 - Inspect metrics in Grafana/Prometheus:
   - Histograms `tc_store_operation_latency_seconds` (per verb, per daemon)
-  - Counters `tc_store_operation_errors_total`, `tc_store_operation_retries_total`
+ - Counters `tc_store_operation_errors_total`, `tc_store_operation_retries_total`
   - Any custom lease health gauges added during Phase 4
 - Compare p95 latency, error, and retry rates against the previous release—flag if deviation exceeds approved SLO guardrails.
 
 ## Deployment steps
 
 1. Roll the Global Store image.
-2. Roll Store Daemon binaries cluster by cluster. Confirm `uv run tensorcast status` reports the new build string.
+2. Roll Store Daemon binaries cluster by cluster. Confirm `uv run tensorcast daemon status` reports the new build string.
 3. Roll the Python SDK wheel to client hosts. Restart workers to pick up the new wheel.
 4. Announce the rollout window and expectations in the deployment channel.
 

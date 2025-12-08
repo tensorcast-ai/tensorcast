@@ -444,6 +444,19 @@ wheels = [
 ]
 
 [[package]]
+name = "grpcio-health-checking"
+version = "1.73.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/72/d8/81b0e9b2e3cf82c61bd66e7e572878e7402d4ff3f793da18385dfcdb4113/grpcio_health_checking-1.73.1.tar.gz", hash = "sha256:352753713edeba3f23ea8a3320c5752bee186002d9475a654f5f815ff4e06345", size = 16763, upload-time = "2025-06-26T02:02:57.354Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/93/ae/1e858845b9120b757d64f96096a15ce5a2077e5304fdd8dac79c630f8953/grpcio_health_checking-1.73.1-py3-none-any.whl", hash = "sha256:d5fa49c3a2d67d7622690ddf6677a429264f35d1b2ef80bf58e3ffe88a1154c0", size = 18921, upload-time = "2025-06-26T02:02:36.97Z" },
+]
+
+[[package]]
 name = "grpcio-tools"
 version = "1.73.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1898,6 +1911,7 @@ dependencies = [
     { name = "click" },
     { name = "fastapi" },
     { name = "grpcio" },
+    { name = "grpcio-health-checking" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp-proto-grpc" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -1957,6 +1971,7 @@ requires-dist = [
     { name = "duckdb", marker = "extra == 'global'", specifier = ">=1.2.1" },
     { name = "fastapi", specifier = ">=0.115.5" },
     { name = "grpcio", specifier = ">=1.56.0,<2" },
+    { name = "grpcio-health-checking", specifier = ">=1.56.0,<2" },
     { name = "opentelemetry-api", specifier = ">=1.36.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.36.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.36.0" },

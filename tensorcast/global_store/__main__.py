@@ -4,9 +4,12 @@
 
 import argparse
 from concurrent import futures
+from typing import cast
 
 import grpc
+from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 
+from tensorcast import __version__ as _tc_version
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import set_config
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
@@ -45,11 +48,45 @@ def main():
         required=True,
         help="Path to Global Store config (YAML/JSON)",
     )
+    parser.add_argument(
+        "--listen-host",
+        type=str,
+        default=None,
+        help="Override listen host from config",
+    )
+    parser.add_argument(
+        "--listen-port",
+        type=int,
+        default=None,
+        help="Override listen port from config (0 = auto)",
+    )
+    parser.add_argument(
+        "--metrics-port",
+        type=int,
+        default=None,
+        help="Override metrics port from config (0 = auto)",
+    )
     args = parser.parse_args()
 
     # Load configuration (strict via proto)
-    config = GlobalStoreConfig.from_file(args.config)
+    config: GlobalStoreConfig = GlobalStoreConfig.from_file(args.config)
     pb_cfg = GlobalStoreConfig.load_proto_from_file(args.config)
+    cfg_updates: dict[str, object] = {}
+    if args.listen_host is not None:
+        cfg_updates["listen_host"] = args.listen_host
+        pb_cfg.server.listen.host = args.listen_host
+    if args.listen_port is not None:
+        cfg_updates["listen_port"] = args.listen_port
+        pb_cfg.server.listen.port = args.listen_port
+    if args.metrics_port is not None:
+        cfg_updates["metrics_port"] = args.metrics_port
+        pb_cfg.server.metrics_port = args.metrics_port
+    if cfg_updates:
+        copy_fn = getattr(config, "model_copy", None)
+        if callable(copy_fn):
+            config = cast(GlobalStoreConfig, copy_fn(update=cfg_updates))
+        else:
+            config = cast(GlobalStoreConfig, config.copy(update=cfg_updates))
     set_config(config)
 
     # Initialize OpenTelemetry from config (no env bridging)
@@ -74,7 +111,9 @@ def main():
     memory_tier_servicer = MemoryTierGrpcServicer(memory_tier_service)
 
     # Start Prometheus metrics HTTP server (idempotent)
-    start_metrics_http_server(config.metrics_port)
+    metrics_port = start_metrics_http_server(
+        config.metrics_port, addr=config.listen_host or ""
+    )
 
     # Create gRPC server
     server = grpc.server(
@@ -86,19 +125,41 @@ def main():
         memory_tier_servicer, server
     )
 
-    # Bind to port
-    server.add_insecure_port(f"[::]:{config.port}")
+    # Bind to port (capture actual port if 0 was requested)
+    bind_addr = f"{config.listen_host}:{config.listen_port}"
+    bound_port = server.add_insecure_port(bind_addr)
+    if bound_port == 0:
+        raise RuntimeError(f"Failed to bind Global Store on {bind_addr}")
+    listen_host = config.listen_host or "0.0.0.0"
     server.start()
 
+    # Register gRPC health
+    health_servicer = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+    health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
+    health_servicer.set(
+        "tensorcast.global_store.v1.GlobalStoreService",
+        health_pb2.HealthCheckResponse.SERVING,
+    )
+
     logger.info(
-        f"Global Store server started on port {config.port} "
+        f"Global Store server started on {listen_host}:{bound_port} "
         f"with {config.max_workers} workers"
     )
     if config.db_file:
         logger.info(f"Using persistent database: {config.db_file}")
     else:
         logger.info("Using in-memory database")
-    logger.info(f"Prometheus metrics exposed on port {config.metrics_port}")
+    logger.info(f"Prometheus metrics exposed on port {metrics_port}")
+
+    servicer.set_runtime_info(
+        listen_host=listen_host,
+        listen_port=bound_port,
+        metrics_port=metrics_port,
+        cluster_token=config.cluster_token,
+        db_file=str(config.db_file) if config.db_file else "",
+        version=_tc_version,
+    )
 
     try:
         server.wait_for_termination()

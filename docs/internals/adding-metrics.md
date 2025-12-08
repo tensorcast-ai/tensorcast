@@ -153,7 +153,7 @@ You can safely update metrics from multiple threads without external synchroniza
 
 ## 4. Verify Locally
 
-1. Start the StoreDaemon using the CLI (`tensorcast start ...`).
+1. Start the StoreDaemon using the CLI (`tensorcast daemon start ...`).
 2. Verify via the central metrics endpoint.
    You should see something like:
    ```text

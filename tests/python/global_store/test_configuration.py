@@ -110,28 +110,28 @@ class TestConfiguration:
     def test_config_repr(self):
         """Test configuration string representation."""
         config = GlobalStoreConfig(
-            port=50051,
+            listen_port=50051,
             max_workers=10,
             heartbeat_timeout_ms=30000,
         )
 
         repr_str = repr(config)
         assert "GlobalStoreConfig" in repr_str
-        assert "port=50051" in repr_str
+        assert "listen_port=50051" in repr_str
         assert "max_workers=10" in repr_str
 
     def test_config_equality(self):
         """Test configuration equality comparison."""
-        config1 = GlobalStoreConfig(port=50051, max_workers=10)
-        config2 = GlobalStoreConfig(port=50051, max_workers=10)
-        config3 = GlobalStoreConfig(port=50052, max_workers=10)
+        config1 = GlobalStoreConfig(listen_port=50051, max_workers=10)
+        config2 = GlobalStoreConfig(listen_port=50051, max_workers=10)
+        config3 = GlobalStoreConfig(listen_port=50052, max_workers=10)
 
         assert config1 == config2
         assert config1 != config3
 
     def test_config_immutability(self):
         """Test that configuration is immutable after creation."""
-        config = GlobalStoreConfig(port=50051)
+        config = GlobalStoreConfig(listen_port=50051)
 
         # The pydantic model is frozen, so attempting to modify attributes should raise ValidationError
         with pytest.raises((ValidationError)):

@@ -12,7 +12,7 @@ import ipaddress
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Optional, cast
+from typing import Any, Optional, cast
 from uuid import UUID
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
@@ -83,6 +83,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         """
         # Initialize configuration
         self.config = get_config()
+        self._runtime_info: dict[str, Any] = {}
 
         # Initialize database connection
         if db_file is None:
@@ -131,6 +132,25 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # Start background cleanup thread
         self._start_cleanup_thread()
         # Cleanup and optimization are now handled by a single maintenance thread
+
+    def set_runtime_info(
+        self,
+        *,
+        listen_host: str | None,
+        listen_port: int | None,
+        metrics_port: int | None,
+        cluster_token: str | None,
+        db_file: str | None,
+        version: str | None,
+    ) -> None:
+        self._runtime_info = {
+            "listen_host": listen_host,
+            "listen_port": listen_port,
+            "metrics_port": metrics_port,
+            "cluster_token": cluster_token,
+            "db_file": db_file,
+            "version": version,
+        }
 
     @staticmethod
     def _timestamp_to_datetime(ts: timestamp_pb2.Timestamp | None) -> datetime | None:
@@ -1688,8 +1708,35 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         context: grpc.ServicerContext,
     ) -> global_store_pb2.HealthCheckResponse:
         """Simple health check endpoint."""
+        info = getattr(self, "_runtime_info", {}) or {}
+        listen_host = info.get("listen_host") or getattr(
+            self.config, "listen_host", None
+        )
+        listen_port = info.get("listen_port") or getattr(
+            self.config, "listen_port", None
+        )
+        metrics_port = info.get("metrics_port") or getattr(
+            self.config, "metrics_port", None
+        )
+        cluster_token = info.get("cluster_token") or getattr(
+            self.config, "cluster_token", None
+        )
+        db_file = info.get("db_file") or (
+            str(self.config.db_file) if getattr(self.config, "db_file", None) else ""
+        )
+        version = info.get("version") or ""
+        listen_address = (
+            f"{listen_host}:{listen_port}" if listen_host and listen_port else ""
+        )
         return global_store_pb2.HealthCheckResponse(
-            status=global_store_pb2.Status.STATUS_OK
+            status=global_store_pb2.Status.STATUS_OK,
+            cluster_token=cluster_token or "",
+            listen_address=listen_address,
+            listen_host=listen_host or "",
+            listen_port=int(listen_port or 0),
+            metrics_port=int(metrics_port or 0),
+            version=version,
+            db_file=db_file or "",
         )
 
     # ========== Chunk Directory Methods ==========
