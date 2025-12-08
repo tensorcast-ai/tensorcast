@@ -285,6 +285,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     status=global_store_pb2.Status.STATUS_ERROR
                 )
 
+            artifact_row: Optional[dict[str, object]] = self.artifacts_repo.get(
+                artifact_id
+            )
+
             include_replicas = True
             if request.HasField("include_replicas"):
                 include_replicas = request.include_replicas.value
@@ -313,14 +317,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                             status=global_store_pb2.Status.STATUS_ERROR
                         )
                     space_kind = "C"
-                    artifact_row = self.artifacts_repo.get(artifact_id)
                     if not artifact_row or not artifact_row.get("index_multihash"):
                         context.set_code(grpc.StatusCode.NOT_FOUND)
                         context.set_details("canonical index not recorded")
                         return global_store_pb2.GetArtifactInfoByIdResponse(
                             status=global_store_pb2.Status.STATUS_NOT_FOUND
                         )
-                    space_id = artifact_row["index_multihash"]
+                    space_id = cast(str, artifact_row["index_multihash"])
                 elif space_field == "view_id":
                     view_id = request.view_id
                     if not view_id:
@@ -464,6 +467,30 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 else global_store_pb2.Status.STATUS_OK
             )
 
+            descriptor_pb: Optional[common_pb2.ArtifactDescriptor] = None
+            if artifact_row is not None:
+                id_kind_value = str(artifact_row.get("id_kind") or "").upper()
+                descriptor_pb = common_pb2.ArtifactDescriptor(
+                    artifact_id=artifact_id,
+                    index_multihash=str(artifact_row.get("index_multihash") or ""),
+                    data_multihash=str(artifact_row.get("data_multihash") or ""),
+                    schema_version=str(artifact_row.get("schema_version") or ""),
+                    encoding=str(artifact_row.get("encoding") or ""),
+                    total_size=0,
+                )
+                if id_kind_value == ArtifactIdKind.CGID.value:
+                    descriptor_pb.id_kind = (
+                        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
+                    )
+                elif id_kind_value == ArtifactIdKind.MI2.value:
+                    descriptor_pb.id_kind = (
+                        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
+                    )
+                else:
+                    descriptor_pb.id_kind = (
+                        common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_UNSPECIFIED
+                    )
+
             response = global_store_pb2.GetArtifactInfoByIdResponse(status=status)
             if include_replicas:
                 response.replicas.extend(available_replicas)
@@ -473,6 +500,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 response.view_meta.CopyFrom(view_meta_msg)
             if partial_details:
                 response.partial_coverage.extend(partial_details)
+            if descriptor_pb is not None:
+                response.descriptor.CopyFrom(descriptor_pb)
             return response
 
         except Exception as e:
@@ -1785,7 +1814,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         else:
             proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
 
-        return common_pb2.MemoryInfo(
+        memory_info = common_pb2.MemoryInfo(
             node_id=replica.node_id,
             node_address=replica.node_address,
             node_port=replica.node_port,
@@ -1796,6 +1825,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             buffer_sizes=replica.buffer_sizes,
             verification_json=replica.verification_json or "",
         )
+        creation_proto = self._datetime_to_timestamp(replica.created_at)
+        if creation_proto is not None:
+            memory_info.creation_ts.CopyFrom(creation_proto)
+        expires_proto = self._datetime_to_timestamp(replica.expires_at)
+        if expires_proto is not None:
+            memory_info.expires_at.CopyFrom(expires_proto)
+        return memory_info
 
     def _memory_info_to_replica_artifact_id(
         self,

@@ -242,6 +242,7 @@ message GetArtifactInfoByIdResponse {
   repeated Leaf leaves = 3;
   ViewMeta view_meta = 4;
   repeated PartialCoverageDetail partial_coverage = 5;
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 6;
 }
 
 message Leaf {

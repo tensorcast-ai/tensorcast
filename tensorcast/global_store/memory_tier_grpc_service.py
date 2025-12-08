@@ -133,6 +133,14 @@ class MemoryTierGrpcServicer(memory_tier_pb2_grpc.MemoryTierServiceServicer):
         resp.leases.extend([_lease_to_pb(lease) for lease in leases])
         return resp
 
+    def ListMemoryTierStatuses(self, request, context):
+        snapshots = self.service.list_latest(
+            request.node_id if request.node_id else None
+        )
+        resp = memory_tier_pb2.ListMemoryTierStatusesResponse()
+        resp.statuses.extend([_snapshot_to_pb(snapshot) for snapshot in snapshots])
+        return resp
+
 
 def _lease_to_pb(lease: MemoryTierLease) -> memory_tier_pb2.MemoryTierLease:
     chunk_range_pb = memory_tier_pb2.ChunkRange(
@@ -200,3 +208,18 @@ def _ack_action_to_string(action: memory_tier_pb2.LeaseAckAction) -> str:
 
 def _default_request_id() -> str:
     return f"mt_req_{int(time.time_ns())}"
+
+
+def _snapshot_to_pb(snapshot: MemoryTierSnapshot) -> memory_tier_pb2.MemoryTierStatus:
+    return memory_tier_pb2.MemoryTierStatus(
+        node_id=snapshot.node_id,
+        stable_total_bytes=snapshot.stable_total_bytes,
+        stable_used_bytes=snapshot.stable_used_bytes,
+        preemptible_total_bytes=snapshot.preemptible_total_bytes,
+        preemptible_marked_bytes=snapshot.preemptible_marked_bytes,
+        faults_per_sec=snapshot.faults_per_sec,
+        rehydrate_p99_ns=snapshot.rehydrate_p99_ns,
+        enable_preemptible=snapshot.enable_preemptible,
+        memory_tier_config_json=snapshot.memory_tier_config_json,
+        epoch_ns=snapshot.epoch_ns,
+    )
