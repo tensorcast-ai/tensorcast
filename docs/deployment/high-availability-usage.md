@@ -43,7 +43,7 @@ high_availability:
 ### Store Daemon Configuration
 
 ```yaml
-# store_daemon_config.yaml
+# daemon.yaml
 high_availability:
   enabled: true
   connection_retry:
@@ -73,7 +73,7 @@ global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
 ### Starting Store Daemon with HA
 
 ```bash
-uv run -q python -m tensorcast.cli start --config=/etc/tensorcast/store_daemon.yaml
+uv run -q python -m tensorcast.cli daemon start --config=/etc/tensorcast/daemon.yaml --global-store-mode connect
 ```
 
 ### Worker Recovery Registration

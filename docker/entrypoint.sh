@@ -6,7 +6,7 @@
 #   docker run tensorcast-store global-store --port 50051
 #
 # The first positional argument selects which service to start.
-# * store-daemon  -> tensorcast.cli start
+# * store-daemon  -> tensorcast.cli daemon start
 # * global-store -> tensorcast.global_store
 # Any additional arguments are forwarded verbatim to the underlying command.
 
@@ -22,7 +22,7 @@ shift
 
 case "${mode}" in
   store-daemon)
-    exec python -m tensorcast.cli start "$@"
+    exec python -m tensorcast.cli daemon start "$@"
     ;;
   global-store)
     exec python -m tensorcast.global_store "$@"

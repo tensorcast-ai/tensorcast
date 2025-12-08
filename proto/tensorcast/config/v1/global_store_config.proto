@@ -12,6 +12,7 @@ message GlobalServer {
   tensorcast.config.v1.SocketAddress listen = 10;
   uint32 max_workers = 2;
   tensorcast.config.v1.GrpcServer grpc = 3;
+  uint32 metrics_port = 11; // Prometheus metrics HTTP port (0 = auto)
 }
 
 message Database {

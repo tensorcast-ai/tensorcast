@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from time import monotonic
 from typing import Callable, Iterator
@@ -411,7 +412,7 @@ def _record_rpc_metrics(method: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def start_metrics_http_server(port: int) -> None:
+def start_metrics_http_server(port: int, addr: str = "") -> int:
     """Idempotently start the Prometheus HTTP server on *port*.
 
     Calling this multiple times is safe; `start_http_server` is a no-op after
@@ -419,14 +420,13 @@ def start_metrics_http_server(port: int) -> None:
     """
 
     try:
-        start_http_server(port)
+        server = start_http_server(port, addr=addr)
+        actual_port = getattr(server, "server_port", None) or port
+        return int(actual_port)
     except OSError as exc:
-        # The most common failure is the port already in use when the server is
-        # restarted quickly.  We log and continue because metrics are optional.
-        import logging
-
         logging.getLogger(__name__).warning(
             "Could not start Prometheus metrics HTTP server on port %s: %s",
             port,
             exc,
         )
+        return port

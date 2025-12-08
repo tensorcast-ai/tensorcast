@@ -89,4 +89,5 @@ message Observability {
 message ConfigMeta {
   string schema_version = 1; // e.g., "v1"
   string description = 2; // free-form description for operators
+  string cluster_token = 3; // implicit cluster identity to prevent split-brain
 }

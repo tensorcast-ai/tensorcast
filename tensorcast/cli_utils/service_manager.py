@@ -15,19 +15,16 @@ import os
 import signal
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import click
 
+from tensorcast.cli_utils.config import discover_daemon_config
 from tensorcast.cli_utils.errors import ServiceError
-from tensorcast.cli_utils.filesys import (
-    open_log_binary,
-    read_json_locked,
-    write_json_locked,
-)
+from tensorcast.cli_utils.filesys import open_log_binary
+from tensorcast.cli_utils.health import get_daemon_config
 from tensorcast.cli_utils.logs import logs_tail as _logs_tail
 from tensorcast.cli_utils.network import (
     pick_free_tcp_port,
@@ -40,6 +37,8 @@ from tensorcast.cli_utils.paths import (
     get_current_session_id,
     get_session_address,
     list_sessions,
+    runtime_lock_path,
+    runtime_state_path,
     session_paths,
     set_current_session_id,
 )
@@ -50,10 +49,32 @@ from tensorcast.cli_utils.proc import (
     kill_force,
     kill_gracefully,
     preexec_fate_sharing,
-    pump,
+)
+from tensorcast.cli_utils.process import (
+    atomic_write_json,
+    clear_runtime_daemon,
+    ensure_process_started,
+    file_lock,
+    instance_fingerprint,
+    join_threads,
+    prune_process_records,
+    read_json_default,
+    read_runtime_state,
+    register_process,
+    start_log_threads,
+    update_runtime_daemon,
+    write_session_state,
 )
 from tensorcast.cli_utils.status import check_service_status as _check_service_status
 from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
+
+
+@contextlib.contextmanager
+def _runtime_and_session_lock(inst: DaemonSession) -> Any:
+    """Enforce runtime -> session lock order for state writes."""
+
+    with file_lock(runtime_lock_path()), file_lock(inst.pids_lock):
+        yield
 
 
 def discover_default_config_path() -> Path | None:
@@ -61,26 +82,9 @@ def discover_default_config_path() -> Path | None:
 
     Order:
     1) $TENSORCAST_DAEMON_CONFIG if set and exists
-    2) ~/.tensorcast/store_daemon_config.yaml or ~/.tensorcast/store_daemon.yaml
-    3) examples/config/store_daemon_config.yaml (in repo checkout)
+    2) ~/.tensorcast/config/daemon.yaml or ~/.tensorcast/config/daemon.yml
     """
-    env = os.environ.get("TENSORCAST_DAEMON_CONFIG")
-    if env:
-        p = Path(env).expanduser()
-        if p.exists():
-            return p
-
-    home = Path.home() / ".tensorcast"
-    for name in ("store_daemon_config.yaml", "store_daemon.yaml"):
-        candidate = home / name
-        if candidate.exists():
-            return candidate
-
-    repo_root = Path(__file__).resolve().parents[2]
-    example = repo_root / "examples" / "config" / "store_daemon_config.yaml"
-    if example.exists():
-        return example
-    return None
+    return discover_daemon_config()
 
 
 def start_service(
@@ -93,9 +97,15 @@ def start_service(
     timeout: float = 15.0,
     register_current: bool = True,
     publish_meta: bool = True,
+    ephemeral: bool = False,
+    persist_runtime_state: bool = True,
+    owner: bool = True,
     restrict_to_localhost: bool = False,
+    global_store: dict[str, Any] | None = None,
     listen_host: str | None = None,
     listen_port: int | None = None,
+    ha_endpoints: list[str] | None = None,
+    ha_enabled: bool | None = None,
 ) -> DaemonSession:
     """Start the C++ StoreDaemon.
 
@@ -109,8 +119,8 @@ def start_service(
         cfg.server.listen.host = listen_host
         cfg_modified = True
     if listen_port is not None:
-        if listen_port <= 0 or listen_port > 65535:
-            raise ServiceError("listen_port must be between 1 and 65535")
+        if listen_port < 0 or listen_port > 65535:
+            raise ServiceError("listen_port must be between 0 and 65535")
         cfg.server.listen.port = listen_port
         cfg_modified = True
 
@@ -145,8 +155,39 @@ def start_service(
         cfg.server.p2p_listen.host = p2p_host
         cfg_modified = True
 
+    if ha_enabled is not None and bool(ha_enabled) != bool(
+        cfg.high_availability.enabled
+    ):
+        cfg.high_availability.enabled = bool(ha_enabled)
+        cfg_modified = True
+    if ha_endpoints is not None:
+        endpoints = list(ha_endpoints)
+        if ha_enabled is None and endpoints:
+            cfg.high_availability.enabled = True
+            cfg_modified = True
+        if not endpoints and cfg.high_availability.global_store_endpoints:
+            cfg.high_availability.ClearField("global_store_endpoints")
+            cfg_modified = True
+        if endpoints:
+            cfg.high_availability.ClearField("global_store_endpoints")
+            for endpoint in endpoints:
+                try:
+                    host, port_str = endpoint.rsplit(":", 1)
+                    port_val = int(port_str)
+                except Exception as exc:  # noqa: BLE001
+                    raise ServiceError(f"Invalid HA endpoint '{endpoint}'") from exc
+                ep = cfg.high_availability.global_store_endpoints.add()
+                ep.host = host
+                ep.port = port_val
+            cfg_modified = True
+    if ha_enabled is False and cfg.high_availability.global_store_endpoints:
+        cfg.high_availability.ClearField("global_store_endpoints")
+        cfg_modified = True
+
     inst = session_paths(session_id)
-    effective_cfg_path = inst.session / "effective_daemon_config.yaml"
+    started_at = time.time()
+    runtime_state_file = runtime_state_path()
+    effective_cfg_path = inst.effective_config_path
     try:
         if cfg_modified:
             dump_daemon_config(cfg, effective_cfg_path)
@@ -190,22 +231,22 @@ def start_service(
                 se.close()
         raise
 
-    _register_process(inst, role="daemon", proc=proc, so=so_path, se=se_path)
     connect_host = resolve_connect_host(host)
-    if publish_meta:
-        _write_meta(
-            inst,
-            address=f"{connect_host}:{port}",
-            config_path=meta_cfg_path,
-            p2p_address=f"{resolve_connect_host(p2p_host)}:{p2p_port}",
-            daemon_bin=str(bin_path),
-        )
-    if register_current:
-        set_current_session_id(inst.id)
+    p2p_connect_host = resolve_connect_host(p2p_host)
     object.__setattr__(inst, "address", f"{connect_host}:{port}")
-    object.__setattr__(
-        inst, "p2p_address", f"{resolve_connect_host(p2p_host)}:{p2p_port}"
-    )
+    object.__setattr__(inst, "p2p_address", f"{p2p_connect_host}:{p2p_port}")
+    fingerprint = instance_fingerprint(proc.pid)
+
+    with _runtime_and_session_lock(inst):
+        register_process(
+            inst_id=inst.id,
+            pids_path=inst.pids_json,
+            proc=proc,
+            role="daemon",
+            stdout_path=so_path,
+            stderr_path=se_path,
+            lock_path=None,
+        )
 
     sinks_out: list[Any] = []
     sinks_err: list[Any] = []
@@ -216,37 +257,57 @@ def start_service(
     if to_console:
         sinks_out.append(sys.stdout)
         sinks_err.append(sys.stderr)
-    log_threads = _start_daemon_log_threads(proc, sinks_out, sinks_err)
+    log_threads = start_log_threads(proc, sinks_out, sinks_err)
+
+    def _persist_state() -> None:
+        session_state = {
+            "session_id": inst.id,
+            "ephemeral": ephemeral,
+            "started_at": started_at,
+            "daemon": {
+                "pid": int(proc.pid),
+                "address": inst.address,
+                "p2p_address": inst.p2p_address,
+                "config_path": meta_cfg_path,
+                "binary": str(bin_path),
+            },
+            "global_store": global_store or {},
+            "logs_dir": str(inst.logs),
+        }
+        with contextlib.suppress(Exception):
+            from tensorcast import __version__ as _tc_version
+
+            session_state["version"] = _tc_version
+        with _runtime_and_session_lock(inst):
+            if publish_meta:
+                _write_meta(
+                    inst,
+                    address=f"{connect_host}:{port}",
+                    config_path=meta_cfg_path,
+                    p2p_address=inst.p2p_address,
+                    daemon_bin=str(bin_path),
+                )
+            write_session_state(inst.session_state_json, session_state)
+            if persist_runtime_state:
+                update_runtime_daemon(
+                    path=runtime_state_file,
+                    session_id=inst.id,
+                    pid=int(proc.pid),
+                    address=inst.address,
+                    p2p_address=inst.p2p_address,
+                    owner=owner,
+                    fingerprint=fingerprint,
+                )
+            if register_current:
+                set_current_session_id(inst.id)
 
     # In blocking mode, ensure graceful shutdown:
     # - Register atexit to stop the daemon session we started
     # - Install SIGINT/SIGTERM handlers to call stop_service before exiting
-    if blocking:
-
-        def _cleanup() -> None:
-            with contextlib.suppress(Exception):
-                stop_service(session_id=inst.id)
-
-        atexit.register(_cleanup)
-
-        def _handle_signal(signum, _frame) -> None:  # noqa: ANN001
-            _cleanup()
-            try:
-                sys.exit(128 + int(signum))
-            except SystemExit:
-                raise
-
-        signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
-
-        ret = proc.wait()
-        _join_threads(log_threads)
-        click.echo(f"daemon exited with code {ret}")
-        return inst
-
+    daemon_cfg = None
     if wait:
         try:
-            _ensure_process_started(
+            ensure_process_started(
                 proc,
                 inst.logs if persist_logs else None,
                 startup_grace=min(timeout, 1.0),
@@ -270,6 +331,63 @@ def start_service(
                 + log_hint
             )
 
+    # Best-effort backfill of effective listen/p2p ports from daemon once it is serving.
+    with contextlib.suppress(Exception):
+        daemon_cfg = get_daemon_config(f"{connect_host}:{port}", timeout=1.0)
+    if daemon_cfg is not None:
+        listen = None
+        p2p_listen = None
+        with contextlib.suppress(Exception):
+            listen = daemon_cfg.server.listen
+            p2p_listen = daemon_cfg.server.p2p_listen
+        if listen is None:
+            listen = getattr(daemon_cfg, "listen", None)
+        if p2p_listen is None:
+            p2p_listen = getattr(daemon_cfg, "p2p_listen", None)
+
+        eff_host = getattr(listen, "host", None) or host
+        eff_port = int(getattr(listen, "port", 0) or port)
+        eff_p2p_host = getattr(p2p_listen, "host", None) or p2p_host or eff_host
+        eff_p2p_port = int(getattr(p2p_listen, "port", 0) or p2p_port)
+
+        connect_host = resolve_connect_host(eff_host)
+        p2p_connect_host = resolve_connect_host(eff_p2p_host or eff_host)
+        port = eff_port
+        p2p_port = eff_p2p_port
+        object.__setattr__(inst, "address", f"{connect_host}:{port}")
+        object.__setattr__(inst, "p2p_address", f"{p2p_connect_host}:{p2p_port}")
+
+    # Avoid race where daemon_cfg is None but daemon is already serving; fall back to existing values.
+    if inst.address is None:
+        object.__setattr__(inst, "address", f"{connect_host}:{port}")
+    if inst.p2p_address is None:
+        object.__setattr__(inst, "p2p_address", f"{p2p_connect_host}:{p2p_port}")
+
+    _persist_state()
+
+    if blocking:
+
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                stop_service(session_id=inst.id)
+
+        atexit.register(_cleanup)
+
+        def _handle_signal(signum, _frame) -> None:  # noqa: ANN001
+            _cleanup()
+            try:
+                sys.exit(128 + int(signum))
+            except SystemExit:
+                raise
+
+        signal.signal(signal.SIGTERM, _handle_signal)
+        signal.signal(signal.SIGINT, _handle_signal)
+
+        ret = proc.wait()
+        join_threads(log_threads)
+        click.echo(f"daemon exited with code {ret}")
+        return inst
+
     click.echo(
         f"StoreDaemon started (daemon session={inst.id}) at {connect_host}:{port}. Logs: {inst.logs}"
     )
@@ -283,11 +401,19 @@ def stop_service(
     if not sid:
         raise ServiceError("No session id provided and no current session found")
     inst = session_paths(sid)
+    runtime_state_file = runtime_state_path()
     if not inst.pids_json.exists():
         click.echo(f"No pids.json found for daemon session {sid}")
+        with contextlib.suppress(Exception), file_lock(runtime_lock_path()):
+            state = read_runtime_state(runtime_state_file)
+            daemon_state = state.get("daemon")
+            if isinstance(daemon_state, dict) and daemon_state.get("session_id") == sid:
+                clear_runtime_daemon(runtime_state_file)
         return
-    data = read_json_locked(inst.pids_json)
+    with _runtime_and_session_lock(inst):
+        data = read_json_default(inst.pids_json, {"processes": []})
     procs = data.get("processes", [])
+    targets: list[int] = []
     for proc in reversed(procs):
         pid = int(proc.get("pid", 0))
         if pid <= 0:
@@ -304,13 +430,26 @@ def stop_service(
             first_cmd = None
         if not is_matching_daemon_process(pid, first_cmd):
             continue
+        targets.append(pid)
         if force:
             kill_force(pgid)
         else:
             if not kill_gracefully(pgid, grace=grace):
                 kill_force(pgid)
+    with _runtime_and_session_lock(inst):
+        if targets:
+            prune_process_records(
+                pids_path=inst.pids_json,
+                predicate=lambda entry: int(entry.get("pid", 0)) in targets,
+                lock_path=None,
+            )
+        with contextlib.suppress(Exception):
+            state = read_runtime_state(runtime_state_file)
+            daemon_state = state.get("daemon")
+            if isinstance(daemon_state, dict) and daemon_state.get("session_id") == sid:
+                clear_runtime_daemon(runtime_state_file)
+        clear_current_session_if_matches(sid)
     click.echo(f"Stopped daemon session {sid}")
-    clear_current_session_if_matches(sid)
 
 
 def check_service_status(
@@ -318,7 +457,9 @@ def check_service_status(
 ) -> None:
     sid = session_id or get_current_session_id()
     if not sid:
-        click.echo("No local daemon session found. Start one with 'tensorcast start'.")
+        click.echo(
+            "No local daemon session found. Start one with 'tensorcast daemon start'."
+        )
         sys.exit(1)
     _check_service_status(session_id=sid, host=host, port=port)
 
@@ -329,69 +470,9 @@ def logs_tail(
     _logs_tail(session_id=session_id, stderr=stderr, follow=follow)
 
 
-def _start_daemon_log_threads(
-    proc: subprocess.Popen[Any], stdout_sinks: list[Any], stderr_sinks: list[Any]
-) -> list[threading.Thread]:
-    threads: list[threading.Thread] = []
-    if proc.stdout is not None:
-        threads.append(_spawn_log_thread(proc.stdout, stdout_sinks))
-    if proc.stderr is not None:
-        threads.append(_spawn_log_thread(proc.stderr, stderr_sinks))
-    return threads
-
-
-def _spawn_log_thread(src, sinks: list[Any]) -> threading.Thread:
-    def _worker() -> None:
-        try:
-            pump(src, sinks)
-        finally:
-            with contextlib.suppress(Exception):
-                src.close()
-            for sink in sinks:
-                if sink in (sys.stdout, sys.stderr):
-                    continue
-                with contextlib.suppress(Exception):
-                    sink.flush()
-                    sink.close()
-
-    thread = threading.Thread(target=_worker, daemon=True)
-    thread.start()
-    return thread
-
-
-def _join_threads(threads: list[threading.Thread], timeout: float = 1.0) -> None:
-    if not threads:
-        return
-    deadline = time.monotonic() + max(timeout, 0.0)
-    for thread in threads:
-        remaining = max(0.0, deadline - time.monotonic())
-        if remaining <= 0.0:
-            break
-        thread.join(remaining)
-
-
-def _ensure_process_started(
-    proc: subprocess.Popen[Any], log_path: Path | None, startup_grace: float
-) -> None:
-    grace = max(startup_grace, 0.1)
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
-        retcode = proc.poll()
-        if retcode is not None:
-            hint = f" Check logs at {log_path}" if log_path is not None else ""
-            raise ServiceError(
-                f"Daemon exited with code {retcode} during startup." + hint
-            )
-        time.sleep(0.05)
-    retcode = proc.poll()
-    if retcode is not None:
-        hint = f" Check logs at {log_path}" if log_path is not None else ""
-        raise ServiceError(f"Daemon exited with code {retcode} during startup." + hint)
-
-
 def _cleanup_failed_start(
     proc: subprocess.Popen[Any],
-    log_threads: list[threading.Thread],
+    log_threads: list[Any],
     inst: DaemonSession,
     so,
     se,
@@ -408,32 +489,34 @@ def _cleanup_failed_start(
         kill_force(pgid)
     with contextlib.suppress(Exception):
         proc.wait(timeout=2.0)
-    _join_threads(log_threads, timeout=1.0)
+    join_threads(log_threads, timeout=1.0)
     for stream in (so, se):
         if stream is None:
             continue
         with contextlib.suppress(Exception):
             stream.flush()
             stream.close()
+    with _runtime_and_session_lock(inst):
+        prune_process_records(
+            pids_path=inst.pids_json,
+            predicate=lambda entry: int(entry.get("pid", 0)) == int(proc.pid),
+            lock_path=None,
+        )
+        with contextlib.suppress(FileNotFoundError):
+            inst.session_state_json.unlink()
+        with contextlib.suppress(FileNotFoundError):
+            inst.meta_json.unlink()
+        with contextlib.suppress(Exception):
+            state = read_runtime_state(runtime_state_path())
+            daemon_state = state.get("daemon")
+            if (
+                isinstance(daemon_state, dict)
+                and daemon_state.get("session_id") == inst.id
+                and int(daemon_state.get("pid", 0)) == int(proc.pid)
+            ):
+                clear_runtime_daemon(runtime_state_path())
     with contextlib.suppress(Exception):
         clear_current_session_if_matches(inst.id)
-
-
-def _register_process(
-    inst: DaemonSession, *, role: str, proc: subprocess.Popen, so: Path, se: Path
-) -> None:
-    entry = {
-        "role": role,
-        "pid": int(proc.pid),
-        "cmd": [str(x) for x in proc.args]
-        if isinstance(proc.args, (list, tuple))
-        else [str(proc.args)],
-        "stdout": str(so),
-        "stderr": str(se),
-        "start_time": __import__("time").time(),
-    }
-    data = {"session_id": inst.id, "processes": [entry]}
-    write_json_locked(inst.pids_json, data)
 
 
 def _write_meta(
@@ -447,6 +530,7 @@ def _write_meta(
     from tensorcast import __version__ as _tc_version
 
     meta = {
+        "schema_version": 1,
         "session_id": inst.id,
         "address": address,
         "config_path": config_path,
@@ -458,7 +542,7 @@ def _write_meta(
         meta["p2p_address"] = p2p_address
     if daemon_bin:
         meta["daemon_bin"] = daemon_bin
-    write_json_locked(inst.meta_json, meta)
+    atomic_write_json(inst.meta_json, meta)
 
 
 __all__ = [

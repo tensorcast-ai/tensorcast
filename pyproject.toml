@@ -14,6 +14,7 @@ requires-python = ">=3.10"
 dependencies = [
     "click>=8.1.8",
     "grpcio>=1.56.0,<2",
+    "grpcio-health-checking>=1.56.0,<2",
     "pandas>=2.2.3",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
