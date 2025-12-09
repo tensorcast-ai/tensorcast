@@ -188,6 +188,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
+- HA checksum format is `artifact_id:node_id:device_id:memory_type:available;` (FNV-1a 64-bit).
 
 **Safe-removal semantics:** When a worker reports an empty inventory, the Global Store does NOT blindly delete all its replicas. An empty list might mean "I haven't enumerated yet" rather than "I have nothing." Removals only apply when the worker explicitly provides a non-empty inventory that excludes replicas the Global Store expects.
 

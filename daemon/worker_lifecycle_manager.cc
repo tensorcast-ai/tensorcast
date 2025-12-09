@@ -33,28 +33,28 @@ using namespace std::chrono_literals;
 
 namespace {
 
-opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> hb_success_counter() {
+opentelemetry::metrics::Counter<uint64_t>* hb_success_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_heartbeat_success_total");
-  return ctr;
+  return ctr.get();
 }
 
-opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> hb_failure_counter() {
+opentelemetry::metrics::Counter<uint64_t>* hb_failure_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_heartbeat_failure_total");
-  return ctr;
+  return ctr.get();
 }
 
-opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> sync_success_counter() {
+opentelemetry::metrics::Counter<uint64_t>* sync_success_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_success_total");
-  return ctr;
+  return ctr.get();
 }
 
-opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> sync_failure_counter() {
+opentelemetry::metrics::Counter<uint64_t>* sync_failure_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_failure_total");
-  return ctr;
+  return ctr.get();
 }
 
 bool is_loopback_or_unspecified(absl::string_view addr) {
@@ -268,7 +268,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
-        hb_failure_counter()->Add(1);
+        if (auto* counter = hb_failure_counter()) {
+          counter->Add(1);
+        }
         // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
         // perform recovery-aware re-registration to preserve identity.
         if (global_store_->is_connected()) {
@@ -280,7 +282,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
       } else {
         const auto& hb = *hb_or;
         hb_success_.fetch_add(1);
-        hb_success_counter()->Add(1);
+        if (auto* counter = hb_success_counter()) {
+          counter->Add(1);
+        }
         last_hb_ts_s_.store(
             static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -346,7 +350,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
             state_version_ = sync_or->first;
             state_checksum_ = sync_or->second;
             sync_success_.fetch_add(1);
-            sync_success_counter()->Add(1);
+            if (auto* counter = sync_success_counter()) {
+              counter->Add(1);
+            }
             // Apply server-suggested removals
             std::vector<std::string> obsolete;
             obsolete.reserve(changes.size());
@@ -434,7 +440,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
           } else {
             VLOG(1) << "SynchronizeWorkerState returned: " << sync_or.status();
             sync_failure_.fetch_add(1);
-            sync_failure_counter()->Add(1);
+            if (auto* counter = sync_failure_counter()) {
+              counter->Add(1);
+            }
             // Fallback to full-state sync if server indicates desync or errors persist
             std::vector<commonpb::ReplicaInfo> expected;
             auto full_or = global_store_->request_full_state_sync(worker_id_, state_version_, &expected);
@@ -764,6 +772,8 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
 std::string WorkerLifecycleManager::compute_state_checksum(
     std::string_view node_id,
     const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
+  // Keep format aligned with Global Store's RecoveryService._compute_state_checksum:
+  // artifact_id:node_id:device_id:memory_type:available; sorted by (artifact_id, memory_type, device_id).
   struct Entry {
     std::string artifact_id;
     std::string memory_type;
