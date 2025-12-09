@@ -89,7 +89,7 @@ Contract highlights:
 - TTL for every ephemeral map; all TTL updates and cleanup run under BackgroundScheduler.
 - Consistent deadlines: user timeouts are clamped to RPC deadlines.
 - Memory tiers: `engine.memory_tiers` drives stable/preemptible behavior; startup fails if configured `stable_bytes` exceed `(cgroup|MemTotal) - mem_pool_size_bytes`, and preemptible markings are skipped entirely when `enable_preemptible` is false. When HA is enabled, the daemon publishes `MemoryTierStatus` heartbeats via `MemoryTierService` using the UMA-backed `MemoryTierBudget` and replays `MemoryTierLease` state on startup/heartbeats (ListOutstandingLeases → UMA stable lease bind/release → ACK carrying artifact_id + chunk_ids + ledger_version for audit).
-- Observability is best-effort and never changes control flow; high-cardinality fields are gated.
+- Observability is best-effort and never changes control flow; high-cardinality fields are gated. Background HA counters (heartbeat/sync) tolerate missing meters so registration and sync continue even when telemetry providers are unavailable.
 - Idempotent unload and lock cleanup; expired tokens are unlocked automatically.
 - Lease-in-place commits rebuild the canonical tensor index from the fed `storage_entries` and `tensor_aliases`, emitting `tc_register_storage_count` / `tc_register_tensor_count` metrics so rollouts can confirm dedupe efficacy.
 

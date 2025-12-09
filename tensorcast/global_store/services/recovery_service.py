@@ -6,7 +6,6 @@ Recovery service for Global Store high availability.
 Handles state recovery after failures, worker rediscovery, and state synchronization.
 """
 
-import hashlib
 import time
 from uuid import UUID, uuid4
 
@@ -22,6 +21,8 @@ from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
+
+ReplicaKey = tuple[str, str, str, int]
 
 
 class RecoveryService:
@@ -175,7 +176,10 @@ class RecoveryService:
                 self.replica_repository.mark_unavailable(replica.replica_id)
 
     def synchronize_worker_state(
-        self, worker_id: str, local_state: global_store_pb2.WorkerLocalState
+        self,
+        worker_id: str,
+        local_state: global_store_pb2.WorkerLocalState,
+        force_full_sync: bool = False,
     ) -> tuple[bool, list[global_store_pb2.StateChange], int, str]:
         """
         Synchronize worker state with global state.
@@ -183,6 +187,8 @@ class RecoveryService:
         Args:
             worker_id: Worker ID
             local_state: Worker's local state
+            force_full_sync: When True, treat the provided inventory as
+                authoritative even if empty (allows drains/retirements).
 
         Returns:
             Tuple of (success, state_changes, new_version, new_checksum)
@@ -193,7 +199,9 @@ class RecoveryService:
             global_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
 
             # Compare states and generate changes
-            state_changes = self._compute_state_changes(local_state, global_replicas)
+            state_changes = self._compute_state_changes(
+                local_state, global_replicas, force_full_sync
+            )
 
             current_version = self.worker_state_versions.get(worker_id, 0)
 
@@ -245,34 +253,41 @@ class RecoveryService:
         self,
         local_state: global_store_pb2.WorkerLocalState,
         global_replicas: list[Replica],
+        force_full_sync: bool,
     ) -> list[global_store_pb2.StateChange]:
         """Compute differences between local and global state."""
         state_changes = []
 
-        # Convert to sets for comparison
-        local_replica_keys = {
-            (r.ref.artifact_id, str(r.memory_info.memory_type), r.memory_info.device_id)
+        def _memory_type_label(mem_type: common_pb2.MemoryType) -> str:
+            if mem_type == common_pb2.MemoryType.MEMORY_TYPE_GPU:
+                return "GPU"
+            if mem_type == common_pb2.MemoryType.MEMORY_TYPE_RAM:
+                return "RAM"
+            return "DISK"
+
+        # Convert to maps for comparison and fast lookup
+        local_replicas_by_key: dict[ReplicaKey, common_pb2.ReplicaInfo] = {
+            (
+                r.ref.artifact_id,
+                r.memory_info.node_id,
+                _memory_type_label(r.memory_info.memory_type),
+                r.memory_info.device_id,
+            ): r
             for r in local_state.local_replicas
         }
 
-        global_replica_keys = {
-            (r.artifact_id, str(r.memory_type.value), r.device_id)
+        global_replicas_by_key: dict[ReplicaKey, Replica] = {
+            (r.artifact_id, r.node_id, r.memory_type.value, r.device_id): r
             for r in global_replicas
         }
 
+        local_replica_keys: set[ReplicaKey] = set(local_replicas_by_key.keys())
+        global_replica_keys: set[ReplicaKey] = set(global_replicas_by_key.keys())
+
         # Find replicas to add (in local but not in global)
         to_add = local_replica_keys - global_replica_keys
-        for artifact_id, memory_type, device_id in to_add:
-            # Find the local replica info
-            local_replica = next(
-                r
-                for r in local_state.local_replicas
-                if (
-                    r.ref.artifact_id == artifact_id
-                    and str(r.memory_info.memory_type) == memory_type
-                    and r.memory_info.device_id == device_id
-                )
-            )
+        for key in to_add:
+            local_replica = local_replicas_by_key[key]
 
             change = global_store_pb2.StateChange(
                 type=global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA,
@@ -282,30 +297,19 @@ class RecoveryService:
             state_changes.append(change)
 
         # Safe-removal semantics --------------------------------------------------
-        # Only consider *removals* when the worker explicitly provides a non-empty
-        # inventory.  An empty ``local_replicas`` list is treated as *unknown* –
-        # we assume the worker could not (or chose not to) send its inventory
-        # and therefore suppress destructive REMOVE_REPLICA operations.
-
-        to_remove: set[tuple[str, str, int]]
+        # Default: empty inventory suppresses removals (treat as unknown).
+        # When force_full_sync is True, empty inventory is authoritative and will
+        # drive removals (used for drains / explicit full reconciliation).
+        to_remove: set[ReplicaKey]
         if local_state.local_replicas:
-            # Worker supplied an inventory – compute genuine removals.
             to_remove = global_replica_keys - local_replica_keys
+        elif force_full_sync:
+            to_remove = global_replica_keys
         else:
-            # No inventory → do **not** remove anything.
             to_remove = set()
 
-        for artifact_id, memory_type, device_id in to_remove:
-            # Find the global replica
-            global_replica = next(
-                r
-                for r in global_replicas
-                if (
-                    r.artifact_id == artifact_id
-                    and str(r.memory_type.value) == memory_type
-                    and r.device_id == device_id
-                )
-            )
+        for key in to_remove:
+            global_replica = global_replicas_by_key[key]
 
             # Convert to proto format
             replica_info = self._convert_replica_to_proto(global_replica)
@@ -314,6 +318,31 @@ class RecoveryService:
                 type=global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA,
                 replica_info=replica_info,
                 reason="Global replica not found in local state",
+            )
+            state_changes.append(change)
+
+        # Identify replicas that exist in both sets but have drifted metadata.
+        shared_keys = local_replica_keys & global_replica_keys
+        for key in shared_keys:
+            local_replica = local_replicas_by_key[key]
+            global_replica = global_replicas_by_key[key]
+
+            desired_available = local_replica.stats.is_available
+            current_available = global_replica.is_available
+
+            availability_changed = desired_available != current_available
+
+            if not availability_changed:
+                continue
+
+            updated_proto = self._convert_replica_to_proto(global_replica)
+            if availability_changed:
+                updated_proto.stats.is_available = desired_available
+
+            change = global_store_pb2.StateChange(
+                type=global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA,
+                replica_info=updated_proto,
+                reason="Replica metadata changed (availability)",
             )
             state_changes.append(change)
 
@@ -353,7 +382,7 @@ class RecoveryService:
                     replica = self._convert_proto_to_replica(
                         change.replica_info, worker_id
                     )
-                    self.replica_repository.create_or_update(replica)
+                    self.replica_repository.update(replica)
                     logger.debug(f"Updated replica: {replica.artifact_id}")
 
             except Exception as e:
@@ -441,18 +470,44 @@ class RecoveryService:
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
         """Compute checksum of replica state for consistency checking."""
+        entries: list[tuple[str, str, int, str, bool]] = []
+        for replica in replicas:
+            mem_type = "DISK"
+            device_id = 0
+            if replica.memory_type.value == "GPU":
+                mem_type = "GPU"
+                device_id = replica.device_id
+            elif replica.memory_type.value == "RAM":
+                mem_type = "RAM"
+                device_id = 0
+            entries.append(
+                (
+                    replica.artifact_id,
+                    replica.node_id or "",
+                    device_id,
+                    mem_type,
+                    replica.is_available,
+                )
+            )
+
         # Sort replicas by a stable key for consistent checksum
-        sorted_replicas = sorted(
-            replicas, key=lambda r: (r.artifact_id, r.node_id, r.device_id)
-        )
+        entries.sort(key=lambda e: (e[0], e[3], e[2]))
 
         # Create string representation of state
-        state_str = ""
-        for replica in sorted_replicas:
-            state_str += f"{replica.artifact_id}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
+        state_parts = [
+            f"{artifact_id}:{node_id}:{device_id}:{memory_type}:{1 if available else 0};"
+            for artifact_id, node_id, device_id, memory_type, available in entries
+        ]
+        state_str = "".join(state_parts)
 
-        # Compute MD5 hash
-        return hashlib.md5(state_str.encode()).hexdigest()
+        # Compute FNV-1a 64-bit hash for portability with C++ daemon
+        hash_val = 0xCBF29CE484222325
+        fnv_prime = 0x100000001B3
+        for b in state_str.encode():
+            hash_val ^= b
+            hash_val = (hash_val * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+
+        return f"{hash_val:016x}"
 
     def get_worker_state_version(self, worker_id: str) -> int:
         """Get current state version for a worker."""

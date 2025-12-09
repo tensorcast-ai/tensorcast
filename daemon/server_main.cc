@@ -267,6 +267,8 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().periodic_sync_interval();
       lopts.chunk_sync_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
+    lopts.force_full_sync_on_empty_inventory = cfg.high_availability().force_full_sync_on_empty_inventory();
+    lopts.cluster_token = cfg.meta().cluster_token();
     lifecycle = std::make_unique<daemon::WorkerLifecycleManager>(
         gsl::not_null<std::shared_ptr<store::StoreEngine>>{engine},
         gsl::not_null<daemon::StoreDaemonServiceImpl*>{&service},

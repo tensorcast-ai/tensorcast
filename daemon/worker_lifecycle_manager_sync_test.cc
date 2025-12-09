@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -564,6 +565,35 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   test_server.server->Shutdown();
   std::error_code ec;
   fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("state_checksum_is_stable_and_availability_sensitive") {
+  std::vector<StoreEngine::ReplicaInfo> infos;
+  StoreEngine::ReplicaInfo gpu;
+  gpu.artifact_id = "artifact-a";
+  gpu.gpu_state = tensorcast::common::memory::MemoryLocation::GPU;
+  gpu.cpu_state = tensorcast::common::memory::MemoryLocation::NONE;
+  gpu.gpu_device_id = 1;
+  gpu.is_registered_for_comm = true;
+  infos.push_back(gpu);
+
+  StoreEngine::ReplicaInfo cpu;
+  cpu.artifact_id = "artifact-b";
+  cpu.gpu_state = tensorcast::common::memory::MemoryLocation::NONE;
+  cpu.cpu_state = tensorcast::common::memory::MemoryLocation::CPU;
+  cpu.gpu_device_id = -1;
+  cpu.is_registered_for_comm = true;
+  infos.push_back(cpu);
+
+  const std::string node_id = "node-xyz";
+  const auto checksum1 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  std::reverse(infos.begin(), infos.end());
+  const auto checksum2 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  REQUIRE(checksum1 == checksum2);
+
+  infos.front().is_registered_for_comm = false;
+  const auto checksum3 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  REQUIRE(checksum3 != checksum1);
 }
 
 TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[daemon][ha][delta]") {

@@ -185,6 +185,9 @@ absl::Status GlobalStoreClient::initialize() {
   grpc::ClientContext context;
   context.set_deadline(
       std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(config_.connection_timeout)));
+  if (!config_.cluster_token.empty()) {
+    context.AddMetadata("x-tensorcast-cluster-token", config_.cluster_token);
+  }
 
   // OpenTelemetry: create a client span for HealthCheck and inject context.
   namespace otel = opentelemetry;
@@ -203,6 +206,20 @@ absl::Status GlobalStoreClient::initialize() {
     return absl::UnavailableError(
         absl::StrFormat(
             "Failed to connect to Global Store at %s: %s", config_.global_store_address, status.error_message()));
+  }
+
+  if (!config_.cluster_token.empty()) {
+    if (resp.cluster_token().empty()) {
+      return absl::FailedPreconditionError(
+          "Global Store health check did not return a cluster_token; refusing to continue with configured token.");
+    }
+    if (resp.cluster_token() != config_.cluster_token) {
+      return absl::FailedPreconditionError(
+          absl::StrFormat(
+              "Global Store cluster_token mismatch: expected '%s', got '%s'",
+              config_.cluster_token,
+              resp.cluster_token()));
+    }
   }
 
   LOG(INFO) << "Successfully connected to Global Store at " << config_.global_store_address;
@@ -1127,6 +1144,9 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     grpc::ClientContext context;
     context.set_deadline(
         std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(config_.rpc_timeout)));
+    if (!config_.cluster_token.empty()) {
+      context.AddMetadata("x-tensorcast-cluster-token", config_.cluster_token);
+    }
 
     // OpenTelemetry: create client span and inject W3C Trace Context.
     namespace otel = opentelemetry;

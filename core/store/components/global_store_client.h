@@ -32,6 +32,7 @@ struct GlobalStoreClientConfig {
   absl::Duration rpc_timeout = absl::Seconds(60);
   uint32_t max_retries = 3;
   absl::Duration retry_backoff = absl::Milliseconds(100);
+  std::string cluster_token;
 };
 
 // Information about a remote replica replica

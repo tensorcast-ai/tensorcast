@@ -8,263 +8,184 @@ sidebar_position: 3
 
 ## Overview
 
-The artifact storage system now includes comprehensive high availability features that ensure system resilience and eventual consistency in the face of failures. This guide explains how to configure and use these features.
+TensorCast HA keeps the single Global Store resilient and consistent with Store Daemon state by combining startup recovery, enhanced heartbeats, incremental/full state sync, and drift pruning. Configuration is file-based (proto-backed) and orchestrated via the `tensorcast` CLI.
 
 ## Features
 
-### Global Store High Availability
-- **Database Recovery**: Automatic recovery from persistent DuckDB storage
-- **Worker Rediscovery**: Automatic rediscovery of workers after restart
-- **State Synchronization**: Reconciles worker states with global state
-- **Enhanced Heartbeat**: State version tracking and consistency checking
+### Global Store
+- **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and resets per-worker state versions.
+- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts; incremental sync applies additions/removals with “addition over removal” semantics; full-state sync returns the expected set without bumping versions.
+- **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, listen endpoints, metrics port, and version.
 
-### Store Daemon High Availability
-- **Connection Manager**: Intelligent reconnection with exponential backoff
-- **State Queueing**: Queues operations during disconnection
-- **Automatic Re-registration**: Re-registers with Global Store after failures
-- **State Synchronization**: Syncs local state with global state
+### Store Daemon
+- **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
+- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas not expected by the Global Store.
+- **Enhanced heartbeat loop**: sends version/checksum/inventory; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
+- **Incremental sync handling**: applies obsolete removals immediately and prefetches server-requested `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.
+- **Bounded retries**: all RPCs use jittered exponential backoff (`max_retries=3`, base 100ms).
 
 ## Configuration
 
-### Global Store Configuration
+### Global Store (proto: `tensorcast.config.v1.GlobalStoreConfig`)
 
 ```yaml
-# global_store_config.yaml
-high_availability:
-  enabled: true
-  state_sync_interval_ms: 300000      # 5 minutes
-  worker_timeout_ms: 30000            # 30 seconds
-  recovery:
-    auto_recovery_enabled: true
-    max_recovery_attempts: 3
-    recovery_timeout_ms: 120000       # 2 minutes
+database:
+  db_file: /var/lib/tensorcast/global_store.duckdb   # persistent for HA
+server:
+  listen:
+    host: 0.0.0.0
+    port: 50051
+  max_workers: 20
+worker_policy:
+  heartbeat_timeout: 30s
+  cleanup_interval: 60s
+  default_heartbeat_interval: 5s
+  memory_tiers:
+    snapshot_retention: 10m
+    snapshot_max_rows: 200
+    publish_interval: 5s
+meta:
+  cluster_token: <optional-cluster-id>               # echoed by HealthCheck
 ```
 
-### Store Daemon Configuration
+### Store Daemon (proto: `tensorcast.config.v1.DaemonConfig`)
 
 ```yaml
-# daemon.yaml
+server:
+  listen:
+    host: 0.0.0.0
+    port: 50052
+  advertise:
+    host: 10.0.0.20           # must be routable (non-loopback/unspecified)
+  p2p_listen:
+    host: 0.0.0.0
+    port: 65090               # required for HA registration
 high_availability:
   enabled: true
-  connection_retry:
-    max_attempts: -1                  # Infinite retries
-    base_delay_ms: 1000
-    max_delay_ms: 60000
-    backoff_multiplier: 2.0
-  state_sync:
-    heartbeat_enhanced: true
-    state_checksum_enabled: true
-    periodic_sync_interval_ms: 600000 # 10 minutes
+  global_store_endpoints:
+    - host: 10.0.0.5          # first entry is used today
+      port: 50051
+  heartbeat_interval: 5s      # default when omitted
+  periodic_sync_interval: 10s # chunk sync loop; 0 disables
 ```
 
-## Usage Examples
+> The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
 
-### Starting Global Store with HA
+## Usage
 
-```python
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
-
-# Start with persistent database for recovery
-global_store = GlobalStoreServicer(db_file="/path/to/persistent.db")
-
-# Recovery is automatically initiated on startup
-```
-
-### Starting Store Daemon with HA
+### Start Global Store (single instance)
 
 ```bash
-uv run -q python -m tensorcast.cli daemon start --config=/etc/tensorcast/daemon.yaml --global-store-mode connect
+uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml --wait
 ```
 
-### Worker Recovery Registration
+- Use a persistent DuckDB path (`database.db_file`) for recovery.
+- The CLI persists `cluster_token` under `~/.tensorcast/runtime/cluster_token` to detect split-brain and returns the metrics port in the startup log.
 
-When a Store Daemon restarts, it can recover its previous state:
+### Start Store Daemon with HA
 
-```python
-# The connection manager automatically handles recovery registration
-# with the previous worker ID if available
-
-# Manual recovery registration
-request = global_store_pb2.RegisterWorkerRequest(
-    node_id="worker-node-1",
-    node_address="10.0.0.100",
-    grpc_port=50052,
-    p2p_port=9090,
-    mem_pool_total_size=10 * 1024**3,  # 10GB
-    mem_pool_available_size=8 * 1024**3,  # 8GB
-    is_recovery_registration=True,
-    previous_worker_id="worker_node-1_1640995200"
-)
-
-response = global_store_stub.RegisterWorker(request)
-if response.state_sync_required:
-    # Perform state synchronization
-    pass
+```bash
+uv run tensorcast daemon start \
+  --config=/etc/tensorcast/daemon.yaml \
+  --global-store-mode connect \
+  --global-store-address 10.0.0.5:50051 \
+  --wait
 ```
 
-### Enhanced Heartbeat
+- The orchestrator writes an effective config that enables HA, injects the Global Store endpoint, and fills missing listen/p2p ports.
+- Startup will fail fast if `server.p2p_listen.port` is zero or if `advertise.host` is loopback/unspecified.
 
-Store Daemons send enhanced heartbeats with state information:
+### Manual RPC examples (generated stubs)
+
+Enhanced heartbeat:
 
 ```python
-request = global_store_pb2.WorkerHeartbeatRequest(
-    worker_id="worker_node-1_1640995200",
+import time
+from tensorcast.proto.global_store.v1 import global_store_pb2
+
+req = global_store_pb2.WorkerHeartbeatRequest(
+    worker_id="worker-node-1",
     mem_pool_available_size=7 * 1024**3,
     accepting_new_requests=True,
-    # Enhanced HA fields
     state_version=15,
-    state_checksum="md5_hash_of_local_state",
-    registered_artifact_ids=["artifact1", "artifact2", "artifact3"],
-    last_successful_sync=1640995200,
-    global_store_status=global_store_pb2.ConnectionStatus.CONNECTION_STATUS_CONNECTED
+    state_checksum="local_state_md5",
+    registered_artifact_ids=["artifact1", "artifact2"],
+    last_successful_sync=int(time.time()),
+    global_store_status=global_store_pb2.CONNECTION_STATUS_CONNECTED,
 )
-
-response = global_store_stub.WorkerHeartbeat(request)
-if response.state_sync_required:
-    # Global Store detected inconsistency, perform sync
-    perform_state_sync(response.expected_state_version)
+resp = stub.WorkerHeartbeat(req)
+if resp.state_sync_required:
+    # initiate sync
+    ...
 ```
 
-### State Synchronization
-
-Manual state synchronization when needed:
+State sync:
 
 ```python
-# Prepare local state
+import time
+from google.protobuf import timestamp_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
+from tensorcast.proto.common.v1 import common_pb2
+
+ts = timestamp_pb2.Timestamp()
+ts.FromSeconds(int(time.time()))
 local_state = global_store_pb2.WorkerLocalState(
-    worker_id="worker_node-1_1640995200",
+    worker_id="worker-node-1",
     state_version=15,
     state_checksum="local_state_checksum",
-    local_replicas=[...],  # List of local artifact replicas
-    last_update_timestamp=int(time.time())
+    last_update_ts=ts,
 )
-
-# Request synchronization
-sync_request = global_store_pb2.SynchronizeWorkerStateRequest(
-    worker_id="worker_node-1_1640995200",
-    local_state=local_state,
-    force_full_sync=False
+replica = local_state.local_replicas.add()
+replica.ref.artifact_id = "artifact1"
+replica.memory_info.memory_type = common_pb2.MEMORY_TYPE_GPU
+replica.memory_info.device_id = 0
+replica.memory_info.memory_size = 1 * 1024**3
+resp = stub.SynchronizeWorkerState(
+    global_store_pb2.SynchronizeWorkerStateRequest(
+        worker_id="worker-node-1",
+        local_state=local_state,
+        force_full_sync=False,
+    )
 )
-
-response = global_store_stub.SynchronizeWorkerState(sync_request)
-# Apply state changes
-for change in response.state_changes:
-    if change.type == global_store_pb2.StateChange.ADD_REPLICA:
-        # Add replica locally
-        pass
-    elif change.type == global_store_pb2.StateChange.REMOVE_REPLICA:
-        # Remove replica locally
-        pass
 ```
 
 ## Failure Scenarios
 
-### Global Store Crash/Restart
-
-1. **Automatic Recovery**: Global Store automatically recovers from persistent database
-2. **Worker Rediscovery**: Workers are marked as stale until they reconnect
-3. **State Reconciliation**: When workers reconnect, states are synchronized
-
-### Store Daemon Crash/Restart
-
-1. **Clean Registration**: Store Daemon registers as new worker (clears previous state)
-2. **Artifact Rediscovery**: Local storage is scanned for available artifacts
-3. **State Rebuild**: Artifact replicas are re-registered with Global Store
-
-### Network Partition
-
-1. **Connection Monitoring**: Store Daemon detects Global Store unavailability
-2. **Local Operation**: Continues serving cached artifacts locally
-3. **State Queueing**: Artifact registrations are queued for later sync
-4. **Automatic Reconnection**: Exponential backoff retry until reconnection
-5. **State Synchronization**: Queued changes are synced after reconnection
+- **Global Store crash/restart**: recovery marks workers/replicas stale; daemons continue heartbeating, re-register on `NOT_FOUND`, run full-state sync, and prune drift. Persistent `db_file` keeps registry state.
+- **Daemon crash/restart**: a fresh process registers a new worker id, runs full-state sync, and unloads replicas not expected by the Global Store.
+- **Network partition**: RPC retries are bounded; once connectivity returns the next heartbeat triggers sync. No offline queue is kept—state is rebuilt from the current engine snapshot.
+- **Registration rejected**: ensure `advertise.host` is routable and `p2p_listen.port` is set.
 
 ## Monitoring
 
-### Key Metrics
-
-Monitor these Prometheus metrics for HA health:
-
-```
-# Connection status
-global_store_connection_status{worker_id="..."}
-connection_retry_attempts_total{worker_id="..."}
-connection_downtime_seconds{worker_id="..."}
-
-# State synchronization
-state_sync_operations_total{worker_id="...", result="..."}
-state_sync_duration_seconds{worker_id="..."}
-state_inconsistencies_detected_total{worker_id="..."}
-
-# Recovery operations
-recovery_operations_total{type="...", result="..."}
-recovery_success_rate{type="..."}
-recovery_duration_seconds{type="..."}
-```
-
-### Health Checks
-
-```bash
-# Check Global Store via gRPC
-grpcurl -plaintext global-store:50051 \
-  global_store.GlobalStoreService/ListActiveWorkers
-```
+- **Metrics**: Global Store exports Prometheus metrics (e.g., `tc_state_sync_total`, `tc_state_sync_seconds`, `tc_active_workers`, `tc_replicas_total`, `tc_grpc_server_handled_total`). Scrape `http://<host>:<metrics_port>/metrics`.
+- **Health**:
+  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/HealthCheck`
+  - Inventory: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/ListActiveWorkers`
+- **Daemon visibility**: OTEL spans wrap all Global Store RPCs; counters (hb_success/failure, sync_success/failure) are exported via the configured OTEL sink when enabled.
 
 ## Best Practices
 
-### Deployment
-
-1. **Persistent Storage**: Always use persistent database files for Global Store
-2. **Health Monitoring**: Monitor connection and sync metrics
-3. **Gradual Rollout**: Update Global Store first, then Store Daemons
-4. **Testing**: Test failure scenarios in staging environment
-
-### Configuration
-
-1. **Timeout Values**: Adjust timeouts based on network latency
-2. **Retry Limits**: Use infinite retries for mission-critical deployments
-3. **Sync Intervals**: Balance consistency vs performance needs
-4. **Resource Allocation**: Ensure adequate memory for state queuing
-
-### Troubleshooting
-
-1. **Check Logs**: Both components log HA operations extensively
-2. **Verify Configuration**: Ensure HA is enabled in both components
-3. **Network Connectivity**: Verify gRPC connectivity between components
-4. **Database Access**: Ensure Global Store can read/write database file
-5. **Resource Limits**: Check memory and disk space for state operations
+- Use persistent storage for the Global Store database; back up `cluster_token` with it.
+- Set a routable `server.advertise.host` and non-zero `server.p2p_listen.port` before enabling HA.
+- Only enable `high_availability.force_full_sync_on_empty_inventory` when deliberately draining/retiring a node; otherwise keep the default conservative behavior.
+- Run with `--wait` to ensure both services reach healthy state before clients connect.
+- Keep configs proto-valid (strict parsing) and avoid relying on multiple endpoints—the first `global_store_endpoints` entry is used today.
 
 ## Migration from Legacy Setup
 
-### Phase 1: Enable HA in Global Store
-```bash
-# Update Global Store with persistent database
-global-store --db-file=/data/global-store.db
-```
-
-### Phase 2: Update Store Daemons
-```bash
-# Enable HA in Store Daemon configuration
-store-daemon --config=/etc/store-daemon-ha.yaml
-```
-
-### Phase 3: Verify Operation
-```bash
-# Check all workers are using enhanced heartbeat
-# Monitor connection status and state sync metrics
-# Test failure scenarios
-```
+1. Add a persistent `database.db_file` and optional `meta.cluster_token` to the Global Store config, then restart with `uv run tensorcast global start --config=... --wait`.
+2. Update daemon config to include `high_availability` and a routable `server.advertise.host`/`p2p_listen.port`, then restart with `uv run tensorcast daemon start --global-store-address <addr> --wait`.
+3. Verify via `HealthCheck`, metrics scrape, and a forced `RequestFullStateSync` (daemon restart) before rolling out broadly.
 
 ## Limitations
 
-1. **Single Global Store**: Current implementation supports single Global Store instance
-2. **Eventual Consistency**: System guarantees eventual, not immediate consistency
-3. **Memory Overhead**: State tracking and queueing requires additional memory
-4. **Network Dependency**: HA features require reliable network connectivity
+- Single Global Store instance; no automatic failover or multi-endpoint rotation (first endpoint only).
+- RPC retries are bounded; there is no durable queue of state changes while disconnected.
+- Eventual consistency: reconciles on heartbeat/sync, not instantly.
 
 ## Future Enhancements
 
-- Multi-master Global Store with consensus
-- Cross-region replication
-- Automated failover with standby instances
-- Advanced conflict resolution for concurrent updates
+- Endpoint rotation/failover across multiple Global Store addresses.
+- Multi-master Global Store with consensus and cross-region replication.
+- Automated standby promotion and richer conflict resolution for concurrent updates.

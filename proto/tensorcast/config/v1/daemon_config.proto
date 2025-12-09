@@ -61,6 +61,9 @@ message HighAvailability {
   google.protobuf.Duration periodic_sync_interval = 4;
   int32 max_retries = 5;
   google.protobuf.Duration registration_retry_delay = 6;
+  // When true, an empty local inventory is treated as authoritative and will
+  // remove replicas during sync (intended for drain/retire workflows).
+  bool force_full_sync_on_empty_inventory = 11;
 }
 
 message Engine {

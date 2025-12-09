@@ -27,6 +27,12 @@ class WorkerLifecycleManager {
     uint16_t p2p_port{0};
     int heartbeat_interval_ms{5000};
     int chunk_sync_interval_ms{10000}; // 0 to disable
+    // When true, an empty local inventory is treated as authoritative and will
+    // drive removals via force_full_sync during synchronization.
+    bool force_full_sync_on_empty_inventory{false};
+    // Optional cluster identity guard; if set, daemon will refuse to register
+    // with a Global Store reporting a different token.
+    std::string cluster_token;
   };
 
   WorkerLifecycleManager(
@@ -65,7 +71,9 @@ class WorkerLifecycleManager {
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
-  static std::string compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos);
+  static std::string compute_state_checksum(
+      std::string_view node_id,
+      const std::vector<store::StoreEngine::ReplicaInfo>& infos);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
 

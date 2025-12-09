@@ -371,6 +371,7 @@ class ReplicaRepository(BaseRepository):
             UPDATE artifact_replicas
             SET
                 updated_at = CURRENT_TIMESTAMP,
+                node_id = ?,
                 is_available = ?,
                 max_concurrency = ?,
                 remote_memory_keys = ?,
@@ -382,6 +383,7 @@ class ReplicaRepository(BaseRepository):
             RETURNING replica_id
             """,
             [
+                replica.node_id,
                 replica.is_available,
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),

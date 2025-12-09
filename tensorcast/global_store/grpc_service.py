@@ -1641,7 +1641,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         try:
             success, state_changes, new_version, new_checksum = (
                 self.recovery_service.synchronize_worker_state(
-                    request.worker_id, request.local_state
+                    request.worker_id, request.local_state, request.force_full_sync
                 )
             )
 
