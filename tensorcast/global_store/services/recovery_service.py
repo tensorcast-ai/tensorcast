@@ -6,7 +6,6 @@ Recovery service for Global Store high availability.
 Handles state recovery after failures, worker rediscovery, and state synchronization.
 """
 
-import hashlib
 import time
 from uuid import UUID, uuid4
 
@@ -175,7 +174,10 @@ class RecoveryService:
                 self.replica_repository.mark_unavailable(replica.replica_id)
 
     def synchronize_worker_state(
-        self, worker_id: str, local_state: global_store_pb2.WorkerLocalState
+        self,
+        worker_id: str,
+        local_state: global_store_pb2.WorkerLocalState,
+        force_full_sync: bool = False,
     ) -> tuple[bool, list[global_store_pb2.StateChange], int, str]:
         """
         Synchronize worker state with global state.
@@ -183,6 +185,8 @@ class RecoveryService:
         Args:
             worker_id: Worker ID
             local_state: Worker's local state
+            force_full_sync: When True, treat the provided inventory as
+                authoritative even if empty (allows drains/retirements).
 
         Returns:
             Tuple of (success, state_changes, new_version, new_checksum)
@@ -193,7 +197,9 @@ class RecoveryService:
             global_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
 
             # Compare states and generate changes
-            state_changes = self._compute_state_changes(local_state, global_replicas)
+            state_changes = self._compute_state_changes(
+                local_state, global_replicas, force_full_sync
+            )
 
             current_version = self.worker_state_versions.get(worker_id, 0)
 
@@ -245,6 +251,7 @@ class RecoveryService:
         self,
         local_state: global_store_pb2.WorkerLocalState,
         global_replicas: list[Replica],
+        force_full_sync: bool,
     ) -> list[global_store_pb2.StateChange]:
         """Compute differences between local and global state."""
         state_changes = []
@@ -282,17 +289,15 @@ class RecoveryService:
             state_changes.append(change)
 
         # Safe-removal semantics --------------------------------------------------
-        # Only consider *removals* when the worker explicitly provides a non-empty
-        # inventory.  An empty ``local_replicas`` list is treated as *unknown* –
-        # we assume the worker could not (or chose not to) send its inventory
-        # and therefore suppress destructive REMOVE_REPLICA operations.
-
+        # Default: empty inventory suppresses removals (treat as unknown).
+        # When force_full_sync is True, empty inventory is authoritative and will
+        # drive removals (used for drains / explicit full reconciliation).
         to_remove: set[tuple[str, str, int]]
         if local_state.local_replicas:
-            # Worker supplied an inventory – compute genuine removals.
             to_remove = global_replica_keys - local_replica_keys
+        elif force_full_sync:
+            to_remove = global_replica_keys
         else:
-            # No inventory → do **not** remove anything.
             to_remove = set()
 
         for artifact_id, memory_type, device_id in to_remove:
@@ -441,18 +446,44 @@ class RecoveryService:
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
         """Compute checksum of replica state for consistency checking."""
+        entries: list[tuple[str, str, int, bool, str]] = []
+        for replica in replicas:
+            mem_type = "DISK"
+            device_id = 0
+            if replica.memory_type.value == "GPU":
+                mem_type = "GPU"
+                device_id = replica.device_id
+            elif replica.memory_type.value == "RAM":
+                mem_type = "RAM"
+                device_id = 0
+            entries.append(
+                (
+                    replica.artifact_id,
+                    mem_type,
+                    device_id,
+                    replica.is_available,
+                    replica.node_id or "",
+                )
+            )
+
         # Sort replicas by a stable key for consistent checksum
-        sorted_replicas = sorted(
-            replicas, key=lambda r: (r.artifact_id, r.node_id, r.device_id)
-        )
+        entries.sort(key=lambda e: (e[0], e[1], e[2]))
 
         # Create string representation of state
-        state_str = ""
-        for replica in sorted_replicas:
-            state_str += f"{replica.artifact_id}:{replica.node_id}:{replica.device_id}:{replica.is_available};"
+        state_parts = [
+            f"{artifact_id}:{node_id}:{device_id}:{mem_type}:{1 if available else 0};"
+            for artifact_id, mem_type, device_id, available, node_id in entries
+        ]
+        state_str = "".join(state_parts)
 
-        # Compute MD5 hash
-        return hashlib.md5(state_str.encode()).hexdigest()
+        # Compute FNV-1a 64-bit hash for portability with C++ daemon
+        hash_val = 0xCBF29CE484222325
+        fnv_prime = 0x100000001B3
+        for b in state_str.encode():
+            hash_val ^= b
+            hash_val = (hash_val * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+
+        return f"{hash_val:016x}"
 
     def get_worker_state_version(self, worker_id: str) -> int:
         """Get current state version for a worker."""

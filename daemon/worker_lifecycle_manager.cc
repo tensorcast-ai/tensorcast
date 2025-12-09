@@ -4,13 +4,15 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <exception>
 #include <utility>
 
 #include "absl/container/flat_hash_set.h"
-#include "absl/hash/hash.h"
+#include "absl/crc/crc32c.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -30,6 +32,30 @@ namespace commonpb = common::v1;
 using namespace std::chrono_literals;
 
 namespace {
+
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> hb_success_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_heartbeat_success_total");
+  return ctr;
+}
+
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> hb_failure_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_heartbeat_failure_total");
+  return ctr;
+}
+
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> sync_success_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_success_total");
+  return ctr;
+}
+
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<uint64_t>> sync_failure_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_failure_total");
+  return ctr;
+}
 
 bool is_loopback_or_unspecified(absl::string_view addr) {
   if (addr.empty())
@@ -63,6 +89,7 @@ gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> WorkerLifec
 
   store::components::GlobalStoreClientConfig cfg;
   cfg.global_store_address = opts.global_store_addr;
+  cfg.cluster_token = opts.cluster_token;
   auto client = std::make_shared<store::components::GlobalStoreClient>(std::move(cfg));
   return gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>>{std::move(client)};
 }
@@ -228,7 +255,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         registered_ids.push_back(i.artifact_id);
       }
       // Compute simple checksum over current snapshot
-      state_checksum_ = compute_state_checksum(infos);
+      state_checksum_ = compute_state_checksum(node_id_, infos);
       auto hb_or = global_store_->send_heartbeat_enhanced(
           worker_id_,
           engine_->get_available_memory(),
@@ -241,6 +268,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
       if (!hb_or.ok()) {
         LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
         hb_failure_.fetch_add(1);
+        hb_failure_counter()->Add(1);
         // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
         // perform recovery-aware re-registration to preserve identity.
         if (global_store_->is_connected()) {
@@ -252,6 +280,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
       } else {
         const auto& hb = *hb_or;
         hb_success_.fetch_add(1);
+        hb_success_counter()->Add(1);
         last_hb_ts_s_.store(
             static_cast<int64_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
@@ -285,6 +314,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
             rep->mutable_ref()->set_artifact_id(i.artifact_id);
             rep->mutable_ref()->set_replica_id("");
             auto* mi = rep->mutable_memory_info();
+            mi->set_node_id(node_id_);
             mi->set_memory_size(i.size_bytes);
             if (i.gpu_state != common::memory::MemoryLocation::NONE) {
               mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
@@ -305,16 +335,18 @@ void WorkerLifecycleManager::heartbeat_loop() {
                     : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
                 .replica = 0};
             rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
-            rep->mutable_stats()->set_is_available(true);
+            rep->mutable_stats()->set_is_available(i.is_registered_for_comm);
             rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
           }
 
           std::vector<global_store::StateChange> changes;
-          auto sync_or = global_store_->synchronize_worker_state(local_state, /*force_full_sync=*/false, &changes);
+          const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && infos.empty();
+          auto sync_or = global_store_->synchronize_worker_state(local_state, force_full_sync, &changes);
           if (sync_or.ok()) {
             state_version_ = sync_or->first;
             state_checksum_ = sync_or->second;
             sync_success_.fetch_add(1);
+            sync_success_counter()->Add(1);
             // Apply server-suggested removals
             std::vector<std::string> obsolete;
             obsolete.reserve(changes.size());
@@ -402,6 +434,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           } else {
             VLOG(1) << "SynchronizeWorkerState returned: " << sync_or.status();
             sync_failure_.fetch_add(1);
+            sync_failure_counter()->Add(1);
             // Fallback to full-state sync if server indicates desync or errors persist
             std::vector<commonpb::ReplicaInfo> expected;
             auto full_or = global_store_->request_full_state_sync(worker_id_, state_version_, &expected);
@@ -728,22 +761,61 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
   apply_obsolete_replicas(obsolete);
 }
 
-std::string WorkerLifecycleManager::compute_state_checksum(const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
-  // Simple stable hash over (artifact_id, gpu_state, cpu_state, device_id)
-  size_t h = 0;
+std::string WorkerLifecycleManager::compute_state_checksum(
+    std::string_view node_id,
+    const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
+  struct Entry {
+    std::string artifact_id;
+    std::string memory_type;
+    int device_id;
+    bool available;
+  };
+
+  std::vector<Entry> entries;
+  entries.reserve(infos.size());
+
   for (const auto& i : infos) {
-    h = absl::HashOf(h, i.artifact_id, static_cast<int>(i.gpu_state), static_cast<int>(i.cpu_state), i.gpu_device_id);
+    std::string mem_type = "DISK";
+    int device_id = 0;
+    if (i.gpu_state != common::memory::MemoryLocation::NONE) {
+      mem_type = "GPU";
+      device_id = i.gpu_device_id;
+    } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
+      mem_type = "RAM";
+      device_id = 0;
+    }
+    entries.push_back(
+        Entry{
+            .artifact_id = i.artifact_id,
+            .memory_type = std::move(mem_type),
+            .device_id = device_id,
+            .available = i.is_registered_for_comm,
+        });
   }
-  // Format as hex for readability
-  std::string out;
-  out.resize(sizeof(size_t) * 2);
-  static const char* hex = "0123456789abcdef";
-  for (size_t i = 0; i < sizeof(size_t); ++i) {
-    auto byte = static_cast<uint8_t>((h >> ((sizeof(size_t) - 1 - i) * 8)) & 0xFF);
-    out[i * 2] = hex[(byte >> 4) & 0xF];
-    out[i * 2 + 1] = hex[byte & 0xF];
+
+  std::sort(entries.begin(), entries.end(), [](const Entry& lhs, const Entry& rhs) {
+    if (lhs.artifact_id != rhs.artifact_id)
+      return lhs.artifact_id < rhs.artifact_id;
+    if (lhs.memory_type != rhs.memory_type)
+      return lhs.memory_type < rhs.memory_type;
+    return lhs.device_id < rhs.device_id;
+  });
+
+  std::string state_str;
+  for (const auto& e : entries) {
+    absl::StrAppendFormat(
+        &state_str, "%s:%s:%d:%s:%d;", e.artifact_id, node_id, e.device_id, e.memory_type, e.available ? 1 : 0);
   }
-  return out;
+
+  // FNV-1a 64-bit over the stable string; portable across languages.
+  uint64_t hash = 14695981039346656037ull; // FNV offset basis
+  constexpr uint64_t kFnvPrime = 1099511628211ull; // FNV prime
+  for (char c : state_str) {
+    hash ^= static_cast<uint8_t>(c);
+    hash *= kFnvPrime;
+  }
+
+  return absl::StrFormat("%016x", hash);
 }
 
 } // namespace tensorcast::daemon
