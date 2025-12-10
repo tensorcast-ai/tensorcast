@@ -111,6 +111,18 @@ uint32_t compute_backoff_ticks(uint32_t attempts) {
   return std::min<uint32_t>(backoff, kMaxCooldownTicks);
 }
 
+void send_reports(comps::IGlobalStoreClient* client, const std::vector<comps::PersistenceReport>& reports) {
+  if (client == nullptr) {
+    return;
+  }
+  for (const auto& report : reports) {
+    const absl::Status st = client->report_persistence_status(report);
+    if (!st.ok()) {
+      LOG(WARNING) << "persistence.report_status_failed: " << st.message();
+    }
+  }
+}
+
 nlohmann::json target_to_json(const PersistenceTargetState& target) {
   nlohmann::json j;
   j["node_id"] = target.node_id;
@@ -339,8 +351,14 @@ absl::optional<PersistenceTaskState> PersistenceManager::get_latest_for_artifact
 }
 
 void PersistenceManager::advance_once_for_test() {
-  absl::MutexLock lock(&mu_);
-  advance_locked();
+  comps::IGlobalStoreClient* gs_client = nullptr;
+  std::vector<comps::PersistenceReport> reports;
+  {
+    absl::MutexLock lock(&mu_);
+    gs_client = global_store_;
+    advance_locked(reports);
+  }
+  send_reports(gs_client, reports);
 }
 
 void PersistenceManager::set_local_node_id(std::string node_id) {
@@ -795,10 +813,16 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
   }
 }
 
-void PersistenceManager::maybe_report_status_locked(const PersistenceTaskState& task) {
+void PersistenceManager::maybe_report_status_locked(
+    const PersistenceTaskState& task,
+    std::vector<comps::PersistenceReport>& reports) {
   if (global_store_ == nullptr) {
     return;
   }
+  reports.push_back(build_report(task));
+}
+
+store::components::PersistenceReport PersistenceManager::build_report(const PersistenceTaskState& task) {
   comps::PersistenceReport report;
   report.task_id = task.task_id;
   report.plan_id = task.plan_id;
@@ -827,10 +851,7 @@ void PersistenceManager::maybe_report_status_locked(const PersistenceTaskState& 
     report.shards.push_back(std::move(shard_report));
   }
 
-  const absl::Status st = global_store_->report_persistence_status(report);
-  if (!st.ok()) {
-    LOG(WARNING) << "persistence.report_status_failed: " << st.message();
-  }
+  return report;
 }
 
 void PersistenceManager::persist_task_locked(const PersistenceTaskState& task) const {
@@ -948,11 +969,17 @@ gs::PersistenceState PersistenceManager::to_global_state(v1::PersistenceState st
 }
 
 void PersistenceManager::tick() {
-  absl::MutexLock lock(&mu_);
-  advance_locked();
+  comps::IGlobalStoreClient* gs_client = nullptr;
+  std::vector<comps::PersistenceReport> reports;
+  {
+    absl::MutexLock lock(&mu_);
+    gs_client = global_store_;
+    advance_locked(reports);
+  }
+  send_reports(gs_client, reports);
 }
 
-void PersistenceManager::advance_locked() {
+void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& reports) {
   for (auto& entry : tasks_) {
     auto& task = entry.second;
     if (is_terminal(task.state)) {
@@ -967,7 +994,7 @@ void PersistenceManager::advance_locked() {
       propagate_degraded_reason(task);
       task.progress = compute_task_progress(task);
       record_progress_metric(task.progress);
-      maybe_report_status_locked(task);
+      maybe_report_status_locked(task, reports);
       continue;
     }
     bool any_failed = false;
@@ -1007,7 +1034,7 @@ void PersistenceManager::advance_locked() {
       }
     }
     record_progress_metric(task.progress);
-    maybe_report_status_locked(task);
+    maybe_report_status_locked(task, reports);
     persist_task_locked(task);
   }
 }

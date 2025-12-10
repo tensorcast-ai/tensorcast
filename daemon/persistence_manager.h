@@ -131,19 +131,22 @@ class PersistenceManager {
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void advance_shard_locked(PersistenceTaskState& task, PersistenceShardState& shard)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
-  void maybe_report_status_locked(const PersistenceTaskState& task) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void maybe_report_status_locked(
+      const PersistenceTaskState& task,
+      std::vector<store::components::PersistenceReport>& reports) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   absl::Status ack_and_register_remote(
       const PersistenceTaskState& task,
       const PersistenceShardState& shard,
       PersistenceTargetState& target);
   static bool is_terminal(v1::PersistenceState state);
+  static store::components::PersistenceReport build_report(const PersistenceTaskState& task);
   static tensorcast::global_store::v1::PersistenceState to_global_state(v1::PersistenceState state);
   void persist_task_locked(const PersistenceTaskState& task) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void load_task_log();
   void update_counter_from_task_id(absl::string_view task_id) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   void tick();
-  void advance_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void advance_locked(std::vector<store::components::PersistenceReport>& reports) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   LipManager* lip_mgr_; // Not owned.
   store::components::IGlobalStoreClient* global_store_{nullptr}; // Not owned.
