@@ -16,6 +16,12 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
+## Placement & Persistence Options (Design 0041)
+
+- `RegisterArtifactOptions` now exposes `placement_policy` (`local_only` default, `replicated`, `sharded`) and `persist` (default `False`). Calls to `Store.put`/`put_async` forward these values unchanged.
+- When `persist=True`, the registration pipeline invokes daemon RPC `StartPersistence` after commit and records the returned `persistence_task_id` on `RegisteredArtifact`.
+- Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
+
 ## Artifact Handles & Metadata Cache
 
 - `tensorcast.artifact(...)` / `Store.artifact(...)` provide lazy handles that

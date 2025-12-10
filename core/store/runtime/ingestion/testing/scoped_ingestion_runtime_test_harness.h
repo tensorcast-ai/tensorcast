@@ -52,6 +52,10 @@ class ScopedIngestionRuntimeTestHarness {
   }
 
   void shutdown() {
+    if (env_ != nullptr) {
+      // Ensure no in-flight ingestion callbacks target torn-down subscribers.
+      env_->runtime_context().drain_events();
+    }
     if (replica_runtime_) {
       replica_runtime_->clear_mem();
       replica_runtime_.reset();

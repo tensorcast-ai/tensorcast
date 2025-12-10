@@ -8,14 +8,17 @@
 #include <filesystem>
 #include <memory>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/device_resolver.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/lip_manager.h"
+#include "daemon/persistence_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
 #include "daemon/replica_session_manager.h"
@@ -60,6 +63,9 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     // Observability
     bool allow_high_card_attrs{false};
 
+    // Persistence
+    std::filesystem::path persistence_log_path{"/tmp/tensorcast_persistence.log"};
+
     // API behavior flags
     // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
     // ordering (artifact_id, device_id). If false (default), uses numeric
@@ -86,6 +92,12 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
         opts_(opts) {
     start_sweepers();
+    persistence_mgr_ = std::make_unique<PersistenceManager>(
+        scheduler_.get(),
+        lip_mgr_.get().get(),
+        engine_->get_artifact_chunk_bytes(),
+        std::chrono::milliseconds(500),
+        opts_.persistence_log_path);
     // Wire helper services and controllers (post-scheduler construction)
     sessions_svc_ = std::make_unique<SessionsService>(
         sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(opts_.sessions_ttl.count()));
@@ -136,12 +148,24 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   }
 
   // Worker lifecycle reflection for status RPCs
-  void set_worker_registered(std::string worker_id) {
+  void set_worker_registered(std::string worker_id, std::string node_id) {
+    std::string node_id_copy;
     {
       absl::MutexLock l(&worker_mu_);
       worker_id_ = std::move(worker_id);
+      node_id_ = std::move(node_id);
+      node_id_copy = node_id_;
+    }
+    if (persistence_mgr_) {
+      persistence_mgr_->set_local_node_id(node_id_copy);
     }
     is_registered_.store(true);
+  }
+
+  void set_global_store_client(store::components::IGlobalStoreClient* client) {
+    if (persistence_mgr_) {
+      persistence_mgr_->set_global_store_client(client);
+    }
   }
 
   bool is_registered() const {
@@ -258,6 +282,15 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::GetArtifactIndexByIdRequest* req,
       v1::GetArtifactIndexByIdResponse* resp) override;
 
+  grpc::Status StartPersistence(
+      grpc::ServerContext* ctx,
+      const v1::StartPersistenceRequest* req,
+      v1::StartPersistenceResponse* resp) override;
+  grpc::Status QueryPersistenceStatus(
+      grpc::ServerContext* ctx,
+      const v1::QueryPersistenceStatusRequest* req,
+      v1::QueryPersistenceStatusResponse* resp) override;
+
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,
@@ -311,6 +344,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::atomic<bool> is_registered_{false};
   mutable absl::Mutex worker_mu_;
   std::string worker_id_ ABSL_GUARDED_BY(worker_mu_);
+  std::string node_id_ ABSL_GUARDED_BY(worker_mu_);
 
   // Verification tracker extracted to its own component
   gsl::not_null<std::unique_ptr<VerificationTracker>> verif_tracker_;
@@ -345,6 +379,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<PersistenceManager> persistence_mgr_;
 };
 
 class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {

@@ -41,9 +41,9 @@ graph TB
 
 ## Runtime Events & Publish Context Tracking
 
-- P2P loads route through IngestionRuntime which still emits `ingestion_started`, `ingestion_completed`, and `ingestion_failed` events for every transfer. RuntimeContext mints a `publish_context_id` per request and the completion payload is delivered directly to MetadataGateway, so auto-publish dedupes against any synchronous `register_replica_with_global_store` calls without relying on RuntimeContext subscriptions.
-- The completion payload includes request metadata (artifact id, source, target device, bytes transferred, duration) so load-balancing heuristics and UMA telemetry can attribute work to the correct pipeline stage even when the transport fails.
-- MetadataGateway treats a completion event that shares a `publish_context_id` with an already-issued publish RPC as a lightweight TTL refresh. When the event arrives first it performs the Global Store RPC and later synchronous publish calls detect the shared context and skip duplicate registration.
+- `MaterializationFacade` mints a `publish_context_id` for every ingestion when `publish_to_global_store` is enabled (the daemon defaults to true). Started/completed events flow through the runtime ingestion event hub, carrying the request source, target device, bytes, and duration.
+- `MetadataGateway` subscribes to completion events and registers the replica (and variant residency when `view_id` is present) with Global Store using the same `publish_context_id`. Registration results are cached per replica so subsequent explicit calls are deduped.
+- `MaterializeOrchestrator` still invokes `register_replica_with_global_store` after P2P or disk success, but the call reuses the cached publish context so `MetadataGateway` will return immediately if the event-driven publish already succeeded.
 
 ## Unified Staging Flow Control
 
@@ -197,13 +197,15 @@ cursor.execute("""
 
 ### Materialization Behavior (current implementation)
 
-- **AUTO mode orchestration**: `MaterializeOrchestrator::run()` first requests a transport from Global Store. If granted, it builds a `P2PSource` and calls the backend’s `ingest_from_p2p()` implementation (StoreEngine now implements the `loading::MaterializationBackend` interface); otherwise it falls back to disk via `ingest_from_disk()`.
-- **P2P path (synchronous in engine)**: `ingest_from_p2p()` now flows through `materialization::runtime::pipeline::IngestionPipeline`, performing the transfer synchronously (waits for load to complete). On GPU memory pressure it attempts eviction and retries once. It then returns a `ReplicaHandle` with `ready_future` already resolved.
-- **Disk path**: `ingest_from_disk()` shares the same pipeline stages and starts an async load that blocks until the requested memory location reaches `LOADED` before returning. The returned `ReplicaHandle` includes the loading future (already completed on success) and CUDA IPC handle for GPU targets.
-- **Registration**: On successful P2P or disk load, the orchestrator finalizes the transport with Global Store and the ingestion pipeline emits an event. `runtime::metadata::MetadataGateway` consumes that event via the RuntimeContext dispatcher and registers the local replica, so the orchestrator/ingestion runtime never invoke the registration helper directly.
-- **Telemetry**: The same RuntimeContext notification is consumed by `runtime::ReplicaRuntime`, which refreshes UMA metrics and ingestion histograms so `StoreEngine::get_available_memory()` and metrics exporters stay consistent without explicit callbacks inside the façade.
-- **Lease-in-place payloads**: Registration feeds now include `storage_entries` and `tensor_aliases` so the daemon can rebuild the canonical tensor index without reopening CUDA IPC handles for every tensor. Metrics (`tc_register_storage_count`, `tc_register_tensor_count`) expose the number of unique storages and logical tensors processed per commit to validate deduplication.
-- **Failure handling**: If a transport is granted but P2P ingestion fails, the orchestrator still calls `complete_replica_transport()` to release capacity on the source, then attempts disk fallback when `hints.disk_path` is provided. If no `disk_path` is available, the error is propagated.
+- **AUTO mode orchestration**: `MaterializationService` delegates `AUTO` requests to `MaterializeOrchestrator` when a Global Store client is connected. `SourcePreference::kPreferDisk` only takes the disk-first path when `hints.disk_path` is set; `kPreferP2P` requires a canonical `artifact_id`. View-aware transports are attempted first (`request_view_transport`) and fall back to canonical routing if the server does not support views. When Global Store is unreachable and no disk path is supplied, the request fails early.
+- **Pipeline execution**: Both `ingest_from_p2p()` and `ingest_from_disk()` run through the unified `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). SourceAdapter enforces that the communication manager is enabled for P2P and carries the daemon’s fallback disk directory. MetadataStage rebuilds or fetches canonical index JSON (from disk; from Global Store for view-only requests), enforces descriptor schema v3, and plans view projections. AllocationStage retries GPU loads after eviction when needed and blocks until P2P loads finish, returning a handle with a ready future already resolved.
+- **Verification and hashing**: VerificationStage validates P2P transfers using the sender’s `verification_json` (key-point metadata), computes view hashes when a plan is present, and optionally computes full data digests when `force_full_digest_on_load` or safetensors ingestion requires it. Disk loads backfill missing safetensors descriptors and reuse or generate verification JSON for canonical and view registrations.
+- **Registration**: Ingestion completions publish to the ingestion event hub with a minted `publish_context_id`; `MetadataGateway` consumes the event and registers the replica (including variant residency when `view_id` is present). `MaterializeOrchestrator` still completes the transport and calls `register_replica_with_global_store()`, but the cached publish context ensures duplicate publishes are skipped.
+- **Failure handling**: Granted transports are always closed via `complete_replica_transport()`. If the P2P load fails and `hints.disk_path` is available, the orchestrator falls back to disk; otherwise the error is propagated. Disk loads triggered after an orchestrator failure intentionally stay local when Global Store is unavailable.
+
+### Variant-aware routing (current state)
+
+- The daemon passes `view_id` and view placement hints into `request_view_transport()`. The C++ client currently falls back to canonical routing because the server API is view-unaware; residency and verification metadata for the view are still registered through `MetadataGateway` once the load completes.
 
 
 ## P2P Transfer Workflow (Key-based)
@@ -263,6 +265,8 @@ sequenceDiagram
     RPC-->>Client: MaterializeByKeyResponse(status=ALLOCATED, handle_bytes, artifact_id)
 ```
 
+`IngestionPipeline` already emits a completion event with a `publish_context_id`; `MetadataGateway` registers the replica from that event. The explicit `register_replica_with_global_store()` in the diagram reuses the same context and is a no-op when the event-driven publish has already succeeded.
+
 ### Key Components and File Locations
 
 #### Python Layer
@@ -291,6 +295,7 @@ sequenceDiagram
 
 ### Request phase (server)
 
+- When no replicas exist for the requested artifact, the transport service fails fast with `NOT_FOUND` and records `transport_request(not_found)` before entering the selection loop.
 - Global Store loops until timeout to find a candidate via `ReplicaRepository.find_available_for_transport()`; on success it creates a `Transport` row and increments a per-replica counter atomically.
 - Retry cadence is controlled by `transport_wait_retry_interval_ms`. The heartbeat staleness cutoff uses `heartbeat_timeout_ms`.
 - Metrics recorded: `inc_transport_request(artifact_id, "success"|"timeout")`, `observe_transport_wait(artifact_id, seconds)`, `inc_active_transports()`.
@@ -307,7 +312,7 @@ sequenceDiagram
 ## Chunk-aware Remote Memory Export
 
 - The source replica exports chunk metadata from the VS-backed CPU region and registers remote-access handles via `Replica::enable_remote_memory_access()` which internally calls `export_chunks_for_p2p(...)`.
-- The Global Store carries these as `remote_memory_keys` and `buffer_sizes` in `MemoryInfo`. The orchestrator passes them into `P2PSource` so the engine can fetch efficiently.
+- The Global Store carries these as `remote_memory_keys`, `buffer_sizes`, and optional `verification_json` in `MemoryInfo`. The orchestrator passes them into `P2PSource` so the engine can fetch efficiently and verify key points after transfer.
 - When RDMA is disabled, GPU→GPU transfers over TCP use staging buffers and mark registration options with `needs_staging=true`.
 
 

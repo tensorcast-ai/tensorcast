@@ -58,6 +58,10 @@ service GlobalStoreService {
   // Update chunk states (called by StoreDaemon periodically)
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
 
+  // ========== Placement & Persistence (Design-0041) ==========
+  rpc PlanPlacement(PlanPlacementRequest) returns (PlanPlacementResponse) {}
+  rpc ReportPersistenceStatus(ReportPersistenceStatusRequest) returns (ReportPersistenceStatusResponse) {}
+
   // ========== Key Mapping (RFC-0014) ==========
   // Map a human-readable key to a single artifact_id, with optional replica hints
   rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
@@ -510,6 +514,95 @@ message ListReplicasV2Request {
 message ListReplicasV2Response {
   repeated ArtifactReplicaRecord replicas = 1;
   tensorcast.common.v1.PageInfo page_info = 2;
+}
+
+// ========== Placement & Persistence (Design-0041) ==========
+enum PlacementPolicy {
+  PLACEMENT_POLICY_UNSPECIFIED = 0;
+  PLACEMENT_POLICY_LOCAL_ONLY = 1;
+  PLACEMENT_POLICY_REPLICATED = 2;
+  PLACEMENT_POLICY_SHARDED = 3;
+}
+
+enum PlacementTargetState {
+  PLACEMENT_TARGET_STATE_UNSPECIFIED = 0;
+  PLACEMENT_TARGET_STATE_PENDING = 1;
+  PLACEMENT_TARGET_STATE_COPYING = 2;
+  PLACEMENT_TARGET_STATE_COMPLETE = 3;
+  PLACEMENT_TARGET_STATE_FAILED = 4;
+  PLACEMENT_TARGET_STATE_SKIPPED = 5;
+}
+
+enum PersistenceState {
+  PERSISTENCE_STATE_UNSPECIFIED = 0;
+  PERSISTENCE_STATE_PENDING = 1;
+  PERSISTENCE_STATE_RUNNING = 2;
+  PERSISTENCE_STATE_DEGRADED = 3;
+  PERSISTENCE_STATE_SUCCESS = 4;
+  PERSISTENCE_STATE_FAILED = 5;
+}
+
+message PlacementShard {
+  string shard_id = 1;
+  uint32 shard_idx = 2;
+  uint64 size_bytes = 3;
+  string content_digest = 4;
+  uint64 byte_range_start = 5;
+  uint64 byte_range_length = 6;
+  repeated uint64 chunk_ids = 7;
+}
+
+message PlacementTarget {
+  string node_id = 1;
+  string lease_id = 2;
+  PlacementTargetState target_state = 3;
+  string degraded_reason = 4;
+}
+
+message ShardPlacement {
+  PlacementShard shard = 1;
+  repeated PlacementTarget targets = 2;
+  string degraded_reason = 3;
+}
+
+message PlanPlacementRequest {
+  string artifact_id = 1;
+  PlacementPolicy placement_policy = 2;
+  repeated PlacementShard shards = 3;
+  string source_node_id = 4;
+}
+
+message PlanPlacementResponse {
+  string plan_id = 1;
+  PlacementPolicy effective_policy = 2;
+  repeated ShardPlacement placements = 3;
+  bool degraded = 4;
+  string degraded_reason = 5;
+}
+
+message PersistenceShardStatus {
+  string shard_id = 1;
+  uint32 shard_idx = 2;
+  PersistenceState state = 3;
+  double progress = 4;
+  string degraded_reason = 5;
+  string last_error = 6;
+  repeated PlacementTarget targets = 7;
+}
+
+message ReportPersistenceStatusRequest {
+  string task_id = 1;
+  string artifact_id = 2;
+  string plan_id = 3;
+  PersistenceState state = 4;
+  double progress = 5;
+  string last_error = 6;
+  string degraded_reason = 7;
+  repeated PersistenceShardStatus shard_statuses = 8;
+}
+
+message ReportPersistenceStatusResponse {
+  Status status = 1;
 }
 
 // ========== RFC-0014 Key Mapping Messages ==========

@@ -23,6 +23,7 @@ enum class TaskKind : std::uint8_t {
   kRegionRegistry,
   // Unified lifecycle task replaces SessionTTL, RegJoinTTL, and PidWatch
   kSessionLifecycle,
+  kPersistence,
 };
 
 class BackgroundScheduler {
@@ -50,6 +51,7 @@ class BackgroundScheduler {
     t.fn = std::move(fn);
     t.next_due = Clock::now() + interval;
     tasks_.push_back(std::move(t));
+    cv_.notify_all();
   }
 
   void start() {

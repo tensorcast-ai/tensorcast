@@ -14,6 +14,7 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
+from tensorcast.api._config import PlacementPolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -122,6 +123,19 @@ def get_host_pid() -> int:
 
 # This is a singleton class that manages the checkpoint
 class DaemonCtl:
+    _PLACEMENT_POLICY_TO_PROTO: dict[str, store_daemon_pb2.PlacementPolicy] = {
+        "local_only": store_daemon_pb2.PLACEMENT_POLICY_LOCAL_ONLY,
+        "replicated": store_daemon_pb2.PLACEMENT_POLICY_REPLICATED,
+        "sharded": store_daemon_pb2.PLACEMENT_POLICY_SHARDED,
+    }
+    _PERSISTENCE_STATE_FROM_PROTO = {
+        store_daemon_pb2.PERSISTENCE_STATE_PENDING: "pending",
+        store_daemon_pb2.PERSISTENCE_STATE_RUNNING: "running",
+        store_daemon_pb2.PERSISTENCE_STATE_DEGRADED: "degraded",
+        store_daemon_pb2.PERSISTENCE_STATE_SUCCESS: "success",
+        store_daemon_pb2.PERSISTENCE_STATE_FAILED: "failed",
+    }
+
     def __init__(self, server_address="127.0.0.1:8073"):
         # SDK-library safe: ensure OTel is active or ask app to init. No downgrade.
         ensure_client_otel("tensorcast-client", role="client")
@@ -1768,6 +1782,71 @@ class DaemonCtl:
                 retries=1,
             )
             return resp.tensor_index_data
+
+    @classmethod
+    def _placement_policy_to_proto(
+        cls, placement_policy: str | PlacementPolicy
+    ) -> store_daemon_pb2.PlacementPolicy:
+        key = (
+            placement_policy.value
+            if isinstance(placement_policy, PlacementPolicy)
+            else str(placement_policy).strip().lower()
+        )
+        if key not in cls._PLACEMENT_POLICY_TO_PROTO:
+            raise ValueError(
+                "placement_policy must be one of: local_only, replicated, sharded"
+            )
+        return cls._PLACEMENT_POLICY_TO_PROTO[key]
+
+    @classmethod
+    def _persistence_state_from_proto(
+        cls, state: store_daemon_pb2.PersistenceState
+    ) -> str:
+        return cls._PERSISTENCE_STATE_FROM_PROTO.get(state, "unknown")
+
+    def start_persistence(
+        self,
+        *,
+        artifact_id: str,
+        placement_policy: str | PlacementPolicy = "local_only",
+        persist_to_shared_disk: bool = True,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.StartPersistenceResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        policy_proto = self._placement_policy_to_proto(placement_policy)
+        req = store_daemon_pb2.StartPersistenceRequest(
+            artifact_id=artifact_id,
+            placement_policy=policy_proto,
+            persist_to_shared_disk=bool(persist_to_shared_disk),
+        )
+        with self._client_span("Client/StartPersistence") as span:
+            return self._unary_call(
+                self.stub.StartPersistence, req, timeout=timeout_s, span=span, retries=0
+            )
+
+    def query_persistence_status(
+        self,
+        *,
+        task_id: str | None = None,
+        artifact_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.QueryPersistenceStatusResponse:
+        if not task_id and not artifact_id:
+            raise ValueError("task_id or artifact_id is required")
+        req = store_daemon_pb2.QueryPersistenceStatusRequest()
+        if task_id:
+            req.task_id = task_id
+        if artifact_id:
+            req.artifact_id = artifact_id
+        with self._client_span("Client/QueryPersistenceStatus") as span:
+            return self._unary_call(
+                self.stub.QueryPersistenceStatus,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
 
     def ping(self, timeout_s: float = 2.0) -> bool:
         try:

@@ -337,6 +337,18 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("revoke_key_mapping not used in tests");
   }
 
+  absl::StatusOr<tensorcast::store::components::PlacementPlanResult> plan_placement(
+      std::string_view,
+      tensorcast::global_store::v1::PlacementPolicy,
+      const std::vector<tensorcast::store::components::PlacementShardSpec>&,
+      std::string_view) override {
+    return absl::UnimplementedError("plan_placement not used in tests");
+  }
+
+  absl::Status report_persistence_status(const tensorcast::store::components::PersistenceReport&) override {
+    return absl::UnimplementedError("report_persistence_status not used in tests");
+  }
+
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
 };
 

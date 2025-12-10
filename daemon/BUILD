@@ -32,6 +32,7 @@ sc_cc_library(
         ":lip_bridge_lib",
         ":lip_manager_lib",
         ":materialization_controller_lib",
+        ":persistence_manager_lib",
         ":ref_tracker_hdr",
         ":registration_controller_lib",
         ":registration_manager_lib",
@@ -56,6 +57,28 @@ sc_cc_library(
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "persistence_manager_lib",
+    srcs = ["persistence_manager.cc"],
+    hdrs = ["persistence_manager.h"],
+    deps = [
+        ":background_scheduler_hdr",
+        ":lip_manager_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store:global_store_client",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/types:optional",
+        "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
     ],
@@ -712,6 +735,17 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/testing:common",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "persistence_manager_test",
+    srcs = ["persistence_manager_test.cc"],
+    deps = [
+        ":persistence_manager_lib",
+        "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],

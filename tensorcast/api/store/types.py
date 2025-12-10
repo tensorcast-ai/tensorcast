@@ -223,6 +223,30 @@ class StoreCapabilities:
     server_config: ServerConfig | None = None
 
 
+@dataclass(frozen=True)
+class PersistenceShardStatus:
+    shard_id: str
+    shard_idx: int
+    state: str
+    progress: float
+    degraded_reason: str | None = None
+    last_error: str | None = None
+    target_nodes: tuple[str, ...] = ()
+    lease_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PersistenceStatusResult:
+    task_id: str
+    artifact_id: str
+    plan_id: str
+    state: str
+    progress: float
+    degraded_reason: str | None = None
+    last_error: str | None = None
+    shards: tuple[PersistenceShardStatus, ...] = ()
+
+
 __all__ = [
     "ArtifactError",
     "ArtifactStatusCode",
@@ -238,4 +262,6 @@ __all__ = [
     "StoreCapabilities",
     "StoreOptions",
     "TensorDict",
+    "PersistenceStatusResult",
+    "PersistenceShardStatus",
 ]

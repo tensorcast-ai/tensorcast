@@ -10,6 +10,10 @@ sidebar_position: 4
 
 This document explains High Availability (HA) as implemented in code: startup recovery, enhanced heartbeat, state synchronization, and daemon lifecycle behavior. It links directly to source files and proto definitions used in production.
 
+## TODO
+
+- Add persistence-task durability/resume plan for distributed persistence (daemon-local journal + recovery flow) once design 0041 lands.
+
 ## Key Components (sources)
 
 - Global Store

@@ -223,6 +223,58 @@ CREATE INDEX IF NOT EXISTS idx_chunk_directory_state ON chunk_directory(chunk_st
 CREATE INDEX IF NOT EXISTS idx_chunk_directory_update_time ON chunk_directory(last_update_time);
 CREATE INDEX IF NOT EXISTS idx_chunk_directory_source_selection ON chunk_directory(artifact_id, chunk_idx, chunk_state, node_load_ratio);
 
+-- Persistence placement plans (Design-0041)
+CREATE TABLE IF NOT EXISTS artifact_placements (
+    plan_id TEXT PRIMARY KEY,
+    artifact_id TEXT NOT NULL,
+    policy TEXT CHECK (policy IN ('local_only','replicated','sharded')) NOT NULL,
+    shard_count INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS artifact_placement_shards (
+    plan_id TEXT NOT NULL,
+    shard_idx INTEGER NOT NULL,
+    shard_id TEXT NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    content_digest TEXT NOT NULL,
+    byte_range_start BIGINT NOT NULL,
+    byte_range_length BIGINT NOT NULL,
+    chunk_ids JSON NOT NULL,
+    PRIMARY KEY (plan_id, shard_idx)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_placement_shards_digest ON artifact_placement_shards(content_digest);
+
+CREATE TABLE IF NOT EXISTS artifact_placement_targets (
+    plan_id TEXT NOT NULL,
+    shard_idx INTEGER NOT NULL,
+    node_id TEXT NOT NULL,
+    lease_id TEXT NULL,
+    target_state TEXT CHECK (target_state IN ('pending','copying','complete','failed','skipped')) NOT NULL,
+    degraded_reason TEXT NULL,
+    PRIMARY KEY (plan_id, shard_idx, node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_placement_targets_node ON artifact_placement_targets(node_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_placement_targets_plan_state ON artifact_placement_targets(plan_id, target_state);
+
+CREATE TABLE IF NOT EXISTS artifact_placement_summary (
+    plan_id TEXT PRIMARY KEY,
+    plan_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS artifact_persistence_status (
+    task_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    artifact_id TEXT NOT NULL,
+    state TEXT CHECK (state IN ('pending','running','success','failed','degraded')) NOT NULL,
+    progress REAL NOT NULL DEFAULT 0.0,
+    last_error TEXT NULL,
+    degraded_reason TEXT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_persistence_status_artifact_state ON artifact_persistence_status(artifact_id, state);
+
 -- RFC-0014: Human key → artifact_id mapping with optional routing hints
 CREATE TABLE IF NOT EXISTS key_mappings (
     key TEXT PRIMARY KEY,

@@ -202,6 +202,15 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - Feeds Prometheus gauges for capacity monitoring
 - Exposes `ListMemoryTierStatuses` to return the latest per-node telemetry snapshots and `ListOutstandingLeases` for live lease state
 
+### PlacementService
+
+**Purpose:** Plan shard placement and ingest persistence status (Design 0041).
+
+**Key behaviors:**
+- Generates placement plans that always include the source node and attempt a stable-DRAM remote target when policy is `replicated` or `sharded`; degrades to local-only when no remote capacity is available.
+- Persists plan metadata across normalized tables (`artifact_placements`, `artifact_placement_shards`, `artifact_placement_targets`) plus an optional JSON summary for quick fetches.
+- Accepts daemon `ReportPersistenceStatus` updates to update per-target state and append task status rows in `artifact_persistence_status`.
+
 ### ChunkService
 
 **Purpose:** Support distributed memory pool via chunk directory.
@@ -233,6 +242,11 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `artifact_indices` | Deduplicated tensor index blobs (by SHA-256) | Cold |
 | `artifact_transports` | In-flight transport records | Warm |
 | `chunk_directory` | VS/UMA chunk-level location tracking | Warm |
+| `artifact_placements` | Normalized persistence plan headers | Cold |
+| `artifact_placement_shards` | Shard summaries (size, range, digest, chunk_ids) | Cold |
+| `artifact_placement_targets` | Shard target nodes and lease IDs | Warm |
+| `artifact_placement_summary` | Optional cached plan JSON for fast lookups | Cold |
+| `artifact_persistence_status` | Task-level persistence status and progress | Warm |
 | `key_mappings` | Human-friendly key → artifact_id lookup | Cold |
 | `memory_tier_snapshots` | UMA telemetry time-series | Warm |
 | `memory_tier_leases` | Preemptible memory lease lifecycle | Warm |
