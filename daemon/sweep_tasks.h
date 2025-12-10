@@ -61,7 +61,7 @@ class LockTtlTask final : public IBackgroundTask {
 
  private:
   TransportLockManager& locks_;
-  store::StoreEngine& engine_;
+  [[maybe_unused]] store::StoreEngine& engine_;
 };
 
 class RegionRegistrySweepTask final : public IBackgroundTask {

@@ -61,6 +61,10 @@ service StoreDaemonService {
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+
+  // ========== Persistence (Design-0041) ==========
+  rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
+  rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -115,6 +119,22 @@ enum MaterializationSource {
   MATERIALIZATION_SOURCE_DISK = 1;
   MATERIALIZATION_SOURCE_P2P = 2;
   MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
+}
+
+enum PlacementPolicy {
+  PLACEMENT_POLICY_UNSPECIFIED = 0;
+  PLACEMENT_POLICY_LOCAL_ONLY = 1;
+  PLACEMENT_POLICY_REPLICATED = 2;
+  PLACEMENT_POLICY_SHARDED = 3;
+}
+
+enum PersistenceState {
+  PERSISTENCE_STATE_UNSPECIFIED = 0;
+  PERSISTENCE_STATE_PENDING = 1;
+  PERSISTENCE_STATE_RUNNING = 2;
+  PERSISTENCE_STATE_DEGRADED = 3;
+  PERSISTENCE_STATE_SUCCESS = 4;
+  PERSISTENCE_STATE_FAILED = 5;
 }
 
 message MemCopyHandle {
@@ -684,4 +704,47 @@ message GetArtifactIndexByIdRequest {
 }
 message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
+}
+
+// ========== Persistence (Design-0041) ==========
+message PersistenceShardStatus {
+  string shard_id = 1;
+  uint32 shard_idx = 2;
+  PersistenceState state = 3;
+  double progress = 4;
+  string degraded_reason = 5;
+  string last_error = 6;
+  repeated string target_nodes = 7;
+  repeated string lease_ids = 8;
+}
+
+message StartPersistenceRequest {
+  string artifact_id = 1;
+  PlacementPolicy placement_policy = 2;
+  // Enable shared-disk persistence alongside remote replicas.
+  bool persist_to_shared_disk = 3;
+}
+
+message StartPersistenceResponse {
+  string task_id = 1;
+  string plan_id = 2;
+  PersistenceState state = 3;
+  double progress = 4;
+  string degraded_reason = 5;
+}
+
+message QueryPersistenceStatusRequest {
+  string task_id = 1;
+  string artifact_id = 2;
+}
+
+message QueryPersistenceStatusResponse {
+  string task_id = 1;
+  string artifact_id = 2;
+  string plan_id = 3;
+  PersistenceState state = 4;
+  double progress = 5;
+  string degraded_reason = 6;
+  string last_error = 7;
+  repeated PersistenceShardStatus shards = 8;
 }

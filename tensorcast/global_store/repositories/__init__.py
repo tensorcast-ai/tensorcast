@@ -6,6 +6,10 @@ from .chunk_directory_repository import ChunkDirectoryRepository
 from .leaf_repository import LeafRepository
 from .memory_tier_lease_repository import MemoryTierLeaseRepository
 from .memory_tier_snapshot_repository import MemoryTierSnapshotRepository
+from .placement_repository import (
+    ArtifactPersistenceStatusRepository,
+    ArtifactPlacementRepository,
+)
 from .replica_repository import ReplicaRepository
 from .transport_repository import TransportRepository
 from .variant_repository import VariantRepository
@@ -20,4 +24,6 @@ __all__ = [
     "WorkerRepository",
     "MemoryTierSnapshotRepository",
     "MemoryTierLeaseRepository",
+    "ArtifactPlacementRepository",
+    "ArtifactPersistenceStatusRepository",
 ]

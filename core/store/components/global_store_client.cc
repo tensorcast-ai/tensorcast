@@ -1429,4 +1429,124 @@ absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::str
   return response.tensor_index_data();
 }
 
+absl::StatusOr<PlacementPlanResult> GlobalStoreClient::plan_placement(
+    std::string_view artifact_id,
+    global_store::PlacementPolicy policy,
+    const std::vector<PlacementShardSpec>& shards,
+    std::string_view source_node_id) {
+  global_store::PlanPlacementRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_placement_policy(policy);
+  request.set_source_node_id(std::string(source_node_id));
+  for (const auto& shard : shards) {
+    auto* out = request.add_shards();
+    out->set_shard_id(shard.shard_id);
+    out->set_shard_idx(shard.shard_idx);
+    out->set_size_bytes(shard.size_bytes);
+    out->set_content_digest(shard.content_digest);
+    out->set_byte_range_start(shard.byte_range_start);
+    out->set_byte_range_length(shard.byte_range_length);
+    out->mutable_chunk_ids()->Add(shard.chunk_ids.begin(), shard.chunk_ids.end());
+  }
+
+  global_store::PlanPlacementResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->PlanPlacement(ctx, req, resp); },
+      "PlanPlacement");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.plan_id().empty()) {
+    return absl::InternalError("PlanPlacement returned empty plan_id");
+  }
+
+  PlacementPlanResult result;
+  result.plan_id = response.plan_id();
+  result.effective_policy = response.effective_policy();
+  result.degraded = response.degraded();
+  result.degraded_reason = response.degraded_reason();
+  result.placements.reserve(response.placements_size());
+
+  for (const auto& placement_proto : response.placements()) {
+    PlacementShardSpec shard{
+        .shard_id = placement_proto.shard().shard_id(),
+        .shard_idx = placement_proto.shard().shard_idx(),
+        .size_bytes = placement_proto.shard().size_bytes(),
+        .content_digest = placement_proto.shard().content_digest(),
+        .byte_range_start = placement_proto.shard().byte_range_start(),
+        .byte_range_length = placement_proto.shard().byte_range_length(),
+        .chunk_ids = {placement_proto.shard().chunk_ids().begin(), placement_proto.shard().chunk_ids().end()}};
+    ShardPlacement placement;
+    placement.shard = std::move(shard);
+    placement.degraded_reason = placement_proto.degraded_reason();
+    placement.targets.reserve(placement_proto.targets_size());
+    for (const auto& target_proto : placement_proto.targets()) {
+      PlacementTargetStatus target;
+      target.node_id = target_proto.node_id();
+      target.lease_id = target_proto.lease_id();
+      target.target_state = target_proto.target_state();
+      target.degraded_reason = target_proto.degraded_reason();
+      placement.targets.push_back(std::move(target));
+    }
+    result.placements.push_back(std::move(placement));
+  }
+  return result;
+}
+
+absl::Status GlobalStoreClient::report_persistence_status(const PersistenceReport& report) {
+  global_store::ReportPersistenceStatusRequest request;
+  request.set_task_id(report.task_id);
+  request.set_artifact_id(report.artifact_id);
+  request.set_plan_id(report.plan_id);
+  request.set_state(report.state);
+  request.set_progress(report.progress);
+  if (!report.last_error.empty()) {
+    request.set_last_error(report.last_error);
+  }
+  if (!report.degraded_reason.empty()) {
+    request.set_degraded_reason(report.degraded_reason);
+  }
+  for (const auto& shard : report.shards) {
+    auto* shard_proto = request.add_shard_statuses();
+    shard_proto->set_shard_id(shard.shard_id);
+    shard_proto->set_shard_idx(shard.shard_idx);
+    shard_proto->set_state(shard.state);
+    shard_proto->set_progress(shard.progress);
+    if (!shard.degraded_reason.empty()) {
+      shard_proto->set_degraded_reason(shard.degraded_reason);
+    }
+    if (!shard.last_error.empty()) {
+      shard_proto->set_last_error(shard.last_error);
+    }
+    for (const auto& target : shard.targets) {
+      auto* target_proto = shard_proto->add_targets();
+      target_proto->set_node_id(target.node_id);
+      if (!target.lease_id.empty()) {
+        target_proto->set_lease_id(target.lease_id);
+      }
+      target_proto->set_target_state(target.target_state);
+      if (!target.degraded_reason.empty()) {
+        target_proto->set_degraded_reason(target.degraded_reason);
+      }
+    }
+  }
+
+  global_store::ReportPersistenceStatusResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ReportPersistenceStatus(ctx, req, resp); },
+      "ReportPersistenceStatus");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("ReportPersistenceStatus failed: status=%s", status_to_cstr(response.status())));
+  }
+  return absl::OkStatus();
+}
+
 } // namespace tensorcast::store::components

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from tensorcast.api._config import (
     GetArtifactOptions,
+    PlacementPolicy,
     PlanType,
     RegisterArtifactOptions,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "RegisteredLease",
     "RegistrationResult",
     "PlanType",
+    "PlacementPolicy",
     "RegisterArtifactOptions",
     "GetArtifactOptions",
     "calculate_tensor_device_offsets",

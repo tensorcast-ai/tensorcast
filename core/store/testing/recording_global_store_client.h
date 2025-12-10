@@ -10,6 +10,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
 #include "tensorcast/memory_tier/v1/memory_tier.pb.h"
@@ -28,6 +29,13 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::VariantViewUpdate> view_updates;
   std::vector<components::MemoryTierStatusPayload> memory_tier_statuses;
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
+  std::vector<components::PlacementPlanResult> placement_plans;
+  std::vector<components::PersistenceReport> persistence_reports;
+  bool allow_plan_placement{true};
+  bool deny_leases{false};
+  bool fail_register_replica{false};
+  bool fail_acknowledge_lease{false};
+  std::string remote_node_id{"stub-remote"};
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -72,6 +80,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       common::memory::MemoryLocation,
       uint64_t,
       uint32_t) override {
+    if (fail_register_replica) {
+      return absl::UnavailableError("register_replica disabled in RecordingGlobalStoreClient");
+    }
     registered_replicas.emplace_back(artifact_id);
     return std::string("replica-0");
   }
@@ -211,12 +222,18 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   absl::StatusOr<components::MemoryTierLeaseDescriptor> request_memory_tier_lease(
       const components::MemoryTierLeaseDescriptor& request) override {
+    if (deny_leases) {
+      return absl::UnavailableError("lease denied by test stub");
+    }
     memory_tier_leases.push_back(request);
     return request;
   }
 
   absl::StatusOr<components::MemoryTierLeaseDescriptor> acknowledge_memory_tier_lease(
       const components::MemoryTierLeaseAckPayload& ack) override {
+    if (fail_acknowledge_lease) {
+      return absl::UnavailableError("lease ack denied in RecordingGlobalStoreClient");
+    }
     components::MemoryTierLeaseDescriptor lease;
     lease.lease_id = ack.lease_id;
     lease.node_id = ack.node_id;
@@ -245,6 +262,43 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       }
     }
     return absl::NotFoundError("lease not found");
+  }
+
+  absl::StatusOr<components::PlacementPlanResult> plan_placement(
+      std::string_view artifact_id,
+      tensorcast::global_store::v1::PlacementPolicy policy,
+      const std::vector<components::PlacementShardSpec>& shards,
+      std::string_view source_node_id) override {
+    if (!allow_plan_placement) {
+      return absl::UnavailableError("plan placement disabled in RecordingGlobalStoreClient");
+    }
+    components::PlacementPlanResult plan;
+    plan.plan_id = absl::StrCat("plan-", placement_plans.size());
+    plan.effective_policy = policy;
+    plan.degraded = false;
+    plan.degraded_reason = "";
+    for (const auto& shard : shards) {
+      components::ShardPlacement placement;
+      placement.shard = shard;
+      components::PlacementTargetStatus target;
+      target.node_id = std::string(source_node_id);
+      target.target_state = tensorcast::global_store::v1::PLACEMENT_TARGET_STATE_PENDING;
+      placement.targets.push_back(std::move(target));
+      if (policy != tensorcast::global_store::v1::PLACEMENT_POLICY_LOCAL_ONLY) {
+        components::PlacementTargetStatus remote;
+        remote.node_id = remote_node_id;
+        remote.target_state = tensorcast::global_store::v1::PLACEMENT_TARGET_STATE_PENDING;
+        placement.targets.push_back(std::move(remote));
+      }
+      plan.placements.push_back(std::move(placement));
+    }
+    placement_plans.push_back(plan);
+    return plan;
+  }
+
+  absl::Status report_persistence_status(const components::PersistenceReport& report) override {
+    persistence_reports.push_back(report);
+    return absl::OkStatus();
   }
 
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}

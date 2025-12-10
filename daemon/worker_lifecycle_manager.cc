@@ -83,15 +83,16 @@ WorkerLifecycleManager::WorkerLifecycleManager(
       global_store_(make_global_store_client(opts_)),
       node_id_(derive_node_id()) {}
 
-gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
+gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
     const Options& opts) {
   ABSL_CHECK(!opts.global_store_addr.empty()) << "WorkerLifecycleManager requires a Global Store address";
 
   store::components::GlobalStoreClientConfig cfg;
   cfg.global_store_address = opts.global_store_addr;
   cfg.cluster_token = opts.cluster_token;
-  auto client = std::make_shared<store::components::GlobalStoreClient>(std::move(cfg));
-  return gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>>{std::move(client)};
+  std::shared_ptr<store::components::IGlobalStoreClient> client =
+      std::make_shared<store::components::GlobalStoreClient>(std::move(cfg));
+  return gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>>{std::move(client)};
 }
 
 std::string WorkerLifecycleManager::derive_node_id() {
@@ -130,6 +131,8 @@ absl::Status WorkerLifecycleManager::start() {
   if (!st.ok()) {
     return st;
   }
+  store::components::IGlobalStoreClient* global_store_client = global_store_.get().get();
+  service_->set_global_store_client(global_store_client);
 
   auto node_addr_or = resolve_advertised_address(opts_);
   if (!node_addr_or.ok()) {
@@ -160,7 +163,7 @@ absl::Status WorkerLifecycleManager::start() {
   if (!reg_or.ok())
     return reg_or.status();
   worker_id_ = *reg_or;
-  service_->set_worker_registered(worker_id_);
+  service_->set_worker_registered(worker_id_, node_id_);
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(worker_id_, node_id_, node_addr, grpc_port, opts_.p2p_port);
@@ -518,7 +521,7 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
     LOG(INFO) << "Worker identity changed after recovery: old=" << worker_id_ << " new=" << new_worker_id;
   }
   worker_id_ = new_worker_id;
-  service_->set_worker_registered(worker_id_);
+  service_->set_worker_registered(worker_id_, node_id_);
   engine_->set_worker_identity(worker_id_, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Perform a best-effort full-state sync after re-registration
   std::vector<commonpb::ReplicaInfo> expected;

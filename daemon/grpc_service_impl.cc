@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_format.h"
@@ -122,6 +123,100 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
     v1::GetArtifactIndexByIdResponse* resp) {
   RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::StartPersistence(
+    grpc::ServerContext* ctx,
+    const v1::StartPersistenceRequest* req,
+    v1::StartPersistenceResponse* resp) {
+  RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (req->placement_policy() == v1::PLACEMENT_POLICY_UNSPECIFIED) {
+    return {StatusCode::INVALID_ARGUMENT, "placement_policy is required"};
+  }
+  if (is_shutting_down_.load()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!persistence_mgr_) {
+    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
+  }
+  auto task_or =
+      persistence_mgr_->start_task(req->artifact_id(), req->placement_policy(), req->persist_to_shared_disk());
+  if (!task_or.ok()) {
+    return to_grpc_status(task_or.status());
+  }
+  const auto& task = *task_or;
+
+  resp->set_task_id(task.task_id);
+  resp->set_plan_id(task.plan_id);
+  resp->set_state(task.state);
+  resp->set_progress(task.progress);
+  if (!task.degraded_reason.empty()) {
+    resp->set_degraded_reason(task.degraded_reason);
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::QueryPersistenceStatus(
+    grpc::ServerContext* ctx,
+    const v1::QueryPersistenceStatusRequest* req,
+    v1::QueryPersistenceStatusResponse* resp) {
+  RpcContext rctx{"QueryPersistenceStatus", *ctx, opts_.allow_high_card_attrs};
+  if (req->task_id().empty() && req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "task_id or artifact_id is required"};
+  }
+  std::optional<std::string> task_key;
+  if (!req->task_id().empty()) {
+    task_key = req->task_id();
+  }
+  if (!persistence_mgr_) {
+    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
+  }
+  absl::optional<PersistenceTaskState> task;
+  if (task_key.has_value()) {
+    task = persistence_mgr_->get_by_task_id(*task_key);
+  } else {
+    task = persistence_mgr_->get_latest_for_artifact(req->artifact_id());
+  }
+
+  if (!task.has_value()) {
+    return {StatusCode::NOT_FOUND, "persistence task not found"};
+  }
+  resp->set_task_id(task_key.value_or(task->task_id));
+  resp->set_artifact_id(task->artifact_id);
+  resp->set_plan_id(task->plan_id);
+  resp->set_state(task->state);
+  resp->set_progress(task->progress);
+  if (!task->degraded_reason.empty()) {
+    resp->set_degraded_reason(task->degraded_reason);
+  }
+  if (!task->last_error.empty()) {
+    resp->set_last_error(task->last_error);
+  }
+  for (const auto& shard : task->shards) {
+    auto* out = resp->add_shards();
+    out->set_shard_id(shard.shard_id);
+    out->set_shard_idx(shard.shard_idx);
+    out->set_state(shard.state);
+    out->set_progress(shard.progress);
+    if (!shard.degraded_reason.empty()) {
+      out->set_degraded_reason(shard.degraded_reason);
+    }
+    if (!shard.last_error.empty()) {
+      out->set_last_error(shard.last_error);
+    }
+    out->mutable_target_nodes()->Reserve(static_cast<int>(shard.targets.size()));
+    out->mutable_lease_ids()->Reserve(static_cast<int>(shard.targets.size()));
+    for (const auto& target : shard.targets) {
+      out->add_target_nodes(target.node_id);
+      out->add_lease_ids(target.lease_id);
+    }
+  }
+  rctx.mark_success();
+  return Status::OK;
 }
 
 Status StoreDaemonServiceImpl::UnloadReplica(

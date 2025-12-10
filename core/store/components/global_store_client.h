@@ -25,6 +25,8 @@
 
 namespace tensorcast::store::components {
 
+namespace global_store = tensorcast::global_store::v1;
+
 // Configuration for Global Store Client
 struct GlobalStoreClientConfig {
   std::string global_store_address = "localhost:50051";
@@ -90,7 +92,7 @@ struct VariantViewUpdate {
   bool mark_verified{false};
   uint64_t canonical_size_bytes{0};
   uint64_t canonical_bytes_covered{0};
-  std::vector<global_store::v1::LeafWrite> leaf_writes;
+  std::vector<global_store::LeafWrite> leaf_writes;
 };
 
 enum class MemoryTierLeaseKind { kStable, kPreemptible };
@@ -143,6 +145,58 @@ struct MemoryTierLeaseAckPayload {
   uint64_t ack_epoch_ns{0};
 };
 
+struct PlacementShardSpec {
+  std::string shard_id;
+  uint32_t shard_idx{0};
+  uint64_t size_bytes{0};
+  std::string content_digest;
+  uint64_t byte_range_start{0};
+  uint64_t byte_range_length{0};
+  std::vector<uint64_t> chunk_ids;
+};
+
+struct PlacementTargetStatus {
+  std::string node_id;
+  std::string lease_id;
+  global_store::PlacementTargetState target_state{global_store::PLACEMENT_TARGET_STATE_PENDING};
+  std::string degraded_reason;
+};
+
+struct ShardPlacement {
+  PlacementShardSpec shard;
+  std::vector<PlacementTargetStatus> targets;
+  std::string degraded_reason;
+};
+
+struct PlacementPlanResult {
+  std::string plan_id;
+  global_store::PlacementPolicy effective_policy{global_store::PLACEMENT_POLICY_UNSPECIFIED};
+  bool degraded{false};
+  std::string degraded_reason;
+  std::vector<ShardPlacement> placements;
+};
+
+struct PersistenceShardReport {
+  std::string shard_id;
+  uint32_t shard_idx{0};
+  global_store::PersistenceState state{global_store::PERSISTENCE_STATE_PENDING};
+  double progress{0.0};
+  std::string degraded_reason;
+  std::string last_error;
+  std::vector<PlacementTargetStatus> targets;
+};
+
+struct PersistenceReport {
+  std::string task_id;
+  std::string artifact_id;
+  std::string plan_id;
+  global_store::PersistenceState state{global_store::PERSISTENCE_STATE_PENDING};
+  double progress{0.0};
+  std::string last_error;
+  std::string degraded_reason;
+  std::vector<PersistenceShardReport> shards;
+};
+
 class IGlobalStoreClient {
  public:
   virtual ~IGlobalStoreClient() = default;
@@ -164,7 +218,7 @@ class IGlobalStoreClient {
       uint64_t mem_pool_available_size,
       bool accepting_new_requests = true) = 0;
 
-  virtual absl::StatusOr<global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+  virtual absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
       bool accepting_new_requests,
@@ -172,7 +226,7 @@ class IGlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global_store::v1::ConnectionStatus connection_status = global_store::v1::CONNECTION_STATUS_CONNECTED) = 0;
+      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
@@ -239,9 +293,9 @@ class IGlobalStoreClient {
       const std::vector<uint32_t>& chunk_indices) = 0;
 
   virtual absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
-      const global_store::v1::WorkerLocalState& local_state,
+      const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::v1::StateChange>* out_changes) = 0;
+      std::vector<global_store::StateChange>* out_changes) = 0;
 
   virtual absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
@@ -297,6 +351,14 @@ class IGlobalStoreClient {
       uint32_t p2p_port) = 0;
 
   virtual absl::Status update_artifact_view_state(const VariantViewUpdate& update) = 0;
+
+  virtual absl::StatusOr<PlacementPlanResult> plan_placement(
+      std::string_view artifact_id,
+      global_store::PlacementPolicy policy,
+      const std::vector<PlacementShardSpec>& shards,
+      std::string_view source_node_id) = 0;
+
+  virtual absl::Status report_persistence_status(const PersistenceReport& report) = 0;
 };
 
 class GlobalStoreClient : public IGlobalStoreClient {
@@ -324,7 +386,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       bool accepting_new_requests = true) override;
 
   // Enhanced heartbeat with HA state fields
-  absl::StatusOr<global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
+  absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
       bool accepting_new_requests,
@@ -332,7 +394,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global_store::v1::ConnectionStatus connection_status = global_store::v1::CONNECTION_STATUS_CONNECTED) override;
+      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 
@@ -403,9 +465,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   // HA State Synchronization
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
-      const global_store::v1::WorkerLocalState& local_state,
+      const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::v1::StateChange>* out_changes) override;
+      std::vector<global_store::StateChange>* out_changes) override;
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
@@ -444,6 +506,14 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   absl::Status update_artifact_view_state(const VariantViewUpdate& update) override;
 
+  absl::StatusOr<PlacementPlanResult> plan_placement(
+      std::string_view artifact_id,
+      global_store::PlacementPolicy policy,
+      const std::vector<PlacementShardSpec>& shards,
+      std::string_view source_node_id) override;
+
+  absl::Status report_persistence_status(const PersistenceReport& report) override;
+
  private:
   // Helper for RPC retries
   template <typename Request, typename Response, typename RpcMethod>
@@ -465,7 +535,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   const GlobalStoreClientConfig config_;
   const gsl::not_null<std::shared_ptr<grpc::Channel>> channel_;
-  const gsl::not_null<std::unique_ptr<global_store::v1::GlobalStoreService::Stub>> stub_;
+  const gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>> stub_;
   const gsl::not_null<std::unique_ptr<tensorcast::memory_tier::v1::MemoryTierService::Stub>> memory_tier_stub_;
   std::string worker_id_;
   std::string node_id_;

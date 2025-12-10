@@ -75,10 +75,33 @@ class PlanType(Enum):
         )
 
 
+class PlacementPolicy(Enum):
+    LOCAL_ONLY = "local_only"
+    REPLICATED = "replicated"
+    SHARDED = "sharded"
+
+    @staticmethod
+    def parse(value: object) -> "PlacementPolicy":
+        if isinstance(value, PlacementPolicy):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"local_only", "local"}:
+            return PlacementPolicy.LOCAL_ONLY
+        if normalized in {"replicated", "replica"}:
+            return PlacementPolicy.REPLICATED
+        if normalized in {"sharded", "shard"}:
+            return PlacementPolicy.SHARDED
+        raise ValueError(
+            f"Unknown placement_policy '{value}'; expected local_only, replicated, or sharded."
+        )
+
+
 class RegisterArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     plan: PlanType = PlanType.VRAM_LEASED
+    placement_policy: PlacementPolicy = PlacementPolicy.LOCAL_ONLY
+    persist: bool = False
     p2p_prefer: str = "vram"
     max_inflight_bytes: int = 512 * 1024 * 1024
     release_on_tensor_commit: bool = True
@@ -98,6 +121,14 @@ class RegisterArtifactOptions(BaseModel):
             return PlanType.parse(value)
         except InvalidPlan:
             raise
+        except Exception as exc:  # noqa: BLE001
+            raise InvalidPlan(str(exc)) from exc
+
+    @field_validator("placement_policy", mode="before")
+    @classmethod
+    def _normalize_placement_policy(cls, value: object) -> PlacementPolicy:
+        try:
+            return PlacementPolicy.parse(value)
         except Exception as exc:  # noqa: BLE001
             raise InvalidPlan(str(exc)) from exc
 
@@ -128,6 +159,7 @@ __all__ = [
     "DEFAULT_PINNED_TIMEOUT_MS",
     "GetArtifactOptions",
     "PlanType",
+    "PlacementPolicy",
     "RegisterArtifactOptions",
     "clear_daemon_address",
     "get_daemon_address",

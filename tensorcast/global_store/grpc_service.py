@@ -27,8 +27,19 @@ from tensorcast.global_store.exceptions import (
     TimeoutError,
     ValidationError,
 )
-from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.models import (
+    MemoryType,
+    PersistenceShardStatus,
+    PersistenceStatus,
+    PlacementPlan,
+    PlacementShard,
+    PlacementTarget,
+    Replica,
+    Worker,
+)
 from tensorcast.global_store.repositories import (
+    ArtifactPersistenceStatusRepository,
+    ArtifactPlacementRepository,
     ChunkDirectoryRepository,
     LeafRepository,
     ReplicaRepository,
@@ -46,6 +57,7 @@ from tensorcast.global_store.repositories.key_mapping_repository import (
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
+    PlacementService,
     RecoveryService,
     TransportService,
     ViewStateService,
@@ -73,6 +85,40 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     This class handles gRPC requests and delegates to service layer for
     business logic. Thread safety is handled by DuckDB's cursor artifact.
     """
+
+    _POLICY_FROM_PROTO = {
+        global_store_pb2.PLACEMENT_POLICY_LOCAL_ONLY: "local_only",
+        global_store_pb2.PLACEMENT_POLICY_REPLICATED: "replicated",
+        global_store_pb2.PLACEMENT_POLICY_SHARDED: "sharded",
+    }
+    _POLICY_TO_PROTO = {v: k for k, v in _POLICY_FROM_PROTO.items()}
+
+    _TARGET_STATE_FROM_PROTO = {
+        global_store_pb2.PLACEMENT_TARGET_STATE_UNSPECIFIED: "pending",
+        global_store_pb2.PLACEMENT_TARGET_STATE_PENDING: "pending",
+        global_store_pb2.PLACEMENT_TARGET_STATE_COPYING: "copying",
+        global_store_pb2.PLACEMENT_TARGET_STATE_COMPLETE: "complete",
+        global_store_pb2.PLACEMENT_TARGET_STATE_FAILED: "failed",
+        global_store_pb2.PLACEMENT_TARGET_STATE_SKIPPED: "skipped",
+    }
+    _TARGET_STATE_TO_PROTO = {
+        "pending": global_store_pb2.PLACEMENT_TARGET_STATE_PENDING,
+        "copying": global_store_pb2.PLACEMENT_TARGET_STATE_COPYING,
+        "complete": global_store_pb2.PLACEMENT_TARGET_STATE_COMPLETE,
+        "failed": global_store_pb2.PLACEMENT_TARGET_STATE_FAILED,
+        "skipped": global_store_pb2.PLACEMENT_TARGET_STATE_SKIPPED,
+    }
+
+    _PERSISTENCE_STATE_FROM_PROTO = {
+        global_store_pb2.PERSISTENCE_STATE_PENDING: "pending",
+        global_store_pb2.PERSISTENCE_STATE_RUNNING: "running",
+        global_store_pb2.PERSISTENCE_STATE_DEGRADED: "degraded",
+        global_store_pb2.PERSISTENCE_STATE_SUCCESS: "success",
+        global_store_pb2.PERSISTENCE_STATE_FAILED: "failed",
+    }
+    _PERSISTENCE_STATE_TO_PROTO = {
+        v: k for k, v in _PERSISTENCE_STATE_FROM_PROTO.items()
+    }
 
     def __init__(self, db_file: str | None = None):
         """
@@ -108,6 +154,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.variant_repository = VariantRepository(self.connection)
         self.leaf_repository = LeafRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.placement_repository = ArtifactPlacementRepository(self.connection)
+        self.persistence_status_repository = ArtifactPersistenceStatusRepository(
+            self.connection
+        )
 
         # Initialize services
         self.artifact_service = ArtifactService(self.replica_repository)
@@ -120,6 +170,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.chunk_service = ChunkService(self.chunk_directory_repository)
         self.view_state_service = ViewStateService(
             self.variant_repository, self.leaf_repository
+        )
+        self.placement_service = PlacementService(
+            self.worker_repository,
+            self.placement_repository,
+            self.persistence_status_repository,
         )
 
         # Initialize recovery service for high availability
@@ -210,6 +265,56 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         if len(digest) != 32:
             return None
         return digest.hex()
+
+    @classmethod
+    def _policy_from_proto(cls, value: global_store_pb2.PlacementPolicy) -> str:
+        try:
+            return cls._POLICY_FROM_PROTO[value]
+        except KeyError as exc:  # noqa: BLE001
+            raise ValidationError("placement_policy is required") from exc
+
+    @classmethod
+    def _policy_to_proto(cls, value: str) -> global_store_pb2.PlacementPolicy:
+        normalized = value.strip().lower()
+        if normalized not in cls._POLICY_TO_PROTO:
+            raise ValidationError(f"Unknown placement policy '{value}'")
+        return cls._POLICY_TO_PROTO[normalized]
+
+    @classmethod
+    def _target_state_from_proto(
+        cls, value: global_store_pb2.PlacementTargetState
+    ) -> str:
+        try:
+            return cls._TARGET_STATE_FROM_PROTO[value]
+        except KeyError as exc:  # noqa: BLE001
+            raise ValidationError("target_state is required") from exc
+
+    @classmethod
+    def _target_state_to_proto(
+        cls, value: str
+    ) -> global_store_pb2.PlacementTargetState:
+        normalized = value.strip().lower()
+        if normalized not in cls._TARGET_STATE_TO_PROTO:
+            raise ValidationError(f"Unknown target state '{value}'")
+        return cls._TARGET_STATE_TO_PROTO[normalized]
+
+    @classmethod
+    def _persistence_state_from_proto(
+        cls, value: global_store_pb2.PersistenceState
+    ) -> str:
+        try:
+            return cls._PERSISTENCE_STATE_FROM_PROTO[value]
+        except KeyError as exc:  # noqa: BLE001
+            raise ValidationError("persistence state is required") from exc
+
+    @classmethod
+    def _persistence_state_to_proto(
+        cls, value: str
+    ) -> global_store_pb2.PersistenceState:
+        normalized = value.strip().lower()
+        if normalized not in cls._PERSISTENCE_STATE_TO_PROTO:
+            raise ValidationError(f"Unknown persistence state '{value}'")
+        return cls._PERSISTENCE_STATE_TO_PROTO[normalized]
 
     def _initiate_startup_recovery(self):
         """Initiate recovery process on startup."""
@@ -1802,7 +1907,179 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 updates_applied=0,
             )
 
+    # ========== Placement & Persistence Methods ==========
+
+    def PlanPlacement(
+        self,
+        request: global_store_pb2.PlanPlacementRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.PlanPlacementResponse:
+        if not request.artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("artifact_id is required")
+            return global_store_pb2.PlanPlacementResponse()
+        if not request.source_node_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("source_node_id is required")
+            return global_store_pb2.PlanPlacementResponse()
+        try:
+            policy = self._policy_from_proto(request.placement_policy)
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.PlanPlacementResponse()
+
+        shard_models: list[PlacementShard] = []
+        for shard in request.shards:
+            shard_id = shard.shard_id or f"{request.artifact_id}:{shard.shard_idx}"
+            shard_models.append(
+                PlacementShard(
+                    plan_id="",
+                    shard_idx=shard.shard_idx,
+                    shard_id=shard_id,
+                    size_bytes=shard.size_bytes,
+                    content_digest=shard.content_digest,
+                    byte_range_start=shard.byte_range_start,
+                    byte_range_length=shard.byte_range_length,
+                    chunk_ids=list(shard.chunk_ids),
+                )
+            )
+
+        try:
+            plan = self.placement_service.plan_placement(
+                request.artifact_id,
+                policy,
+                shard_models,
+                source_node_id=request.source_node_id,
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.PlanPlacementResponse()
+        except Exception:
+            logger.exception("Failed to plan placement")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Failed to plan placement")
+            return global_store_pb2.PlanPlacementResponse()
+
+        return self._plan_to_proto(plan)
+
+    def ReportPersistenceStatus(
+        self,
+        request: global_store_pb2.ReportPersistenceStatusRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ReportPersistenceStatusResponse:
+        if not request.task_id or not request.plan_id or not request.artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("task_id, plan_id, and artifact_id are required")
+            return global_store_pb2.ReportPersistenceStatusResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            state = self._persistence_state_from_proto(request.state)
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.ReportPersistenceStatusResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        shard_statuses: list[PersistenceShardStatus] = []
+        try:
+            for shard in request.shard_statuses:
+                shard_state = self._persistence_state_from_proto(shard.state)
+                targets = [
+                    PlacementTarget(
+                        plan_id=request.plan_id,
+                        shard_idx=shard.shard_idx,
+                        node_id=target.node_id,
+                        lease_id=target.lease_id or None,
+                        target_state=self._target_state_from_proto(target.target_state),
+                        degraded_reason=target.degraded_reason or None,
+                    )
+                    for target in shard.targets
+                ]
+                shard_statuses.append(
+                    PersistenceShardStatus(
+                        shard_id=shard.shard_id,
+                        shard_idx=shard.shard_idx,
+                        state=shard_state,
+                        progress=shard.progress,
+                        degraded_reason=shard.degraded_reason or None,
+                        last_error=shard.last_error or None,
+                        targets=targets,
+                    )
+                )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.ReportPersistenceStatusResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception:
+            logger.exception("Failed to decode shard status payload")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Failed to decode shard status payload")
+            return global_store_pb2.ReportPersistenceStatusResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        try:
+            status_model = PersistenceStatus(
+                task_id=request.task_id,
+                plan_id=request.plan_id,
+                artifact_id=request.artifact_id,
+                state=state,
+                progress=request.progress,
+                last_error=request.last_error or None,
+                degraded_reason=request.degraded_reason or None,
+            )
+            self.placement_service.record_status(status_model, shard_statuses)
+        except Exception:
+            logger.exception("Failed to persist ReportPersistenceStatus")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details("Failed to persist ReportPersistenceStatus")
+            return global_store_pb2.ReportPersistenceStatusResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        return global_store_pb2.ReportPersistenceStatusResponse(
+            status=global_store_pb2.Status.STATUS_OK
+        )
+
     # ========== Helper Methods ==========
+
+    def _plan_to_proto(
+        self, plan: PlacementPlan
+    ) -> global_store_pb2.PlanPlacementResponse:
+        response = global_store_pb2.PlanPlacementResponse(
+            plan_id=plan.plan_id,
+            effective_policy=self._policy_to_proto(plan.policy),
+            degraded=bool(plan.degraded_reason),
+            degraded_reason=plan.degraded_reason or "",
+        )
+        for shard in plan.shards:
+            placement = response.placements.add()
+            placement.shard.shard_id = shard.shard_id
+            placement.shard.shard_idx = shard.shard_idx
+            placement.shard.size_bytes = shard.size_bytes
+            placement.shard.content_digest = shard.content_digest
+            placement.shard.byte_range_start = shard.byte_range_start
+            placement.shard.byte_range_length = shard.byte_range_length
+            placement.shard.chunk_ids.extend(shard.chunk_ids)
+            placement.degraded_reason = shard.degraded_reason or ""
+            for target in plan.targets:
+                if target.shard_idx != shard.shard_idx:
+                    continue
+                target_proto = placement.targets.add()
+                target_proto.node_id = target.node_id
+                if target.lease_id:
+                    target_proto.lease_id = target.lease_id
+                target_proto.target_state = self._target_state_to_proto(
+                    target.target_state
+                )
+                if target.degraded_reason:
+                    target_proto.degraded_reason = target.degraded_reason
+        return response
 
     def _replica_to_memory_info(self, replica: Replica) -> common_pb2.MemoryInfo:
         """Convert Replica to MemoryInfo proto."""

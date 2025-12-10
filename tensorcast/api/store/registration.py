@@ -373,7 +373,10 @@ class RegistrationPipeline:
             )
         except Exception as exc:  # noqa: BLE001
             raise map_registration_error(exc) from exc
-        return self._registration_to_artifact(registration_result)
+        task_id = self._maybe_start_persistence(options, registration_result)
+        return self._registration_to_artifact(
+            registration_result, persistence_task_id=task_id
+        )
 
     def _should_prevalidate_disk(self, options: RegisterArtifactOptions) -> bool:
         disk_path = options.disk_path
@@ -383,8 +386,43 @@ class RegistrationPipeline:
             return False
         return disk_path.strip() != ""
 
+    def _maybe_start_persistence(
+        self, options: RegisterArtifactOptions, result: RegistrationResult
+    ) -> str | None:
+        if not options.persist:
+            return None
+        artifact_id = result.descriptor.artifact_id
+        if not artifact_id:
+            raise ArtifactError(
+                "Persistence requested but artifact_id is missing",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        try:
+            response = self._runtime.ensure_client().start_persistence(
+                artifact_id=artifact_id,
+                placement_policy=options.placement_policy.value,
+                persist_to_shared_disk=True,
+            )
+        except ArtifactError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "store.persistence_start.failed",
+                extra={
+                    "tc.artifact.id": artifact_id,
+                    "tc.persist.policy": options.placement_policy.value,
+                    "tc.persist.error": str(exc),
+                },
+            )
+            return None
+        task_id = getattr(response, "task_id", None)
+        if isinstance(task_id, str) and task_id.strip():
+            return task_id
+        return None
+
     def _registration_to_artifact(
-        self, result: RegistrationResult
+        self, result: RegistrationResult, *, persistence_task_id: str | None = None
     ) -> RegisteredArtifact:
         canonical_index = canonical_index_from_result(result)
         replica = replica_info_from_result(result)
@@ -397,6 +435,7 @@ class RegistrationPipeline:
             lease=lease_handle,
             state_dict=result.state_dict,
             registration_result=result,
+            persistence_task_id=persistence_task_id,
         )
 
     def _perform_registration(

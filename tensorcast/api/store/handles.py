@@ -21,6 +21,7 @@ class RegisteredArtifact:
     lease: LeaseHandle | None
     state_dict: TensorDict | None = None
     registration_result: RegistrationResult | None = None
+    persistence_task_id: str | None = None
 
 
 __all__ = ["RegisteredArtifact"]

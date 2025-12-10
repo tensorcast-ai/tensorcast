@@ -48,6 +48,8 @@ from tensorcast.api.store.types import (
     CanonicalIndexEntry,
     FallbackOptions,
     LeaseHandle,
+    PersistenceShardStatus,
+    PersistenceStatusResult,
     ReplicaInfo,
     RetryPolicy,
     StoreCapabilities,
@@ -56,11 +58,20 @@ from tensorcast.api.store.types import (
 )
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
 from tensorcast.daemon_ctl import get_daemon_client
+from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.types import DeregisterArtifactOutcome, VramRegionHandle
 
 
 class Store:
     """Store façade delegating to runtime, registration, and materialization pipelines."""
+
+    _PERSISTENCE_STATE_FROM_PROTO = {
+        store_daemon_pb2.PERSISTENCE_STATE_PENDING: "pending",
+        store_daemon_pb2.PERSISTENCE_STATE_RUNNING: "running",
+        store_daemon_pb2.PERSISTENCE_STATE_DEGRADED: "degraded",
+        store_daemon_pb2.PERSISTENCE_STATE_SUCCESS: "success",
+        store_daemon_pb2.PERSISTENCE_STATE_FAILED: "failed",
+    }
 
     def __init__(
         self,
@@ -205,6 +216,51 @@ class Store:
             key=key,
             options=options,
             device=device,
+        )
+
+    def query_persistence_status(
+        self, *, task_id: str | None = None, artifact_id: str | None = None
+    ) -> PersistenceStatusResult:
+        """Query persistence task state via the local daemon."""
+        if not task_id and not artifact_id:
+            raise ArtifactError(
+                "task_id or artifact_id must be provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resp = self._runtime.ensure_client().query_persistence_status(
+            task_id=task_id, artifact_id=artifact_id
+        )
+        return self._persistence_status_from_proto(resp)
+
+    def _persistence_status_from_proto(
+        self, resp: store_daemon_pb2.QueryPersistenceStatusResponse
+    ) -> PersistenceStatusResult:
+        shards: list[PersistenceShardStatus] = []
+        for shard in resp.shards:
+            state = self._PERSISTENCE_STATE_FROM_PROTO.get(shard.state, "unknown")
+            shards.append(
+                PersistenceShardStatus(
+                    shard_id=shard.shard_id,
+                    shard_idx=int(shard.shard_idx),
+                    state=state,
+                    progress=float(shard.progress),
+                    degraded_reason=shard.degraded_reason or None,
+                    last_error=shard.last_error or None,
+                    target_nodes=tuple(shard.target_nodes),
+                    lease_ids=tuple(shard.lease_ids),
+                )
+            )
+        state = self._PERSISTENCE_STATE_FROM_PROTO.get(resp.state, "unknown")
+        return PersistenceStatusResult(
+            task_id=resp.task_id,
+            artifact_id=resp.artifact_id,
+            plan_id=resp.plan_id,
+            state=state,
+            progress=float(resp.progress),
+            degraded_reason=resp.degraded_reason or None,
+            last_error=resp.last_error or None,
+            shards=tuple(shards),
         )
 
     # ------------------------------------------------------------------
@@ -561,6 +617,14 @@ def put_async(
     )
 
 
+def query_persistence_status(
+    *, task_id: str | None = None, artifact_id: str | None = None
+) -> PersistenceStatusResult:
+    return _coerce_store().query_persistence_status(
+        task_id=task_id, artifact_id=artifact_id
+    )
+
+
 def artifact(
     *,
     artifact_id: str | None = None,
@@ -617,6 +681,8 @@ __all__ = [
     "TensorMeta",
     "TensorDict",
     "TransformPlacement",
+    "PersistenceStatusResult",
+    "PersistenceShardStatus",
     "artifact",
     "artifact_async",
     "from_disk",
@@ -627,6 +693,7 @@ __all__ = [
     "register_async",
     "put",
     "put_async",
+    "query_persistence_status",
     "register_view",
     "register_vram_region",
     "unregister_vram_region",

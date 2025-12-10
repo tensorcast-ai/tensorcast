@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from tensorcast.api._config import (
     GetArtifactOptions,
+    PlacementPolicy,
     PlanType,
     RegisterArtifactOptions,
 )
@@ -34,6 +35,17 @@ def test_register_options_are_frozen() -> None:
     assert opts.plan is PlanType.VRAM_LEASED
     with pytest.raises((TypeError, ValidationError)):
         opts.plan = PlanType.VRAM_LEASED
+
+
+def test_register_options_placement_policy_parsing() -> None:
+    default_opts = RegisterArtifactOptions()
+    assert default_opts.placement_policy is PlacementPolicy.LOCAL_ONLY
+
+    replicated = RegisterArtifactOptions(placement_policy="replicated")
+    assert replicated.placement_policy is PlacementPolicy.REPLICATED
+
+    with pytest.raises(InvalidPlan):
+        RegisterArtifactOptions(placement_policy="unknown")
 
 
 def test_get_options_validate_prefer_values() -> None:

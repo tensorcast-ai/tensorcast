@@ -81,11 +81,11 @@ class WorkerLifecycleManager {
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
   const Options opts_;
 
-  static gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> make_global_store_client(
+  static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
       const Options& opts);
   static std::string derive_node_id();
 
-  const gsl::not_null<std::shared_ptr<store::components::GlobalStoreClient>> global_store_;
+  const gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> global_store_;
   const std::string node_id_;
   std::string worker_id_;
 

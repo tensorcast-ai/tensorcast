@@ -5,6 +5,7 @@
 from .artifact_service import ArtifactService
 from .chunk_service import ChunkService
 from .memory_tier_service import MemoryTierService
+from .placement_service import PlacementService
 from .recovery_service import RecoveryService
 from .transport_service import TransportService
 from .view_state_service import ViewStateService
@@ -18,4 +19,5 @@ __all__ = [
     "RecoveryService",
     "ViewStateService",
     "MemoryTierService",
+    "PlacementService",
 ]

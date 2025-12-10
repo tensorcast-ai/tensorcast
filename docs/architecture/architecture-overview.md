@@ -48,10 +48,11 @@ graph TD
 ### 1. Global Store
 **Role**: Centralized metadata service and coordination layer
 
-- **Responsibility**: Manages artifact registry, replica locations **and per-chunk directory metadata**, coordinates transfers
+- **Responsibility**: Manages artifact registry, replica locations **and per-chunk directory metadata**, coordinates transfers, and records variant/view metadata (view specs, view hash, partial leaf digests)
 - **Technology**: gRPC service with DuckDB persistence
-- **Key Feature**: Artifact data never flows through Global Store — only metadata (including chunk directory)
-- **Chunk Directory**: Tracks residency/state for every chunk across the cluster
+- **Key Feature**: Artifact data never flows through Global Store — only metadata (including chunk directory, `remote_memory_keys`/`buffer_sizes`, and optional `verification_json` for key‑point validation)
+- **Load selection guardrails**: Transport selection filters by `workers.accepting_new_requests` and recent heartbeat freshness (`heartbeat_timeout_ms`) before applying replica priority.
+- **Variant state**: `ViewStateService` persists view registrations and leaf digests so daemons can mark view residency and publish verification state.
 - **Documentation**: [Global Store Development Guide](./global-store.md)
 
 ### 2. Store Daemon
@@ -60,9 +61,14 @@ graph TD
 - **Responsibility**: Stores artifacts locally, serves them to clients, handles P2P transfers
 - **Technology**: C++ service with gRPC interface (high-performance StoreEngine core)
 - **Key Feature**: Zero-copy GPU memory sharing via CUDA IPC
-- **Implementation Notes**: Thin gRPC layer over `StoreEngine`; manages sessions, PID references, and transport locks; exports CUDA IPC handles to clients
-- **Registration Path**: The RFC-0006 lifecycle (Begin → TTL → Commit/Abort) lives in the Runtime metadata stack (`core/store/runtime/metadata/registration_backend.*`), which maintains pending state, view ingestion, hashes, and emits registration events. `runtime::metadata::MetadataGateway` consumes those callbacks along with direct ingestion completions to publish replicas and variant metadata to Global Store without routing through `StoreEngine`, deduping auto-publish and synchronous calls via the shared `publish_context_id`.
-- **Runtime Modules**: `RuntimeEnv` owns lifecycle wiring and worker identity; `RuntimeContext` initializes shared services plus the event dispatcher; `ReplicaRuntime` encapsulates replica lifecycle APIs; `IngestionRuntime` unifies ingestion + registration flows; and `MetadataGateway` is the only component touching the Global Store client. `StoreEngine` now delegates to these modules instead of manually orchestrating catalog/telemetry wiring.
+- **Runtime wiring**: `RuntimeEnv` boots a `RuntimeContext` that owns the device manager, pinned buffer pool, communication manager, metrics collector, Global Store client, and ingestion event hub. The gRPC surface stays thin; lifecycle/telemetry is driven by the runtime modules rather than ad‑hoc engine wiring.
+- **Ingestion pipeline**: `IngestionRuntime` delegates to `MaterializationFacade`, which runs the staged `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). MetadataStage rebuilds or fetches canonical indices (from disk or Global Store for variants), plans views, and enforces descriptor schema v3. AllocationStage handles eviction and retries for P2P GPU loads; VerificationStage enforces `verification_json` key‑point checks and optional full digests, and computes view hashes when configured.
+- **P2P orchestration**: `MaterializationService` invokes `MaterializeOrchestrator` for `AUTO` mode. The orchestrator:
+  - Respects `SourcePreference` (disk‑first only when a disk path is provided; `PREFER_P2P` requires a canonical `artifact_id`).
+  - Tries view-aware transports first (`request_view_transport`) and falls back to canonical transport when unsupported.
+  - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present.
+  - Builds `P2PSource` with remote `verification_json` and memory registration info so VerificationStage can validate the transfer.
+- **Auto-publish**: Every ingestion run mints a `publish_context_id`; completion events flow through the ingestion event hub into `MetadataGateway`, which registers replicas (and variant residency) with the Global Store. Explicit registration calls from the orchestrator reuse the same context so `MetadataGateway` dedupes double-publishes cleanly.
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
 
 > See also: [Store Daemon (C++) Internals](../../daemon/README.md) — thin gRPC layer over the StoreEngine with session/ref tracking, transport locks, lifecycle management, and background sweepers.
@@ -146,12 +152,14 @@ Client                                 Store Daemon                        Globa
    |                                          |<-- artifact_id (+ disk_path) ----|
    |                                          |   (Load from local disk)         |
    |                                          |-- Register Local Replica ------->|
-   |                                          |<------ Replica ID ---------------|
+  |                                          |<------ Replica ID ---------------|
    |<- ALLOCATED + CUDA IPC handle -----------|                                   |
 ```
 
+Variant-aware requests carry `hints.variant.view_id`; the daemon attempts a view transport first, falls back to canonical routing when unsupported, and registers view residency after ingestion via the shared publish context.
+
 ## Load Balancing & Concurrency
-- Prioritization: GPU > RAM > DISK, then by per‑replica load ratio
+- Prioritization: GPU > RAM > DISK, then by per‑replica load ratio; replicas are only eligible when the worker’s last heartbeat is fresh and `accepting_new_requests` is true.
 - Each replica tracks `max_concurrency` and `current_requests`; selection is atomic
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
