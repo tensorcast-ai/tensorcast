@@ -19,6 +19,10 @@ sc_cc_library(
         ":use_fake_cuda": ["USE_FAKE_CUDA"],
         "//conditions:default": [],
     }),
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-ldl"],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":error_handling_lib",
