@@ -4,13 +4,13 @@
 
 #include <atomic>
 #include <chrono>
-#include <deque>
 #include <filesystem>
 #include <memory>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
@@ -76,10 +76,17 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
-      : StoreDaemonServiceImpl(std::move(engine), Options{}) {}
+      : StoreDaemonServiceImpl(std::move(engine), Options{}, nullptr) {}
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine, Options opts)
+      : StoreDaemonServiceImpl(std::move(engine), std::move(opts), nullptr) {}
+
+  explicit StoreDaemonServiceImpl(
+      std::shared_ptr<store::StoreEngine> engine,
+      Options opts,
+      std::shared_ptr<common::AsyncRuntime> async_runtime)
       : engine_(gsl::not_null<std::shared_ptr<store::StoreEngine>>(std::move(engine))),
+        async_runtime_(async_runtime ? std::move(async_runtime) : std::make_shared<common::AsyncRuntime>()),
         sessions_(opts.sessions_ttl),
         locks_(opts.locks_ttl),
         region_registry_(
@@ -91,6 +98,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         verif_tracker_(gsl::not_null<std::unique_ptr<VerificationTracker>>(std::make_unique<VerificationTracker>())),
         reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
         opts_(opts) {
+    verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
     start_sweepers();
     persistence_mgr_ = std::make_unique<PersistenceManager>(
         scheduler_.get(),
@@ -140,14 +148,37 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   // Initiate graceful shutdown: reject new materialization requests and allow
   // in-flight operations to complete. Called by server_main signal handler.
   void begin_shutdown() {
+    bool expected = false;
+    if (!shutdown_started_.compare_exchange_strong(expected, true)) {
+      return;
+    }
     is_shutting_down_.store(true);
+    stop_sweepers();
+    if (async_runtime_) {
+      async_runtime_->shutdown();
+    }
   }
 
   bool is_shutting_down() const {
     return is_shutting_down_.load();
   }
 
+  [[nodiscard]] std::shared_ptr<common::AsyncRuntime> async_runtime_shared() const {
+    return async_runtime_;
+  }
+
+  [[nodiscard]] absl::Status drain_async_runtime(absl::Time deadline) const {
+    if (!async_runtime_) {
+      return absl::OkStatus();
+    }
+    return async_runtime_->drain(deadline);
+  }
+
   // Worker lifecycle reflection for status RPCs
+  void set_worker_registered(std::string worker_id) {
+    set_worker_registered(std::move(worker_id), /*node_id=*/"");
+  }
+
   void set_worker_registered(std::string worker_id, std::string node_id) {
     std::string node_id_copy;
     {
@@ -320,6 +351,8 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
  private:
   gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
+  // Async runtime must outlive all components that hold executor keep-alives.
+  std::shared_ptr<common::AsyncRuntime> async_runtime_;
   ReplicaSessionManager sessions_;
   TransportLockManager locks_;
   RefTracker refs_;
@@ -338,6 +371,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
   // Shutdown gating
   std::atomic<bool> is_shutting_down_{false};
+  std::atomic<bool> shutdown_started_{false};
   // Compatibility configuration removed
 
   // Worker lifecycle reflection
@@ -348,10 +382,6 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
   // Verification tracker extracted to its own component
   gsl::not_null<std::unique_ptr<VerificationTracker>> verif_tracker_;
-
-  // Background task queue for auto-registration only (verification queue moved)
-  absl::Mutex bg_tasks_mu_;
-  std::deque<AutoRegTask> auto_reg_tasks_ ABSL_GUARDED_BY(bg_tasks_mu_);
 
   // Registration lifecycle state manager (Begin/Feed/KeepAlive/Commit)
   gsl::not_null<std::unique_ptr<RegistrationManager>> reg_mgr_;
@@ -370,7 +400,6 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       absl::Span<const RegisterStorageMeta> storages);
 
   Options opts_;
-
   // New helpers/controllers (RFC-0016)
   DeviceResolver devices_{store::DeviceRegistry::instance()};
   std::unique_ptr<SessionsService> sessions_svc_;

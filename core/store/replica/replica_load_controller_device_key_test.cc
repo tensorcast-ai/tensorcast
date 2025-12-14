@@ -5,12 +5,14 @@
 #include <chrono>
 #include <memory>
 
+#include "core/common/async_runtime.h"
 #include "core/common/const/granularity.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/replica_load_controller.h"
 
 using tensorcast::DeviceType;
+using tensorcast::common::AsyncRuntime;
 using tensorcast::common::memory::PinnedBufferPool;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::replica::ReplicaLoadController;
@@ -19,12 +21,14 @@ TEST_CASE("ReplicaLoadController binds UMA allocation to canonical device key", 
   const uint64_t artifact_size = 64 * 1024; // 64 KiB CPU replica
   auto pinned_pool = std::make_shared<PinnedBufferPool>(
       /*total_bytes=*/512 * 1024, /*chunk_bytes=*/tensorcast::common::consts::kArtifactChunkDefault);
+  auto async_runtime = std::make_shared<AsyncRuntime>();
   const DeviceKey cpu_device{DeviceType::CPU, -1, ""};
 
   auto controller = std::make_shared<ReplicaLoadController>(
       "cpu_artifact_for_uma",
       cpu_device,
       pinned_pool,
+      async_runtime,
       tensorcast::common::consts::kArtifactChunkDefault,
       /*max_buffer_bytes=*/256 * 1024,
       std::chrono::milliseconds::zero(),

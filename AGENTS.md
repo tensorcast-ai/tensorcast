@@ -287,6 +287,9 @@ cat third_party/<lib>/BUILD                 # Check target definitions
 - **Files/Directories**: `snake_case`
 - Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
+#### Async Concurrency (Folly)
+- Use `tensorcast::common::AsyncRuntime` + `folly::SemiFuture`/`folly::Future` (and `ReadySignal<T>` for completion-driven fan-out); avoid `std::thread/std::async`, detached threads, and polling, and always bind work to an executor with `.via(...)`
+
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs

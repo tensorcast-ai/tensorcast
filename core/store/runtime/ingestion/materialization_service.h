@@ -4,11 +4,11 @@
 
 #include <chrono>
 #include <functional>
-#include <future>
 #include <memory>
 #include <string>
 
 #include "absl/status/statusor.h"
+#include "core/common/async_runtime.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/materialization/common/view_hash_utils.h"
@@ -35,6 +35,7 @@ struct MaterializationDeps {
 
   gsl::not_null<components::ReplicaRegistry*> replica_registry;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
+  std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
   size_t artifact_chunk_bytes = 0;
   std::chrono::milliseconds pinned_memory_timeout{0};
   int num_threads = 0;
@@ -64,7 +65,7 @@ class MaterializationService {
   [[nodiscard]] ReplicaHandle build_handle(
       const MaterializationRequest& request,
       const std::shared_ptr<replica::Replica>& replica,
-      std::shared_future<absl::Status> ready_future,
+      std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal,
       loading::MaterializationSource source) const;
 };
 

@@ -81,6 +81,8 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
   const size_t pool_chunk_size = 64UL * 1024; // 64 KiB chunk size
   std::shared_ptr<PinnedBufferPool> pinned_pool = std::make_shared<PinnedBufferPool>(pool_total_size, pool_chunk_size);
   REQUIRE(pinned_pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
   // --- Test GPU Registration --- (Requires CUDA device)
   SECTION("Load to GPU and Register for Communication") {
     // Skip section if no CUDA devices are available
@@ -115,6 +117,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .device_type = ::tensorcast::DeviceType::GPU,
         .local_device_id = device_id,
         .pinned_buffer_pool = pinned_pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -130,9 +133,9 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Load to CPU first (as DiskLoader requires it)
     LOG(INFO) << "Loading replica to CPU (prerequisite for GPU load from disk)...";
-    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
+    auto load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(load_future.valid());
-    absl::Status load_status = load_future.get(); // Wait for completion
+    absl::Status load_status = std::move(load_future).get(); // Wait for completion
     INFO("CPU load status: " << load_status);
     REQUIRE(load_status.ok());
     REQUIRE(replica->wait_until_loaded(MemoryLocation::CPU, absl::Seconds(10)).ok());
@@ -140,9 +143,9 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Now load to GPU
     LOG(INFO) << "Loading replica to GPU...";
-    load_future = replica->ensure_loaded_async(MemoryLocation::GPU);
-    REQUIRE(load_future.valid());
-    load_status = load_future.get(); // Wait for completion
+    auto gpu_future = replica->ensure_loaded_async(MemoryLocation::GPU);
+    REQUIRE(gpu_future.valid());
+    load_status = std::move(gpu_future).get(); // Wait for completion
     INFO("GPU load status: " << load_status);
     REQUIRE(load_status.ok());
 
@@ -221,6 +224,7 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dummy_device_id,
         .pinned_buffer_pool = pinned_pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -236,9 +240,9 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     // Load to CPU
     LOG(INFO) << "Loading replica to CPU...";
-    std::shared_future<absl::Status> load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
+    auto load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(load_future.valid());
-    const absl::Status& load_status = load_future.get(); // Wait for completion
+    const absl::Status load_status = std::move(load_future).get(); // Wait for completion
     INFO("CPU load status: " << load_status);
     REQUIRE(load_status.ok());
 

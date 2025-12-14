@@ -1218,8 +1218,8 @@ void MTcpTransport::recv_loop() {
                       *reinterpret_cast<const uint64_t*>(staged_ptr + sub_chunk_size - sizeof(uint64_t));
                   VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
                           << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " first=0x"
-                          << absl::Hex(head_sample, absl::kZeroPad16) << " last=0x"
-                          << absl::Hex(tail_sample, absl::kZeroPad16);
+                          << absl::StrCat(absl::Hex(head_sample, absl::kZeroPad16)) << " last=0x"
+                          << absl::StrCat(absl::Hex(tail_sample, absl::kZeroPad16));
                 } else {
                   VLOG(2) << "[MTcpTransport::recv_loop] staged sub-chunk slot=" << slot_id
                           << " bytes=" << sub_chunk_size << " gpu_off=" << gpu_global_offset << " (<8 bytes payload)";

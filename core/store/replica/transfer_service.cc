@@ -14,7 +14,6 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "core/common/async_copy_manager.h"
 #include "core/common/cuda_api.h"
 #include "core/store/materialization/dataplane/runtime/pump.h"
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
@@ -81,7 +80,7 @@ std::unordered_map<int, int> g_inflight_copies ABSL_GUARDED_BY(g_if_mu);
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> g_meter;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_if_copies_gauge;
 
-static void inflight_copies_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
+void inflight_copies_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
   auto obs =
       opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
           result);
@@ -99,8 +98,7 @@ void GpuSchedHandle::update_inflight_copies_(int device_id, int delta) {
   {
     absl::MutexLock lk(&g_if_mu);
     g_inflight_copies[device_id] += delta;
-    if (g_inflight_copies[device_id] < 0)
-      g_inflight_copies[device_id] = 0;
+    g_inflight_copies[device_id] = std::max(g_inflight_copies[device_id], 0);
   }
   // Lazy-init meter and gauge
   if (!g_meter) {
@@ -305,6 +303,7 @@ absl::Status TransferService::load_from_source(
     std::unique_ptr<loader::SeekableSource>& source,
     MemoryLocation target_location,
     int concurrency,
+    folly::Executor::KeepAlive<> executor,
     std::optional<absl::Span<const uint32_t>> chunk_indices,
     void* gpu_ptr_or_null,
     std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
@@ -382,7 +381,8 @@ absl::Status TransferService::load_from_source(
 
   auto ranges = build_ranges_(chunk_indices, layout_chunk_size, total_size);
   const auto start_tp = std::chrono::steady_clock::now();
-  absl::Status pump_status = loader::pump_ranges(*source, *sink, adapter, absl::MakeSpan(ranges), concurrency);
+  absl::Status pump_status =
+      loader::pump_ranges(*source, *sink, adapter, absl::MakeSpan(ranges), concurrency, executor);
   if (!pump_status.ok()) {
     LOG(ERROR) << "TransferService::load_from_source pump_ranges failed: " << pump_status;
     return pump_status;
@@ -431,6 +431,7 @@ absl::Status TransferService::execute(
     MemoryLocation target_location,
     loader::SeekableSource& source,
     int concurrency,
+    folly::Executor::KeepAlive<> executor,
     void* gpu_ptr_or_null,
     std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
     int device_id) {
@@ -475,7 +476,8 @@ absl::Status TransferService::execute(
     return absl::FailedPreconditionError("Failed to construct sink for target location");
   }
   const auto start_tp = std::chrono::steady_clock::now();
-  absl::Status pump_status = loader::pump_ranges(source, *sink, adapter, absl::MakeSpan(plan.ranges), concurrency);
+  absl::Status pump_status =
+      loader::pump_ranges(source, *sink, adapter, absl::MakeSpan(plan.ranges), concurrency, executor);
   if (!pump_status.ok()) {
     return pump_status;
   }

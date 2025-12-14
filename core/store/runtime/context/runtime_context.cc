@@ -2,6 +2,7 @@
 
 #include "core/store/runtime/context/runtime_context.h"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 
@@ -12,6 +13,7 @@
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/async_copy_manager.h"
 #include "core/common/memory/host_memory.h"
 
 namespace {
@@ -19,6 +21,9 @@ constexpr char kDefaultP2PHost[] = "0.0.0.0";
 } // namespace
 
 namespace tensorcast::store::runtime {
+namespace {
+constexpr absl::Duration kDefaultRuntimeDrainTimeout = absl::Seconds(30);
+} // namespace
 
 RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
     : options_(options),
@@ -33,6 +38,20 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
       view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})),
       events_(std::make_unique<RuntimeContextEvents>()),
       ingestion_event_hub_(std::make_unique<ingestion::IngestionEventHub>(events_.get())) {
+  if (options_.async_runtime) {
+    async_runtime_ = options_.async_runtime;
+    owns_async_runtime_ = false;
+  } else {
+    const size_t cpu_threads = static_cast<size_t>(std::max<int>(1, options_.num_thread));
+    const size_t blocking_threads = static_cast<size_t>(std::max<int>(2, options_.num_thread));
+    async_runtime_ = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
+        .cpu_threads = cpu_threads,
+        .blocking_threads = blocking_threads,
+        .thread_name_prefix = "tensorcast-store",
+    });
+    owns_async_runtime_ = true;
+  }
+  common::AsyncCopyManager::instance().set_async_runtime(async_runtime_);
   if (options_.comm_manager) {
     comm_manager_ = options_.comm_manager;
   } else {
@@ -86,6 +105,14 @@ void RuntimeContext::shutdown() {
     return;
   }
   started_ = false;
+
+  if (async_runtime_ && owns_async_runtime_) {
+    async_runtime_->shutdown();
+    const absl::Status st = async_runtime_->drain(absl::Now() + kDefaultRuntimeDrainTimeout);
+    if (!st.ok()) {
+      LOG(FATAL) << "RuntimeContext: AsyncRuntime drain failed during shutdown: " << st;
+    }
+  }
   if (events_) {
     events_->drain();
   }

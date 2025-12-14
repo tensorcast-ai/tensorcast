@@ -7,7 +7,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include "absl/status/status.h"
 #include "core/common/memory/memory_location.h"
@@ -18,7 +17,6 @@
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/store_engine_options.h"
-#include "gsl/pointers"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
 
@@ -76,7 +74,7 @@ struct IngestionContext {
   std::optional<loader::ViewPlan> resolved_view_plan;
 
   std::shared_ptr<replica::Replica> replica;
-  std::shared_future<absl::Status> load_future;
+  std::shared_ptr<common::ReadySignal<absl::Status>> load_signal;
 
   std::chrono::steady_clock::time_point start_time;
   bool publish_to_global_store{true};

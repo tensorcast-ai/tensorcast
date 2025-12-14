@@ -140,8 +140,7 @@ TEST_CASE("IngestionPipeline P2P Loader TCP end-to-end", "[pipeline][p2p][gpu]")
   auto handle_or = harness.pipeline->ingest_from_p2p("remote_artifact", p2p_source, target, {});
   REQUIRE(handle_or.ok());
   auto& handle = handle_or.value();
-  REQUIRE(handle.ready_future.valid());
-  REQUIRE(handle.ready_future.get().ok());
+  REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());
 
   auto gpu_ptr_result = harness.replica_runtime->get_replica_gpu_ptr(handle.replica_key);
   REQUIRE(gpu_ptr_result.ok());

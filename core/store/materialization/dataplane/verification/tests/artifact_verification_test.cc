@@ -59,6 +59,8 @@ TEST_CASE("Replica Verification System", "[replica][verification]") {
   const size_t pool_chunk = 1024;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   // UMA is internal to ReplicaLoadController; no VS injection required.
   // Use new DiskSource
@@ -73,6 +75,7 @@ TEST_CASE("Replica Verification System", "[replica][verification]") {
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .max_buffer_bytes = pool_total};
 
   auto mstatus = Replica::create(cfg);

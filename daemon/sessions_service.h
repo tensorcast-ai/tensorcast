@@ -10,6 +10,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
+#include "core/common/ready_signal.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/replica_session_manager.h"
 #include "daemon/session_lifecycle.h"
@@ -31,9 +32,9 @@ class SessionsService {
   void put_with_verification(
       const std::string& replica_uuid,
       const store::loading::ReplicaKey& key,
-      std::shared_future<absl::Status> ready) {
-    sessions_.put(replica_uuid, key, ready);
-    verif_.initiate(replica_uuid, ready);
+      std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
+    sessions_.put(replica_uuid, key, ready_signal);
+    verif_.initiate(replica_uuid, ready_signal);
     if (sched_)
       sched_->notify(TaskKind::kVerification);
     if (lifecycle_) {

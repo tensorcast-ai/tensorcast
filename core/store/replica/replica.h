@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,10 +11,13 @@
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "folly/futures/Future.h"
 #include "gsl/pointers"
 
 #include "core/common/artifact_verification.h"
+#include "core/common/async_runtime.h"
 #include "core/common/memory/memory_location.h"
+#include "core/common/ready_signal.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/communication_types.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
@@ -92,12 +94,15 @@ class Replica {
    * @param target_location The desired location (MemoryLocation::CPU or MemoryLocation::GPU).
    * @param concurrency Hint for loader concurrency (e.g., disk read threads). Defaults to 4.
    * @param device_id Optional device ID for GPU operations.
-   * @return std::shared_future<absl::Status> A future indicating the completion status of the load/copy operation.
+   * @return folly::SemiFuture<absl::Status> A future indicating the completion status of the load/copy operation.
    */
-  std::shared_future<absl::Status> ensure_loaded_async(
+  folly::SemiFuture<absl::Status> ensure_loaded_async(
       common::memory::MemoryLocation target_location,
       int concurrency = 4,
       std::optional<int> device_id = std::nullopt) ABSL_LOCKS_EXCLUDED(mutex_);
+
+  [[nodiscard]] std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal_for(
+      common::memory::MemoryLocation target_location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Releases the memory associated with the specified location.
@@ -207,6 +212,7 @@ class Replica {
       loading::ReplicaKey key,
       std::unique_ptr<IArtifactLoader> loader,
       std::shared_ptr<ReplicaLoadController> memory_manager,
+      gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       common::memory::MemoryLocation source_type,
       std::optional<loader::ViewPlan> view_plan,
       loading::TransformPlacement transform_placement);
@@ -219,6 +225,7 @@ class Replica {
 
   const gsl::not_null<std::unique_ptr<IArtifactLoader>> loader_;
   const gsl::not_null<std::shared_ptr<ReplicaLoadController>> memory_manager_;
+  const gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime_;
 
   // Store the original source type for reference (e.g., to know if RDMA registration makes sense)
   const common::memory::MemoryLocation original_source_type_;
@@ -227,9 +234,9 @@ class Replica {
   const std::optional<loader::ViewPlan> view_plan_;
   const loading::TransformPlacement transform_placement_;
 
-  // Futures tracking ongoing load/copy operations to prevent duplicate requests
-  std::shared_future<absl::Status> cpu_load_future_ ABSL_GUARDED_BY(mutex_);
-  std::shared_future<absl::Status> gpu_load_future_ ABSL_GUARDED_BY(mutex_);
+  // Producer-side completion signals for in-flight load/copy operations.
+  std::shared_ptr<common::ReadySignal<absl::Status>> cpu_ready_signal_ ABSL_GUARDED_BY(mutex_);
+  std::shared_ptr<common::ReadySignal<absl::Status>> gpu_ready_signal_ ABSL_GUARDED_BY(mutex_);
 };
 
 } // namespace tensorcast::store::replica

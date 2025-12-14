@@ -24,6 +24,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":runtime_context_events",
+        "//core/common:async_copy_manager_lib",
         "//core/common:host_memory_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:communication_manager",

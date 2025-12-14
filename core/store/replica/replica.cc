@@ -140,6 +140,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.artifact_identifier,
       dev_key,
       config.pinned_buffer_pool,
+      config.async_runtime,
       config.artifact_chunk_bytes,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
@@ -157,6 +158,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       std::move(inst_key),
       std::move(loader),
       std::move(memory_manager),
+      config.async_runtime,
       source_type,
       std::move(view_plan),
       config.transform_placement));
@@ -171,12 +173,14 @@ Replica::Replica(
     loading::ReplicaKey key,
     std::unique_ptr<IArtifactLoader> loader,
     std::shared_ptr<ReplicaLoadController> memory_manager,
+    gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     common::memory::MemoryLocation source_type,
     std::optional<loader::ViewPlan> view_plan,
     loading::TransformPlacement transform_placement)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
+      async_runtime_(std::move(async_runtime)),
       original_source_type_(source_type),
       view_plan_(std::move(view_plan)),
       transform_placement_(transform_placement) {}
@@ -185,33 +189,9 @@ Replica::Replica(
 // Destructor
 //--------------------------------------------------------------------------
 Replica::~Replica() {
-  // Gracefully wait for any outstanding asynchronous operations (CPU/GPU load or copy).
-  // If the operations do not finish within a reasonable timeout, we abort with LOG(FATAL)
-  // to avoid use‑after‑free (UB) on memory_manager_ or loader_.
-  constexpr int kWaitSeconds = 30; // Tunable: max time to wait for each future.
-  auto wait_for_future = [&](std::shared_future<absl::Status>& fut, const char* tag) {
-    if (!fut.valid()) {
-      return; // Nothing to wait for.
-    }
-    auto status = fut.wait_for(std::chrono::seconds(kWaitSeconds));
-    if (status != std::future_status::ready) {
-      // Potential UB if we proceed because background thread may dereference freed objects.
-      LOG(FATAL) << "Replica(" << key_.artifact_id << "): Timed out waiting for " << tag << " future to finish after "
-                 << kWaitSeconds << " seconds. Aborting to prevent undefined behaviour.";
-    }
-    // Future is ready – retrieve the result (ignore, but call get() to propagate any exceptions).
-    const absl::Status& st = fut.get();
-    if (!st.ok()) {
-      LOG(WARNING) << "Replica(" << key_.artifact_id << "): " << tag << " operation completed with status: " << st;
-    }
-  };
-
-  // We intentionally do NOT hold mutex_ while waiting to avoid deadlocks: the background
-  // tasks might attempt to acquire the same mutex in their finalisation paths.
-  wait_for_future(cpu_load_future_, "CPU");
-  wait_for_future(gpu_load_future_, "GPU");
-
-  // Other resources are released automatically by unique_ptr destructors.
+  // No blocking waits here. All background work is tracked by AsyncRuntime and
+  // must be drained by the top-level owner (or the StoreEngine-owned runtime)
+  // before destroying replicas.
 }
 
 //--------------------------------------------------------------------------
@@ -231,18 +211,16 @@ absl::StatusOr<uint64_t> Replica::get_artifact_size() const {
   return size;
 }
 
-std::shared_future<absl::Status> Replica::ensure_loaded_async(
+folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     MemoryLocation target_location,
     int concurrency,
     std::optional<int> device_id) {
   (void)device_id; // device binding is fixed at construction time
-  // Helper: create an already-ready shared_future carrying given status.
-  auto make_ready_future = [](const absl::Status& st) -> std::shared_future<absl::Status> {
-    return std::async(std::launch::deferred, [st] { return st; }).share();
-  };
 
-  // Dynamic device re-configuration is no longer supported. The ReplicaLoadController
-  // is now permanently bound to the device id supplied at construction time.
+  if (target_location != MemoryLocation::CPU && target_location != MemoryLocation::GPU) {
+    return folly::makeSemiFuture<absl::Status>(
+        absl::InvalidArgumentError("Invalid target location for ensure_loaded_async."));
+  }
 
   // ------------------------------------------------------------------
   // Quick recovery path: if previous operation left the target location in
@@ -252,172 +230,98 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
   // ------------------------------------------------------------------
   MemoryState initial_state = memory_manager_->get_state(target_location);
   if (initial_state == MemoryState::FAILED) {
-    // Release any partially-allocated resources.
     absl::Status rel_status = memory_manager_->release_memory(target_location);
     if (!rel_status.ok()) {
-      return make_ready_future(rel_status);
+      return folly::makeSemiFuture(std::move(rel_status));
     }
-    // Transition the state back to UNALLOCATED so that normal loading can proceed.
     absl::Status state_status = memory_manager_->set_state(target_location, MemoryState::UNALLOCATED);
     if (!state_status.ok()) {
-      return make_ready_future(state_status);
+      return folly::makeSemiFuture(std::move(state_status));
     }
-    // Invalidate the cached future for this location (if any).
     {
-      absl::MutexLock fut_lock(&mutex_);
+      absl::MutexLock lock(&mutex_);
       if (target_location == MemoryLocation::CPU) {
-        cpu_load_future_ = std::shared_future<absl::Status>();
+        cpu_ready_signal_.reset();
       } else {
-        gpu_load_future_ = std::shared_future<absl::Status>();
+        gpu_ready_signal_.reset();
       }
     }
     VLOG(1) << "Replica(" << key_.artifact_id << "): Reset memory state from FAILED to UNALLOCATED for "
             << location_to_string(target_location) << ".";
   }
 
-  // ------------------------------------------------------------------
-  // Phase-1: quick state inspection under mutex_
-  // ------------------------------------------------------------------
-  MemoryState current_state = MemoryState::UNINITIALIZED;
-  std::shared_future<absl::Status>* member_future = nullptr;
-  ReplicaLoadController* mm_ptr = nullptr; // raw pointer is safe as Replica owns orchestrator lifetime
+  std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal;
   MemoryLocation source_location = MemoryLocation::NONE;
-  bool need_allocation = false;
-  absl::StatusOr<MemoryLocation> src_status; // Declare here
-
   {
     absl::MutexLock lock(&mutex_);
 
-    // Get raw pointer under lock
-    mm_ptr = memory_manager_.get().get();
+    std::shared_ptr<common::ReadySignal<absl::Status>>* slot =
+        (target_location == MemoryLocation::CPU) ? &cpu_ready_signal_ : &gpu_ready_signal_;
 
-    if (target_location == MemoryLocation::CPU) {
-      member_future = &cpu_load_future_;
-    } else if (target_location == MemoryLocation::GPU) {
-      member_future = &gpu_load_future_;
-    } else {
-      return make_ready_future(absl::InvalidArgumentError("Invalid target location for ensure_loaded_async."));
-    }
-
-    current_state = memory_manager_->get_state(target_location);
-
-    // Already LOADED
+    const MemoryState current_state = memory_manager_->get_state(target_location);
     if (current_state == MemoryState::LOADED) {
-      return make_ready_future(absl::OkStatus());
-    }
-
-    // Already LOADING – return the existing shared future if valid
-    if (current_state == MemoryState::LOADING) {
-      // Common race condition: another thread has transitioned the state to
-      // LOADING but has not yet published the shared_future.  Rather than
-      // failing, create a lightweight waiting future that completes once the
-      // memory manager reports LOADED (or an error state).  This behaviour
-      // aligns with the expectation that *all* concurrent callers of
-      // materialize_replica() succeed when at least one thread is actively loading the
-      // data.
-
-      if (member_future->valid()) {
-        return *member_future;
+      if (*slot) {
+        return (*slot)->subscribe();
       }
-
-      std::shared_future<absl::Status> fallback_wait =
-          std::async(std::launch::async, [mm_ptr, target_location]() {
-            // Wait indefinitely; callers can still supply a timeout when they
-            // call wait_until_loaded()/wait_ready() on the resulting ReplicaHandle.
-            return mm_ptr->wait_for_state(target_location, MemoryState::LOADED, absl::InfiniteDuration());
-          }).share();
-
-      // Publish the newly created future so that subsequent callers can reuse
-      // it rather than spinning up additional threads.
-      *member_future = fallback_wait;
-      return fallback_wait;
+      return folly::makeSemiFuture<absl::Status>(absl::OkStatus());
     }
 
-    // ------------------------------------------------------------------
-    // NEW: Handle race window where another thread has already allocated
-    // memory (state = ALLOCATED) but has not yet transitioned the state to
-    // LOADING.  Launching an additional load task here would result in
-    // duplicate disk reads and, more importantly, a second call to
-    // allocate_buffer_pool() which fails with AlreadyExists, ultimately
-    // placing the ReplicaLoadController in FAILED state.  Instead, we treat the
-    // ALLOCATED state as a signal that a load is imminent and simply wait
-    // for the first thread to transition the state to LOADED or FAILED.
-    // ------------------------------------------------------------------
-    if (current_state == MemoryState::ALLOCATED) {
-      if (member_future->valid()) {
-        return *member_future; // Reuse existing future if one was published.
+    if (current_state == MemoryState::LOADING || current_state == MemoryState::ALLOCATED) {
+      if (*slot) {
+        return (*slot)->subscribe();
       }
-
-      // Create a lightweight waiter future that blocks until the location
-      // becomes LOADED (or FAILED) without spawning a second load.
-      std::shared_future<absl::Status> fallback_wait =
-          std::async(std::launch::async, [mm_ptr, target_location]() {
-            return mm_ptr->wait_for_state(target_location, MemoryState::LOADED, absl::InfiniteDuration());
-          }).share();
-
-      *member_future = fallback_wait; // Publish for subsequent callers.
-      return fallback_wait;
+      return folly::makeSemiFuture<absl::Status>(absl::InternalError("Load in progress but ready signal missing"));
     }
 
-    // FAILED previously
     if (current_state == MemoryState::FAILED) {
-      return make_ready_future(absl::FailedPreconditionError("Previous operation failed."));
+      return folly::makeSemiFuture<absl::Status>(absl::FailedPreconditionError("Previous operation failed."));
     }
 
-    // For UNALLOCATED / ALLOCATED resolve best source
-    need_allocation = (current_state == MemoryState::UNALLOCATED);
+    // Producer-side completion signal must be published before entering
+    // in-flight (ALLOCATED/LOADING) to eliminate race windows and fallback
+    // waiter threads.
+    ready_signal = std::make_shared<common::ReadySignal<absl::Status>>();
+    *slot = ready_signal;
 
-    // ------------------------------------------------------------------
-    // Allocate memory *inside* the critical section to ensure only a single
-    // thread performs the initial allocation.  This prevents a race where
-    // another thread observes the still-UNALLOCATED state before the first
-    // thread has finished allocation, leading to duplicate allocation and
-    // duplicate load tasks (which can leave the ReplicaLoadController in FAILED
-    // state).  The allocation itself may be moderately expensive (e.g.
-    // UMA allocation) but is still far cheaper than the full disk load we perform
-    // later and only happens once per instance, so holding the mutex here is
-    // acceptable.
-    // ------------------------------------------------------------------
-    if (need_allocation) {
-      absl::Status alloc_st = mm_ptr->allocate_memory(target_location);
+    if (current_state <= MemoryState::UNALLOCATED) {
+      absl::Status alloc_st = memory_manager_->allocate_memory(target_location);
       if (!alloc_st.ok()) {
-        return make_ready_future(alloc_st);
+        ready_signal->set_value(alloc_st);
+        slot->reset();
+        return ready_signal->subscribe();
       }
-
-      // State is now at least ALLOCATED – subsequent concurrent callers will
-      // enter the ALLOCATED/LOADING fast-path above and wait rather than
-      // launching a duplicate load.
-      // Allocation completed under lock
     }
 
-    src_status = find_best_source_for_target(target_location);
+    auto src_status = find_best_source_for_target(target_location);
     if (!src_status.ok()) {
       LOG(ERROR) << "Replica(" << key_.artifact_id << "): Failed to find best source for target "
                  << location_to_string(target_location) << ": " << src_status.status();
-      return make_ready_future(src_status.status());
+      ready_signal->set_value(src_status.status());
+      slot->reset();
+      return ready_signal->subscribe();
     }
     source_location = *src_status;
   }
-  // ---------------- Mutex released ----------------
 
-  // ------------------------------------------------------------------
-  // Phase-2: potentially heavy work (allocation / async task dispatch)
-  // ------------------------------------------------------------------
-  // Allocation already performed under the mutex above.  At this point the
-  // memory manager is guaranteed to be in at least the ALLOCATED state, so
-  // we can proceed with launching the actual load/copy task without holding
-  // the Replica-level mutex.
-
-  // Dispatch appropriate task
-  std::shared_future<absl::Status> new_future;
+  folly::SemiFuture<absl::Status> op = folly::makeSemiFuture(absl::OkStatus());
   if (source_location == MemoryLocation::CPU && target_location == MemoryLocation::GPU) {
-    new_future = mm_ptr->copy_data_async(MemoryLocation::CPU, MemoryLocation::GPU).share();
+    op = memory_manager_->copy_data_async(MemoryLocation::CPU, MemoryLocation::GPU);
   } else if (source_location == MemoryLocation::GPU && target_location == MemoryLocation::CPU) {
-    new_future = mm_ptr->copy_data_async(MemoryLocation::GPU, MemoryLocation::CPU).share();
+    op = memory_manager_->copy_data_async(MemoryLocation::GPU, MemoryLocation::CPU);
   } else if (source_location == MemoryLocation::DISK || source_location == MemoryLocation::REMOTE) {
     auto src_or = loader_->open_source();
     if (!src_or.ok()) {
-      return make_ready_future(src_or.status());
+      (void)memory_manager_->release_memory(target_location);
+      ready_signal->set_value(src_or.status());
+      {
+        absl::MutexLock lock(&mutex_);
+        if (target_location == MemoryLocation::CPU) {
+          cpu_ready_signal_.reset();
+        } else {
+          gpu_ready_signal_.reset();
+        }
+      }
+      return ready_signal->subscribe();
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     if (view_plan_.has_value() && !view_plan_->is_identity) {
@@ -428,35 +332,46 @@ std::shared_future<absl::Status> Replica::ensure_loaded_async(
         transform_placement_ == loading::TransformPlacement::kServer) {
       loader::TransformPlan transform_plan = view_plan_->transform;
       auto mm_shared = memory_manager_;
-      post_load_fn = [mm = mm_shared, transform_plan, target_location]() -> absl::Status {
+      post_load_fn = [mm = std::move(mm_shared), transform_plan, target_location]() -> absl::Status {
         auto ptrs = mm->get_pointer(target_location);
         if (ptrs.empty() || ptrs[0] == nullptr) {
           return absl::FailedPreconditionError("View transform requires loaded memory, but no pointer is available");
         }
-        const int device_id = (target_location == MemoryLocation::GPU) ? mm->get_local_device_id() : -1;
-        return loader::execute_transform(transform_plan, target_location, ptrs[0], device_id);
+        const int dev = (target_location == MemoryLocation::GPU) ? mm->get_local_device_id() : -1;
+        return loader::execute_transform(transform_plan, target_location, ptrs[0], dev);
       };
     }
-    // Delegate orchestration to ReplicaLoadController using the (optionally adapted) source
-    new_future =
-        memory_manager_
-            ->load_async_from_source(std::move(source_ptr), target_location, concurrency, std::nullopt, post_load_fn)
-            .share();
+    op = memory_manager_->load_async_from_source(
+        std::move(source_ptr), target_location, concurrency, std::nullopt, std::move(post_load_fn));
   } else {
-    return make_ready_future(absl::InternalError("Invalid source/target combination."));
+    op = folly::makeSemiFuture<absl::Status>(absl::InternalError("Invalid source/target combination."));
   }
 
-  // ------------------------------------------------------------------
-  // Phase‑3: store the new shared_future under lock then return a copy
-  // ------------------------------------------------------------------
-  {
-    absl::MutexLock lock(&mutex_);
-    if (member_future) {
-      *member_future = new_future; // copy assignment – shared_future is cheap
-    }
-  }
+  auto ready_signal_copy = ready_signal;
+  (void)std::move(op)
+      .via(async_runtime_->serial_executor())
+      .thenValue([ready_signal_copy](absl::Status status) {
+        ready_signal_copy->set_value(status);
+        return status;
+      })
+      .thenError(folly::tag_t<std::exception>{}, [ready_signal_copy](const std::exception& ex) {
+        absl::Status status = absl::InternalError(ex.what());
+        ready_signal_copy->set_value(status);
+        return status;
+      });
 
-  return new_future;
+  return ready_signal->subscribe();
+}
+
+std::shared_ptr<common::ReadySignal<absl::Status>> Replica::ready_signal_for(MemoryLocation target_location) const {
+  absl::MutexLock lock(&mutex_);
+  if (target_location == MemoryLocation::CPU) {
+    return cpu_ready_signal_;
+  }
+  if (target_location == MemoryLocation::GPU) {
+    return gpu_ready_signal_;
+  }
+  return nullptr;
 }
 
 absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_target(
@@ -513,20 +428,19 @@ absl::Status Replica::release_memory(MemoryLocation location) {
 
   absl::Status status = memory_manager_->release_memory(location);
 
-  // If release was successful and state is now unallocated, invalidate the future
+  // If release was successful and state is now unallocated, invalidate the in-flight signal.
   if (status.ok() && memory_manager_->get_state(location) <= MemoryState::UNALLOCATED) {
-    std::shared_future<absl::Status>* relevant_future = nullptr;
+    std::shared_ptr<common::ReadySignal<absl::Status>>* relevant_signal = nullptr;
     if (location == MemoryLocation::CPU) {
-      relevant_future = &cpu_load_future_;
+      relevant_signal = &cpu_ready_signal_;
     } else if (location == MemoryLocation::GPU) {
-      relevant_future = &gpu_load_future_;
+      relevant_signal = &gpu_ready_signal_;
     }
 
-    if (relevant_future && relevant_future->valid()) {
-      VLOG(2) << "Replica(" << key_.artifact_id << "): Invalidating future for released location "
+    if (relevant_signal && *relevant_signal) {
+      VLOG(2) << "Replica(" << key_.artifact_id << "): Resetting ready signal for released location "
               << location_to_string(location);
-      // Reset the future object
-      *relevant_future = std::shared_future<absl::Status>();
+      relevant_signal->reset();
     }
   }
   return status;

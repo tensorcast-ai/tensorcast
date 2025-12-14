@@ -47,6 +47,11 @@ class WorkerLifecycleManager {
   absl::Status start();
   void stop();
 
+  // Exposed for deterministic HA synchronization and unit tests.
+  static std::string compute_state_checksum(
+      std::string_view node_id,
+      const std::vector<store::StoreEngine::ReplicaInfo>& infos);
+
  private:
   static absl::StatusOr<std::string> resolve_advertised_address(const WorkerLifecycleManager::Options& opts);
 
@@ -71,9 +76,6 @@ class WorkerLifecycleManager {
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
-  static std::string compute_state_checksum(
-      std::string_view node_id,
-      const std::vector<store::StoreEngine::ReplicaInfo>& infos);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
 

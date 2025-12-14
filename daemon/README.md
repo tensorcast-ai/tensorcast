@@ -56,7 +56,7 @@ flowchart TB
 - Managers/Registries:
   - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
   - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
-- Engine: single source of truth for materialization orchestration, memory lifecycle, UMA ledger semantics, verification futures.
+- Engine: single source of truth for materialization orchestration, memory lifecycle, UMA ledger semantics, verification readiness.
 
 ## Interfaces (Public Surface)
 
@@ -101,7 +101,7 @@ Contract highlights:
 - `registration_manager.h`, `replica_session_manager.h`, `sessions_service.h`: unified registration/session lifecycles with TTL.
 - `ref_tracker.h`: PID reference tracking; liveness integrated via `SessionLifecycleTask`.
 - `transport_lock_manager.h`: tokenized chunk locking with TTL and best-effort unlock.
-- `verification_tracker.h`: verification futures, capacity and expiry-based eviction.
+- `verification_tracker.h`: completion-driven verification tracking (ReadySignal subscriptions) with capacity/expiry pruning.
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
 - `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.

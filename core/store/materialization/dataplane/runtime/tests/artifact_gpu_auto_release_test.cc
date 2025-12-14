@@ -54,6 +54,8 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
   const size_t pool_chunk = 1024 * 1024; // 1MB chunks
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   SECTION("Load to CPU then GPU with auto-release enabled") {
     // Use new DiskSource
@@ -68,6 +70,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = size0 + size1,
         .max_buffer_bytes = pool_total};
 
@@ -95,7 +98,7 @@ TEST_CASE("GPU auto-release mandatory after CPU to GPU copy", "[replica][gpu][re
     REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
     // Ensure the asynchronous copy task has finished so that any post-copy
     // auto-release logic is completed before we inspect CPU memory state.
-    REQUIRE(gpu_fut.get().ok());
+    REQUIRE(std::move(gpu_fut).get().ok());
     REQUIRE(replica->get_memory_state(MemoryLocation::GPU) == MemoryState::LOADED);
 
     // After GPU copy, CPU memory should be marked UNALLOCATED (physical pages released but virtual space retained)
@@ -159,6 +162,8 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
   const size_t pool_chunk = 4 * 1024 * 1024; // 4MB chunks
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   SECTION("Sequential GPU loading with CPU auto-release") {
     // First GPU load
@@ -175,6 +180,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 0,
           .pinned_buffer_pool = pool,
+          .async_runtime = async_runtime,
           .expected_artifact_size = total_size};
 
       auto mstatus = Replica::create(cfg);
@@ -191,7 +197,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
       REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
       // Wait for async copy task to finish and mandatory CPU release to take effect.
-      REQUIRE(gpu_fut.get().ok());
+      REQUIRE(std::move(gpu_fut).get().ok());
 
       // Verify CPU was released
       REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
@@ -212,6 +218,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
           .device_type = ::tensorcast::DeviceType::CPU,
           .local_device_id = 1,
           .pinned_buffer_pool = pool,
+          .async_runtime = async_runtime,
           .expected_artifact_size = total_size2};
 
       auto mstatus = Replica::create(cfg);
@@ -228,7 +235,7 @@ TEST_CASE("Multi-GPU replica loading with mandatory CPU release", "[replica][gpu
       auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
       REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
       // Wait for async copy task to finish and mandatory CPU release to take effect.
-      REQUIRE(gpu_fut.get().ok());
+      REQUIRE(std::move(gpu_fut).get().ok());
 
       // Verify CPU was released
       REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
@@ -259,6 +266,8 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
   const size_t pool_chunk = 1024 * 1024; // 1MB chunks
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   SECTION("Replica smaller than one chunk") {
     const std::string artifact_id = "tiny_artifact";
@@ -281,6 +290,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -298,7 +308,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
     REQUIRE(set_dev.ok());
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
-    REQUIRE(gpu_fut.get().ok());
+    REQUIRE(std::move(gpu_fut).get().ok());
 
     // Verify CPU was released even for tiny replica
     REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
@@ -327,6 +337,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -343,7 +354,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
 
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
-    REQUIRE(gpu_fut.get().ok());
+    REQUIRE(std::move(gpu_fut).get().ok());
 
     // Verify CPU was released
     REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
@@ -373,6 +384,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .max_buffer_bytes = pool_total};
 
@@ -389,7 +401,7 @@ TEST_CASE("GPU auto-release with very small artifacts (boundary condition)", "[r
 
     auto gpu_fut = replica->ensure_loaded_async(MemoryLocation::GPU);
     REQUIRE(replica->wait_until_loaded(MemoryLocation::GPU, absl::Seconds(30)).ok());
-    REQUIRE(gpu_fut.get().ok());
+    REQUIRE(std::move(gpu_fut).get().ok());
 
     // Verify CPU was released
     REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);

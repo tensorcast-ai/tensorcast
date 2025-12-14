@@ -7,9 +7,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <filesystem>
-#include <fstream>
-#include <future>
 #include <string>
 #include <vector>
 
@@ -17,7 +14,6 @@
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
-#include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "core/store/device_registry.h"
@@ -27,7 +23,6 @@
 #include "daemon/session_lifecycle.h"
 #include "daemon/transport_lock_manager.h"
 #include "daemon/verification_tracker.h"
-#include "nlohmann/json.hpp"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -87,67 +82,11 @@ class RegionRegistrySweepTask final : public IBackgroundTask {
   IpcRegionRegistry& registry_;
 };
 
-// Shared struct used by verification auto-registration queue
-struct AutoRegTask {
-  store::loading::ReplicaKey key;
-  std::string disk_path;
-  std::shared_future<absl::Status> ready;
-};
-
 class VerificationTask final : public IBackgroundTask {
  public:
-  VerificationTask(
-      VerificationTracker& tracker,
-      store::StoreEngine& engine,
-      absl::Mutex* mu,
-      std::deque<AutoRegTask>* queue)
-      : tracker_(tracker), engine_(engine), mu_(mu), queue_(queue) {}
+  explicit VerificationTask(VerificationTracker& tracker) : tracker_(tracker) {}
 
   void run_once() override {
-    tracker_.drain_ready_and_update();
-    std::vector<AutoRegTask> reg_ready;
-    {
-      absl::MutexLock l(mu_);
-      for (auto it = queue_->begin(); it != queue_->end();) {
-        if (it->ready.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
-          reg_ready.push_back(*it);
-          it = queue_->erase(it);
-        } else {
-          ++it;
-        }
-      }
-    }
-    for (auto& task : reg_ready) {
-      absl::Status ready = task.ready.get();
-      if (!ready.ok()) {
-        LOG(ERROR) << "VerificationTask: ready future returned error: " << ready;
-      }
-      std::string mi2_id;
-      try {
-        std::filesystem::path desc_path = std::filesystem::path(task.disk_path) / "artifact_descriptor.json";
-        if (std::filesystem::exists(desc_path)) {
-          std::ifstream f(desc_path);
-          if (f.is_open()) {
-            nlohmann::json j;
-            f >> j;
-            if (j.contains("artifact_id") && j["artifact_id"].is_string()) {
-              mi2_id = j["artifact_id"].get<std::string>();
-            } else if (
-                j.contains("index_multihash") && j.contains("data_multihash") && j["index_multihash"].is_string() &&
-                j["data_multihash"].is_string()) {
-              mi2_id = absl::StrCat(
-                  "mi2:", j["index_multihash"].get<std::string>(), ":", j["data_multihash"].get<std::string>());
-            }
-          }
-        }
-      } catch (...) {
-        VLOG(1) << "descriptor parse error (ignored)";
-      }
-      auto st = engine_.register_replica_with_global_store(task.key, mi2_id);
-      if (!st.ok()) {
-        LOG(WARNING) << "Auto-register disk load failed: " << st;
-      }
-    }
     tracker_.prune();
   }
 
@@ -157,9 +96,6 @@ class VerificationTask final : public IBackgroundTask {
 
  private:
   VerificationTracker& tracker_;
-  store::StoreEngine& engine_;
-  absl::Mutex* mu_;
-  std::deque<AutoRegTask>* queue_ ABSL_GUARDED_BY(*mu_);
 };
 
 // PID watch handling moved under unified SessionLifecycleTask

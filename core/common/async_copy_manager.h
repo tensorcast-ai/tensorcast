@@ -15,6 +15,7 @@
 
 #include "absl/container/flat_hash_map.h"
 
+#include "core/common/async_runtime.h"
 #include "core/common/cuda_api.h"
 
 namespace tensorcast::common {
@@ -81,6 +82,13 @@ class AsyncCopyManager {
  public:
   static AsyncCopyManager& instance();
 
+  // Optional: bind copy callbacks and trace fallbacks to an injected runtime.
+  // When set, host callbacks will schedule user callbacks onto
+  // AsyncRuntime::cpu_executor and stream-synchronization fallback work onto
+  // AsyncRuntime::blocking_executor. If not set, AsyncCopyManager falls back to
+  // its internal callback worker thread.
+  void set_async_runtime(std::weak_ptr<AsyncRuntime> async_runtime);
+
   absl::StatusOr<CopyHandle> submit_h2d(const HostRegion& src, const DeviceRegion& dst, const CopyOptions& opts = {});
 
   absl::StatusOr<CopyHandle> submit_d2h(const DeviceRegion& src, const HostRegion& dst, const CopyOptions& opts = {});
@@ -104,10 +112,13 @@ class AsyncCopyManager {
   AsyncCopyManager();
   ~AsyncCopyManager();
 
+  void shutdown_impl_(bool destroy_streams);
+
   // Internal helpers to lazily create and cache per-device non-blocking streams
   absl::StatusOr<cudaStream_t> get_h2d_stream_(int device_id);
   absl::StatusOr<cudaStream_t> get_d2h_stream_(int device_id);
   absl::StatusOr<cudaStream_t> get_d2d_stream_(int device_id);
+  std::shared_ptr<AsyncRuntime> get_async_runtime_() const;
   void enqueue_callback_(std::function<void()> cb);
   void callback_loop_();
 
@@ -120,7 +131,11 @@ class AsyncCopyManager {
   absl::CondVar callback_cv_;
   std::queue<std::function<void()>> callback_queue_ ABSL_GUARDED_BY(callback_mu_);
   bool callback_shutdown_ ABSL_GUARDED_BY(callback_mu_) = false;
+  bool callback_thread_started_ ABSL_GUARDED_BY(callback_mu_) = false;
   std::thread callback_thread_;
+
+  mutable absl::Mutex runtime_mu_;
+  std::weak_ptr<AsyncRuntime> async_runtime_ ABSL_GUARDED_BY(runtime_mu_);
 };
 
 } // namespace tensorcast::common

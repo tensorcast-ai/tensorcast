@@ -51,6 +51,8 @@ class VectorSource final : public loader::SeekableSource {
 std::shared_ptr<replica::Replica> MakeCpuReplica(
     const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pool,
     uint64_t size_bytes) {
+  auto async_runtime = std::make_shared<common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
   loading::InlineBufferSource src{.data = nullptr, .size_bytes = size_bytes};
   if (size_bytes > 0) {
     auto storage = std::shared_ptr<uint8_t[]>(new uint8_t[size_bytes], std::default_delete<uint8_t[]>());
@@ -65,6 +67,7 @@ std::shared_ptr<replica::Replica> MakeCpuReplica(
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .artifact_chunk_bytes = kChunkBytes,
       .expected_artifact_size = size_bytes,
       .view_id = std::nullopt,

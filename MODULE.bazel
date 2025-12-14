@@ -1,20 +1,21 @@
 module(name = "tensorcast")
 
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "toolchains_llvm", version = "1.4.0")
+bazel_dep(name = "toolchains_llvm", version = "1.6.0")
 
 llvm = use_extension("@toolchains_llvm//toolchain/extensions:llvm.bzl", "llvm")
 llvm.toolchain(
-    llvm_version = "19.1.1",
-    sha256 = {"linux-x86_64": "8204de000b6a6921f0572e038336601e3225898e9a253c8aaa43b0a5fae8a4ce"},
+    llvm_version = "21.1.0",
+    sha256 = {"linux-x86_64": "4a8c4b07646a4a2eb76ccf1d73522c3e13519745b72ef09d631c09b7577b0ed2"},
     stdlib = {"linux-x86_64": "stdc++"},
     strip_prefix = {
-        "linux-x86_64": "LLVM-19.1.1-Linux-X64",
+        "linux-x86_64": "LLVM-21.1.0-Linux-X64",
     },
     urls = {
         "linux-x86_64": [
-            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-19.1.1/LLVM-19.1.1-Linux-X64.tar.xz",
-            "https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.1/LLVM-19.1.1-Linux-X64.tar.xz",
+            "file:///data/LLVM-21.1.0-Linux-X64.tar.xz",
+            "https://githubfast.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.0/LLVM-21.1.0-Linux-X64.tar.xz",
         ],
     },
 )
@@ -24,7 +25,7 @@ register_toolchains("@llvm_toolchain//:all")
 
 bazel_dep(name = "rules_cc", version = "0.2.2")
 bazel_dep(name = "rules_python", version = "1.7.0")
-bazel_dep(name = "bazel_skylib", version = "1.8.1")
+bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "abseil-cpp", version = "20250512.1")
 bazel_dep(name = "catch2", version = "3.8.1")
 bazel_dep(name = "nlohmann_json", version = "3.12.0")
@@ -40,6 +41,7 @@ bazel_dep(name = "grpc", version = "1.74.1")
 bazel_dep(name = "rules_buf", version = "0.5.2")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "folly", version = "2025.01.13.00.bcr.3")
+bazel_dep(name = "double-conversion", version = "3.3.1")
 
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
 protoc.toolchain(

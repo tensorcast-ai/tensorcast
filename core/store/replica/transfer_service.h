@@ -11,6 +11,7 @@
 
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "folly/Executor.h"
 #include "gsl/pointers"
 
 #include "core/common/memory/cuda_memory.h"
@@ -57,6 +58,7 @@ class TransferService {
       std::unique_ptr<loader::SeekableSource>& source,
       common::memory::MemoryLocation target_location,
       int concurrency,
+      folly::Executor::KeepAlive<> executor,
       std::optional<absl::Span<const uint32_t>> chunk_indices,
       void* gpu_ptr_or_null,
       std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
@@ -68,6 +70,7 @@ class TransferService {
       common::memory::MemoryLocation target_location,
       loader::SeekableSource& source,
       int concurrency,
+      folly::Executor::KeepAlive<> executor,
       void* gpu_ptr_or_null,
       std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation,
       int device_id);

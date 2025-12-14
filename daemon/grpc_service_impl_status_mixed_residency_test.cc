@@ -44,7 +44,7 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
         tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY,
         hints);
     REQUIRE(h.ok());
-    REQUIRE(h->ready_future.get().ok());
+    REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }
 
   // Load GPU replica (device 0) from the same disk artifact
@@ -56,7 +56,7 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
         tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY,
         hints);
     REQUIRE(h.ok());
-    REQUIRE(h->ready_future.get().ok());
+    REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }
 
   // Query detailed status
@@ -127,7 +127,7 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
                         : tensorcast::store::DeviceKey{tensorcast::DeviceType::GPU, 0, ""};
     auto h = engine->materialize_replica(dev, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
     REQUIRE(h.ok());
-    REQUIRE(h->ready_future.get().ok());
+    REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }
 
   // Filter by artifact_id substring (directory basename)

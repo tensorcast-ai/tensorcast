@@ -1,5 +1,7 @@
 // Copyright (c) 2025, TensorCast Team.
 
+#include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -8,6 +10,8 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/log/log.h"
+#include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/common/config/daemon_config_io.h"
 #include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
@@ -142,6 +146,14 @@ int main(int argc, char** argv) {
     common::trace::TraceManager::set_chrome_trace_dir(cfg.observability().tracing().chrome_trace_dir());
   }
 
+  // Async runtime shared by daemon + embedded store.
+  auto async_runtime = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
+      .cpu_threads = static_cast<size_t>(std::max<int>(1, opts.num_thread)),
+      .blocking_threads = static_cast<size_t>(std::max<int>(2, opts.num_thread)),
+      .thread_name_prefix = "tensorcast",
+  });
+  opts.async_runtime = async_runtime;
+
   auto engine = std::make_shared<store::StoreEngine>(opts);
 
   // Map lifecycle options into service options
@@ -184,7 +196,7 @@ int main(int argc, char** argv) {
     svc_opts.disk_path_whitelist.emplace_back(prefix);
   }
 
-  daemon::StoreDaemonServiceImpl service(engine, svc_opts);
+  daemon::StoreDaemonServiceImpl service(engine, svc_opts, async_runtime);
   daemon::StoreDaemonServiceV2Impl service_v2(service.materialization_controller(), svc_opts.allow_high_card_attrs);
 
   // gRPC server
@@ -279,12 +291,15 @@ int main(int argc, char** argv) {
     }
   }
 
+  constexpr absl::Duration kShutdownTimeout = absl::Seconds(30);
+
   std::thread sig_thread([&server, &service, set]() mutable {
     int sig = 0;
     if (sigwait(&set, &sig) == 0) {
       LOG(INFO) << "Received signal " << sig << ", initiating gRPC shutdown...";
       service.begin_shutdown();
-      server->Shutdown();
+      const auto deadline = std::chrono::system_clock::now() + std::chrono::seconds(30);
+      server->Shutdown(deadline);
     }
   });
 
@@ -294,6 +309,11 @@ int main(int argc, char** argv) {
   }
   if (lifecycle) {
     lifecycle->stop();
+  }
+  service.begin_shutdown();
+  const absl::Status drain_status = async_runtime->drain(absl::Now() + kShutdownTimeout);
+  if (!drain_status.ok()) {
+    LOG(FATAL) << "AsyncRuntime drain failed during shutdown: " << drain_status;
   }
 
   return 0;

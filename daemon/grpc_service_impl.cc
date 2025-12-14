@@ -594,7 +594,7 @@ void StoreDaemonServiceImpl::start_sweepers() {
   }
   // Verification + auto-registration
   {
-    auto t = std::make_shared<VerificationTask>(*verif_tracker_, *engine_, &bg_tasks_mu_, &auto_reg_tasks_);
+    auto t = std::make_shared<VerificationTask>(*verif_tracker_);
     scheduler_->add_task(
         TaskKind::kVerification, std::chrono::duration_cast<milliseconds>(opts_.verification_sweep_interval), [t]() {
           t->run_once();

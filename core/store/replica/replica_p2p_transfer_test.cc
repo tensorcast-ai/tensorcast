@@ -257,6 +257,7 @@ class P2PTestServer {
     // Configure Replica
     DiskSource disk_src;
     disk_src.path = resources.temp_dir / ARTIFACT_SUBDIR;
+    auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
     ReplicaConfig replica_config{
         .source = disk_src,
         .artifact_identifier = artifact_id,
@@ -264,6 +265,7 @@ class P2PTestServer {
             (register_location == MemoryLocation::GPU) ? ::tensorcast::DeviceType::GPU : ::tensorcast::DeviceType::CPU,
         .local_device_id = (register_location == MemoryLocation::GPU) ? gpu_id : -1,
         .pinned_buffer_pool = resources.pinned_pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -281,7 +283,7 @@ class P2PTestServer {
     {
       LOG(INFO) << "Loading replica to CPU...";
       auto load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
-      if (!load_future.get().ok()) {
+      if (!std::move(load_future).get().ok()) {
         LOG(ERROR) << "Failed to initiate CPU load";
         resources.cleanup();
         return;
@@ -299,7 +301,7 @@ class P2PTestServer {
     if (register_location == MemoryLocation::GPU) {
       LOG(INFO) << "Loading replica to GPU (as register_location is GPU)...";
       auto load_future = replica->ensure_loaded_async(MemoryLocation::GPU);
-      if (!load_future.get().ok()) {
+      if (!std::move(load_future).get().ok()) {
         LOG(ERROR) << "Failed to initiate GPU load";
         resources.cleanup();
         return;
@@ -521,6 +523,7 @@ class P2PTestClient {
     p2p_source.comm_engine = shared_engine;
 
     // Build ReplicaConfig via aggregate initialization (avoid default construction)
+    auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
     ReplicaConfig config{
         .source = p2p_source,
         .artifact_identifier = artifact_id + "_client",
@@ -528,6 +531,7 @@ class P2PTestClient {
                                                                        : ::tensorcast::DeviceType::CPU,
         .local_device_id = (client_target_location == MemoryLocation::GPU) ? static_cast<int>(gpu_id) : -1,
         .pinned_buffer_pool = resources.pinned_pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = artifact_size,
         .p2p_comm_enabled = true};
 
@@ -597,7 +601,7 @@ class P2PTestClient {
     LOG(INFO) << "Loading replica to CLIENT " << client_target_loc_str << " via P2P from SERVER " << server_reg_loc_str
               << "...";
     auto load_future = replica->ensure_loaded_async(client_target_location);
-    absl::Status future_get_status = load_future.get(); // Check status immediately
+    absl::Status future_get_status = std::move(load_future).get(); // Check status immediately
     if (!future_get_status.ok()) {
       LOG(ERROR) << "ensure_loaded_async failed immediately for " << client_target_loc_str << ": " << future_get_status;
       cleanup_borrowed_memory();

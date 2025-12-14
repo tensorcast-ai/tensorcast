@@ -5,10 +5,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <optional>
 #include <utility>
 
+#include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -77,7 +77,9 @@ absl::Status validate_mi2_descriptor_matches_request(const loading::Materializat
 
 } // namespace
 
-MaterializationService::MaterializationService(MaterializationDeps deps) : deps_(std::move(deps)) {}
+MaterializationService::MaterializationService(MaterializationDeps deps) : deps_(std::move(deps)) {
+  ABSL_CHECK(deps_.async_runtime != nullptr) << "MaterializationDeps.async_runtime is required";
+}
 
 absl::StatusOr<ReplicaHandle> MaterializationService::execute(const MaterializationRequest& request) {
   auto existing_or = try_reuse_replica(request);
@@ -109,8 +111,12 @@ absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const Ma
   const auto& replica = existing_or.value();
   std::optional<int> gpu_device =
       request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
-  auto fut = replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
-  return build_handle(request, replica, fut, loading::MaterializationSource::kLocalReplica);
+  (void)replica->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
+  return build_handle(
+      request,
+      replica,
+      replica->ready_signal_for(request.target_location()),
+      loading::MaterializationSource::kLocalReplica);
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const MaterializationRequest& request) const {
@@ -154,6 +160,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
         .device_type = DeviceType::GPU,
         .local_device_id = request.target_device().ordinal,
         .pinned_buffer_pool = deps_.memory_pool,
+        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{deps_.async_runtime},
         .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
         .expected_artifact_size = expected_size,
         .view_plan = src_replica->view_plan(),
@@ -179,9 +186,9 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
     }
 
     absl::Status copy_st = dst_replica->copy_from(*src_replica);
-    std::promise<absl::Status> p;
-    p.set_value(copy_st);
-    return build_handle(request, dst_replica, p.get_future().share(), loading::MaterializationSource::kLocalReplica);
+    auto ready_signal = std::make_shared<common::ReadySignal<absl::Status>>();
+    ready_signal->set_value(copy_st);
+    return build_handle(request, dst_replica, std::move(ready_signal), loading::MaterializationSource::kLocalReplica);
   }
 
   return absl::FailedPreconditionError(
@@ -253,11 +260,11 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
 ReplicaHandle MaterializationService::build_handle(
     const MaterializationRequest& request,
     const std::shared_ptr<replica::Replica>& replica,
-    std::shared_future<absl::Status> ready_future,
+    std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal,
     loading::MaterializationSource source) const {
   ReplicaHandle handle;
   handle.replica_key = request.replica_key();
-  handle.ready_future = std::move(ready_future);
+  handle.ready_signal = std::move(ready_signal);
   handle.cpu_state = replica->get_memory_state(MemoryLocation::CPU);
   handle.gpu_state = replica->get_memory_state(MemoryLocation::GPU);
   handle.source = source;

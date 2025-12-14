@@ -18,12 +18,25 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
+#include "core/common/async_runtime.h"
 #include "core/store/materialization/dataplane/contracts/buffer_pool.h"
 #include "core/store/materialization/dataplane/contracts/sink.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/runtime/pump.h"
 
 using namespace tensorcast::store::loader;
+
+namespace {
+
+static tensorcast::common::AsyncRuntime& pump_async_test_runtime() {
+  static tensorcast::common::AsyncRuntime runtime(
+      tensorcast::common::AsyncRuntime::Options{
+          .thread_name_prefix = "tensorcast-pump-async-test",
+      });
+  return runtime;
+}
+
+} // namespace
 
 // Minimal seekable source that produces deterministic bytes
 class TestSeekableSource : public SeekableSource {
@@ -316,7 +329,8 @@ TEST_CASE("Pump uses AsyncPositionedSink path", "[pump][async]") {
   TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/2);
 
   std::vector<Range> ranges{{0ULL, total}};
-  auto st = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/2);
+  auto st = pump_ranges(
+      src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/2, pump_async_test_runtime().blocking_executor());
   REQUIRE(st.ok());
   REQUIRE(sink.async_called() > 0);
   REQUIRE(sink.sync_called() == 0);
@@ -342,7 +356,8 @@ TEST_CASE("Pump async path surfaces sink error", "[pump][async]") {
 
   TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/1);
   std::vector<Range> ranges{{0ULL, total}};
-  auto st = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1);
+  auto st = pump_ranges(
+      src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1, pump_async_test_runtime().blocking_executor());
   REQUIRE(!st.ok());
   REQUIRE(st.message().find("async sink failure") != std::string::npos);
 }
@@ -355,7 +370,8 @@ TEST_CASE("Pump async tolerates delayed callbacks", "[pump][async][delay]") {
   TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/2);
   std::vector<Range> ranges{{0ULL, total}};
 
-  auto status = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/2);
+  auto status = pump_ranges(
+      src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/2, pump_async_test_runtime().blocking_executor());
   REQUIRE(status.ok());
   const int expected_chunks = static_cast<int>(total / pool.chunk_size());
   const absl::Duration wait_step = absl::Milliseconds(1);
@@ -375,7 +391,8 @@ TEST_CASE("Pump async surfaces delayed callback failure", "[pump][async][regress
   TestBufferPool pool(/*chunk_size=*/4096, /*capacity=*/1);
   std::vector<Range> ranges{{0ULL, total}};
 
-  auto status = pump_ranges(src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1);
+  auto status = pump_ranges(
+      src, sink, pool, absl::MakeSpan(ranges), /*concurrency=*/1, pump_async_test_runtime().blocking_executor());
 
   const absl::Time deadline = absl::Now() + absl::Milliseconds(200);
   while (sink.callbacks_fired() == 0 && absl::Now() < deadline) {

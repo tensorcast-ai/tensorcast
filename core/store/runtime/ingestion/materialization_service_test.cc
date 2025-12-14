@@ -3,13 +3,13 @@
 #include "core/store/runtime/ingestion/materialization_service.h"
 
 #include <chrono>
-#include <future>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 #include "absl/status/status.h"
+#include "core/common/async_runtime.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/replica_registry.h"
@@ -45,26 +45,29 @@ DeviceKey MakeGpuKey(int ordinal) {
   return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, .uuid = ""};
 }
 
-std::shared_future<absl::Status> MakeReadyFuture(absl::Status status) {
-  std::promise<absl::Status> promise;
-  promise.set_value(std::move(status));
-  return promise.get_future().share();
+std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> MakeReadySignal(absl::Status status) {
+  auto signal = std::make_shared<tensorcast::common::ReadySignal<absl::Status>>();
+  signal->set_value(std::move(status));
+  return signal;
 }
 
 ReplicaHandle MakeStubHandle(const ReplicaKey& key) {
   ReplicaHandle handle;
   handle.replica_key = key;
-  handle.ready_future = MakeReadyFuture(absl::OkStatus());
+  handle.ready_signal = MakeReadySignal(absl::OkStatus());
   return handle;
 }
 
 struct TestHarness {
-  TestHarness() : memory_pool(std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1ULL << 20, 1ULL << 20)) {}
+  TestHarness()
+      : memory_pool(std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1ULL << 20, 1ULL << 20)),
+        async_runtime(std::make_shared<tensorcast::common::AsyncRuntime>()) {}
 
   MaterializationDeps BuildDeps() {
     MaterializationDeps deps(
         gsl::not_null<ReplicaRegistry*>{&registry},
         gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{memory_pool});
+    deps.async_runtime = async_runtime;
     deps.artifact_chunk_bytes = kChunkBytes;
     deps.pinned_memory_timeout = std::chrono::milliseconds{0};
     deps.num_threads = 2;
@@ -75,6 +78,7 @@ struct TestHarness {
 
   ReplicaRegistry registry;
   std::shared_ptr<tensorcast::common::memory::PinnedBufferPool> memory_pool;
+  std::shared_ptr<tensorcast::common::AsyncRuntime> async_runtime;
   std::function<absl::StatusOr<ReplicaHandle>(const MaterializationRequest&)> run_auto;
   std::function<absl::StatusOr<
       ReplicaHandle>(const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&)>
@@ -83,7 +87,8 @@ struct TestHarness {
 
 std::shared_ptr<tensorcast::store::replica::Replica> MakeCpuReplica(
     const std::string& artifact_id,
-    gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>> pool) {
+    gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>> pool,
+    gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>> async_runtime) {
   InlineBufferSource src{.data = nullptr, .size_bytes = 16};
   tensorcast::store::replica::ReplicaConfig cfg{
       .source = src,
@@ -91,6 +96,7 @@ std::shared_ptr<tensorcast::store::replica::Replica> MakeCpuReplica(
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .artifact_chunk_bytes = kChunkBytes,
       .expected_artifact_size = 16};
   auto replica_or = tensorcast::store::replica::Replica::create(cfg);
@@ -121,7 +127,10 @@ TEST_CASE("MaterializationService reuses resident replicas", "[materialization_s
   REQUIRE(request_or.ok());
   const auto request = request_or.value();
 
-  auto replica = MakeCpuReplica(request.canonical_artifact_id(), harness.memory_pool);
+  auto replica = MakeCpuReplica(
+      request.canonical_artifact_id(),
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{harness.memory_pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.async_runtime});
   auto status = harness.registry.emplace(request.replica_key(), gsl::not_null{replica});
   REQUIRE(status.ok());
 
