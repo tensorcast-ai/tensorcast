@@ -271,7 +271,7 @@ stateDiagram-v2
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
 - `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
 - Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration
 

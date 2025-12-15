@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <queue>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -45,6 +47,65 @@ DeviceKey normalize_device_key(DeviceKey key) {
   key.uuid.clear();
   return key;
 }
+
+struct GpuTransferGateState {
+  bool active{false};
+  std::queue<folly::Promise<folly::Unit>> waiters;
+};
+
+ABSL_CONST_INIT absl::Mutex g_gpu_transfer_gate_mu(absl::kConstInit);
+absl::flat_hash_map<int, GpuTransferGateState> g_gpu_transfer_gate ABSL_GUARDED_BY(g_gpu_transfer_gate_mu);
+
+folly::SemiFuture<folly::Unit> acquire_gpu_transfer_gate(int device_id) {
+  absl::MutexLock lock(&g_gpu_transfer_gate_mu);
+  auto& gate = g_gpu_transfer_gate[device_id];
+  if (!gate.active) {
+    gate.active = true;
+    return folly::makeSemiFuture();
+  }
+  folly::Promise<folly::Unit> p;
+  auto sf = p.getSemiFuture();
+  gate.waiters.push(std::move(p));
+  return sf;
+}
+
+void release_gpu_transfer_gate(int device_id) {
+  std::optional<folly::Promise<folly::Unit>> next;
+  {
+    absl::MutexLock lock(&g_gpu_transfer_gate_mu);
+    auto it = g_gpu_transfer_gate.find(device_id);
+    if (it == g_gpu_transfer_gate.end()) {
+      return;
+    }
+    auto& gate = it->second;
+    if (!gate.waiters.empty()) {
+      next.emplace(std::move(gate.waiters.front()));
+      gate.waiters.pop();
+    } else {
+      gate.active = false;
+    }
+  }
+  if (next.has_value()) {
+    next->setValue();
+  }
+}
+
+class GpuTransferGateLease {
+ public:
+  explicit GpuTransferGateLease(int device_id) : device_id_(device_id) {}
+
+  GpuTransferGateLease(const GpuTransferGateLease&) = delete;
+  GpuTransferGateLease& operator=(const GpuTransferGateLease&) = delete;
+
+  ~GpuTransferGateLease() {
+    if (device_id_ >= 0) {
+      release_gpu_transfer_gate(device_id_);
+    }
+  }
+
+ private:
+  int device_id_{-1};
+};
 
 } // namespace
 
@@ -1274,20 +1335,31 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
 
   // Phase 2: launch async pump task delegated to TransferService
   auto self = shared_from_this();
-  return folly::via(async_runtime_->blocking_executor())
+  const int local_device_id = get_local_device_id();
+  folly::SemiFuture<folly::Unit> gate = folly::makeSemiFuture();
+  if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
+    gate = acquire_gpu_transfer_gate(local_device_id);
+  }
+  return std::move(gate)
+      .via(async_runtime_->blocking_executor())
       .thenValue(
           [self,
            source = std::move(source),
            target_location,
            concurrency,
            chunk_indices,
-           post_load_fn = std::move(post_load_fn)](auto&&) mutable -> absl::Status {
+           post_load_fn = std::move(post_load_fn),
+           local_device_id](auto&&) mutable -> absl::Status {
+            std::optional<GpuTransferGateLease> lease;
+            if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
+              lease.emplace(local_device_id);
+            }
             LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id
                       << "): async load start; target=" << static_cast<int>(target_location)
                       << ", conc=" << concurrency;
             void* gpu_ptr = nullptr;
             std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
-            int device_id = self->get_local_device_id();
+            const int device_id = local_device_id;
             if (target_location == MemoryLocation::GPU) {
               auto vec = self->get_pointer(MemoryLocation::GPU);
               if (vec.empty()) {
