@@ -673,6 +673,10 @@ if BUILD_EXTENSION:
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
+            dir_path + '/external/fmt+/include',
+            dir_path + '/external/double-conversion+',
+            dir_path + '/external/folly+',
+            dir_path + '/bazel-bin/external/folly+',
             dir_path + "/proto/gen/cc",
         ]
 
