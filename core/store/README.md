@@ -283,7 +283,7 @@ stateDiagram-v2
 
 #### ACM Usage Quick Guide
 
-- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) inside the `on_copy_done` callback. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires. Pump consumers dealing with non-owning state (e.g., `pump_ranges`) instead poll handles and finalize completions inline so the callback does not outlive stack-owned context.
+- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) either inside the `on_copy_done` callback or by finalizing `CopyHandle` completions inline in the owning thread. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires. Pump consumers dealing with non-owning state (e.g., `pump_ranges`) poll handles and finalize completions inline so callbacks do not outlive stack-owned context.
 - H2D example (return slot + optional UMA advancement in callback):
   ```cpp
   using common::AsyncCopyManager;

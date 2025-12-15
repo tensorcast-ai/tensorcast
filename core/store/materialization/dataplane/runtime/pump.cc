@@ -13,6 +13,7 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -611,35 +612,22 @@ absl::Status pump_ranges(
 
   PumpState state;
   std::atomic<size_t> range_index{0};
-  absl::Mutex producers_mu;
-  absl::CondVar producers_cv;
-  int producers_remaining ABSL_GUARDED_BY(producers_mu) = concurrency;
+  auto producers_done = std::make_shared<absl::BlockingCounter>(concurrency);
+  auto producers_remaining = std::make_shared<std::atomic<int>>(concurrency);
 
   for (int i = 0; i < concurrency; ++i) {
-    executor->add([&src, &pool, ranges, &range_index, &state, &producers_mu, &producers_cv, &producers_remaining]() {
+    executor->add([&src, &pool, ranges, &range_index, &state, producers_done, producers_remaining]() {
       run_range_producer(src, pool, ranges, range_index, state);
-      bool last = false;
-      {
-        absl::MutexLock lock(&producers_mu);
-        ABSL_CHECK(producers_remaining > 0);
-        --producers_remaining;
-        last = (producers_remaining == 0);
-      }
-      if (last) {
+      if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
         pool.signal_production_complete();
       }
-      producers_cv.SignalAll();
+      producers_done->DecrementCount();
     });
   }
 
   run_consumer(dst, pool, state);
 
-  {
-    absl::MutexLock lock(&producers_mu);
-    while (producers_remaining != 0) {
-      producers_cv.Wait(&producers_mu);
-    }
-  }
+  producers_done->Wait();
 
   // Close the sink
   // Attempt to close if dst also implements Sink
