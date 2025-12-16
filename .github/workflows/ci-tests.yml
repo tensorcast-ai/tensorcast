@@ -128,7 +128,6 @@ jobs:
             external/re2+ \
             external/boringssl+/include \
             external/c-ares+/include \
-            external/openssl+/include \
             external/xz+/src \
             external/zlib+ \
             $BOOST_INCLUDES
