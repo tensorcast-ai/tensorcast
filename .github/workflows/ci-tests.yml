@@ -100,6 +100,7 @@ jobs:
           ln -sf $(bazel info bazel-bin) bazel-bin
           ls -la bazel-bin
           ls -la bazel-bin/external/folly+
+          ls -la bazel-bin/external/folly+/folly
 
       - name: Archive Bazel external headers
         if: steps.cache-externals.outputs.cache-hit != 'true'
@@ -255,6 +256,10 @@ jobs:
       - name: Extract Bazel external headers
         run: |
           tar -xzf bazel-external-includes.tar.gz
+          ls -la .
+          ls -la bazel-bin
+          ls -la bazel-bin/external/folly+
+          ls -la bazel-bin/external/folly+/folly
 
       - name: Download Bazel generated C++ protos artifact
         uses: actions/download-artifact@v4
