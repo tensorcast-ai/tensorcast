@@ -730,7 +730,11 @@ if BUILD_EXTENSION:
                         if USE_FAKE_CUDA
                         else []
                     )
-
+                    + [
+                        '-DGLOG_DEPRECATED=__attribute__((deprecated))',
+                        '-DGLOG_EXPORT=__attribute__((visibility("default")))',
+                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))'
+                    ]
                 ),
                 extra_link_args=(
                     [

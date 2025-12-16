@@ -17,6 +17,7 @@
 -Ibazel-bin/external/catch2+
 -Ibazel-bin/external/folly+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
+-Ibazel-bin/external/glog+/_virtual_includes/glog
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
 -Iexternal/protobuf+/src
