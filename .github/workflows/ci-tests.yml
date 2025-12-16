@@ -95,12 +95,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v12-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
 
       - name: Set bazel-bin-dir
         run: |
           ln -sf $(bazel info bazel-bin) bazel-bin
           test -f bazel-bin/external/folly+/folly/folly-config.h || { echo "ERROR: folly-config.h not found"; exit 1; }
+          test -f bazel-bin/external/glog+/_virtual_includes/glog/glog/logging.h || { echo "ERROR: logging.h not found"; exit 1; }
 
       - name: Archive Bazel external headers
         if: steps.cache-externals.outputs.cache-hit != 'true'
@@ -112,7 +113,7 @@ jobs:
             external/grpc+/include \
             external/protobuf+/src \
             external/gsl+ \
-            external/glog+/src \
+            bazel-bin/external/glog+/_virtual_includes/glog \
             external/libevent+ \
             external/nlohmann_json+/include \
             external/opentelemetry-cpp+ \
@@ -258,7 +259,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v12-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
         uses: actions/download-artifact@v4

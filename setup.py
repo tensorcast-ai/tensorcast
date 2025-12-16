@@ -674,7 +674,7 @@ if BUILD_EXTENSION:
             dir_path + "/external/grpc+/include",
             dir_path + "/external/protobuf+/src",
             dir_path + "/external/gsl+",
-            dir_path + "/external/glog+/src",
+            dir_path + "/bazel-bin/external/glog+/_virtual_includes/glog",
             dir_path + "/external/libevent+",
             dir_path + "/external/libevent+/include",
             dir_path + "/external/nlohmann_json+/include",
@@ -730,11 +730,7 @@ if BUILD_EXTENSION:
                         if USE_FAKE_CUDA
                         else []
                     )
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
+
                 ),
                 extra_link_args=(
                     [
@@ -751,11 +747,6 @@ if BUILD_EXTENSION:
                         "-export-dynamic",
                     ]
                     + rpath_flags
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
                 ),
                 undef_macros=["NDEBUG"],
         )
