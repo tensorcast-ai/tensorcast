@@ -350,4 +350,5 @@ jobs:
           uv run pytest tests/python/ -v --tb=short
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
+          GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4096
         shell: bash
