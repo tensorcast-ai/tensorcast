@@ -662,9 +662,13 @@ if BUILD_EXTENSION:
         "_C": ["tensorcast/csrc/checkpoint_py.cc"],
     }
 
+    # Collect all boost include directories dynamically
+    boost_include_dirs = sorted(glob.glob(dir_path + "/external/boost.*+/include"))
+
     for name, sources in EXTENSIONS.items():
         _include_dirs = [
             dir_path,
+            dir_path + "/third_party/dev_includes",
             dir_path + "/tensorcast/csrc",
             dir_path + "/external/abseil-cpp+",
             dir_path + "/external/grpc+/include",
@@ -678,7 +682,7 @@ if BUILD_EXTENSION:
             dir_path + '/external/folly+',
             dir_path + '/bazel-bin/external/folly+',
             dir_path + "/proto/gen/cc",
-        ]
+        ] + boost_include_dirs
 
         # Library search paths
         _library_dirs = [
