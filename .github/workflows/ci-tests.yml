@@ -95,11 +95,9 @@ jobs:
           path: bazel-external-includes.tar.gz
           key: bazel-external-includes-v4-${{ hashFiles('MODULE.bazel') }}
 
-      - name: Print bazel-bin-dir
+      - name: Set bazel-bin-dir
         run: |
-          echo "bazel-bin-dir: $(bazel info bazel-bin)"
-          echo "folly: $(bazel info bazel-bin/external/folly+)"
-          echo "folly: $(ls -la bazel-bin/external/folly+)"
+          ln -sf $(bazel info bazel-bin) bazel-bin
 
       - name: Archive Bazel external headers
         if: steps.cache-externals.outputs.cache-hit != 'true'
@@ -114,7 +112,7 @@ jobs:
             external/fmt+/include \
             external/double-conversion+ \
             external/folly+ \
-            bazel-bin/external/folly+
+             $(bazel info bazel-bin/external/folly+)
 
 
       - name: Upload Bazel external headers artifact
