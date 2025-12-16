@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v0-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v12-${{ hashFiles('MODULE.bazel') }}
 
       - name: Set bazel-bin-dir
         run: |
@@ -258,7 +258,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v0-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v12-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
         uses: actions/download-artifact@v4
