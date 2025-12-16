@@ -73,6 +73,9 @@ jobs:
             --define use_fake_cuda=true \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
+          bazel build @folly//folly:config_h_gen \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Upload libcheckpoint_ext.so artifact
         uses: actions/upload-artifact@v4
