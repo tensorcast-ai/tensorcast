@@ -93,7 +93,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v2-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v3-${{ hashFiles('MODULE.bazel') }}
 
       - name: Archive Bazel external headers
         if: steps.cache-externals.outputs.cache-hit != 'true'
@@ -104,7 +104,11 @@ jobs:
             external/protobuf+/src \
             external/gsl+ \
             external/nlohmann_json+/include \
-            external/opentelemetry-cpp+
+            external/opentelemetry-cpp+ \
+            external/fmt+/include \
+            external/double-conversion+ \
+            external/folly+
+
 
       - name: Upload Bazel external headers artifact
         uses: actions/upload-artifact@v4
@@ -232,7 +236,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v2-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v3-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
         uses: actions/download-artifact@v4
