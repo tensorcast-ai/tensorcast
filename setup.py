@@ -676,6 +676,7 @@ if BUILD_EXTENSION:
             dir_path + '/external/fmt+/include',
             dir_path + '/external/double-conversion+',
             dir_path + '/external/folly+',
+            dir_path + '/bazel-bin/external/folly+',
             dir_path + "/proto/gen/cc",
         ]
 
