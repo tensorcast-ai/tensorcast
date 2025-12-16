@@ -6,12 +6,12 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <thread>
 #include <utility>
 
 #include "absl/status/status.h"
 #include "core/common/cuda_api.h"
 #include "core/common/trace/trace_manager.h"
+#include "folly/Executor.h"
 
 namespace tensorcast::common::trace {
 namespace detail {
@@ -26,7 +26,10 @@ struct CudaTracePayload {
   int device_id{-1};
 };
 
-inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* payload) {
+inline void sc_schedule_trace_host_cb(
+    cudaStream_t stream,
+    CudaTracePayload* payload,
+    folly::Executor::KeepAlive<> fallback_executor) {
   payload->stream = stream;
   auto status = tensorcast::cuda::launch_host_func(
       stream,
@@ -40,25 +43,37 @@ inline void sc_schedule_trace_host_cb(cudaStream_t stream, CudaTracePayload* pay
       },
       payload);
   if (!status.ok()) {
-    // Fallback: synchronize the stream on a detached thread before completing.
+    // Fallback: synchronize the stream before completing. Prefer scheduling on
+    // a blocking executor to keep the caller thread non-blocking and ensure the
+    // work is drainable; if none is provided, run synchronously.
     std::unique_ptr<CudaTracePayload> holder(payload);
-    std::thread(
-        [](std::unique_ptr<CudaTracePayload> payload_up) {
-          if (!payload_up) {
-            return;
-          }
-          auto* p = payload_up.get();
-          if (p->device_id >= 0) {
-            (void)tensorcast::cuda::set_device(p->device_id);
-          }
-          absl::Status sync_status = tensorcast::cuda::stream_synchronize(p->stream);
-          TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
-          if (p->on_complete) {
-            p->on_complete(sync_status);
-          }
-        },
-        std::move(holder))
-        .detach();
+    if (fallback_executor) {
+      fallback_executor->add([payload_up = std::move(holder)]() mutable {
+        if (!payload_up) {
+          return;
+        }
+        auto* p = payload_up.get();
+        if (p->device_id >= 0) {
+          (void)tensorcast::cuda::set_device(p->device_id);
+        }
+        absl::Status sync_status = tensorcast::cuda::stream_synchronize(p->stream);
+        TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
+        if (p->on_complete) {
+          p->on_complete(sync_status);
+        }
+      });
+      return;
+    }
+
+    auto* p = holder.get();
+    if (p->device_id >= 0) {
+      (void)tensorcast::cuda::set_device(p->device_id);
+    }
+    absl::Status sync_status = tensorcast::cuda::stream_synchronize(p->stream);
+    TraceManager::instance().end_span(p->artifact_id, p->request_id, p->span_id);
+    if (p->on_complete) {
+      p->on_complete(sync_status);
+    }
   }
 }
 
@@ -88,7 +103,8 @@ inline absl::Status trace_cuda_async(
     const std::string& stage,
     cudaStream_t stream,
     Op&& op,
-    Done&& on_complete = Done{}) {
+    Done&& on_complete = Done{},
+    folly::Executor::KeepAlive<> fallback_executor = {}) {
   const std::string& artifact_id = TraceManager::current_artifact_id();
   const std::string& request_id = TraceManager::current_request_id();
   // Pass the CUDA stream to begin_span for better Chrome Trace visualization
@@ -107,7 +123,7 @@ inline absl::Status trace_cuda_async(
   if (auto dev_status = tensorcast::cuda::get_device(&current_device); dev_status.ok()) {
     payload->device_id = current_device;
   }
-  detail::sc_schedule_trace_host_cb(stream, payload);
+  detail::sc_schedule_trace_host_cb(stream, payload, std::move(fallback_executor));
 
   return absl::OkStatus();
 }

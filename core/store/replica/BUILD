@@ -33,6 +33,7 @@ sc_header_only_library(
     hdrs = ["replica_config.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:async_runtime_lib",
         "//core/common:device_types_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/store/materialization/contracts:loading_spec",
@@ -121,6 +122,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
+        "@folly//folly:executor",
         "@gsl",
     ],
 )

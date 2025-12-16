@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <deque>
 #include <vector>
 
 #include "absl/log/absl_check.h"
@@ -64,26 +65,57 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
     }
   }
   const size_t num_va_chunks = (total_size + va_chunk - 1) / va_chunk;
-  const size_t total_copy_chunks = (total_size + copy_chunk - 1) / copy_chunk;
-  std::vector<common::CopyHandle> copy_handles;
-  copy_handles.reserve(total_copy_chunks); // Track every async H2D so we can wait for completion at the end.
+  const size_t inflight_limit = streaming_buf->capacity();
+  ABSL_CHECK_GT(inflight_limit, 0u) << "StreamingPinnedBuffer must have positive capacity";
+
+  struct InFlightCopy {
+    common::CopyHandle handle;
+    int slot_id;
+  };
+
+  std::deque<InFlightCopy> inflight;
+  absl::Status first_error = absl::OkStatus();
+
+  auto complete_front = [&]() {
+    InFlightCopy entry = std::move(inflight.front());
+    inflight.pop_front();
+    absl::Status st = entry.handle.wait();
+    absl::Status rc = streaming_buf->return_chunk(entry.slot_id);
+    if (!rc.ok()) {
+      LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << entry.slot_id << ": " << rc;
+      if (first_error.ok()) {
+        first_error = rc;
+      }
+    }
+    if (!st.ok()) {
+      LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << entry.slot_id << ": " << st;
+      if (first_error.ok()) {
+        first_error = st;
+      }
+    }
+  };
+
   for (size_t va_idx = 0; va_idx < num_va_chunks; ++va_idx) {
+    if (!first_error.ok()) {
+      break;
+    }
     const size_t va_off = va_idx * va_chunk;
     const size_t this_len = std::min(va_chunk, total_size - va_off);
 
     // No UMA/VS locking in final cutover. UMA is authoritative; residency is
     // guaranteed by direct-write grant when available (kept by grant_keepalive).
 
-    // Aggregate UMA advancement per CPU block via callbacks
-    const int num_subchunks = static_cast<int>((this_len + copy_chunk - 1) / copy_chunk);
-    auto remaining = std::make_shared<std::atomic<int>>(num_subchunks);
     size_t copied = 0;
     while (copied < this_len) {
+      if (!first_error.ok()) {
+        break;
+      }
       size_t step = std::min(copy_chunk, this_len - copied);
       common::memory::StreamingChunkGuard guard(streaming_buf);
       auto host_ptr_or = guard.acquire();
       if (!host_ptr_or.ok()) {
-        return host_ptr_or.status();
+        first_error = host_ptr_or.status();
+        break;
       }
       char* host_ptr = *host_ptr_or;
 
@@ -95,26 +127,16 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
       const size_t chunk_index = (va_off + copied) / copy_chunk;
       auto promote_status = guard.promote_to_consumer(chunk_index, step);
       if (!promote_status.ok()) {
-        return promote_status;
+        first_error = promote_status;
+        break;
       }
       const int slot_id = guard.release_for_async();
 
-      // Async copy H2D via ACM; return SPB slot in host callback
+      // Async copy H2D via ACM; return the SPB slot only after the copy handle completes.
       void* dst_device = static_cast<char*>(gpu_ptr.get()) + va_off + copied;
       common::HostRegion h{.base = host_ptr, .length = step, .pinned = true};
       common::DeviceRegion d{.device_id = static_cast<int>(device_id), .dev_ptr = dst_device, .length = step};
-      common::CopyOptions opts{
-          .tracing_stage = "H2D/Copy",
-          .callbacks = {.on_copy_done = [streaming_buf, slot_id, remaining](absl::Status st) {
-            absl::Status rc = streaming_buf->return_chunk(slot_id);
-            if (!rc.ok()) {
-              LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed slot=" << slot_id << ": " << rc;
-            }
-            if (!st.ok()) {
-              LOG(ERROR) << "AsyncCopyManager::submit_h2d failed slot=" << slot_id << ": " << st;
-            }
-            (void)remaining->fetch_sub(1, std::memory_order_acq_rel);
-          }}};
+      common::CopyOptions opts{.tracing_stage = "H2D/Copy"};
       auto hdl_or = common::AsyncCopyManager::instance().submit_h2d(h, d, opts);
       if (!hdl_or.ok()) {
         absl::Status rc = streaming_buf->return_chunk(slot_id);
@@ -122,22 +144,23 @@ absl::Status perform_copy_cpu_to_gpu_streaming(
           LOG(WARNING) << "StreamingPinnedBuffer::return_chunk failed after submit_h2d error slot=" << slot_id << ": "
                        << rc;
         }
-        return hdl_or.status();
+        first_error = hdl_or.status();
+        break;
       }
-      copy_handles.emplace_back(std::move(*hdl_or));
+      inflight.push_back(InFlightCopy{.handle = std::move(*hdl_or), .slot_id = slot_id});
+      if (inflight.size() >= inflight_limit) {
+        complete_front();
+      }
 
       copied += step;
     }
   }
 
-  for (auto& handle : copy_handles) {
-    auto wait_status = handle.wait();
-    if (!wait_status.ok()) {
-      return wait_status;
-    }
+  while (!inflight.empty()) {
+    complete_front();
   }
 
-  return absl::OkStatus();
+  return first_error;
 }
 
 absl::Status perform_copy_gpu_to_cpu_streaming(

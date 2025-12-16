@@ -1,20 +1,31 @@
 // Copyright (c) 2025, TensorCast Team.
 
 #include "core/common/async_copy_manager.h"
+
+#include <cstring>
 #include <utility>
+
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
 #include "core/common/trace/trace_cuda_async_fn.h"
 
 namespace tensorcast::common {
 
-AsyncCopyManager::AsyncCopyManager() {
-  callback_thread_ = std::thread([this]() { callback_loop_(); });
-}
+AsyncCopyManager::AsyncCopyManager() = default;
 
 AsyncCopyManager& AsyncCopyManager::instance() {
   static AsyncCopyManager inst;
   return inst;
+}
+
+void AsyncCopyManager::set_async_runtime(std::weak_ptr<AsyncRuntime> async_runtime) {
+  absl::MutexLock lock(&runtime_mu_);
+  async_runtime_ = std::move(async_runtime);
+}
+
+std::shared_ptr<AsyncRuntime> AsyncCopyManager::get_async_runtime_() const {
+  absl::MutexLock lock(&runtime_mu_);
+  return async_runtime_.lock();
 }
 
 CopyHandle::~CopyHandle() = default;
@@ -90,10 +101,17 @@ absl::Status CopyHandle::resolve_status_() const {
 }
 
 AsyncCopyManager::~AsyncCopyManager() {
-  shutdown();
+  // Avoid calling CUDA APIs during global destruction; CUDA fake/real globals
+  // may already be torn down. Best-effort join the callback thread and clear
+  // internal state.
+  shutdown_impl_(/*destroy_streams=*/false);
 }
 
 void AsyncCopyManager::shutdown() {
+  shutdown_impl_(/*destroy_streams=*/true);
+}
+
+void AsyncCopyManager::shutdown_impl_(bool destroy_streams) {
   {
     absl::MutexLock lock(&callback_mu_);
     if (!callback_shutdown_) {
@@ -106,18 +124,27 @@ void AsyncCopyManager::shutdown() {
   }
 
   absl::MutexLock lock(&mu_);
-  auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
+  auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) { m.clear(); };
+
+  if (!destroy_streams) {
+    destroy_map(h2d_streams_);
+    destroy_map(d2h_streams_);
+    destroy_map(d2d_streams_);
+    return;
+  }
+
+  auto destroy_streams_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
     for (auto& kv : m) {
       if (kv.second != nullptr) {
-        // Ignore errors during shutdown
+        // Ignore errors during shutdown.
         ABSL_CHECK_OK(cuda::stream_destroy(kv.second));
       }
     }
     m.clear();
   };
-  destroy_map(h2d_streams_);
-  destroy_map(d2h_streams_);
-  destroy_map(d2d_streams_);
+  destroy_streams_map(h2d_streams_);
+  destroy_streams_map(d2h_streams_);
+  destroy_streams_map(d2d_streams_);
 }
 
 absl::StatusOr<cudaStream_t> AsyncCopyManager::get_h2d_stream_(int device_id) {
@@ -207,6 +234,10 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       return set_dev_status;
     }
   }
+  folly::Executor::KeepAlive<> fallback_executor;
+  if (auto runtime = get_async_runtime_()) {
+    fallback_executor = runtime->blocking_executor();
+  }
   auto status = common::trace::trace_cuda_async(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
@@ -224,7 +255,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
         if (cb) {
           enqueue_callback_([cb, completion_status]() { cb(completion_status); });
         }
-      });
+      },
+      std::move(fallback_executor));
 
   if (!status.ok()) {
     LOG(ERROR) << "AsyncCopyManager::submit_h2d failed: device=" << dst.device_id << " dst_ptr=" << dst_ptr
@@ -276,6 +308,10 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       return set_dev_status;
     }
   }
+  folly::Executor::KeepAlive<> fallback_executor;
+  if (auto runtime = get_async_runtime_()) {
+    fallback_executor = runtime->blocking_executor();
+  }
   auto status = common::trace::trace_cuda_async(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
@@ -292,7 +328,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
         if (cb) {
           enqueue_callback_([cb, completion_status]() { cb(completion_status); });
         }
-      });
+      },
+      std::move(fallback_executor));
 
   if (!status.ok()) {
     absl::MutexLock lock(&p->mu);
@@ -339,6 +376,10 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       return set_dev_status;
     }
   }
+  folly::Executor::KeepAlive<> fallback_executor;
+  if (auto runtime = get_async_runtime_()) {
+    fallback_executor = runtime->blocking_executor();
+  }
   auto status = common::trace::trace_cuda_async(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
@@ -355,7 +396,8 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
         if (cb) {
           enqueue_callback_([cb, completion_status]() { cb(completion_status); });
         }
-      });
+      },
+      std::move(fallback_executor));
 
   if (!status.ok()) {
     absl::MutexLock lock(&p->mu);
@@ -431,9 +473,26 @@ void AsyncCopyManager::enqueue_callback_(std::function<void()> cb) {
   if (!cb) {
     return;
   }
+  if (auto runtime = get_async_runtime_()) {
+    auto executor = runtime->cpu_executor();
+    executor->add([task = std::move(cb)]() mutable { task(); });
+    return;
+  }
+
+  bool start_thread = false;
   {
     absl::MutexLock lock(&callback_mu_);
+    if (callback_shutdown_) {
+      return;
+    }
     callback_queue_.push(std::move(cb));
+    if (!callback_thread_started_) {
+      callback_thread_started_ = true;
+      start_thread = true;
+    }
+  }
+  if (start_thread) {
+    callback_thread_ = std::thread([this]() { callback_loop_(); });
   }
   callback_cv_.Signal();
 }

@@ -69,11 +69,13 @@ jobs:
 
       - name: Build tensorcast_daemon (Fake CUDA)
         run: |
+          bazel build @folly//folly:config_h_gen \
+            --config=remote \
+            --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
           bazel build //daemon:tensorcast_daemon \
             --define use_fake_cuda=true \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
-
       - name: Upload libcheckpoint_ext.so artifact
         uses: actions/upload-artifact@v4
         with:
@@ -93,18 +95,43 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v2-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
+
+      - name: Set bazel-bin-dir
+        run: |
+          ln -sf $(bazel info bazel-bin) bazel-bin
+          test -f bazel-bin/external/folly+/folly/folly-config.h || { echo "ERROR: folly-config.h not found"; exit 1; }
+          test -f bazel-bin/external/glog+/_virtual_includes/glog/glog/logging.h || { echo "ERROR: logging.h not found"; exit 1; }
 
       - name: Archive Bazel external headers
         if: steps.cache-externals.outputs.cache-hit != 'true'
         run: |
+          # Collect all boost include directories (using -L to follow symlinks)
+          BOOST_INCLUDES=$(find -L external -maxdepth 1 -type d -name 'boost.*+' -exec test -d {}/include \; -print | sed 's|$|/include|' | tr '\n' ' ')
           tar -czf bazel-external-includes.tar.gz --dereference \
             external/abseil-cpp+ \
             external/grpc+/include \
             external/protobuf+/src \
             external/gsl+ \
+            bazel-bin/external/glog+/_virtual_includes/glog \
+            external/libevent+ \
             external/nlohmann_json+/include \
-            external/opentelemetry-cpp+
+            external/opentelemetry-cpp+ \
+            external/fmt+/include \
+            external/double-conversion+ \
+            external/folly+ \
+            bazel-bin/external/folly+ \
+            external/yaml-cpp+/include \
+            external/fast_float+/include \
+            external/jemalloc+/include \
+            external/libunwind+/include \
+            external/zstd+/lib \
+            external/re2+ \
+            external/boringssl+/include \
+            external/c-ares+/include \
+            external/xz+/src \
+            external/zlib+ \
+            $BOOST_INCLUDES
 
       - name: Upload Bazel external headers artifact
         uses: actions/upload-artifact@v4
@@ -232,7 +259,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v2-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v13-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
         uses: actions/download-artifact@v4
@@ -244,6 +271,10 @@ jobs:
       - name: Extract Bazel external headers
         run: |
           tar -xzf bazel-external-includes.tar.gz
+          ls -la .
+          ls -la bazel-bin
+          ls -la bazel-bin/external/folly+
+          ls -la bazel-bin/external/folly+/folly
 
       - name: Download Bazel generated C++ protos artifact
         uses: actions/download-artifact@v4
@@ -319,4 +350,5 @@ jobs:
           uv run pytest tests/python/ -v --tb=short
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
+          GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4096
         shell: bash

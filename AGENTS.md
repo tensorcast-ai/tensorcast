@@ -287,6 +287,17 @@ cat third_party/<lib>/BUILD                 # Check target definitions
 - **Files/Directories**: `snake_case`
 - Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
+#### Async Concurrency (Folly)
+- Use `tensorcast::common::AsyncRuntime` + `folly::SemiFuture`/`folly::Future` (and `ReadySignal<T>` for completion-driven fan-out); avoid `std::thread/std::async`, detached threads, and polling, and always bind work to an executor with `.via(...)`.
+- **Executor selection rules (required)**:
+  - `cpu_executor()` and `serial_executor()` must stay non-blocking: no `CondVar::Wait*`, `folly::Future::get()/wait()`, `CopyHandle::wait()`, `sleep*`, `cuda*Synchronize`, or IO.
+  - `blocking_executor()` is the only place where blocking waits/IO are allowed, and they must be bounded (timeout/deadline) and return an error on expiry.
+- **Avoid thread-pool starvation deadlocks (required)**:
+  - If code schedules work onto executor **E** and waits for that work to make progress (producer/consumer, fan-out/join, callbacks releasing resources, etc.), the waiting/consumer must not run on an **E** worker thread.
+  - Concurrency limiting (per-GPU/per-artifact gates, schedulers, backpressure) must be async (`folly::Promise`/`SemiFuture`, async semaphores, etc.); do not block shared worker threads waiting for “slots”.
+- **Make hangs fail-fast (preferred, especially in tests/stress)**:
+  - Add progress counters + periodic “no progress” warnings (include queue depth/inflight counts) and convert sustained stalls into `absl::DeadlineExceededError`/`absl::UnavailableError`.
+
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs

@@ -54,6 +54,8 @@ int randomized_port_hint(int canonical_base) {
 
 TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader]") {
   SKIP_IF_NO_CUDA();
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   SECTION("Remote GPU to Local GPU via TCP") {
     // Use dedicated tensor key and port range to avoid crosstalk with other sections.
@@ -125,6 +127,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         "test_artifact", // artifact_identifier
         gpu_device, // target device
         pinned_pool, // pinned_pool (needed for streaming buffer)
+        gsl::not_null{async_runtime},
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
@@ -134,7 +137,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto src_or = loader->open_source();
     REQUIRE(src_or.ok());
     auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
-    auto load_status = load_future.get();
+    auto load_status = std::move(load_future).get();
     CAPTURE(load_status.message());
     REQUIRE(load_status.ok());
 
@@ -228,6 +231,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         "test_artifact", // artifact_identifier
         cpu_device, // CPU target
         pinned_pool, // pinned_pool
+        gsl::not_null{async_runtime},
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
@@ -239,7 +243,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     auto src_or = loader->open_source();
     REQUIRE(src_or.ok());
     auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::CPU, 1);
-    auto load_status = load_future.get();
+    auto load_status = std::move(load_future).get();
     CAPTURE(load_status.message());
     // Remote GPU -> Local CPU is now supported; expect success.
     REQUIRE(load_status.ok());
@@ -353,6 +357,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         "sub_chunk_artifact",
         gpu_device,
         pinned_pool,
+        gsl::not_null{async_runtime},
         kArtifactChunkBytes,
         pool_size,
         std::chrono::milliseconds::zero(),
@@ -366,7 +371,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         MemoryLocation::GPU,
         /*concurrency=*/load_concurrency);
 
-    auto load_status = future.get();
+    auto load_status = std::move(future).get();
     CAPTURE(load_status.message());
     REQUIRE(load_status.ok());
 
@@ -467,6 +472,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
           "credit_artifact",
           gpu_device,
           pinned_pool,
+          gsl::not_null{async_runtime},
           kArtifactChunkBytes,
           1024 * 1024 * 1024,
           std::chrono::milliseconds::zero(),
@@ -475,7 +481,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       auto src_or = loader->open_source();
       REQUIRE(src_or.ok());
       auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
-      auto load_status = load_future.get();
+      auto load_status = std::move(load_future).get();
       CAPTURE(load_status.message());
       REQUIRE(load_status.ok());
 
@@ -579,6 +585,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
           "credit_artifact_small_pool",
           gpu_device,
           pinned_pool,
+          gsl::not_null{async_runtime},
           kArtifactChunkBytes,
           stage_chunk_bytes * 2,
           std::chrono::milliseconds::zero(),
@@ -587,7 +594,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       auto src_or = loader->open_source();
       REQUIRE(src_or.ok());
       auto load_future = mem_manager->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, 1);
-      auto load_status = load_future.get();
+      auto load_status = std::move(load_future).get();
       CAPTURE(load_status.message());
       REQUIRE_FALSE(load_status.ok());
       const absl::string_view status_str = load_status.message();

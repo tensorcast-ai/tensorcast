@@ -77,6 +77,7 @@ struct RegistrationBackendHarness {
                 gsl::not_null<tensorcast::store::components::MetricsCollector*>{metrics_collector.get()},
             .memory_pool = gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{memory_pool},
             .communication_manager = nullptr,
+            .async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>(),
         } {
     REQUIRE(device_manager->initialize().ok());
   }
@@ -143,6 +144,7 @@ ReplicaConfig MakeInlineReplicaConfig(
       .local_device_id = device_id,
       .pinned_buffer_pool =
           gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{context.pinned_buffer_pool()},
+      .async_runtime = gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{context.async_runtime()},
       .artifact_chunk_bytes = context.artifact_chunk_bytes(),
       .expected_artifact_size = bytes,
       .max_buffer_bytes = bytes,

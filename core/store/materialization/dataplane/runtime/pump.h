@@ -9,6 +9,7 @@
 #include "core/store/materialization/dataplane/contracts/buffer_pool.h"
 #include "core/store/materialization/dataplane/contracts/sink.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "folly/Executor.h"
 
 namespace tensorcast::store::loader {
 
@@ -20,6 +21,7 @@ absl::Status pump_ranges(
     PositionedSink& dst,
     BufferPool& pool,
     absl::Span<const Range> ranges,
-    int concurrency = 2);
+    int concurrency,
+    folly::Executor::KeepAlive<> executor);
 
 } // namespace tensorcast::store::loader

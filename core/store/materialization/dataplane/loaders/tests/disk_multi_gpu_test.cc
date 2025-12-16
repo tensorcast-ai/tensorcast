@@ -74,6 +74,9 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 1024;
 
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
+
   for (int dev = 0; dev < std::min(device_count, 2); ++dev) {
     CAPTURE(dev);
     auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
@@ -91,6 +94,7 @@ TEST_CASE("Multi-GPU Disk Load and Verification", "[replica][disk][multi_gpu]") 
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = dev,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = total,
         .max_buffer_bytes = pool_total};
 

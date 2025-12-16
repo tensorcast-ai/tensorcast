@@ -80,6 +80,7 @@ TEST_CASE("ReplicaRuntime handles inline CPU replicas", "[replica_runtime]") {
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
       .pinned_buffer_pool = gsl::not_null<std::shared_ptr<PinnedBufferPool>>{context.pinned_buffer_pool()},
+      .async_runtime = gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{context.async_runtime()},
       .artifact_chunk_bytes = context.artifact_chunk_bytes(),
       .expected_artifact_size = kBufferBytes};
   config.max_buffer_bytes = kBufferBytes;

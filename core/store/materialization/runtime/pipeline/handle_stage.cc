@@ -22,7 +22,7 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
       .view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::optional<std::string>(),
       .device = dev_key,
       .replica = 0};
-  handle.ready_future = ctx.load_future;
+  handle.ready_signal = ctx.load_signal;
   handle.cpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::CPU);
   handle.gpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::GPU);
 

@@ -81,12 +81,15 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   const size_t pool_total = 1024 * 1024;
   const size_t pool_chunk = 4096;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
   const size_t artifact_chunk_bytes = tensorcast::common::consts::kArtifactChunkDefault;
   const DeviceKey gpu_device{DeviceType::GPU, 0, ""};
   auto memmgr = std::make_shared<ReplicaLoadController>(
       "loader_stream_artifact",
       gpu_device,
       pool,
+      gsl::not_null{async_runtime},
       artifact_chunk_bytes,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming
       std::chrono::milliseconds::zero(),
@@ -97,7 +100,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
   REQUIRE(src_or.ok());
   auto fut = memmgr->load_async_from_source(std::move(*src_or), MemoryLocation::GPU, /*concurrency=*/2);
   REQUIRE(fut.valid());
-  auto st = fut.get();
+  auto st = std::move(fut).get();
   LOG(INFO) << "Streaming load result: " << st.message();
   REQUIRE(st.ok());
 

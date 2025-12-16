@@ -10,6 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/common/async_runtime.h"
 #include "core/store/materialization/dataplane/contracts/buffer_pool.h"
 #include "core/store/materialization/dataplane/contracts/sink.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
@@ -20,6 +21,14 @@ using namespace tensorcast::store;
 using namespace tensorcast::store::loader;
 
 namespace {
+
+static tensorcast::common::AsyncRuntime& pump_direct_test_runtime() {
+  static tensorcast::common::AsyncRuntime runtime(
+      tensorcast::common::AsyncRuntime::Options{
+          .thread_name_prefix = "tensorcast-pump-direct-test",
+      });
+  return runtime;
+}
 
 // Minimal buffer pool (unused in direct path but required by API)
 class DummyPool : public BufferPool {
@@ -179,7 +188,7 @@ TEST_CASE("pump_ranges uses capability-driven direct writes when available", "[p
   // Define three ranges across the buffer
   std::vector<Range> ranges = {{0, 4096}, {8192, 4096}, {16384, 8192}};
 
-  auto st = pump_ranges(source, *sink, pool, absl::MakeSpan(ranges), 2);
+  auto st = pump_ranges(source, *sink, pool, absl::MakeSpan(ranges), 2, pump_direct_test_runtime().blocking_executor());
   REQUIRE(st.ok());
 
   // Ensure staged path was not used

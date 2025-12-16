@@ -361,6 +361,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .memory_pool =
           gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{runtime_context_->pinned_buffer_pool()},
       .communication_manager = runtime_context_->communication_manager(),
+      .async_runtime = runtime_context_->async_runtime(),
   };
   return resources;
 }

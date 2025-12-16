@@ -9,6 +9,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:async_copy_manager_lib",
+        "//core/common:async_runtime_lib",
         "//core/common:memory_location_lib",
         "//core/store:communication_types",
         "//core/store:device_registry",

@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -702,9 +701,7 @@ grpc::Status MaterializationController::materialize_replica(
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
           if (!req.replica_uuid().empty()) {
-            std::promise<absl::Status> p;
-            p.set_value(absl::OkStatus());
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
+            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
           }
           if (req.pid() > 0) {
             d_.refs.add_ref(rkey, req.pid());
@@ -787,7 +784,7 @@ grpc::Status MaterializationController::materialize_replica(
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
+    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
   }
   if (req.pid() > 0) {
     d_.refs.add_ref(handle.replica_key, req.pid());
@@ -883,9 +880,7 @@ grpc::Status MaterializationController::materialize_by_key(
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
           if (!req.replica_uuid().empty()) {
-            std::promise<absl::Status> p;
-            p.set_value(absl::OkStatus());
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, p.get_future().share());
+            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
           }
           if (req.pid() > 0) {
             d_.refs.add_ref(rkey, req.pid());
@@ -949,7 +944,7 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   const auto& handle = *result;
   if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_future);
+    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
   }
   if (req.pid() > 0) {
     d_.refs.add_ref(handle.replica_key, req.pid());
@@ -1295,11 +1290,10 @@ grpc::Status MaterializationController::confirm(
   // Wait bounded by gRPC deadline with a 30s hard cap (Confirm has no user timeout)
   using namespace std::chrono;
   const auto wait_ms = ClampToDeadline(rctx.server_context(), milliseconds(30000), milliseconds(30000));
-  const auto st_wait = entry->ready.wait_for(wait_ms);
-  if (st_wait == std::future_status::timeout) {
+  const absl::Status st = entry->wait_ready(wait_ms);
+  if (absl::IsDeadlineExceeded(st)) {
     return {StatusCode::DEADLINE_EXCEEDED, "confirm timeout"};
   }
-  absl::Status st = entry->ready.get();
   if (st.ok()) {
     resp.set_code(0);
     rctx.mark_success();
@@ -1363,8 +1357,8 @@ grpc::Status MaterializationController::unload(
   const int rc = d_.engine.unload_replica(key);
   if (rc == 0) {
     if (!req.replica_uuid().empty()) {
-      const size_t erased = d_.sessions.erase(req.replica_uuid());
-      if (erased == 0) {
+      const bool erased = d_.sessions.erase(req.replica_uuid());
+      if (!erased) {
         VLOG(2) << "unload: session not found for replica_uuid=" << req.replica_uuid();
       }
     }
@@ -1406,11 +1400,10 @@ grpc::Status MaterializationController::wait_verification(
   using namespace std::chrono;
   const auto user_ms = milliseconds(req.timeout_ms() > 0 ? req.timeout_ms() : 30000);
   const auto wait_ms = ClampToDeadline(rctx.server_context(), user_ms, milliseconds(30000));
-  auto st_wait = entry->ready.wait_for(wait_ms);
-  if (st_wait == std::future_status::timeout) {
+  const absl::Status st = entry->wait_ready(wait_ms);
+  if (absl::IsDeadlineExceeded(st)) {
     return {StatusCode::DEADLINE_EXCEEDED, "verification wait timeout"};
   }
-  absl::Status st = entry->ready.get();
   if (st.ok()) {
     resp.set_status(v1::VerificationStatus::VERIFICATION_STATUS_PASSED);
     d_.sessions.update_verification_status(req.replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_PASSED);

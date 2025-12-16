@@ -5,14 +5,15 @@
 #include <atomic>
 #include <limits>
 #include <memory>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/cleanup/cleanup.h"
+#include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/synchronization/blocking_counter.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -49,7 +50,7 @@ opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_dire
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_direct_win_fallback_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_direct_win_duration_ms;
 
-inline void record_copy_failure_(const char* device) {
+inline void record_copy_failure(const char* device) {
   if (!g_meter) {
     g_meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   }
@@ -90,7 +91,7 @@ class SlotLease {
   bool active_;
 };
 
-void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
+static void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
   VLOG(1) << "Consumer thread started";
   bool draining = false;
 
@@ -254,7 +255,7 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
         slot_ctx->record_status(st);
         slot_ctx->return_if_needed();
         if (!st.ok()) {
-          record_copy_failure_("gpu");
+          record_copy_failure("gpu");
           slot_ctx->request_pool_shutdown();
         }
         VLOG(2) << "pump_async_callback slot=" << slot_ctx->slot_id << " chunk_id=" << slot_ctx->global_chunk_id
@@ -262,7 +263,7 @@ void run_consumer(PositionedSink& dst, BufferPool& pool, PumpState& state) {
       };
       auto hdl_or = async->write_at_async(dest_offset, chunk.data_ptr, chunk.bytes_in_chunk, write_opts);
       if (!hdl_or.ok()) {
-        record_copy_failure_("gpu");
+        record_copy_failure("gpu");
         absl::MutexLock lock(&state.status_mutex);
         if (state.consumer_status.ok()) {
           state.consumer_status = hdl_or.status();
@@ -429,7 +430,7 @@ void run_range_producer(
 
       auto status = pool.mark_chunk_ready(slot_id, chunk_id, bytes_read);
       if (!status.ok()) {
-        record_copy_failure_("cpu");
+        record_copy_failure("cpu");
         absl::MutexLock lock(&state.status_mutex);
         if (state.producer_status.ok()) {
           state.producer_status = status;
@@ -455,12 +456,16 @@ absl::Status pump_ranges(
     PositionedSink& dst,
     BufferPool& pool,
     absl::Span<const Range> ranges,
-    int concurrency) {
+    int concurrency,
+    folly::Executor::KeepAlive<> executor) {
   if (concurrency <= 0) {
     return absl::InvalidArgumentError("Concurrency must be positive");
   }
   if (ranges.empty()) {
     return absl::InvalidArgumentError("Ranges cannot be empty");
+  }
+  if (!executor) {
+    return absl::InvalidArgumentError("pump_ranges requires a non-null executor");
   }
 
   // Capability-driven direct-write path: if destination implements
@@ -607,28 +612,22 @@ absl::Status pump_ranges(
 
   PumpState state;
   std::atomic<size_t> range_index{0};
-  std::vector<std::thread> producers;
-  producers.reserve(concurrency);
+  auto producers_done = std::make_shared<absl::BlockingCounter>(concurrency);
+  auto producers_remaining = std::make_shared<std::atomic<int>>(concurrency);
 
-  // Start producer threads
   for (int i = 0; i < concurrency; ++i) {
-    producers.emplace_back(
-        run_range_producer, std::ref(src), std::ref(pool), ranges, std::ref(range_index), std::ref(state));
+    executor->add([&src, &pool, ranges, &range_index, &state, producers_done, producers_remaining]() {
+      run_range_producer(src, pool, ranges, range_index, state);
+      if (producers_remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        pool.signal_production_complete();
+      }
+      producers_done->DecrementCount();
+    });
   }
 
-  // Start consumer thread
-  std::thread consumer(run_consumer, std::ref(dst), std::ref(pool), std::ref(state));
+  run_consumer(dst, pool, state);
 
-  // Wait for all producers to finish
-  for (auto& t : producers) {
-    t.join();
-  }
-
-  // Signal that production is complete
-  pool.signal_production_complete();
-
-  // Wait for consumer to finish
-  consumer.join();
+  producers_done->Wait();
 
   // Close the sink
   // Attempt to close if dst also implements Sink

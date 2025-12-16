@@ -261,8 +261,7 @@ absl::StatusOr<components::MemoryTierLeaseDescriptor> StoreEngine::acquire_memor
 
   // Ensure CPU residency is ready before binding the lease.
   if (replica->get_memory_state(MemoryLocation::CPU) != MemoryState::LOADED) {
-    auto fut = replica->ensure_loaded_async(MemoryLocation::CPU);
-    auto load_status = fut.get();
+    auto load_status = std::move(replica->ensure_loaded_async(MemoryLocation::CPU)).get();
     if (!load_status.ok()) {
       return load_status;
     }

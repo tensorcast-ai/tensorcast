@@ -166,6 +166,8 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
   const size_t pool_chunk = 4096; // Use 4 KiB-aligned chunk size per alignment requirements
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   // Unified UMA is managed internally; no manual CPU arena injection needed.
   // Use new DiskSource
@@ -179,6 +181,7 @@ TEST_CASE("Streaming Disk Load to GPU", "[replica][disk][streaming]") {
       .device_type = ::tensorcast::DeviceType::GPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .expected_artifact_size = std::nullopt,
       .max_buffer_bytes = 1024 * 2 // 2 KB buffer to force streaming
   };

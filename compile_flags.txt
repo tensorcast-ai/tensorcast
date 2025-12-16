@@ -13,9 +13,11 @@
 -Itensorcast
 -Iproto/gen/cc
 -Itests/cpp
+-Ithird_party/dev_includes
 -Ibazel-bin/external/catch2+
 -Ibazel-bin/external/folly+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
+-Ibazel-bin/external/glog+/_virtual_includes/glog
 -Iexternal/abseil-cpp+
 -Iexternal/nlohmann_json+/include
 -Iexternal/protobuf+/src
@@ -27,6 +29,8 @@
 -Iexternal/opentelemetry-cpp+/api/include
 -Iexternal/opentelemetry-cpp+/sdk/include
 -Iexternal/opentelemetry-cpp+/exporters/otlp/include
+-Iexternal/fmt+/include
+-Iexternal/double-conversion+
 
 -I.venv/lib/python3.10/site-packages/torch/include
 -I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include
@@ -37,7 +41,7 @@
 -Iexternal/+_repo_rules+cuda/include
 -Iexternal/+_repo_rules+nvrtc/nvidia/cuda_nvrtc/include
 
--D__cplusplus=202002L
-
 -Wno-unused-parameter
 -Wno-unused-variable
+
+-DJEMALLOC_NO_RENAME

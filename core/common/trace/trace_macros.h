@@ -3,13 +3,14 @@
 // All rights reserved.
 #pragma once
 
+#include <memory>
+
 // NOLINTBEGIN(unused-includes)
-#include <future>
 #include "core/common/otel/trace_scope_bridge.h"
-#include "core/common/trace/trace_ctx.h"
 #include "core/common/trace/trace_manager.h"
+#include "core/common/trace/trace_request_data.h"
 #include "core/common/trace/trace_scope.h"
-//
+#include "folly/io/async/Request.h"
 // NOLINTEND(unused-includes)
 
 // ---------------------------------------------------------------------------
@@ -34,6 +35,15 @@
     common::trace::TraceManager::current_artifact_id(), stage                                                   \
   }
 
+#define _SC_TRACE_REQUEST_CONTEXT_IMPL(request_id, artifact_id)                                                        \
+  auto _trace_ids_##__LINE__ = std::make_shared<common::trace::TraceIds>(request_id, artifact_id);                     \
+  folly::ShallowCopyRequestContextScopeGuard _trace_reqctx_guard_##__LINE__(                                           \
+      folly::RequestDataItem{                                                                                          \
+          common::trace::kTraceIdsToken, std::make_unique<common::trace::TraceIdsRequestData>(_trace_ids_##__LINE__)}, \
+      folly::RequestDataItem{                                                                                          \
+          common::trace::kTraceRequestDataToken,                                                                       \
+          std::make_unique<common::trace::TraceRequestData>(_trace_ids_##__LINE__)}) /**/
+
 // ---------------------------------------------------------------------------
 // 2. Public macros
 // ---------------------------------------------------------------------------
@@ -49,6 +59,7 @@
 // Set both request_id and artifact_id along with summary guard and initial trace scope.
 // This should only be used in load_model_from_remote/disk entry points.
 #define SC_TRACE_INIT_GUARD(request_id, artifact_id, stage)                              \
+  _SC_TRACE_REQUEST_CONTEXT_IMPL(request_id, artifact_id);                               \
   common::trace::TraceManager::RequestIdGuard _trace_req_guard_##__LINE__(request_id);   \
   common::trace::TraceManager::ArtifactIdGuard _trace_mid_guard_##__LINE__(artifact_id); \
   common::trace::TraceSummaryGuard _trace_summary_guard_##__LINE__(artifact_id);         \
@@ -56,7 +67,3 @@
   common::otel::TraceScopeBridge _otel_trace_scope_bridge_##__LINE__ {                   \
     artifact_id, stage                                                                   \
   }
-
-// Spawn std::async task that automatically propagates current request-id / replica-id.
-// Users must #include "core/common/trace/trace_ctx.h" when using this macro.
-#define SC_TRACE_ASYNC(policy, ...) std::async(policy, common::trace::with_trace_ctx(__VA_ARGS__))

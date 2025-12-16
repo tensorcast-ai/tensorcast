@@ -67,6 +67,8 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   const size_t pool_chunk = 1024;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   // Create DiskSource
   DiskSource disk_src;
@@ -80,6 +82,7 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -90,7 +93,7 @@ TEST_CASE("DiskArtifact page-aligned load to CPU via mmap", "[replica][disk][cpu
   SECTION("Load via mmap and verify content") {
     auto fut = replica->ensure_loaded_async(MemoryLocation::CPU);
     REQUIRE(fut.valid());
-    auto status = fut.get();
+    auto status = std::move(fut).get();
     REQUIRE(status.ok());
     REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
 

@@ -25,7 +25,10 @@ uv tool install pre-commit --with pre-commit-uv
 ./tools/install-bazel.sh
 
 # Dependency that need for compile
-sudo apt-get install -y libxml2 libstdc++-12-dev
+sudo apt install software-properties-common
+sudo add-apt-repository ppa:ubuntu-toolchain-r/test
+sudo apt update
+sudo apt-get install -y libxml2 libstdc++-12-dev gcc-13 g++-13
 
 pre-commit install
 ```

@@ -662,19 +662,41 @@ if BUILD_EXTENSION:
         "_C": ["tensorcast/csrc/checkpoint_py.cc"],
     }
 
+    # Collect all boost include directories dynamically
+    boost_include_dirs = sorted(glob.glob(dir_path + "/external/boost.*+/include"))
+
     for name, sources in EXTENSIONS.items():
         _include_dirs = [
             dir_path,
+            dir_path + "/third_party/dev_includes",
             dir_path + "/tensorcast/csrc",
             dir_path + "/external/abseil-cpp+",
             dir_path + "/external/grpc+/include",
             dir_path + "/external/protobuf+/src",
             dir_path + "/external/gsl+",
+            dir_path + "/bazel-bin/external/glog+/_virtual_includes/glog",
+            dir_path + "/external/libevent+",
+            dir_path + "/external/libevent+/include",
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
+            dir_path + '/external/fmt+/include',
+            dir_path + '/external/double-conversion+',
+            dir_path + '/external/folly+',
+            dir_path + '/bazel-bin/external/folly+',
             dir_path + "/proto/gen/cc",
-        ]
+            dir_path + "/external/yaml-cpp+/include",
+            dir_path + "/external/fast_float+/include",
+            dir_path + "/external/jemalloc+/include",
+            dir_path + "/external/libunwind+/include",
+            dir_path + "/external/zstd+/lib",
+            dir_path + "/external/re2+",
+            dir_path + "/external/boringssl+/include",
+            dir_path + "/external/c-ares+/include",
+            dir_path + "/external/openssl+/include",
+            dir_path + "/external/xz+/src",
+            dir_path + "/external/zlib+",
+        ] + boost_include_dirs
 
         # Library search paths
         _library_dirs = [
@@ -708,11 +730,11 @@ if BUILD_EXTENSION:
                         if USE_FAKE_CUDA
                         else []
                     )
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
+                    + [
+                        '-DGLOG_DEPRECATED=__attribute__((deprecated))',
+                        '-DGLOG_EXPORT=__attribute__((visibility("default")))',
+                        '-DGLOG_NO_EXPORT=__attribute__((visibility("default")))'
+                    ]
                 ),
                 extra_link_args=(
                     [
@@ -729,11 +751,6 @@ if BUILD_EXTENSION:
                         "-export-dynamic",
                     ]
                     + rpath_flags
-                    + (
-                        ["-D_GLIBCXX_USE_CXX11_ABI=0"]
-                        if PRE_CXX11_ABI
-                        else ["-D_GLIBCXX_USE_CXX11_ABI=1"]
-                    )
                 ),
                 undef_macros=["NDEBUG"],
         )
