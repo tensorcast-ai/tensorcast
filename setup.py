@@ -675,6 +675,7 @@ if BUILD_EXTENSION:
             dir_path + "/external/protobuf+/src",
             dir_path + "/external/gsl+",
             dir_path + "/external/glog+/src",
+            dir_path + "/external/libevent+/include",
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
@@ -683,6 +684,17 @@ if BUILD_EXTENSION:
             dir_path + '/external/folly+',
             dir_path + '/bazel-bin/external/folly+',
             dir_path + "/proto/gen/cc",
+            dir_path + "/external/yaml-cpp+/include",
+            dir_path + "/external/fast_float+/include",
+            dir_path + "/external/jemalloc+/include",
+            dir_path + "/external/libunwind+/include",
+            dir_path + "/external/zstd+/lib",
+            dir_path + "/external/re2+",
+            dir_path + "/external/boringssl+/include",
+            dir_path + "/external/c-ares+/include",
+            dir_path + "/external/openssl+/include",
+            dir_path + "/external/xz+/src",
+            dir_path + "/external/zlib+",
         ] + boost_include_dirs
 
         # Library search paths

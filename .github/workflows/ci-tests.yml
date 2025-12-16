@@ -95,7 +95,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v8-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v9-${{ hashFiles('MODULE.bazel') }}
 
       - name: Set bazel-bin-dir
         run: |
@@ -113,12 +113,24 @@ jobs:
             external/protobuf+/src \
             external/gsl+ \
             external/glog+/src \
+            external/libevent+/include \
             external/nlohmann_json+/include \
             external/opentelemetry-cpp+ \
             external/fmt+/include \
             external/double-conversion+ \
             external/folly+ \
             bazel-bin/external/folly+ \
+            external/yaml-cpp+/include \
+            external/fast_float+/include \
+            external/jemalloc+/include \
+            external/libunwind+/include \
+            external/zstd+/lib \
+            external/re2+ \
+            external/boringssl+/include \
+            external/c-ares+/include \
+            external/openssl+/include \
+            external/xz+/src \
+            external/zlib+ \
             $BOOST_INCLUDES
 
       - name: Upload Bazel external headers artifact
@@ -247,7 +259,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bazel-external-includes.tar.gz
-          key: bazel-external-includes-v8-${{ hashFiles('MODULE.bazel') }}
+          key: bazel-external-includes-v9-${{ hashFiles('MODULE.bazel') }}
 
       - name: Download Bazel external headers artifact
         uses: actions/download-artifact@v4
