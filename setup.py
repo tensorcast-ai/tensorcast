@@ -674,6 +674,7 @@ if BUILD_EXTENSION:
             dir_path + "/external/grpc+/include",
             dir_path + "/external/protobuf+/src",
             dir_path + "/external/gsl+",
+            dir_path + "/external/glog+/src",
             dir_path + "/external/nlohmann_json+/include",
             dir_path + "/external/opentelemetry-cpp+/api/include",
             dir_path + "/external/opentelemetry-cpp+/exporters/otlp/include",
