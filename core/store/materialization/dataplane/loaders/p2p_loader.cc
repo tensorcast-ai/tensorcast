@@ -84,7 +84,6 @@ absl::StatusOr<store::loader::FilePartitionSource::Options> build_fallback_disk_
   }
   opts.total_size = (expected_total > 0) ? expected_total : total;
   opts.io_batch_bytes = chunk_size;
-  opts.use_direct_io = (opts.total_size > 5ULL * 1024 * 1024 * 1024);
   return opts;
 }
 } // namespace

@@ -217,6 +217,7 @@ absl::Status event_create(cudaEvent_t* event);
 absl::Status event_create_with_flags(cudaEvent_t* event, unsigned int flags);
 absl::Status event_destroy(cudaEvent_t event);
 absl::Status event_record(cudaEvent_t event, cudaStream_t stream = nullptr);
+absl::Status event_query(cudaEvent_t event, bool* ready);
 absl::Status event_synchronize(cudaEvent_t event);
 absl::Status event_elapsed_time(float* ms, cudaEvent_t start, cudaEvent_t end);
 
@@ -257,23 +258,18 @@ absl::Status cu_mem_get_allocation_granularity(
     size_t* granularity,
     const CUmemAllocationProp* prop,
     CUmemAllocationGranularity_flags option);
-absl::Status cu_mem_address_reserve(
-    CUdeviceptr* ptr,
-    size_t size,
-    size_t alignment,
-    CUdeviceptr addr,
-    unsigned long long flags);
+absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags);
 absl::Status cu_mem_create(
     CUmemGenericAllocationHandle* handle,
     size_t size,
     const CUmemAllocationProp* prop,
-    unsigned long long flags);
+    uint64_t flags);
 absl::Status cu_mem_map(
     CUdeviceptr ptr,
     size_t size,
     size_t offset,
     CUmemGenericAllocationHandle handle,
-    unsigned long long flags);
+    uint64_t flags);
 absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDesc* desc, size_t count);
 absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size);
 absl::Status cu_mem_release(CUmemGenericAllocationHandle handle);

@@ -2,15 +2,24 @@
 
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 
 namespace tensorcast::store::loader {
+
+enum class DirectIoMode : uint8_t {
+  kAuto = 0,
+  kDirect = 1,
+  kBuffered = 2,
+};
 
 class FilePartitionSource : public SeekableSource {
  public:
@@ -20,7 +29,7 @@ class FilePartitionSource : public SeekableSource {
     uint64_t total_size = 0;
     // Rename: io_batch_bytes (cap per read iteration)
     size_t io_batch_bytes = 128 * 1024 * 1024; // 128MB default
-    bool use_direct_io = false; // Auto-detected if not set
+    DirectIoMode direct_io_mode = DirectIoMode::kAuto;
   };
 
   explicit FilePartitionSource(Options options);
@@ -44,6 +53,9 @@ class FilePartitionSource : public SeekableSource {
     return using_direct_io_;
   }
 
+  int direct_io_fallback_errno() const;
+  std::string direct_io_fallback_reason() const;
+
  private:
   struct FileHandle {
     int fd = -1;
@@ -62,7 +74,7 @@ class FilePartitionSource : public SeekableSource {
   // Guards initialization and all mutations to file_handles_, initialized_, and
   // using_direct_io_ during OpenFiles()/CloseFiles(). Ensures read_at() sees a
   // consistent snapshot after OpenFiles() returns.
-  absl::Mutex init_mutex_;
+  mutable absl::Mutex init_mutex_;
   std::vector<FileHandle> file_handles_;
 
   // Internal offset for sequential read() calls.
@@ -73,6 +85,8 @@ class FilePartitionSource : public SeekableSource {
 
   bool using_direct_io_ = false;
   bool initialized_ = false;
+  int direct_io_fallback_errno_ = 0;
+  std::string direct_io_fallback_reason_ ABSL_GUARDED_BY(init_mutex_);
 
   // For O_DIRECT alignment
   static constexpr size_t kDirectIOAlignment = 512;

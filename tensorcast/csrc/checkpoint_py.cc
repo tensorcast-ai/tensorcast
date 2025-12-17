@@ -512,7 +512,6 @@ static py::dict save_model_to_disk_wrapper(
     }
     opts.total_size = total_size;
     opts.io_batch_bytes = 128 * 1024 * 1024;
-    opts.use_direct_io = (total_size > 5ULL * 1024 * 1024 * 1024);
     tensorcast::store::loader::FilePartitionSource src(std::move(opts));
     return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src, total_size);
   };
@@ -646,7 +645,6 @@ static py::dict inspect_or_generate_descriptor_wrapper(const std::string& path) 
     }
     opts2.total_size = total_size2;
     opts2.io_batch_bytes = 128 * 1024 * 1024;
-    opts2.use_direct_io = (total_size2 > 5ULL * 1024 * 1024 * 1024);
     tensorcast::store::loader::FilePartitionSource src2(std::move(opts2));
     return tensorcast::store::loader::compute_data_multihash_from_seekable_source(src2, total_size2);
   };

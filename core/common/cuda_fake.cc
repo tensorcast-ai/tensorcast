@@ -936,6 +936,23 @@ absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
   return absl::OkStatus();
 }
 
+absl::Status event_query(cudaEvent_t event, bool* ready) {
+  if (ready == nullptr) {
+    return absl::InvalidArgumentError("ready pointer is null");
+  }
+  auto event_or = get_event_state(event);
+  if (!event_or.ok()) {
+    return event_or.status();
+  }
+  auto fake_event = *event_or;
+  absl::MutexLock lock(&fake_event->mu);
+  if (fake_event->destroyed && !fake_event->completed) {
+    return absl::FailedPreconditionError("fake CUDA event destroyed before completion");
+  }
+  *ready = fake_event->completed;
+  return absl::OkStatus();
+}
+
 absl::Status event_synchronize(cudaEvent_t event) {
   auto event_or = get_event_state(event);
   if (!event_or.ok()) {
@@ -1153,12 +1170,7 @@ absl::Status cu_mem_get_allocation_granularity(
   return absl::OkStatus();
 }
 
-absl::Status cu_mem_address_reserve(
-    CUdeviceptr* ptr,
-    size_t size,
-    size_t alignment,
-    CUdeviceptr addr,
-    unsigned long long flags) {
+absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags) {
   static_cast<void>(flags);
   if (ptr == nullptr) {
     return absl::InvalidArgumentError("ptr is null");
@@ -1189,7 +1201,7 @@ absl::Status cu_mem_create(
     CUmemGenericAllocationHandle* handle,
     size_t size,
     const CUmemAllocationProp* prop,
-    unsigned long long flags) {
+    uint64_t flags) {
   static_cast<void>(prop);
   static_cast<void>(flags);
   if (handle == nullptr) {
@@ -1229,7 +1241,7 @@ absl::Status cu_mem_map(
     size_t size,
     size_t offset,
     CUmemGenericAllocationHandle handle,
-    unsigned long long flags) {
+    uint64_t flags) {
   static_cast<void>(flags);
   auto& state = get_state();
   absl::MutexLock lock(&state.mutex);

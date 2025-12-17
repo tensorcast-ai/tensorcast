@@ -2,6 +2,7 @@
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -47,6 +48,17 @@ class TempFileFixture {
     return create_file(name, aligned_size);
   }
 
+  fs::path create_sparse_file(const std::string& name, uint64_t size) {
+    fs::path file_path = temp_dir_ / name;
+    std::ofstream file(file_path, std::ios::binary);
+    if (size > 0) {
+      file.seekp(static_cast<std::streamoff>(size - 1));
+      file.put(0);
+    }
+    file.close();
+    return file_path;
+  }
+
   [[nodiscard]] const fs::path& temp_dir() const {
     return temp_dir_;
   }
@@ -67,7 +79,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_sizes = {file_size};
     options.total_size = file_size;
     options.io_batch_bytes = 1024;
-    options.use_direct_io = false; // Disable for simplicity
+    options.direct_io_mode = DirectIoMode::kBuffered; // Disable for simplicity
 
     FilePartitionSource source(options);
 
@@ -98,7 +110,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_sizes = {part1_size, part2_size, part3_size};
     options.total_size = part1_size + part2_size + part3_size;
     options.io_batch_bytes = 1024;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -136,7 +148,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_paths = {file_path};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -167,7 +179,7 @@ TEST_CASE("FilePartitionSource basic functionality", "[file_partition_source]") 
     options.partition_paths = {file1, file2};
     options.partition_sizes = {part1_size, part2_size};
     options.total_size = part1_size + part2_size;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -274,7 +286,7 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
     options.partition_paths = {file};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -313,7 +325,7 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
     options.partition_paths = {file};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -361,7 +373,7 @@ TEST_CASE("FilePartitionSource thread safety", "[file_partition_source]") {
     options.partition_paths = {file};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.use_direct_io = false;
+    options.direct_io_mode = DirectIoMode::kBuffered;
 
     FilePartitionSource source(options);
 
@@ -414,7 +426,7 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     options.partition_sizes = {aligned_size};
     options.total_size = aligned_size;
     options.io_batch_bytes = 512;
-    options.use_direct_io = true; // Request Direct I/O
+    options.direct_io_mode = DirectIoMode::kDirect; // Request Direct I/O
 
     FilePartitionSource source(options);
 
@@ -439,7 +451,7 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     options.partition_paths = {file};
     options.partition_sizes = {file_size};
     options.total_size = file_size;
-    options.use_direct_io = true;
+    options.direct_io_mode = DirectIoMode::kDirect;
 
     FilePartitionSource source(options);
 
@@ -450,6 +462,48 @@ TEST_CASE("FilePartitionSource Direct I/O", "[file_partition_source]") {
     // Should either succeed or fail gracefully
     if (result.ok()) {
       REQUIRE(result.value() <= 1234);
+    }
+  }
+
+  SECTION("Buffered mode forces no O_DIRECT even above auto threshold") {
+    constexpr uint64_t kAboveThresholdBytes = 6ull * 1024ull * 1024ull * 1024ull;
+    auto file = fixture.create_sparse_file("big.bin", kAboveThresholdBytes);
+
+    FilePartitionSource::Options options;
+    options.partition_paths = {file};
+    options.partition_sizes = {static_cast<size_t>(kAboveThresholdBytes)};
+    options.total_size = kAboveThresholdBytes;
+    options.direct_io_mode = DirectIoMode::kBuffered;
+
+    FilePartitionSource source(options);
+    std::vector<char> buffer(1);
+    auto result = source.read(buffer.data(), buffer.size());
+    REQUIRE(result.ok());
+    REQUIRE_FALSE(source.is_using_direct_io());
+    REQUIRE(source.direct_io_fallback_errno() == 0);
+    REQUIRE(source.direct_io_fallback_reason().empty());
+  }
+
+  SECTION("Auto mode selects O_DIRECT above threshold (may fall back)") {
+    constexpr uint64_t kAboveThresholdBytes = 6ull * 1024ull * 1024ull * 1024ull;
+    auto file = fixture.create_sparse_file("big_auto.bin", kAboveThresholdBytes);
+
+    FilePartitionSource::Options options;
+    options.partition_paths = {file};
+    options.partition_sizes = {static_cast<size_t>(kAboveThresholdBytes)};
+    options.total_size = kAboveThresholdBytes;
+    options.direct_io_mode = DirectIoMode::kAuto;
+
+    FilePartitionSource source(options);
+    std::vector<char> buffer(1);
+    auto result = source.read(buffer.data(), buffer.size());
+    REQUIRE(result.ok());
+    if (source.is_using_direct_io()) {
+      REQUIRE(source.direct_io_fallback_errno() == 0);
+      REQUIRE(source.direct_io_fallback_reason().empty());
+    } else {
+      REQUIRE(source.direct_io_fallback_errno() != 0);
+      REQUIRE_FALSE(source.direct_io_fallback_reason().empty());
     }
   }
 }

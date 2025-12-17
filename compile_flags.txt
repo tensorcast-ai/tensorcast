@@ -13,6 +13,7 @@
 -Itensorcast
 -Iproto/gen/cc
 -Itests/cpp
+-Ithird_party/cuda_compat
 -Ibazel-bin/external/catch2+
 -Ibazel-bin/external/folly+
 -Ibazel-out/k8-fastbuild/bin/external/catch2+/_virtual_includes/catch2_generated
@@ -27,17 +28,11 @@
 -Iexternal/opentelemetry-cpp+/api/include
 -Iexternal/opentelemetry-cpp+/sdk/include
 -Iexternal/opentelemetry-cpp+/exporters/otlp/include
+-Iexternal/+_repo_rules+nccl/nvidia/nccl/include/
 
--I.venv/lib/python3.10/site-packages/torch/include
--I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include
--I.venv/lib64/python3.10/site-packages/triton/backends/nvidia/include
-
--I/usr/include/python3.10
-
--Iexternal/+_repo_rules+cuda/include
--Iexternal/+_repo_rules+nvrtc/nvidia/cuda_nvrtc/include
-
--D__cplusplus=202002L
+-Iexternal/+_repo_rules+libtorch/torch/include/
+-Iexternal/+_repo_rules+libtorch/torch/include/torch/csrc/api/include
+-Iexternal/+_repo_rules+triton/triton/backends/nvidia/include
 
 -Wno-unused-parameter
 -Wno-unused-variable

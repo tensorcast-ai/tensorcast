@@ -18,8 +18,18 @@
 namespace tensorcast::store::loader {
 
 FilePartitionSource::FilePartitionSource(Options options) : options_(std::move(options)) {
-  // Use the provided use_direct_io flag, or auto-detect based on artifact size
-  using_direct_io_ = options_.use_direct_io || (options_.total_size > 5ULL * 1024 * 1024 * 1024); // 5GB threshold
+  constexpr uint64_t kDirectIoAutoThresholdBytes = 5ULL * 1024 * 1024 * 1024;
+  switch (options_.direct_io_mode) {
+    case DirectIoMode::kAuto:
+      using_direct_io_ = (options_.total_size > kDirectIoAutoThresholdBytes);
+      break;
+    case DirectIoMode::kDirect:
+      using_direct_io_ = true;
+      break;
+    case DirectIoMode::kBuffered:
+      using_direct_io_ = false;
+      break;
+  }
 
   // Allocate aligned buffer for O_DIRECT if needed
   if (using_direct_io_) {
@@ -37,6 +47,9 @@ absl::Status FilePartitionSource::OpenFiles() {
   if (initialized_) {
     return absl::OkStatus();
   }
+
+  direct_io_fallback_errno_ = 0;
+  direct_io_fallback_reason_.clear();
 
   LOG(INFO) << "FilePartitionSource::OpenFiles opening " << options_.partition_paths.size()
             << " partition files, total_size=" << options_.total_size;
@@ -99,6 +112,8 @@ absl::Status FilePartitionSource::OpenFiles() {
       // Close any partially opened file descriptors before retrying
       CloseFilesNoLock();
       using_direct_io_ = false;
+      direct_io_fallback_errno_ = open_errno;
+      direct_io_fallback_reason_ = absl::StrCat("open_o_direct_failed_errno=", open_errno);
       attempted_fallback = true;
       // Retry opening without O_DIRECT
       continue;
@@ -108,6 +123,16 @@ absl::Status FilePartitionSource::OpenFiles() {
     CloseFilesNoLock();
     return absl::ErrnoToStatus(open_errno, "Failed to open partition(s)");
   }
+}
+
+int FilePartitionSource::direct_io_fallback_errno() const {
+  absl::MutexLock lock(&init_mutex_);
+  return direct_io_fallback_errno_;
+}
+
+std::string FilePartitionSource::direct_io_fallback_reason() const {
+  absl::MutexLock lock(&init_mutex_);
+  return direct_io_fallback_reason_;
 }
 
 void FilePartitionSource::CloseFiles() {

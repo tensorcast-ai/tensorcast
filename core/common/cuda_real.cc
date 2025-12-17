@@ -478,6 +478,22 @@ absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
   return absl::OkStatus();
 }
 
+absl::Status event_query(cudaEvent_t event, bool* ready) {
+  if (ready == nullptr) {
+    return absl::InvalidArgumentError("ready pointer is null");
+  }
+  const cudaError_t rc = cudaEventQuery(event);
+  if (rc == cudaSuccess) {
+    *ready = true;
+    return absl::OkStatus();
+  }
+  if (rc == cudaErrorNotReady) {
+    *ready = false;
+    return absl::OkStatus();
+  }
+  return tensorcast::common::cuda_as_status(rc, "cudaEventQuery");
+}
+
 absl::Status event_synchronize(cudaEvent_t event) {
   SC_RETURN_IF_CUDA_ERROR(cudaEventSynchronize(event));
   return absl::OkStatus();

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include "gsl/pointers"
@@ -12,6 +13,22 @@
 
 namespace tensorcast::store::loader {
 
+inline constexpr uint64_t DEFAULT_GPU_SCHED_LIMIT_BYTES = 512ull * 1024ull * 1024ull;
+inline constexpr uint64_t DEFAULT_GPU_SCHED_LIMIT_COPIES = 2;
+
+struct GpuSchedulerStats {
+  uint64_t waits = 0;
+  double wait_sec = 0.0;
+  uint64_t inflight_bytes = 0;
+  uint64_t inflight_copies = 0;
+  uint64_t limit_bytes = DEFAULT_GPU_SCHED_LIMIT_BYTES;
+  uint64_t limit_copies = DEFAULT_GPU_SCHED_LIMIT_COPIES;
+  bool enabled = true;
+};
+
+GpuSchedulerStats get_gpu_scheduler_stats(int device_id);
+void reset_gpu_scheduler_stats_for_testing();
+
 class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositionedSink {
  public:
   struct Options {
@@ -20,6 +37,9 @@ class GpuMemorySink : public Sink, public PositionedSink, public AsyncPositioned
     size_t chunk_size = 128 * 1024 * 1024; // 128MB default
     int device_id = 0;
     std::shared_ptr<common::memory::GpuDeviceMemory> allocation;
+    bool gpu_sched_enabled = true;
+    uint64_t gpu_sched_limit_bytes = DEFAULT_GPU_SCHED_LIMIT_BYTES;
+    uint64_t gpu_sched_limit_copies = DEFAULT_GPU_SCHED_LIMIT_COPIES;
   };
 
   explicit GpuMemorySink(Options options);

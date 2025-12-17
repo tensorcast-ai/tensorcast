@@ -290,6 +290,7 @@ sc_cc_library(
         "//core/common:cuda_api_lib",
         "//core/common:cuda_memory_lib",
         "//core/common:device_guard_lib",
+        "@abseil-cpp//absl/time",
         "@gsl",
         "@opentelemetry-cpp//api:api",
     ],

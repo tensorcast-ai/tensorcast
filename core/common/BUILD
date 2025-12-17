@@ -26,6 +26,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":error_handling_lib",
+        "//third_party/cuda_compat:nv_target",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/synchronization",
@@ -37,6 +38,7 @@ sc_cc_library(
         "@cufft",
         "@cupti",
         "@curand",
+        "@cusolver",
         "@cusparse",
         "@cusparselt",
         "@nccl",

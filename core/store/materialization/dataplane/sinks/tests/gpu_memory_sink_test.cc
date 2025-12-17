@@ -203,6 +203,38 @@ TEST_CASE("GpuMemorySink basic functionality", "[gpu_memory_sink]") {
     REQUIRE(fixture.verify_gpu_content(options.total_size, 'C'));
   }
 
+  SECTION("Async positioned writes track completeness on close") {
+    constexpr size_t kChunkBytes = 1024;
+    constexpr size_t kNumChunks = 3;
+    constexpr size_t kTotal = kChunkBytes * kNumChunks;
+    static_assert(kTotal <= 10 * 1024 * 1024);
+
+    GpuMemorySink::Options options{
+        .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
+        .total_size = kTotal,
+        .chunk_size = 128 * 1024 * 1024,
+        .device_id = 0,
+    };
+    GpuMemorySink sink(options);
+
+    fixture.fill_host_buffer('F');
+    std::vector<CopyHandle> handles;
+    handles.reserve(kNumChunks);
+    for (size_t i = 0; i < kNumChunks; ++i) {
+      const void* src = static_cast<const char*>(fixture.host_ptr()) + (i * kChunkBytes);
+      auto h_or = sink.write_at_async(i * kChunkBytes, src, kChunkBytes);
+      REQUIRE(h_or.ok());
+      handles.push_back(std::move(*h_or));
+    }
+    for (auto& h : handles) {
+      REQUIRE(h.wait().ok());
+    }
+
+    auto status = sink.close();
+    REQUIRE(status.ok());
+    REQUIRE(fixture.verify_gpu_content(kTotal, 'F'));
+  }
+
   SECTION("Async transfer completion") {
     GpuMemorySink::Options options{
         .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
@@ -225,6 +257,104 @@ TEST_CASE("GpuMemorySink basic functionality", "[gpu_memory_sink]") {
 
     // Verify all data transferred
     REQUIRE(fixture.verify_gpu_content(large_write, 'D'));
+  }
+}
+
+TEST_CASE("GpuMemorySink scheduler configuration and stats", "[gpu_memory_sink]") {
+  reset_gpu_scheduler_stats_for_testing();
+  GPUMemoryFixture fixture(64 * 1024 * 1024); // 64MB
+
+  if (!fixture.is_cuda_available()) {
+    SKIP("CUDA not available");
+  }
+
+  SECTION("Disabled scheduler does not accumulate waits") {
+    constexpr size_t kBytes = 4 * 1024 * 1024;
+    fixture.fill_host_buffer('S');
+
+    GpuMemorySink::Options options{
+        .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
+        .total_size = kBytes,
+        .chunk_size = 128 * 1024 * 1024,
+        .device_id = 0,
+        .gpu_sched_enabled = false,
+        .gpu_sched_limit_bytes = 1,
+        .gpu_sched_limit_copies = 1,
+    };
+    GpuMemorySink sink(options);
+
+    auto h_or = sink.write_at_async(0, fixture.host_ptr(), kBytes);
+    REQUIRE(h_or.ok());
+    REQUIRE(h_or->wait().ok());
+    REQUIRE(sink.close().ok());
+
+    const auto stats = get_gpu_scheduler_stats(options.device_id);
+    REQUIRE(stats.enabled == false);
+    REQUIRE(stats.waits == 0);
+    REQUIRE(stats.inflight_bytes == 0);
+    REQUIRE(stats.inflight_copies == 0);
+  }
+
+  SECTION("Scheduler waits when copy limit is hit") {
+    constexpr size_t kTotalBytes = 64 * 1024 * 1024;
+    static_assert(kTotalBytes % 2 == 0);
+    constexpr size_t kChunkBytes = kTotalBytes / 2;
+
+    fixture.fill_host_buffer('T');
+
+    GpuMemorySink::Options options{
+        .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
+        .total_size = kTotalBytes,
+        .chunk_size = 128 * 1024 * 1024,
+        .device_id = 0,
+        .gpu_sched_enabled = true,
+        .gpu_sched_limit_bytes = 0, // unlimited bytes
+        .gpu_sched_limit_copies = 1,
+    };
+    GpuMemorySink sink(options);
+
+    auto h1_or = sink.write_at_async(0, fixture.host_ptr(), kChunkBytes);
+    REQUIRE(h1_or.ok());
+
+    const void* src2 = static_cast<const char*>(fixture.host_ptr()) + kChunkBytes;
+    auto h2_or = sink.write_at_async(kChunkBytes, src2, kChunkBytes);
+    REQUIRE(h2_or.ok());
+
+    REQUIRE(h1_or->wait().ok());
+    REQUIRE(h2_or->wait().ok());
+    REQUIRE(sink.close().ok());
+
+    const auto stats = get_gpu_scheduler_stats(options.device_id);
+    REQUIRE(stats.enabled == true);
+    REQUIRE(stats.limit_copies == 1);
+    REQUIRE(stats.waits > 0);
+    REQUIRE(stats.inflight_bytes == 0);
+    REQUIRE(stats.inflight_copies == 0);
+  }
+
+  SECTION("Byte limit smaller than copy does not deadlock") {
+    constexpr size_t kBytes = 8 * 1024 * 1024;
+    fixture.fill_host_buffer('U');
+
+    GpuMemorySink::Options options{
+        .gpu_base_ptr = gsl::not_null<void*>{fixture.gpu_ptr()},
+        .total_size = kBytes,
+        .chunk_size = 128 * 1024 * 1024,
+        .device_id = 0,
+        .gpu_sched_enabled = true,
+        .gpu_sched_limit_bytes = 1, // smaller than kBytes
+        .gpu_sched_limit_copies = 1,
+    };
+    GpuMemorySink sink(options);
+
+    auto h_or = sink.write_at_async(0, fixture.host_ptr(), kBytes);
+    REQUIRE(h_or.ok());
+    REQUIRE(h_or->wait().ok());
+    REQUIRE(sink.close().ok());
+
+    const auto stats = get_gpu_scheduler_stats(options.device_id);
+    REQUIRE(stats.enabled == true);
+    REQUIRE(stats.limit_bytes == 1);
   }
 }
 
