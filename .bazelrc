@@ -27,9 +27,10 @@ build --cxxopt="-std=c++20"
 build --cxxopt="-Werror=thread-safety-analysis"
 build --cxxopt="-Werror=unused-result"
 build --cxxopt="-Werror=switch"
+build --cxxopt="-Wno-macro-redefined"
 build --cxxopt="-fdiagnostics-color=always"
 build --cxxopt="-D_GLIBCXX_USE_CXX11_ABI=0"
-build --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
+# build --linkopt="-D_GLIBCXX_USE_CXX11_ABI=0"
 build --cxxopt="-Xclang"
 build --cxxopt="-fno-cxx-modules"
 
@@ -62,4 +63,3 @@ common:remote --experimental_remote_cache_compression_threshold=100
 common:remote --build_metadata=REPO_URL=https://github.com/tensorcast-ai/tensorcast.git
 
 try-import user.bazelrc
-

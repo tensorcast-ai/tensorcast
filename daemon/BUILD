@@ -101,10 +101,15 @@ sc_header_only_library(
     hdrs = ["verification_tracker.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:ready_signal_lib",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:check",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
+        "@folly//folly:executor",
+        "@folly//folly/futures:core",
     ],
 )
 
@@ -176,6 +181,7 @@ cc_binary(
     deps = [
         ":grpc_service_impl",
         ":worker_lifecycle",
+        "//core/common:async_runtime_lib",
         "//core/common:daemon_config_io_lib",
         "//core/common:logging_init_lib",
         "//core/common:otel_init_lib",
@@ -187,6 +193,7 @@ cc_binary(
         "@abseil-cpp//absl/flags:parse",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
         "@gsl",
     ],
 )
@@ -206,9 +213,12 @@ sc_header_only_library(
     hdrs = ["replica_session_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:ready_signal_lib",
         "//core/store/materialization/contracts:loading_spec",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",
+        "@folly//folly/futures:core",
     ],
 )
 
@@ -277,7 +287,10 @@ sc_header_only_library(
     hdrs = ["background_scheduler.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:trace_request_data_lib",
         "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/log",
+        "@folly//folly/io/async:request_context",
     ],
 )
 
@@ -296,6 +309,7 @@ sc_header_only_library(
     hdrs = ["grpc_metrics.h"],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:trace_manager_lib",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -316,9 +330,8 @@ sc_header_only_library(
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
-        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/synchronization",
-        "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -347,6 +360,10 @@ sc_header_only_library(
     deps = [
         ":grpc_metrics_hdr",
         ":grpc_span_hdr",
+        "//core/common:trace_request_data_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@folly//folly/io/async:request_context",
     ],
 )
 
@@ -374,7 +391,10 @@ sc_header_only_library(
         ":session_lifecycle_hdr",
         ":session_manager_hdr",
         ":verification_tracker_hdr",
+        "//core/common:ready_signal_lib",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time:time",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -612,6 +632,19 @@ cc_test(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "@abseil-cpp//absl/log",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "daemon_shutdown_drain_test",
+    srcs = ["daemon_shutdown_drain_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/common:async_runtime_lib",
+        "//core/store:store_engine",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
         "@catch2//:catch2_main",
     ],
 )

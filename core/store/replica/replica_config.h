@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 
+#include "core/common/async_runtime.h"
 #include "core/common/const/granularity.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -41,6 +42,9 @@ struct ReplicaConfig {
 
   // Memory pools for allocation (can be shared across replicas).
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_buffer_pool;
+
+  // Async runtime shared across daemon + store for executor-based concurrency.
+  gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime;
   // UMA chunking granularity (bytes)
   size_t artifact_chunk_bytes{tensorcast::common::consts::kArtifactChunkDefault};
 

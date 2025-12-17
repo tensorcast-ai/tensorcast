@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <functional>
-#include <future>
 #include <memory>
 #include <optional>
 #include <string>
@@ -16,8 +15,10 @@
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "folly/futures/Future.h"
 #include "gsl/pointers"
 
+#include "core/common/async_runtime.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -42,7 +43,7 @@ namespace tensorcast::store::replica {
  * and contiguous GPU memory, supporting both pool-based allocation and borrowing external pointers.
  * It ensures thread-safe access to memory resources and their states.
  */
-class ReplicaLoadController {
+class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadController> {
  public:
   /**
    * @brief Constructs a ReplicaLoadController.
@@ -61,6 +62,7 @@ class ReplicaLoadController {
       std::string artifact_identifier,
       DeviceKey device_key,
       const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
+      gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       size_t artifact_chunk_bytes,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
@@ -172,9 +174,9 @@ class ReplicaLoadController {
    *
    * @param source The source memory location (must be LOADED).
    * @param destination The destination memory location (must be ALLOCATED).
-   * @return std::future<absl::Status> Future indicating the completion status of the copy.
+   * @return folly::SemiFuture<absl::Status> Future indicating the completion status of the copy.
    */
-  [[nodiscard]] std::future<absl::Status> copy_data_async(
+  [[nodiscard]] folly::SemiFuture<absl::Status> copy_data_async(
       common::memory::MemoryLocation source,
       common::memory::MemoryLocation destination) ABSL_LOCKS_EXCLUDED(mutex_);
 
@@ -182,7 +184,7 @@ class ReplicaLoadController {
    * @brief NEW: Orchestrate DISK/REMOTE → CPU/GPU using a provided source.
    * Performs allocation, state transitions, buffer setup, pumping, and finalization.
    */
-  [[nodiscard]] std::future<absl::Status> load_async_from_source(
+  [[nodiscard]] folly::SemiFuture<absl::Status> load_async_from_source(
       std::unique_ptr<loader::SeekableSource> source,
       common::memory::MemoryLocation target_location,
       int concurrency,
@@ -429,6 +431,7 @@ class ReplicaLoadController {
   const std::optional<MemoryTierConfig> memory_tier_config_;
 
   // Memory Pools (immutable handles; lock-free reads)
+  const gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime_;
   const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pinned_pool_;
 
   // Streaming buffer configuration

@@ -32,6 +32,8 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
   const size_t pool_chunk = 256 * 1024;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   SECTION("Non-existent subdirectory") {
     // Use new DiskSource
@@ -46,6 +48,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .max_buffer_bytes = pool_total};
 
     auto mstatus = Replica::create(cfg);
@@ -74,6 +77,7 @@ TEST_CASE("DiskArtifact creation errors", "[replica][disk][error]") {
         .device_type = ::tensorcast::DeviceType::CPU,
         .local_device_id = 0,
         .pinned_buffer_pool = pool,
+        .async_runtime = async_runtime,
         .expected_artifact_size = 1024 // wrong expected size
     };
 

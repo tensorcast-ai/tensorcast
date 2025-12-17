@@ -7,6 +7,7 @@
 #include <string>
 
 #include "absl/status/status.h"
+#include "core/common/async_runtime.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
@@ -57,6 +58,14 @@ class RuntimeContext {
     return view_hash_computer_;
   }
 
+  [[nodiscard]] std::shared_ptr<common::AsyncRuntime> async_runtime() const {
+    return async_runtime_;
+  }
+
+  [[nodiscard]] bool owns_async_runtime() const {
+    return owns_async_runtime_;
+  }
+
   void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
 
   [[nodiscard]] size_t artifact_chunk_bytes() const {
@@ -104,6 +113,8 @@ class RuntimeContext {
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
+  std::shared_ptr<common::AsyncRuntime> async_runtime_;
+  bool owns_async_runtime_{false};
   std::unique_ptr<RuntimeContextEvents> events_;
   std::unique_ptr<ingestion::IngestionEventHub> ingestion_event_hub_;
   components::WorkerIdentity worker_identity_;

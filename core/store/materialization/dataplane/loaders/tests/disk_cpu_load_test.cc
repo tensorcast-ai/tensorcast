@@ -66,6 +66,8 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
   const size_t pool_chunk = 1024;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   // UMA is managed internally by ReplicaLoadController.
   // Use new DiskSource
@@ -80,6 +82,7 @@ TEST_CASE("DiskArtifact get size and load to CPU", "[replica][disk][cpu]") {
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 

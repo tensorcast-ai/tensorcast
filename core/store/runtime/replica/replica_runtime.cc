@@ -375,8 +375,7 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
   }();
 
   if (hydrate_inline_cpu) {
-    auto load_future = replica->ensure_loaded_async(common::memory::MemoryLocation::CPU);
-    const absl::Status& load_status = load_future.get();
+    absl::Status load_status = std::move(replica->ensure_loaded_async(common::memory::MemoryLocation::CPU)).get();
     if (!load_status.ok()) {
       LOG(ERROR) << "Failed to hydrate inline CPU replica " << artifact_identifier << ": " << load_status;
       return nullptr;

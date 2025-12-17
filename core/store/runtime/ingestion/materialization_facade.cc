@@ -48,6 +48,7 @@ MaterializationFacade::MaterializationFacade(Config config)
   MaterializationDeps deps(
       gsl::not_null<components::ReplicaRegistry*>{&registry},
       gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{pinned_pool});
+  deps.async_runtime = config_.runtime_context->async_runtime();
   deps.artifact_chunk_bytes = config_.artifact_chunk_bytes;
   deps.pinned_memory_timeout = config_.pinned_memory_timeout;
   deps.num_threads = config_.num_threads;

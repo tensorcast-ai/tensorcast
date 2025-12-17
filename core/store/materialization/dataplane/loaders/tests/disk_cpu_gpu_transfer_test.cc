@@ -71,6 +71,8 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
   const size_t pool_chunk = 512;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   // Use new DiskSource
   DiskSource disk_src;
@@ -84,6 +86,7 @@ TEST_CASE("DiskArtifact load to CPU then GPU and verify content", "[replica][dis
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .expected_artifact_size = total_size,
       .max_buffer_bytes = pool_total};
 
@@ -151,6 +154,8 @@ TEST_CASE(
   const size_t pool_chunk = chunk_bytes / 4;
   auto pool = std::make_shared<PinnedBufferPool>(pool_total, pool_chunk);
   REQUIRE(pool != nullptr);
+  auto async_runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  REQUIRE(async_runtime != nullptr);
 
   MemoryTierConfig mem_tier_cfg;
   mem_tier_cfg.enable_preemptible_memory = false;
@@ -167,6 +172,7 @@ TEST_CASE(
       .device_type = ::tensorcast::DeviceType::CPU,
       .local_device_id = 0,
       .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
       .artifact_chunk_bytes = chunk_bytes,
       .expected_artifact_size = payload_size,
       .max_buffer_bytes = pool_total,

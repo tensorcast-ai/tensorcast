@@ -4,12 +4,15 @@
 
 #include <cstdint>
 #include <functional>
-#include <future>
 #include <map>
 #include <memory>
 #include <vector>
 
 #include "absl/status/status.h"
+#include "folly/futures/Future.h"
+#include "gsl/pointers"
+
+#include "core/common/async_runtime.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/communication_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -104,12 +107,14 @@ class ChunkAwareLoadingStrategy {
    * @param plan Loading plan to execute
    * @param memory Unified memory to update chunk states
    * @param mem_manager Memory manager for allocations and loaders
+   * @param async_runtime Runtime used to schedule blocking plan execution.
    * @return Future that resolves when loading completes
    */
-  static std::future<absl::Status> execute_plan(
+  static folly::SemiFuture<absl::Status> execute_plan(
       const LoadPlan& plan,
       replica::UnifiedMemoryAuthority& memory,
-      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager);
+      const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
+      gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime);
 
   /**
    * @brief Execute loading plan with progress tracking

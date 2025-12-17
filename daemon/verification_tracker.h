@@ -8,17 +8,19 @@
 
 #include <algorithm>
 #include <chrono>
-#include <deque>
-#include <future>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/absl_check.h"
+#include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
-#include "absl/time/time.h"
-#include "grpcpp/grpcpp.h"
+#include "core/common/ready_signal.h"
+#include "folly/Executor.h"
+#include "folly/futures/Future.h"
 #include "tensorcast/daemon/v1/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
@@ -31,14 +33,40 @@ class VerificationTracker {
   };
 
   VerificationTracker() = default;
+
   explicit VerificationTracker(Options opts) : opts_(opts) {}
 
-  // Initialize tracking for a replica_uuid: mark IN_PROGRESS and enqueue a
-  // readiness future to be drained by background tasks.
-  void initiate(const std::string& uuid, std::shared_future<absl::Status> ready) {
+  void set_serial_executor(folly::Executor::KeepAlive<> executor) {
+    serial_executor_ = std::move(executor);
+  }
+
+  // Initialize tracking for a replica_uuid: mark IN_PROGRESS and subscribe to
+  // readiness completion. Completion updates are executed on the serial
+  // executor so registry progression is completion-driven and non-polling.
+  void initiate(const std::string& uuid, std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
     set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS, "");
-    absl::MutexLock l(&mu_);
-    tasks_.push_back(VerifTask{.uuid = uuid, .ready = std::move(ready)});
+    if (!ready_signal) {
+      set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
+      return;
+    }
+    ABSL_CHECK(serial_executor_) << "VerificationTracker serial executor must be set before initiate()";
+
+    std::string uuid_copy = uuid;
+    auto executor = serial_executor_.copy();
+    (void)std::move(ready_signal->subscribe())
+        .via(std::move(executor))
+        .thenValue([this, uuid_copy = std::move(uuid_copy)](absl::Status st) {
+          if (st.ok()) {
+            set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
+          } else {
+            set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
+          }
+          return st;
+        })
+        .thenError(folly::tag_t<std::exception>{}, [this, uuid_copy](const std::exception& ex) {
+          set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, ex.what());
+          return absl::InternalError(ex.what());
+        });
   }
 
   // Return terminal status if known; otherwise std::nullopt.
@@ -58,32 +86,6 @@ class VerificationTracker {
   // Update status explicitly (e.g., synchronous wait path). Refreshes TTL.
   void update(const std::string& uuid, v1::VerificationStatus st, std::string err = "") {
     set_status(uuid, st, std::move(err));
-  }
-
-  // Non-blocking: move ready tasks and update registry to PASSED/FAILED.
-  void drain_ready_and_update() {
-    using namespace std::chrono_literals;
-    std::vector<std::pair<std::string, absl::Status>> done;
-    {
-      absl::MutexLock l(&mu_);
-      for (auto it = tasks_.begin(); it != tasks_.end();) {
-        if (it->ready.wait_for(0ms) == std::future_status::ready) {
-          done.emplace_back(it->uuid, it->ready.get());
-          it = tasks_.erase(it);
-        } else {
-          ++it;
-        }
-      }
-    }
-    for (auto& p : done) {
-      const auto& uuid = p.first;
-      const auto& st = p.second;
-      if (st.ok())
-        set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
-      else
-        set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
-    }
-    prune();
   }
 
   // Enforce TTL and capacity limits.
@@ -115,15 +117,12 @@ class VerificationTracker {
 
  private:
   using time_point = std::chrono::time_point<std::chrono::steady_clock>;
+
   struct Entry {
     v1::VerificationStatus status{v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
     std::string err;
     time_point updated_at;
     time_point expire_at;
-  };
-  struct VerifTask {
-    std::string uuid;
-    std::shared_future<absl::Status> ready;
   };
 
   void set_status(const std::string& uuid, v1::VerificationStatus st, std::string err) {
@@ -140,7 +139,7 @@ class VerificationTracker {
   mutable absl::Mutex mu_;
   Options opts_;
   absl::flat_hash_map<std::string, Entry> reg_ ABSL_GUARDED_BY(mu_);
-  std::deque<VerifTask> tasks_ ABSL_GUARDED_BY(mu_);
+  folly::Executor::KeepAlive<> serial_executor_;
 };
 
 } // namespace tensorcast::daemon

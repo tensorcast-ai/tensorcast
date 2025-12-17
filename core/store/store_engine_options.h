@@ -6,6 +6,8 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+
+#include "core/common/async_runtime.h"
 #include "core/common/const/granularity.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/memory_tier_config.h"
@@ -60,6 +62,10 @@ struct StoreEngineOptions {
   // and listen socket.  When provided, the StoreEngine will reuse this
   // manager instead of creating its own internal instance.
   std::shared_ptr<components::CommunicationManager> comm_manager{nullptr};
+
+  // Optional externally created AsyncRuntime so StoreEngine and daemon can
+  // share a single executor runtime with unified shutdown/drain.
+  std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
 
   // Maximum number of concurrent replica transfers that can use the shared
   // streaming pinned buffer pool. Each transfer receives an isolated buffer

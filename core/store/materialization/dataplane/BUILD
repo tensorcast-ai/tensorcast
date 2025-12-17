@@ -52,6 +52,7 @@ sc_cc_library(
         "//core/store/replica:direct_write",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
+        "@folly//folly:executor",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -679,6 +680,7 @@ cc_test(
     srcs = ["runtime/tests/pump_direct_test.cc"],
     deps = [
         ":pump",
+        "//core/common:async_runtime_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -689,6 +691,7 @@ cc_test(
     srcs = ["runtime/tests/pump_test.cc"],
     deps = [
         ":pump",
+        "//core/common:async_runtime_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
@@ -708,6 +711,7 @@ cc_test(
         ":source",
         ":streaming_buffer_adapter",
         "//core/common:async_copy_manager_lib",
+        "//core/common:async_runtime_lib",
         "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",

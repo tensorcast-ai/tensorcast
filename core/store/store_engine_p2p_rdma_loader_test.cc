@@ -9,11 +9,7 @@
 #include <system_error>
 #include <vector>
 
-#define private public
-#define protected public
-#include "core/store/store_engine.h" // must be included with macros to access internal P2P loader
-#undef private
-#undef protected
+#include "core/store/store_engine.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
@@ -152,8 +148,7 @@ TEST_CASE("StoreEngine P2P Loader RDMA end-to-end", "[store_engine][p2p][rdma][g
   absl::StatusOr<ReplicaHandle> handle_or = tgt_store.ingest_from_p2p("remote_artifact", p2p_src, target, hints);
   REQUIRE(handle_or.ok());
   auto& handle = handle_or.value();
-  REQUIRE(handle.ready_future.valid());
-  REQUIRE(handle.ready_future.get().ok());
+  REQUIRE(handle.wait_ready(std::chrono::milliseconds(30000)).ok());
 
   // ---------------------------------------------------------------------------
   // 5. Validate that the replica resides on GPU and the contents match.

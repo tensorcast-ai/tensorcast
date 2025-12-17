@@ -4,7 +4,6 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <future>
 #include <optional>
 #include <ranges>
 #include <utility>
@@ -112,13 +111,17 @@ ChunkAwareLoadingStrategy::LoadPlan ChunkAwareLoadingStrategy::create_loading_pl
   return plan;
 }
 
-std::future<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
+folly::SemiFuture<absl::Status> ChunkAwareLoadingStrategy::execute_plan(
     const LoadPlan& plan,
     replica::UnifiedMemoryAuthority& memory,
-    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager) {
-  return std::async(std::launch::async, [plan, &memory, mem_manager]() {
-    return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {}); // No-op progress callback
-  });
+    const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
+    gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime) {
+  return folly::via(
+             async_runtime->blocking_executor(),
+             [plan, &memory, mem_manager]() mutable -> absl::Status {
+               return execute_plan_with_progress(plan, memory, mem_manager, [](size_t, size_t) {});
+             })
+      .semi();
 }
 
 absl::Status ChunkAwareLoadingStrategy::execute_plan_with_progress(
@@ -357,10 +360,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_p2p_transfer(
       overall_status = src_or.status();
       break;
     }
-    auto future =
-        mem_manager->load_async_from_source(std::move(*src_or), op.target, 4, absl::MakeSpan(plan.chunk_indices));
-
-    absl::Status load_status = future.get();
+    absl::Status load_status = std::move(mem_manager->load_async_from_source(
+                                             std::move(*src_or), op.target, 4, absl::MakeSpan(plan.chunk_indices)))
+                                   .get();
     if (!load_status.ok()) {
       overall_status = load_status;
       break;
@@ -432,9 +434,9 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
   if (!src_or.ok()) {
     return src_or.status();
   }
-  auto future = mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(plan.chunk_indices));
-
-  absl::Status load_status = future.get();
+  absl::Status load_status =
+      std::move(mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(plan.chunk_indices)))
+          .get();
 
   if (load_status.ok()) {
     // Commit UMA plan on success

@@ -378,8 +378,13 @@ void WorkerLifecycleManager::heartbeat_loop() {
                     break;
                   }
                   std::string artifact_id = ri.ref().artifact_id();
-                  auto engine = engine_;
-                  std::thread([engine, dev, artifact_id]() {
+                  auto engine = engine_.get();
+                  auto async_runtime = service_->async_runtime_shared();
+                  if (!async_runtime || async_runtime->is_shutting_down()) {
+                    break;
+                  }
+                  auto executor = async_runtime->blocking_executor();
+                  executor->add([engine = std::move(engine), dev, artifact_id = std::move(artifact_id)]() mutable {
                     store::loading::MaterializeHints hints;
                     hints.artifact_id = artifact_id;
                     auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
@@ -387,7 +392,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
                       VLOG(1) << "Prefetch materialize_replica failed: artifact_id=" << artifact_id
                               << " dev=" << dev.to_string() << ": " << res.status();
                     }
-                  }).detach();
+                  });
                   break;
                 }
                 case global_store::StateChange::CHANGE_TYPE_UPDATE_REPLICA: {

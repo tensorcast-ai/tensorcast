@@ -34,10 +34,12 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         ":view_id",
+        "//core/common:ready_signal_lib",
         "//core/store:communication_types",
         "//core/store:device_types",
         "//core/store/replica:memory_state",
         "@abseil-cpp//absl/hash",
+        "@folly//folly/futures:core",
     ],
 )
 

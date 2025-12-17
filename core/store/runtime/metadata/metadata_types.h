@@ -92,6 +92,7 @@ struct RegistrationResources {
   gsl::not_null<components::MetricsCollector*> metrics_collector;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
   std::shared_ptr<components::CommunicationManager> communication_manager;
+  std::shared_ptr<common::AsyncRuntime> async_runtime;
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;

@@ -61,6 +61,8 @@ Diagnostics:
       - bugprone-easily-swappable-parameters
       - bugprone-implicit-widening-of-multiplication-result
       - performance-no-int-to-ptr          # Common in CUDA code
+      - performance-unnecessary-value-param
+      - performance-enum-size
       - readability-magic-numbers          # Do not enforce magic-number checks
       - readability-function-cognitive-complexity  # Complexity check is too slow
       - abseil-string-find-startswith      # May have false positives
@@ -70,6 +72,7 @@ Diagnostics:
       - fuchsia-statically-constructed-objects
       - misc-use-anonymous-namespace
       - readability-braces-around-statements
+      - llvm-prefer-static-over-anonymous-namespace
 
     CheckOptions:
       readability-identifier-naming.VariableCase: lower_case

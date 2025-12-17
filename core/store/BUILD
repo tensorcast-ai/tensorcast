@@ -78,6 +78,7 @@ sc_header_only_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//core/common:async_runtime_lib",
         "//core/common:const_granularity_lib",
     ],
 )

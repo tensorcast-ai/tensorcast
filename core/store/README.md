@@ -119,7 +119,7 @@ graph TB
     - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
-  - Returns `ReplicaHandle { ReplicaKey, ready_future, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
+  - Returns `ReplicaHandle { ReplicaKey, ready_signal, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
@@ -195,7 +195,7 @@ sequenceDiagram
     MO->>SE: ingest_from_p2p(...)
     SE->>REP: ensure_loaded_async(GPU/CPU)
     REP->>REP: load_async_from_source(P2P)
-    REP-->>SE: ready_future (LOADED)
+    REP-->>SE: ready_signal (LOADED)
     SE->>GS: complete_replica_transport()
     SE->>GS: register_replica_with_global_store()
   else no transport
@@ -271,7 +271,7 @@ stateDiagram-v2
 - GPU allocations are lazily created via UMA on first use; VS CPU region is reserved at construction.
 - `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
 - Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration
 
@@ -283,7 +283,7 @@ stateDiagram-v2
 
 #### ACM Usage Quick Guide
 
-- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) inside the `on_copy_done` callback. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires. Pump consumers dealing with non-owning state (e.g., `pump_ranges`) instead poll handles and finalize completions inline so the callback does not outlive stack-owned context.
+- Submit one async copy per chunk via `AsyncCopyManager`, and return SPB slots (or wake dependents) either inside the `on_copy_done` callback or by finalizing `CopyHandle` completions inline in the owning thread. Do not `cudaStreamSynchronize()` per chunk; the callback runs on a CPU worker after the CUDA stream callback fires. Pump consumers dealing with non-owning state (e.g., `pump_ranges`) poll handles and finalize completions inline so callbacks do not outlive stack-owned context.
 - H2D example (return slot + optional UMA advancement in callback):
   ```cpp
   using common::AsyncCopyManager;
@@ -396,7 +396,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 ## Concurrency and Error Semantics
 
 - ReplicaLoadController uses a single `absl::Mutex` with per-location condition variables to gate state transitions.
-- `ready_future` from `ReplicaHandle` resolves with the final `absl::Status` of the load/copy.
+- `ready_signal` from `ReplicaHandle` can be subscribed to via `subscribe_ready()` / `wait_ready(...)` and resolves with the final `absl::Status` of the load/copy.
 - Unsafe releases during LOADING mark the destination `FAILED` with last error preserved for diagnostics.
 - TransferService limits one active transfer per GPU; disk read/write concurrency is configured via `MaterializeHints::pipeline_concurrency` (propagated to `pump_ranges`).
 
@@ -413,7 +413,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - `DeviceKey` (core/store/device_types.h): logical device id `{type, ordinal, uuid}` used across APIs.
 - `ReplicaKey` (core/store/materialization/contracts/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
 - `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `CPU`, `DISK`, `REMOTE`.
-- `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, optional view metadata, and a `ready_future`.
+- `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, optional view metadata, and a `ready_signal`.
 
 ## Test Coverage (selected)
 

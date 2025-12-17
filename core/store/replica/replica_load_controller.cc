@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <queue>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -46,6 +48,65 @@ DeviceKey normalize_device_key(DeviceKey key) {
   return key;
 }
 
+struct GpuTransferGateState {
+  bool active{false};
+  std::queue<folly::Promise<folly::Unit>> waiters;
+};
+
+ABSL_CONST_INIT absl::Mutex g_gpu_transfer_gate_mu(absl::kConstInit);
+absl::flat_hash_map<int, GpuTransferGateState> g_gpu_transfer_gate ABSL_GUARDED_BY(g_gpu_transfer_gate_mu);
+
+folly::SemiFuture<folly::Unit> acquire_gpu_transfer_gate(int device_id) {
+  absl::MutexLock lock(&g_gpu_transfer_gate_mu);
+  auto& gate = g_gpu_transfer_gate[device_id];
+  if (!gate.active) {
+    gate.active = true;
+    return folly::makeSemiFuture();
+  }
+  folly::Promise<folly::Unit> p;
+  auto sf = p.getSemiFuture();
+  gate.waiters.push(std::move(p));
+  return sf;
+}
+
+void release_gpu_transfer_gate(int device_id) {
+  std::optional<folly::Promise<folly::Unit>> next;
+  {
+    absl::MutexLock lock(&g_gpu_transfer_gate_mu);
+    auto it = g_gpu_transfer_gate.find(device_id);
+    if (it == g_gpu_transfer_gate.end()) {
+      return;
+    }
+    auto& gate = it->second;
+    if (!gate.waiters.empty()) {
+      next.emplace(std::move(gate.waiters.front()));
+      gate.waiters.pop();
+    } else {
+      gate.active = false;
+    }
+  }
+  if (next.has_value()) {
+    next->setValue();
+  }
+}
+
+class GpuTransferGateLease {
+ public:
+  explicit GpuTransferGateLease(int device_id) : device_id_(device_id) {}
+
+  GpuTransferGateLease(const GpuTransferGateLease&) = delete;
+  GpuTransferGateLease& operator=(const GpuTransferGateLease&) = delete;
+
+  ~GpuTransferGateLease() {
+    if (device_id_ >= 0) {
+      release_gpu_transfer_gate(device_id_);
+    }
+  }
+
+ private:
+  int device_id_{-1};
+};
+
 } // namespace
 
 // V3 final cutover: plan/execute/commit path is always enabled (no flags)
@@ -54,6 +115,7 @@ ReplicaLoadController::ReplicaLoadController(
     std::string artifact_identifier,
     DeviceKey device_key,
     const gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>& pinned_pool,
+    gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     size_t artifact_chunk_bytes,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
@@ -62,6 +124,7 @@ ReplicaLoadController::ReplicaLoadController(
     std::optional<MemoryTierConfig> memory_tier_config)
     : artifact_size_(artifact_size),
       memory_tier_config_(std::move(memory_tier_config)),
+      async_runtime_(std::move(async_runtime)),
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
@@ -480,74 +543,80 @@ void ReplicaLoadController::log_state_change(MemoryLocation loc, MemoryState old
           << " state changing from " << state_to_string(old_state) << " to " << state_to_string(new_state);
 }
 
-std::future<absl::Status> ReplicaLoadController::copy_data_async(MemoryLocation source, MemoryLocation destination) {
+folly::SemiFuture<absl::Status> ReplicaLoadController::copy_data_async(
+    MemoryLocation source,
+    MemoryLocation destination) {
   // Phase 1: capture params and mark destination LOADING
   CopyLaunchParams params;
   bool need_allocate_um = false;
   auto context_status = capture_copy_context_(source, destination, &params, &need_allocate_um);
   if (!context_status.ok()) {
-    return std::async(std::launch::deferred, [context_status] { return context_status; });
+    return folly::makeSemiFuture(std::move(context_status));
   }
 
   // Allocate UMA if needed (avoid calling while holding mutex_)
   if (need_allocate_um) {
     auto st_um = allocate_replica_memory();
     if (!st_um.ok()) {
-      return std::async(std::launch::deferred, [st_um] { return st_um; });
+      return folly::makeSemiFuture(std::move(st_um));
     }
   }
 
   // Phase 2: launch async copy task
-  return std::async(std::launch::async, [this, source, destination, p = std::move(params)]() -> absl::Status {
-    absl::Status copy_status;
-    const bool src_host_async = (source == MemoryLocation::CPU);
-    const bool dst_host_async = (destination == MemoryLocation::CPU);
+  auto self = shared_from_this();
+  return folly::via(async_runtime_->blocking_executor())
+      .thenValue([self, source, destination, p = std::move(params)](auto&&) mutable -> absl::Status {
+        absl::Status copy_status;
+        const bool src_host_async = (source == MemoryLocation::CPU);
+        const bool dst_host_async = (destination == MemoryLocation::CPU);
 
-    // Plan UMA session for transactional CPU↔GPU copies
-    std::optional<int> dev_for_plan;
-    if (destination == MemoryLocation::GPU)
-      dev_for_plan = p.device_id;
-    auto plan_or = memory_coordinator_->plan_load(replica_key_, destination, dev_for_plan, std::nullopt);
-    if (!plan_or.ok()) {
-      LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id
-                 << "): UMA plan_load failed for copy: " << plan_or.status();
-      return this->finalize_copy_state_(destination, plan_or.status());
-    }
-    auto plan = *plan_or;
+        // Plan UMA session for transactional CPU↔GPU copies
+        std::optional<int> dev_for_plan;
+        if (destination == MemoryLocation::GPU)
+          dev_for_plan = p.device_id;
+        auto plan_or =
+            self->memory_coordinator_->plan_load(self->replica_key_, destination, dev_for_plan, std::nullopt);
+        if (!plan_or.ok()) {
+          LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id
+                     << "): UMA plan_load failed for copy: " << plan_or.status();
+          return self->finalize_copy_state_(destination, plan_or.status());
+        }
+        auto plan = *plan_or;
 
-    if (src_host_async && !dst_host_async) { // Host -> GPU
-      copy_status = transfer_service_->copy_cpu_to_gpu_streaming(
-          p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
-    } else if (!src_host_async && dst_host_async) { // GPU -> Host
-      copy_status = transfer_service_->copy_gpu_to_cpu_streaming(
-          p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
-    } else {
-      LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id
-                 << "): Unsupported copy direction: " << static_cast<int>(source) << " -> "
-                 << static_cast<int>(destination);
-      copy_status = absl::InvalidArgumentError("Unsupported copy direction in async task.");
-    }
+        if (src_host_async && !dst_host_async) { // Host -> GPU
+          copy_status = self->transfer_service_->copy_cpu_to_gpu_streaming(
+              p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
+        } else if (!src_host_async && dst_host_async) { // GPU -> Host
+          copy_status = self->transfer_service_->copy_gpu_to_cpu_streaming(
+              p.device_id, gsl::not_null<void*>{p.cuda_mem->get()}, p.total_size);
+        } else {
+          LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id
+                     << "): Unsupported copy direction: " << static_cast<int>(source) << " -> "
+                     << static_cast<int>(destination);
+          copy_status = absl::InvalidArgumentError("Unsupported copy direction in async task.");
+        }
 
-    if (!copy_status.ok()) {
-      // Abort UMA session on failure (idempotent)
-      (void)memory_coordinator_->abort(plan.session_id);
-      return this->finalize_copy_state_(destination, copy_status);
-    }
+        if (!copy_status.ok()) {
+          // Abort UMA session on failure (idempotent)
+          (void)self->memory_coordinator_->abort(plan.session_id);
+          return self->finalize_copy_state_(destination, copy_status);
+        }
 
-    // Commit UMA ledger for in-memory copy path
-    std::optional<int> commit_dev;
-    if (destination == MemoryLocation::GPU)
-      commit_dev = p.device_id;
-    absl::Status cst =
-        memory_coordinator_->commit(plan.session_id, destination, absl::MakeSpan(plan.chunk_indices), commit_dev);
-    if (!cst.ok()) {
-      LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id << "): UMA commit failed after copy: " << cst;
-      return this->finalize_copy_state_(destination, cst);
-    }
+        // Commit UMA ledger for in-memory copy path
+        std::optional<int> commit_dev;
+        if (destination == MemoryLocation::GPU)
+          commit_dev = p.device_id;
+        absl::Status cst = self->memory_coordinator_->commit(
+            plan.session_id, destination, absl::MakeSpan(plan.chunk_indices), commit_dev);
+        if (!cst.ok()) {
+          LOG(ERROR) << "ReplicaLoadController(" << p.artifact_id << "): UMA commit failed after copy: " << cst;
+          return self->finalize_copy_state_(destination, cst);
+        }
 
-    // Phase 3: finalize state and cleanup as needed
-    return this->finalize_copy_state_(destination, copy_status);
-  });
+        // Phase 3: finalize state and cleanup as needed
+        return self->finalize_copy_state_(destination, copy_status);
+      })
+      .semi();
 }
 
 absl::Status ReplicaLoadController::wait_for_state(
@@ -1224,7 +1293,7 @@ std::vector<uint32_t> ReplicaLoadController::get_missing_chunks(MemoryLocation t
 
 // build_sink_ and range utilities moved to TransferService
 
-std::future<absl::Status> ReplicaLoadController::load_async_from_source(
+folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
     std::unique_ptr<loader::SeekableSource> source,
     MemoryLocation target_location,
     int concurrency,
@@ -1238,8 +1307,7 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
     // Allocate destination if needed
     auto sc_or3 = get_state_cond_locked(target_location);
     if (!sc_or3.ok()) {
-      const auto& err = sc_or3.status();
-      return std::async(std::launch::deferred, [err] { return err; });
+      return folly::makeSemiFuture(sc_or3.status());
     }
     MemoryState* state_ptr = sc_or3->state;
     if (*state_ptr == MemoryState::UNALLOCATED) {
@@ -1250,7 +1318,7 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
   if (need_allocate) {
     auto st = allocate_memory(target_location);
     if (!st.ok()) {
-      return std::async(std::launch::deferred, [st] { return st; });
+      return folly::makeSemiFuture(std::move(st));
     }
   }
 
@@ -1266,111 +1334,136 @@ std::future<absl::Status> ReplicaLoadController::load_async_from_source(
   }
 
   // Phase 2: launch async pump task delegated to TransferService
-  return std::async(
-      std::launch::async,
-      [this,
-       source = std::move(source),
-       target_location,
-       concurrency,
-       chunk_indices,
-       post_load_fn = std::move(post_load_fn)]() mutable -> absl::Status {
-        LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id
-                  << "): async load start; target=" << static_cast<int>(target_location) << ", conc=" << concurrency;
-        void* gpu_ptr = nullptr;
-        std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
-        int device_id = get_local_device_id();
-        if (target_location == MemoryLocation::GPU) {
-          auto vec = this->get_pointer(MemoryLocation::GPU);
-          if (vec.empty()) {
-            this->record_failure_and_fail_(MemoryLocation::GPU, "GPU memory not allocated");
-            return absl::FailedPreconditionError("GPU memory not allocated");
-          }
-          gpu_ptr = vec[0];
-          gpu_allocation = this->get_gpu_allocation_shared();
-          if (!gpu_allocation) {
-            this->record_failure_and_fail_(MemoryLocation::GPU, "GPU allocation handle missing");
-            return absl::FailedPreconditionError("GPU allocation handle missing");
-          }
-        }
-
-        // Plan → Execute → Commit path (final)
-        auto plan_or = memory_coordinator_->plan_load(replica_key_, target_location, device_id, chunk_indices);
-        if (!plan_or.ok()) {
-          this->record_failure_and_fail_(
-              target_location, absl::Substitute("UMA plan_load failed: $0", plan_or.status().message()));
-          return plan_or.status();
-        }
-        LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): UMA plan_load ok; launching execute";
-        auto plan = std::move(*plan_or);
-        {
-          std::string range_str;
-          range_str.reserve(plan.ranges.size() * 32);
-          range_str.append("[");
-          const size_t sample = std::min<size_t>(plan.ranges.size(), 8);
-          for (size_t i = 0; i < sample; ++i) {
-            if (i > 0) {
-              range_str.append(", ");
+  auto self = shared_from_this();
+  const int local_device_id = get_local_device_id();
+  folly::SemiFuture<folly::Unit> gate = folly::makeSemiFuture();
+  if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
+    gate = acquire_gpu_transfer_gate(local_device_id);
+  }
+  return std::move(gate)
+      .via(async_runtime_->blocking_executor())
+      .thenValue(
+          [self,
+           source = std::move(source),
+           target_location,
+           concurrency,
+           chunk_indices,
+           post_load_fn = std::move(post_load_fn),
+           local_device_id](auto&&) mutable -> absl::Status {
+            std::optional<GpuTransferGateLease> lease;
+            if (target_location == MemoryLocation::GPU && local_device_id >= 0) {
+              lease.emplace(local_device_id);
             }
-            const auto& r = plan.ranges[i];
-            absl::StrAppend(&range_str, "{off=", r.first, ", len=", r.second, "}");
-          }
-          if (plan.ranges.size() > sample) {
-            range_str.append(", ...");
-          }
-          range_str.append("]");
-          LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): plan ranges device=" << device_id
-                    << " target=" << static_cast<int>(target_location) << " ranges=" << range_str;
-        }
-        absl::Status exec_status =
-            transfer_service_->execute(plan, target_location, *source, concurrency, gpu_ptr, gpu_allocation, device_id);
-        if (!exec_status.ok()) {
-          // Abort session on failure (idempotent)
-          auto _ = memory_coordinator_->abort(plan.session_id);
-          this->record_failure_and_fail_(
-              target_location, absl::Substitute("transfer execute failed: $0", exec_status.message()));
-          return exec_status;
-        }
-        // Commit UMA ledger
-        LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): execute ok; committing UMA";
-        absl::Status cst = memory_coordinator_->commit(
-            plan.session_id, target_location, absl::MakeSpan(plan.chunk_indices), device_id);
-        if (!cst.ok()) {
-          this->record_failure_and_fail_(target_location, absl::Substitute("UMA commit failed: $0", cst.message()));
-          return cst;
-        }
-        // Post policy for GPU; for CPU do nothing here
-        if (target_location == MemoryLocation::GPU) {
-          const auto policy = select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
-          auto uma_policy_st = memory_coordinator_->post_gpu_load_policy(replica_key_, artifact_size_, policy);
-          if (!uma_policy_st.ok()) {
-            LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
-                         << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
-          }
-          // Optionally mark CPU state UNALLOCATED in memory manager facade
-          {
-            absl::MutexLock lk(&mutex_);
-            if (cpu_.state != MemoryState::FAILED) {
-              if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
-                (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
-              } else {
-                (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                      << "): async load start; target=" << static_cast<int>(target_location)
+                      << ", conc=" << concurrency;
+            void* gpu_ptr = nullptr;
+            std::shared_ptr<common::memory::GpuDeviceMemory> gpu_allocation;
+            const int device_id = local_device_id;
+            if (target_location == MemoryLocation::GPU) {
+              auto vec = self->get_pointer(MemoryLocation::GPU);
+              if (vec.empty()) {
+                self->record_failure_and_fail_(MemoryLocation::GPU, "GPU memory not allocated");
+                return absl::FailedPreconditionError("GPU memory not allocated");
+              }
+              gpu_ptr = vec[0];
+              gpu_allocation = self->get_gpu_allocation_shared();
+              if (!gpu_allocation) {
+                self->record_failure_and_fail_(MemoryLocation::GPU, "GPU allocation handle missing");
+                return absl::FailedPreconditionError("GPU allocation handle missing");
               }
             }
-          }
-        }
-        // Optional post-load hook (e.g., view transforms)
-        if (post_load_fn) {
-          absl::Status hook_status = post_load_fn();
-          if (!hook_status.ok()) {
-            this->record_failure_and_fail_(
-                target_location, absl::Substitute("post-load transform failed: $0", hook_status.message()));
-            return hook_status;
-          }
-        }
-        // Facade state LOADED
-        LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): setting final LOADED state";
-        return this->set_state(target_location, MemoryState::LOADED);
-      });
+
+            // Plan → Execute → Commit path (final)
+            auto plan_or =
+                self->memory_coordinator_->plan_load(self->replica_key_, target_location, device_id, chunk_indices);
+            if (!plan_or.ok()) {
+              self->record_failure_and_fail_(
+                  target_location, absl::Substitute("UMA plan_load failed: $0", plan_or.status().message()));
+              return plan_or.status();
+            }
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                      << "): UMA plan_load ok; launching execute";
+            auto plan = std::move(*plan_or);
+            {
+              std::string range_str;
+              range_str.reserve(plan.ranges.size() * 32);
+              range_str.append("[");
+              const size_t sample = std::min<size_t>(plan.ranges.size(), 8);
+              for (size_t i = 0; i < sample; ++i) {
+                if (i > 0) {
+                  range_str.append(", ");
+                }
+                const auto& r = plan.ranges[i];
+                absl::StrAppend(&range_str, "{off=", r.first, ", len=", r.second, "}");
+              }
+              if (plan.ranges.size() > sample) {
+                range_str.append(", ...");
+              }
+              range_str.append("]");
+              LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                        << "): plan ranges device=" << device_id << " target=" << static_cast<int>(target_location)
+                        << " ranges=" << range_str;
+            }
+            absl::Status exec_status = self->transfer_service_->execute(
+                plan,
+                target_location,
+                *source,
+                concurrency,
+                self->async_runtime_->blocking_executor(),
+                gpu_ptr,
+                gpu_allocation,
+                device_id);
+            if (!exec_status.ok()) {
+              // Abort session on failure (idempotent)
+              auto _ = self->memory_coordinator_->abort(plan.session_id);
+              self->record_failure_and_fail_(
+                  target_location, absl::Substitute("transfer execute failed: $0", exec_status.message()));
+              return exec_status;
+            }
+            // Commit UMA ledger
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): execute ok; committing UMA";
+            absl::Status cst = self->memory_coordinator_->commit(
+                plan.session_id, target_location, absl::MakeSpan(plan.chunk_indices), device_id);
+            if (!cst.ok()) {
+              self->record_failure_and_fail_(target_location, absl::Substitute("UMA commit failed: $0", cst.message()));
+              return cst;
+            }
+            // Post policy for GPU; for CPU do nothing here
+            if (target_location == MemoryLocation::GPU) {
+              const auto policy = self->select_post_gpu_policy(UnifiedMemoryAuthority::PostGpuLoadPolicy::EvictCPU);
+              auto uma_policy_st =
+                  self->memory_coordinator_->post_gpu_load_policy(self->replica_key_, self->artifact_size_, policy);
+              if (!uma_policy_st.ok()) {
+                LOG(WARNING) << "ReplicaLoadController(" << self->replica_key_.artifact_id
+                             << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
+              }
+              // Optionally mark CPU state UNALLOCATED in memory manager facade
+              {
+                absl::MutexLock lk(&self->mutex_);
+                if (self->cpu_.state != MemoryState::FAILED) {
+                  if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
+                    (void)self->set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
+                  } else {
+                    (void)self->set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
+                  }
+                }
+              }
+            }
+            // Optional post-load hook (e.g., view transforms)
+            if (post_load_fn) {
+              absl::Status hook_status = post_load_fn();
+              if (!hook_status.ok()) {
+                self->record_failure_and_fail_(
+                    target_location, absl::Substitute("post-load transform failed: $0", hook_status.message()));
+                return hook_status;
+              }
+            }
+            // Facade state LOADED
+            LOG(INFO) << "ReplicaLoadController(" << self->replica_key_.artifact_id << "): setting final LOADED state";
+            return self->set_state(target_location, MemoryState::LOADED);
+          })
+      .semi();
 }
 
 std::vector<replica::ChunkState> ReplicaLoadController::get_chunk_states_uma(

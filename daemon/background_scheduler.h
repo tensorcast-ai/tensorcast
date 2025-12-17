@@ -8,11 +8,14 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 
-#include "absl/log/log.h"
+#include "core/common/trace/trace_request_data.h"
+#include "folly/io/async/Request.h"
 
 namespace tensorcast::daemon {
 
@@ -97,6 +100,25 @@ class BackgroundScheduler {
   }
 
  private:
+  static const char* task_kind_name(TaskKind kind) {
+    switch (kind) {
+      case TaskKind::kLockTTL:
+        return "LockTTL";
+      case TaskKind::kVerification:
+        return "Verification";
+      case TaskKind::kEviction:
+        return "Eviction";
+      case TaskKind::kRegionRegistry:
+        return "RegionRegistry";
+      case TaskKind::kSessionLifecycle:
+        return "SessionLifecycle";
+      case TaskKind::kPersistence:
+        return "Persistence";
+      default:
+        return "Unknown";
+    }
+  }
+
   struct Task {
     TaskKind kind;
     std::chrono::milliseconds interval{0};
@@ -130,6 +152,18 @@ class BackgroundScheduler {
       for (size_t idx : to_run) {
         // Guard against exceptions to keep the loop alive
         try {
+          const char* kind_name = task_kind_name(tasks_[idx].kind);
+          const std::string request_id = std::string("bg_") + kind_name;
+          auto trace_ids = std::make_shared<common::trace::TraceIds>(request_id, /*artifact_id=*/"");
+          auto request_ctx = std::make_shared<folly::RequestContext>();
+          request_ctx->setContextData(
+              common::trace::kRpcMethodToken,
+              std::make_unique<folly::ImmutableRequestData<std::string>>(std::string(kind_name)));
+          request_ctx->setContextData(
+              common::trace::kTraceIdsToken, std::make_unique<common::trace::TraceIdsRequestData>(trace_ids));
+          request_ctx->setContextData(
+              common::trace::kTraceRequestDataToken, std::make_unique<common::trace::TraceRequestData>(trace_ids));
+          folly::RequestContextScopeGuard request_ctx_guard(request_ctx);
           tasks_[idx].fn();
         } catch (...) {
           // Log and continue; background failures must not kill the scheduler

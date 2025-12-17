@@ -8,14 +8,41 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/synchronization/mutex.h"
+#include "core/common/ready_signal.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "folly/futures/Future.h"
 
 namespace tensorcast::daemon {
 
 struct SessionEntry {
   store::loading::ReplicaKey key;
-  std::shared_future<absl::Status> ready;
+  std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal;
   std::chrono::steady_clock::time_point expiry;
+
+  [[nodiscard]] folly::SemiFuture<absl::Status> subscribe_ready() const {
+    if (!ready_signal) {
+      return folly::makeSemiFuture<absl::Status>(absl::OkStatus());
+    }
+    return ready_signal->subscribe();
+  }
+
+  [[nodiscard]] absl::Status wait_ready(std::chrono::milliseconds timeout) const {
+    if (!ready_signal) {
+      return absl::OkStatus();
+    }
+    try {
+      if (timeout.count() > 0) {
+        return std::move(subscribe_ready()).get(timeout);
+      }
+      return std::move(subscribe_ready()).get();
+    } catch (const folly::FutureTimeout&) {
+      return absl::DeadlineExceededError("replica did not reach ready state before timeout");
+    } catch (const std::exception& ex) {
+      return absl::InternalError(ex.what());
+    } catch (...) {
+      return absl::InternalError("replica wait_ready failed with unknown exception");
+    }
+  }
 };
 
 class ReplicaSessionManager {
@@ -25,9 +52,9 @@ class ReplicaSessionManager {
   void put(
       const std::string& replica_uuid,
       const store::loading::ReplicaKey& key,
-      std::shared_future<absl::Status> ready) {
+      std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
     absl::MutexLock l(&mu_);
-    sessions_[replica_uuid] = SessionEntry{key, std::move(ready), now() + ttl_};
+    sessions_[replica_uuid] = SessionEntry{key, std::move(ready_signal), now() + ttl_};
   }
 
   std::optional<SessionEntry> get(const std::string& replica_uuid) {

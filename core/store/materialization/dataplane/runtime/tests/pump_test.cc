@@ -3,7 +3,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <deque>
@@ -17,12 +16,25 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
+#include "core/common/async_runtime.h"
 #include "core/store/materialization/dataplane/contracts/buffer_pool.h"
 #include "core/store/materialization/dataplane/contracts/sink.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/runtime/pump.h"
 
 using namespace tensorcast::store::loader;
+
+namespace {
+
+static tensorcast::common::AsyncRuntime& pump_test_runtime() {
+  static tensorcast::common::AsyncRuntime runtime(
+      tensorcast::common::AsyncRuntime::Options{
+          .thread_name_prefix = "tensorcast-pump-test",
+      });
+  return runtime;
+}
+
+} // namespace
 
 // Mock source for testing
 class MockSource : public Source {
@@ -321,7 +333,7 @@ TEST_CASE("Pump basic functionality", "[pump]") {
     MockBufferPool pool(chunk_size, 4);
 
     std::vector<Range> ranges{{0ULL, data_size}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == data_size);
@@ -334,7 +346,7 @@ TEST_CASE("Pump basic functionality", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, 0ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == 0);
@@ -349,7 +361,7 @@ TEST_CASE("Pump basic functionality", "[pump]") {
     MockBufferPool pool(chunk_size, 3);
 
     std::vector<Range> ranges{{0ULL, data_size}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == data_size);
@@ -364,7 +376,7 @@ TEST_CASE("Pump basic functionality", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, data_size}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == data_size);
@@ -379,7 +391,7 @@ TEST_CASE("Pump error handling", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, 10ULL * 1024ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(!status.ok());
@@ -392,7 +404,7 @@ TEST_CASE("Pump error handling", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, 10ULL * 1024ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(status.message().find("Mock write error") != std::string::npos);
@@ -405,7 +417,7 @@ TEST_CASE("Pump error handling", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, 1024ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(status.message().find("Mock close error") != std::string::npos);
@@ -418,7 +430,7 @@ TEST_CASE("Pump error handling", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, 10ULL * 1024ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(status.message().find("Buffer overflow") != std::string::npos);
@@ -437,7 +449,7 @@ TEST_CASE("Pump with ranges", "[pump]") {
 
     std::vector<std::pair<uint64_t, size_t>> ranges = {{1024, 2048}};
 
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == 2048);
@@ -451,7 +463,7 @@ TEST_CASE("Pump with ranges", "[pump]") {
 
     std::vector<std::pair<uint64_t, size_t>> ranges = {{0, 1024}, {5120, 2048}, {10240, 1024}};
 
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == 4096);
@@ -464,7 +476,7 @@ TEST_CASE("Pump with ranges", "[pump]") {
 
     std::vector<std::pair<uint64_t, size_t>> ranges;
 
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(status.code() == absl::StatusCode::kInvalidArgument);
@@ -478,7 +490,7 @@ TEST_CASE("Pump with ranges", "[pump]") {
 
     std::vector<std::pair<uint64_t, size_t>> ranges = {{0, 1024}};
 
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
   }
@@ -495,7 +507,8 @@ TEST_CASE("Pump concurrency", "[pump]") {
       MockBufferPool pool(chunk_size, concurrency + 1);
 
       std::vector<Range> ranges{{0ULL, data_size}};
-      auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), concurrency);
+      auto status =
+          pump_ranges(source, sink, pool, absl::MakeSpan(ranges), concurrency, pump_test_runtime().blocking_executor());
 
       REQUIRE(status.ok());
       REQUIRE(sink.get_total_bytes_written() == data_size);
@@ -519,7 +532,7 @@ TEST_CASE("Pump concurrency", "[pump]") {
     // Start pump in background
     std::thread pump_thread([&]() {
       std::vector<Range> ranges{{0ULL, data_size}};
-      auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 3);
+      auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 3, pump_test_runtime().blocking_executor());
       REQUIRE(!status.ok());
     });
 
@@ -540,7 +553,7 @@ TEST_CASE("Pump edge cases", "[pump]") {
     MockBufferPool pool(chunk_size, 4);
 
     std::vector<Range> ranges{{0ULL, data_size}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 2, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(sink.get_total_bytes_written() == data_size);
@@ -557,7 +570,7 @@ TEST_CASE("Pump edge cases", "[pump]") {
     MockBufferPool pool(1024, 2);
 
     std::vector<Range> ranges{{0ULL, data_size}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 1, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     // The pump should never write more than the source size
@@ -570,7 +583,7 @@ TEST_CASE("Pump edge cases", "[pump]") {
     MockBufferPool pool(512, 2);
 
     std::vector<Range> ranges{{0ULL, 1024ULL}};
-    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 0);
+    auto status = pump_ranges(source, sink, pool, absl::MakeSpan(ranges), 0, pump_test_runtime().blocking_executor());
 
     REQUIRE(!status.ok());
     REQUIRE(status.code() == absl::StatusCode::kInvalidArgument);
@@ -695,7 +708,8 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
 
     // Run pump_ranges with multiple concurrent workers
     TestSeekableSource source(source_data);
-    auto status = pump_ranges(source, *sink, pool, ranges, 4); // 4 concurrent workers
+    auto status =
+        pump_ranges(source, *sink, pool, ranges, 4, pump_test_runtime().blocking_executor()); // 4 concurrent workers
 
     REQUIRE(status.ok());
     REQUIRE(sink->verify_coverage());
@@ -777,7 +791,7 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
     MockBufferPool pool(2048, 8);
 
     TestSeekableSource source(source_data);
-    auto status = pump_ranges(source, *sink, pool, ranges, 3);
+    auto status = pump_ranges(source, *sink, pool, ranges, 3, pump_test_runtime().blocking_executor());
 
     REQUIRE(status.ok());
     REQUIRE(std::equal(sink->get_buffer().begin(), sink->get_buffer().end(), source_data.begin()));

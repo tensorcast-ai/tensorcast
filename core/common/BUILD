@@ -243,6 +243,33 @@ sc_cc_library(
     ],
 )
 
+# Async runtime / executors (Folly-based)
+sc_cc_library(
+    name = "async_runtime_lib",
+    srcs = ["async_runtime.cc"],
+    hdrs = ["async_runtime.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/cleanup",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@folly//folly/executors:cpu_thread_pool_executor",
+        "@folly//folly/executors:serial_executor",
+        "@folly//folly/futures:core",
+        "@folly//folly/io/async:request_context",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_header_only_library(
+    name = "ready_signal_lib",
+    hdrs = ["ready_signal.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@folly//folly/futures:shared_promise",
+    ],
+)
+
 # Canonical granularity constants (artifact chunk, tx slice, hash leaf)
 sc_header_only_library(
     name = "const_granularity_lib",
@@ -256,11 +283,16 @@ sc_header_only_library(
 ## Metrics - OpenTelemetry wrappers (header-only)
 ## metric_objects_lib removed; use OpenTelemetry API directly
 
-# Tracing - Context
+# Tracing - RequestContext bridge (TraceManager TLS ↔ folly::RequestContext)
 sc_header_only_library(
-    name = "trace_ctx_lib",
-    hdrs = ["trace/trace_ctx.h"],
+    name = "trace_request_data_lib",
+    hdrs = ["trace/trace_request_data.h"],
     visibility = ["//visibility:public"],
+    deps = [
+        ":trace_manager_lib",
+        "@abseil-cpp//absl/synchronization",
+        "@folly//folly/io/async:request_context",
+    ],
 )
 
 # OpenTelemetry - gRPC propagation helpers (header-only)
@@ -329,6 +361,7 @@ sc_header_only_library(
     deps = [
         ":cuda_api_lib",
         ":trace_manager_lib",
+        "@folly//folly:executor",
     ],
 )
 
@@ -339,6 +372,7 @@ sc_cc_library(
     hdrs = ["async_copy_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":async_runtime_lib",
         ":cuda_api_lib",
         ":trace_cuda_async_fn_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -355,6 +389,7 @@ sc_header_only_library(
     deps = [
         ":otel_trace_scope_bridge_hdr",
         ":trace_manager_lib",
+        ":trace_request_data_lib",
         ":trace_scope_lib",
     ],
 )
@@ -366,7 +401,6 @@ sc_cc_library(
     hdrs = ["trace/trace_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":trace_ctx_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/synchronization",
@@ -382,7 +416,6 @@ sc_cc_library(
     hdrs = ["trace/trace_scope.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":trace_ctx_lib",
         ":trace_manager_lib",
         "@abseil-cpp//absl/time",
     ],
@@ -426,6 +459,19 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "async_runtime_test",
+    srcs = ["async_runtime_test.cc"],
+    deps = [
+        ":async_runtime_lib",
+        ":trace_manager_lib",
+        ":trace_request_data_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@folly//folly/io/async:request_context",
+    ],
+)
+
 ## Legacy metrics test removed – metrics now use OTel API
 
 # Aggregate target for backward compatibility
@@ -437,6 +483,7 @@ sc_cc_library(
         ":artifact_hash_lib",
         ":artifact_verification_lib",
         ":async_copy_manager_lib",
+        ":async_runtime_lib",
         ":cuda_api_lib",
         ":cuda_memory_lib",
         ":device_guard_lib",
@@ -445,12 +492,13 @@ sc_cc_library(
         ":logging_init_lib",
         ":pinned_buffer_pool_lib",
         ":pinned_memory_lib",
+        ":ready_signal_lib",
         ":streaming_pinned_buffer_lib",
         ":system_capabilities_lib",
-        ":trace_ctx_lib",
         ":trace_cuda_async_fn_lib",
         ":trace_macros_lib",
         ":trace_manager_lib",
+        ":trace_request_data_lib",
         ":trace_scope_lib",
         "@gsl",
     ],

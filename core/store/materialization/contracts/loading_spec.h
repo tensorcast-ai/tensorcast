@@ -5,7 +5,6 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
-#include <future>
 #include <memory>
 #include <optional>
 #include <ostream>
@@ -14,7 +13,9 @@
 
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
+#include "folly/futures/Future.h"
 
+#include "core/common/ready_signal.h"
 #include "core/store/communication_types.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/view/view_id.h"
@@ -135,7 +136,7 @@ struct ReplicaKeyHash {
 
 struct ReplicaHandle {
   ReplicaKey replica_key;
-  std::shared_future<absl::Status> ready_future;
+  std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal;
   replica::MemoryState cpu_state{replica::MemoryState::UNINITIALIZED};
   replica::MemoryState gpu_state{replica::MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
@@ -149,22 +150,33 @@ struct ReplicaHandle {
   }
 
   [[nodiscard]] replica::MemoryState state(DeviceType type) const;
-  absl::Status wait_ready(std::chrono::milliseconds timeout);
+  [[nodiscard]] folly::SemiFuture<absl::Status> subscribe_ready() const;
+  absl::Status wait_ready(std::chrono::milliseconds timeout) const;
 };
 
 } // namespace tensorcast::store::loading
 
-inline absl::Status tensorcast::store::loading::ReplicaHandle::wait_ready(std::chrono::milliseconds timeout) {
-  if (!ready_future.valid()) {
+inline folly::SemiFuture<absl::Status> tensorcast::store::loading::ReplicaHandle::subscribe_ready() const {
+  if (!ready_signal) {
+    return folly::makeSemiFuture<absl::Status>(absl::OkStatus());
+  }
+  return ready_signal->subscribe();
+}
+
+inline absl::Status tensorcast::store::loading::ReplicaHandle::wait_ready(std::chrono::milliseconds timeout) const {
+  if (!ready_signal) {
     return absl::OkStatus();
   }
-  if (timeout.count() > 0) {
-    const auto wait_status = ready_future.wait_for(timeout);
-    if (wait_status != std::future_status::ready) {
-      return absl::DeadlineExceededError("replica did not reach ready state before timeout");
+  try {
+    if (timeout.count() > 0) {
+      return std::move(subscribe_ready()).get(timeout);
     }
-  } else {
-    ready_future.wait();
+    return std::move(subscribe_ready()).get();
+  } catch (const folly::FutureTimeout&) {
+    return absl::DeadlineExceededError("replica did not reach ready state before timeout");
+  } catch (const std::exception& ex) {
+    return absl::InternalError(ex.what());
+  } catch (...) {
+    return absl::InternalError("replica wait_ready failed with unknown exception");
   }
-  return ready_future.get();
 }

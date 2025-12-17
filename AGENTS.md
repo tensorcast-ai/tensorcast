@@ -211,6 +211,46 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 2. **C++ changes not visible in Python**: Ensure both `BUILD_CORE=1` and `BUILD_EXTENSION=1` are set
 3. **Clean build needed**: Run `bazel clean --expunge` and `rm -rf build/` for a complete clean build
 
+### Third-Party Dependencies Architecture
+
+```
+MODULE.bazel   ─▶  Declares deps (bazel_dep for BCR, http_archive for CUDA/PyPI)
+     │              http_archive uses build_file = "@//third_party/<lib>:BUILD"
+     ▼
+third_party/   ─▶  BUILD files defining cc_library targets (no source code here)
+     │
+     ▼
+./external/    ─▶  Actual headers & sources (populated after bazel build)
+```
+
+**To explore a third-party library**: look in `./external/`, not `third_party/`.
+
+#### Header Paths in `./external/`
+
+| Library       | Header Path                                                   |
+|---------------|---------------------------------------------------------------|
+| CUDA Runtime  | `+_repo_rules+cudart/nvidia/cuda_runtime/include/`            |
+| NCCL          | `+_repo_rules+nccl/nvidia/nccl/include/`                      |
+| LibTorch      | `+_repo_rules+libtorch/torch/include/`                        |
+| Abseil        | `abseil-cpp+/absl/`                                           |
+| Folly         | `folly+/folly/`                                               |
+| gRPC          | `grpc+/include/grpcpp/`                                       |
+| nlohmann_json | `nlohmann_json+/include/nlohmann/`                            |
+| Catch2        | `catch2+/src/catch2/`                                         |
+
+Pattern: `http_archive` → `+_repo_rules+<name>/...`, BCR modules → `<name>+/...`
+
+#### Discovery Commands
+
+```bash
+ls ./external/                              # List all deps
+ls ./external/<lib>+/                       # Explore BCR module
+find ./external -name "header.h"            # Search for header
+cat third_party/<lib>/BUILD                 # Check target definitions
+```
+
+**Note**: Run `bazel build //...` first if `./external/` is empty.
+
 ## Coding Standards
 
 ### Package & Directory Structure
@@ -246,6 +286,17 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 - **Files/Directories**: `snake_case`
 - Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
+#### Async Concurrency (Folly)
+- Use `tensorcast::common::AsyncRuntime` + `folly::SemiFuture`/`folly::Future` (and `ReadySignal<T>` for completion-driven fan-out); avoid `std::thread/std::async`, detached threads, and polling, and always bind work to an executor with `.via(...)`.
+- **Executor selection rules (required)**:
+  - `cpu_executor()` and `serial_executor()` must stay non-blocking: no `CondVar::Wait*`, `folly::Future::get()/wait()`, `CopyHandle::wait()`, `sleep*`, `cuda*Synchronize`, or IO.
+  - `blocking_executor()` is the only place where blocking waits/IO are allowed, and they must be bounded (timeout/deadline) and return an error on expiry.
+- **Avoid thread-pool starvation deadlocks (required)**:
+  - If code schedules work onto executor **E** and waits for that work to make progress (producer/consumer, fan-out/join, callbacks releasing resources, etc.), the waiting/consumer must not run on an **E** worker thread.
+  - Concurrency limiting (per-GPU/per-artifact gates, schedulers, backpressure) must be async (`folly::Promise`/`SemiFuture`, async semaphores, etc.); do not block shared worker threads waiting for “slots”.
+- **Make hangs fail-fast (preferred, especially in tests/stress)**:
+  - Add progress counters + periodic “no progress” warnings (include queue depth/inflight counts) and convert sustained stalls into `absl::DeadlineExceededError`/`absl::UnavailableError`.
+
 ### Bazel BUILD Rules
 - **One logical unit per target** - Each class or related functions group gets its own `cc_library`
 - **Default private visibility** - Only expose true public APIs
@@ -256,7 +307,8 @@ The daemon loads communicator config from a YAML/JSON file (see `--comm_config_p
 ### Build & Dependencies
 - **Language**: C++20 standard (No compatibility shims)
 - **Build System**: Bazel with Clang18 (Dependencies are on MODULE.bazel)
-- **Common Deps**: absl, catch2, nlohmann_json
+- **Common Deps**: absl, folly, catch2, nlohmann_json
+- **Prefer absl/folly over custom utils**: Use existing utilities from Abseil and Folly instead of writing custom helpers.
 
 #### Code Style
 - Prefer modern C++ features and language standards. No compatibility shims.

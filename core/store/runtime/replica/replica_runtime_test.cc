@@ -69,6 +69,7 @@ ReplicaConfig MakeInlineReplicaConfig(
       .local_device_id = device_id,
       .pinned_buffer_pool =
           gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{catalog.pinned_buffer_pool()},
+      .async_runtime = gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{catalog.async_runtime()},
       .artifact_chunk_bytes = catalog.artifact_chunk_bytes(),
       .expected_artifact_size = bytes,
       .max_buffer_bytes = bytes,
@@ -246,11 +247,11 @@ TEST_CASE("ReplicaRuntime toggles GPU exports and chunk snapshots", "[runtime][r
   REQUIRE(gpu_replica != nullptr);
 
   auto cpu_stage_future = gpu_replica->ensure_loaded_async(MemoryLocation::CPU);
-  const absl::Status cpu_stage_status = cpu_stage_future.get();
+  const absl::Status cpu_stage_status = std::move(cpu_stage_future).get();
   CHECK(cpu_stage_status.ok());
 
   auto load_future = gpu_replica->ensure_loaded_async(MemoryLocation::GPU, 1, 0);
-  const absl::Status load_status = load_future.get();
+  const absl::Status load_status = std::move(load_future).get();
   CHECK(load_status.ok());
 
   DeviceKey gpu_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};

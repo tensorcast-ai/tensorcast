@@ -2,10 +2,8 @@
 
 #include "core/store/materialization/runtime/pipeline/allocation_stage.h"
 
-#include <future>
 #include <utility>
 
-#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
@@ -24,6 +22,7 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
       .local_device_id = ctx.target_is_gpu ? ctx.target_device_id : -1,
       .pinned_buffer_pool =
           gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{ctx.runtime_context->pinned_buffer_pool()},
+      .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{ctx.runtime_context->async_runtime()},
       .artifact_chunk_bytes = ctx.artifact_chunk_bytes,
       .expected_artifact_size = std::nullopt};
   config.pinned_memory_timeout =
@@ -75,8 +74,9 @@ absl::Status retry_gpu_load_with_eviction(
     }
   }
 
-  ctx.load_future =
+  auto load_sf =
       replica->ensure_loaded_async(common::memory::MemoryLocation::GPU, ctx.num_threads, std::move(gpu_device));
+  ctx.load_signal = replica->ready_signal_for(common::memory::MemoryLocation::GPU);
   auto wait_status = replica->get_memory_manager().wait_for_state(
       common::memory::MemoryLocation::GPU,
       replica::MemoryState::LOADED,
@@ -88,8 +88,7 @@ absl::Status retry_gpu_load_with_eviction(
     return wait_status;
   }
 
-  ctx.load_future.wait();
-  absl::Status load_status = ctx.load_future.get();
+  absl::Status load_status = std::move(load_sf).get();
   if (!load_status.ok()) {
     return load_status;
   }
@@ -113,26 +112,25 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
 
   auto target_location = ctx.target_location;
   std::optional<int> gpu_device = ctx.target_is_gpu ? std::optional<int>(ctx.target_device_id) : std::nullopt;
-  ctx.load_future = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
+  auto load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
+  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
 
   if (ctx.source_type == SourceType::kP2P) {
-    absl::Status status = ctx.load_future.get();
+    absl::Status status = std::move(load_sf).get();
     if (!status.ok()) {
       if (absl::IsResourceExhausted(status)) {
         LOG(WARNING) << "Resource exhausted, attempting memory eviction for P2P load";
         auto evict_status = ctx.replica_runtime->try_evict_memory_for_replica(ctx.p2p.source.size_bytes);
         if (evict_status.ok()) {
-          ctx.load_future = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
-          status = ctx.load_future.get();
+          load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
+          ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+          status = std::move(load_sf).get();
         }
       }
       if (!status.ok()) {
         return status;
       }
     }
-    std::promise<absl::Status> ready;
-    ready.set_value(absl::OkStatus());
-    ctx.load_future = ready.get_future().share();
     return absl::OkStatus();
   }
 
@@ -153,12 +151,9 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
     return wait_status;
   }
 
-  if (ctx.load_future.valid()) {
-    ctx.load_future.wait();
-    const absl::Status& load_status = ctx.load_future.get();
-    if (!load_status.ok()) {
-      return load_status;
-    }
+  absl::Status load_status = std::move(load_sf).get();
+  if (!load_status.ok()) {
+    return load_status;
   }
 
   return absl::OkStatus();

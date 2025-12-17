@@ -128,11 +128,13 @@ RegistrationBackend::RegistrationBackend(
       metrics_collector_(resources.metrics_collector),
       memory_pool_(resources.memory_pool),
       communication_manager_(std::move(resources.communication_manager)),
+      async_runtime_(std::move(resources.async_runtime)),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
       publisher_(publisher) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
+  ABSL_CHECK(async_runtime_ != nullptr) << "RegistrationResources.async_runtime is required";
 }
 
 absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const ArtifactRegistration& reg) {
@@ -217,6 +219,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       .device_type = DeviceType::GPU,
       .local_device_id = reg.device_id,
       .pinned_buffer_pool = memory_pool_,
+      .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{async_runtime_},
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
