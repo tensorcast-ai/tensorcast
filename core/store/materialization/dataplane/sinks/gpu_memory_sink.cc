@@ -186,7 +186,6 @@ inline void sched_acquire(int device_id, size_t bytes, bool enabled, size_t limi
 
 inline void sched_release(int device_id, size_t bytes) {
   absl::MutexLock lk(&g_sched_mu);
-  ensure_metrics_init_();
   auto it = g_sched.find(device_id);
   if (it != g_sched.end() && it->second) {
     GpuSchedDev* dev = it->second.get();
@@ -335,15 +334,21 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
     }
   }
   auto user_cb = effective_opts.callbacks.on_copy_done;
-  effective_opts.callbacks.on_copy_done = [release_cb = std::move(release_token), debug_payload, user_cb](
-                                              absl::Status st) {
+  auto user_inline_cb = effective_opts.callbacks.on_copy_done_inline;
+  effective_opts.callbacks.on_copy_done_inline = [release_cb = std::move(release_token),
+                                                  user_inline_cb](absl::Status st) {
+    release_cb();
+    if (user_inline_cb) {
+      user_inline_cb(st);
+    }
+  };
+  effective_opts.callbacks.on_copy_done = [debug_payload, user_cb](absl::Status st) {
     if (st.ok() && debug_payload) {
       debug_payload->verify();
     } else if (!st.ok() && debug_payload) {
       LOG(ERROR) << "GpuMemorySink async copy failed before debug verify device=" << debug_payload->device_id
                  << " offset=" << debug_payload->gpu_offset << " bytes=" << debug_payload->bytes << " status=" << st;
     }
-    release_cb();
     if (user_cb) {
       user_cb(st);
     }
