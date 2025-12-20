@@ -7,4 +7,9 @@ cc_library(
     srcs = [
         "nvidia/cusparse/lib/libcusparse.so.12",
     ],
+    hdrs = glob([
+        "nvidia/cusparse/include/**/*.h",
+    ]),
+    includes = ["nvidia/cusparse/include/"],
+    linkopts = ["-Wl,-rpath,lib/"],
 )

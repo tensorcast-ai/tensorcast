@@ -283,7 +283,6 @@ cat third_party/<lib>/BUILD                 # Check target definitions
 #### C++ Naming Conventions
 - **Variables/Functions**: `snake_case`
 - **Classes/Structs**: `PascalCase`
-- **Constants/Macros**: `ALL_CAPS`
 - **Files/Directories**: `snake_case`
 - Apply these rules to every C++ symbol in the repo—code, tests, tooling, and any documentation (designs/plans/READMEs) that names an API.
 
@@ -313,11 +312,13 @@ cat third_party/<lib>/BUILD                 # Check target definitions
 
 #### Code Style
 - Prefer modern C++ features and language standards. No compatibility shims.
+- **String formatting**: Prefer `std::format` (C++20, `#include <format>`) over `absl::StrFormat`; avoid unnecessary `.c_str()` / `.data()` when formatting (clang-tidy: `modernize-use-std-format`).
 - **Functions**: Short (<20 lines), single purpose, verb-based names
 - **Early Returns**: Use guard clauses to avoid nesting
 - **Parameters**: Use structs for multiple params/returns
 - **Immutability**: Prefer `const` and `constexpr`
 - **RAII**: Always use for resource management
+- **Integer types**: Avoid `short`/`long`/`long long`; prefer fixed-width `std::intXX_t`/`std::uintXX_t` instead.
 - **Logging**: Use `LOG` for logging, `VLOG` for verbose logging, `PLOG` for error messages with `errno`
 - **Assertions**: Use `ABSL_CHECK` for assertions, `ABSL_CHECK_OK` for assertions that return statuses
 - Statement should be inside braces

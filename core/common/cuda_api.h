@@ -4,6 +4,7 @@
 #define TENSORCAST_CORE_COMMON_CUDA_API_H_
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 
 #include "absl/status/status.h"
@@ -11,6 +12,7 @@
 
 // CUDA runtime API types that we need to replicate
 #ifndef USE_FAKE_CUDA
+#include <cuda.h>
 #include <cuda_runtime_api.h>
 #else
 // Define minimal CUDA types for fake backend
@@ -99,6 +101,60 @@ typedef struct cudaPointerAttributes {
   cudaMemoryType memoryType; // Pre-CUDA 10.0
   int isManaged;
 } cudaPointerAttributes;
+
+// ---------------------------------------------------------------------------
+// Minimal CUDA Driver API types for FakeCuda (CUDA VMM support).
+// These definitions only cover the subset used by TensorCast.
+// ---------------------------------------------------------------------------
+
+typedef int CUresult;
+
+typedef std::uintptr_t CUdeviceptr;
+typedef std::uint64_t CUmemGenericAllocationHandle;
+
+typedef enum CUmemLocationType_enum {
+  CU_MEM_LOCATION_TYPE_INVALID = 0,
+  CU_MEM_LOCATION_TYPE_DEVICE = 1,
+} CUmemLocationType;
+
+typedef struct CUmemLocation_st {
+  CUmemLocationType type;
+  int id;
+} CUmemLocation;
+
+typedef enum CUmemAllocationType_enum {
+  CU_MEM_ALLOCATION_TYPE_INVALID = 0,
+  CU_MEM_ALLOCATION_TYPE_PINNED = 1,
+} CUmemAllocationType;
+
+typedef enum CUmemAllocationHandleType_enum {
+  CU_MEM_HANDLE_TYPE_NONE = 0,
+  CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1,
+} CUmemAllocationHandleType;
+
+typedef struct CUmemAllocationProp_st {
+  CUmemAllocationType type;
+  CUmemAllocationHandleType requestedHandleTypes;
+  CUmemLocation location;
+  void* win32HandleMetaData;
+  std::uint64_t allocFlags;
+} CUmemAllocationProp;
+
+typedef enum CUmemAllocationGranularity_flags_enum {
+  CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0,
+  CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 1,
+} CUmemAllocationGranularity_flags;
+
+typedef enum CUmemAccess_flags_enum {
+  CU_MEM_ACCESS_FLAGS_PROT_NONE = 0,
+  CU_MEM_ACCESS_FLAGS_PROT_READ = 1,
+  CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 3,
+} CUmemAccess_flags;
+
+typedef struct CUmemAccessDesc_st {
+  CUmemLocation location;
+  CUmemAccess_flags flags;
+} CUmemAccessDesc;
 #endif
 
 namespace tensorcast::cuda {
@@ -161,6 +217,7 @@ absl::Status event_create(cudaEvent_t* event);
 absl::Status event_create_with_flags(cudaEvent_t* event, unsigned int flags);
 absl::Status event_destroy(cudaEvent_t event);
 absl::Status event_record(cudaEvent_t event, cudaStream_t stream = nullptr);
+absl::Status event_query(cudaEvent_t event, bool* ready);
 absl::Status event_synchronize(cudaEvent_t event);
 absl::Status event_elapsed_time(float* ms, cudaEvent_t start, cudaEvent_t end);
 
@@ -192,6 +249,31 @@ absl::Status memcpy_peer_async(
     int src_device,
     size_t bytes,
     cudaStream_t stream = nullptr);
+
+// ---------------------------------------------------------------------------
+// CUDA VMM (Driver API) wrappers.
+// ---------------------------------------------------------------------------
+absl::Status cu_init(unsigned int flags = 0);
+absl::Status cu_mem_get_allocation_granularity(
+    size_t* granularity,
+    const CUmemAllocationProp* prop,
+    CUmemAllocationGranularity_flags option);
+absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags);
+absl::Status cu_mem_create(
+    CUmemGenericAllocationHandle* handle,
+    size_t size,
+    const CUmemAllocationProp* prop,
+    uint64_t flags);
+absl::Status cu_mem_map(
+    CUdeviceptr ptr,
+    size_t size,
+    size_t offset,
+    CUmemGenericAllocationHandle handle,
+    uint64_t flags);
+absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDesc* desc, size_t count);
+absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size);
+absl::Status cu_mem_release(CUmemGenericAllocationHandle handle);
+absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size);
 
 // Helper macro for operations not supported by fake backend
 #ifdef USE_FAKE_CUDA

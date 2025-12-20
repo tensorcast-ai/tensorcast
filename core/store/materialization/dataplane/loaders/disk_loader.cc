@@ -283,7 +283,6 @@ absl::StatusOr<std::unique_ptr<loader::SeekableSource>> DiskLoader::open_source(
     source_opts.total_size = artifact_size_;
     // chunk size is determined by ReplicaLoadController's pinned pool; a default here is fine
     source_opts.io_batch_bytes = 128 * 1024 * 1024;
-    source_opts.use_direct_io = (artifact_size_ > 5ULL * 1024 * 1024 * 1024);
   }
   return std::make_unique<loader::FilePartitionSource>(std::move(source_opts));
 }

@@ -34,6 +34,10 @@ struct DeviceRegion {
 };
 
 struct CopyCallbacks {
+  // Executed inline on the CUDA host callback (or stream-sync fallback) before
+  // the CopyHandle signals completion. Must be non-blocking and must not call
+  // CUDA APIs.
+  std::function<void(absl::Status)> on_copy_done_inline;
   // Fired asynchronously on a CPU worker thread after the CUDA work for this
   // handle has completed. The callback runs outside of cudaLaunchHostFunc so it
   // must still avoid invoking CUDA APIs directly; use AsyncCopyManager helpers

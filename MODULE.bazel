@@ -189,6 +189,16 @@ http_archive(
 )
 
 http_archive(
+    name = "cusolver",
+    build_file = "@//third_party/cusolver:BUILD",
+    integrity = "sha256-GeM/pEK8/QhbMIbE6/fo3rwHz+AeEVE8xtMy/ZGKwmA=",
+    urls = [
+        "http://mirrors.i.basemind.com/pypi/packages/3a/e1/5b9089a4b2a4790dfdea8b3a006052cfecff58139d5a4e34cb1a51df8d6f/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_x86_64.whl",
+        "https://files.pythonhosted.org/packages/3a/e1/5b9089a4b2a4790dfdea8b3a006052cfecff58139d5a4e34cb1a51df8d6f/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_x86_64.whl",
+    ],
+)
+
+http_archive(
     name = "nvjitlink",
     build_file = "@//third_party/nvjitlink:BUILD",
     integrity = "sha256-BrO5slvz+K81HWZJeMomoW0sUSfb1TwEl+KNH7lhHVc=",

@@ -95,6 +95,12 @@ struct IpcMapping {
   int fd = -1;
 };
 
+struct FakeVmmAllocation {
+  std::string shm_name;
+  int fd = -1;
+  size_t size = 0;
+};
+
 // Global state for fake CUDA runtime
 struct FakeCudaState {
   absl::Mutex mutex;
@@ -107,6 +113,10 @@ struct FakeCudaState {
 
   // Cross-process IPC mappings opened in the current process (ptr -> metadata)
   absl::flat_hash_map<void*, IpcMapping> ipc_mappings ABSL_GUARDED_BY(mutex);
+
+  // Fake CUDA VMM allocations: handle -> backing store
+  absl::flat_hash_map<CUmemGenericAllocationHandle, FakeVmmAllocation> vmm_allocations ABSL_GUARDED_BY(mutex);
+  CUmemGenericAllocationHandle next_vmm_handle ABSL_GUARDED_BY(mutex) = 1;
 
   // Streams and events for async simulation
   std::shared_ptr<FakeStream> default_stream ABSL_GUARDED_BY(mutex);
@@ -926,6 +936,23 @@ absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
   return absl::OkStatus();
 }
 
+absl::Status event_query(cudaEvent_t event, bool* ready) {
+  if (ready == nullptr) {
+    return absl::InvalidArgumentError("ready pointer is null");
+  }
+  auto event_or = get_event_state(event);
+  if (!event_or.ok()) {
+    return event_or.status();
+  }
+  auto fake_event = *event_or;
+  absl::MutexLock lock(&fake_event->mu);
+  if (fake_event->destroyed && !fake_event->completed) {
+    return absl::FailedPreconditionError("fake CUDA event destroyed before completion");
+  }
+  *ready = fake_event->completed;
+  return absl::OkStatus();
+}
+
 absl::Status event_synchronize(cudaEvent_t event) {
   auto event_or = get_event_state(event);
   if (!event_or.ok()) {
@@ -1121,6 +1148,183 @@ absl::Status host_register(void* ptr, size_t size, unsigned int flags) {
 
 absl::Status host_unregister(void* ptr) {
   // In fake backend, host memory unregistration is a no-op
+  return absl::OkStatus();
+}
+
+absl::Status cu_init(unsigned int flags) {
+  static_cast<void>(flags);
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_get_allocation_granularity(
+    size_t* granularity,
+    const CUmemAllocationProp* prop,
+    CUmemAllocationGranularity_flags option) {
+  static_cast<void>(prop);
+  static_cast<void>(option);
+  if (granularity == nullptr) {
+    return absl::InvalidArgumentError("granularity pointer is null");
+  }
+  // Use a conservative alignment that matches common CUDA device granularity.
+  *granularity = 64 * 1024;
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags) {
+  static_cast<void>(flags);
+  if (ptr == nullptr) {
+    return absl::InvalidArgumentError("ptr is null");
+  }
+  if (size == 0) {
+    return absl::InvalidArgumentError("size must be > 0");
+  }
+  // Best-effort: FakeCuda treats "reserve" as reserving a PROT_NONE VMA.
+  // alignment is advisory in the fake backend; mmap alignment is page-based.
+  static_cast<void>(alignment);
+
+  int mmap_flags = MAP_PRIVATE | MAP_ANONYMOUS;
+  void* requested = nullptr;
+  if (addr != 0) {
+    requested = reinterpret_cast<void*>(addr);
+    mmap_flags |= MAP_FIXED;
+  }
+
+  void* mapped = mmap(requested, size, PROT_NONE, mmap_flags, -1, 0);
+  if (mapped == MAP_FAILED) {
+    return absl::ErrnoToStatus(errno, "mmap failed in fake cu_mem_address_reserve");
+  }
+  *ptr = reinterpret_cast<CUdeviceptr>(mapped);
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_create(
+    CUmemGenericAllocationHandle* handle,
+    size_t size,
+    const CUmemAllocationProp* prop,
+    uint64_t flags) {
+  static_cast<void>(prop);
+  static_cast<void>(flags);
+  if (handle == nullptr) {
+    return absl::InvalidArgumentError("handle is null");
+  }
+  if (size == 0) {
+    return absl::InvalidArgumentError("size must be > 0");
+  }
+
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+
+  std::string shm_name = make_shm_name();
+  int fd = shm_open(shm_name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0600);
+  if (fd < 0) {
+    return absl::ErrnoToStatus(errno, "shm_open failed in fake cu_mem_create");
+  }
+  if (ftruncate(fd, static_cast<off_t>(size)) != 0) {
+    const absl::Status err = absl::ErrnoToStatus(errno, "ftruncate failed in fake cu_mem_create");
+    close(fd);
+    shm_unlink(shm_name.c_str());
+    return err;
+  }
+
+  const CUmemGenericAllocationHandle new_handle = state.next_vmm_handle++;
+  state.vmm_allocations[new_handle] = FakeVmmAllocation{
+      .shm_name = shm_name,
+      .fd = fd,
+      .size = size,
+  };
+  *handle = new_handle;
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_map(
+    CUdeviceptr ptr,
+    size_t size,
+    size_t offset,
+    CUmemGenericAllocationHandle handle,
+    uint64_t flags) {
+  static_cast<void>(flags);
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+
+  auto it = state.vmm_allocations.find(handle);
+  if (it == state.vmm_allocations.end()) {
+    return absl::InvalidArgumentError("unknown VMM allocation handle");
+  }
+  const FakeVmmAllocation& alloc = it->second;
+
+  if (offset != 0) {
+    return absl::InvalidArgumentError("fake cu_mem_map only supports offset=0");
+  }
+  if (size == 0 || size > alloc.size) {
+    return absl::InvalidArgumentError("invalid mapping size");
+  }
+  void* addr = reinterpret_cast<void*>(ptr);
+  if (addr == nullptr) {
+    return absl::InvalidArgumentError("ptr is null");
+  }
+
+  void* mapped = mmap(addr, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, alloc.fd, 0);
+  if (mapped == MAP_FAILED) {
+    return absl::ErrnoToStatus(errno, "mmap failed in fake cu_mem_map");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDesc* desc, size_t count) {
+  static_cast<void>(ptr);
+  static_cast<void>(size);
+  static_cast<void>(desc);
+  static_cast<void>(count);
+  // Fake backend does not enforce per-device page permissions.
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size) {
+  if (ptr == 0 || size == 0) {
+    return absl::InvalidArgumentError("ptr/size invalid");
+  }
+  void* addr = reinterpret_cast<void*>(ptr);
+  // Preserve the "reserved VA" semantics by replacing the mapping with a
+  // PROT_NONE anonymous mapping at the same address.
+  void* mapped = mmap(addr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+  if (mapped == MAP_FAILED) {
+    return absl::ErrnoToStatus(errno, "mmap(PROT_NONE) failed in fake cu_mem_unmap");
+  }
+  return absl::OkStatus();
+}
+
+absl::Status cu_mem_release(CUmemGenericAllocationHandle handle) {
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+
+  auto it = state.vmm_allocations.find(handle);
+  if (it == state.vmm_allocations.end()) {
+    return absl::OkStatus();
+  }
+
+  FakeVmmAllocation alloc = std::move(it->second);
+  state.vmm_allocations.erase(it);
+
+  absl::Status status = absl::OkStatus();
+  if (alloc.fd >= 0 && close(alloc.fd) != 0) {
+    status = absl::ErrnoToStatus(errno, "close failed in fake cu_mem_release");
+  }
+  if (shm_unlink(alloc.shm_name.c_str()) != 0) {
+    if (status.ok()) {
+      status = absl::ErrnoToStatus(errno, "shm_unlink failed in fake cu_mem_release");
+    }
+  }
+  return status;
+}
+
+absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
+  if (ptr == 0 || size == 0) {
+    return absl::InvalidArgumentError("ptr/size invalid");
+  }
+  void* addr = reinterpret_cast<void*>(ptr);
+  if (munmap(addr, size) != 0) {
+    return absl::ErrnoToStatus(errno, "munmap failed in fake cu_mem_address_free");
+  }
   return absl::OkStatus();
 }
 

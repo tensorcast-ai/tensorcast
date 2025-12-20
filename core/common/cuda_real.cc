@@ -4,8 +4,10 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <dlfcn.h>
 #include <atomic>
 #include <iomanip>
+#include <mutex>
 #include <sstream>
 
 #include <unistd.h>
@@ -14,12 +16,158 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/error_handling.h"
 
 namespace tensorcast::cuda {
 
 namespace {
+constexpr const char* kCudaDriverLibraryNames[] = {"libcuda.so.1", "libcuda.so"};
+
+// NOLINTBEGIN(readability-identifier-naming)
+struct CudaDriverVmmSymbols {
+  decltype(&::cuInit) cuInit = nullptr;
+  decltype(&::cuGetErrorName) cuGetErrorName = nullptr;
+  decltype(&::cuGetErrorString) cuGetErrorString = nullptr;
+  decltype(&::cuMemGetAllocationGranularity) cuMemGetAllocationGranularity = nullptr;
+  decltype(&::cuMemAddressReserve) cuMemAddressReserve = nullptr;
+  decltype(&::cuMemCreate) cuMemCreate = nullptr;
+  decltype(&::cuMemMap) cuMemMap = nullptr;
+  decltype(&::cuMemSetAccess) cuMemSetAccess = nullptr;
+  decltype(&::cuMemUnmap) cuMemUnmap = nullptr;
+  decltype(&::cuMemRelease) cuMemRelease = nullptr;
+  decltype(&::cuMemAddressFree) cuMemAddressFree = nullptr;
+};
+
+// NOLINTEND(readability-identifier-naming)
+
+void*& cuda_driver_handle() {
+  static void* handle = nullptr;
+  return handle;
+}
+
+CudaDriverVmmSymbols& cuda_driver_symbols() {
+  static auto* symbols = new CudaDriverVmmSymbols();
+  return *symbols;
+}
+
+template <typename Fn>
+absl::Status load_cuda_symbol(void* handle, const char* symbol_name, Fn& out) {
+  dlerror();
+  void* symbol = dlsym(handle, symbol_name);
+  const char* error = dlerror();
+  if (symbol == nullptr || error != nullptr) {
+    return absl::UnavailableError(
+        absl::StrCat(
+            "Failed to load CUDA driver symbol ", symbol_name, ": ", error != nullptr ? error : "symbol not found"));
+  }
+  out = reinterpret_cast<Fn>(symbol);
+  return absl::OkStatus();
+}
+
+absl::Status ensure_cuda_driver_loaded() {
+  static std::once_flag once;
+  static absl::Status load_status = absl::OkStatus();
+  std::call_once(once, [&]() {
+    void*& handle = cuda_driver_handle();
+    std::string load_errors;
+
+    for (const char* lib_name : kCudaDriverLibraryNames) {
+      dlerror();
+      handle = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
+      if (handle != nullptr) {
+        break;
+      }
+      const char* error = dlerror();
+      if (error != nullptr) {
+        if (!load_errors.empty()) {
+          absl::StrAppend(&load_errors, "; ");
+        }
+        absl::StrAppend(&load_errors, "dlopen(", lib_name, "): ", error);
+      }
+    }
+
+    if (handle == nullptr) {
+      load_status = absl::UnavailableError(
+          absl::StrCat(
+              "Failed to load CUDA driver library (libcuda.so): ",
+              load_errors.empty() ? "(no error details)" : load_errors));
+      return;
+    }
+
+    auto load_or = [&](auto& fn, const char* name) -> absl::Status { return load_cuda_symbol(handle, name, fn); };
+
+    CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+    if (auto status = load_or(symbols.cuInit, "cuInit"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuGetErrorName, "cuGetErrorName"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuGetErrorString, "cuGetErrorString"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemGetAllocationGranularity, "cuMemGetAllocationGranularity"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemAddressReserve, "cuMemAddressReserve"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemCreate, "cuMemCreate"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemMap, "cuMemMap"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemSetAccess, "cuMemSetAccess"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemUnmap, "cuMemUnmap"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemRelease, "cuMemRelease"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemAddressFree, "cuMemAddressFree"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+
+    load_status = absl::OkStatus();
+  });
+
+  return load_status;
+}
+
+absl::Status cu_result_as_status(CUresult result, absl::string_view context) {
+  if (result == CUDA_SUCCESS) {
+    return absl::OkStatus();
+  }
+
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  const char* name = "unknown";
+  const char* desc = "unknown";
+  if (symbols.cuGetErrorName != nullptr) {
+    (void)symbols.cuGetErrorName(result, &name);
+  }
+  if (symbols.cuGetErrorString != nullptr) {
+    (void)symbols.cuGetErrorString(result, &desc);
+  }
+  return absl::InternalError(absl::StrCat(context, " - ", name, ": ", desc));
+}
+
 // Best-effort same-process fallback for CUDA IPC handles during unit tests.
 // We remember exported handles and their original pointers so that if a test
 // runs export+open in the same process (which real CUDA does not support), we
@@ -330,6 +478,22 @@ absl::Status event_record(cudaEvent_t event, cudaStream_t stream) {
   return absl::OkStatus();
 }
 
+absl::Status event_query(cudaEvent_t event, bool* ready) {
+  if (ready == nullptr) {
+    return absl::InvalidArgumentError("ready pointer is null");
+  }
+  const cudaError_t rc = cudaEventQuery(event);
+  if (rc == cudaSuccess) {
+    *ready = true;
+    return absl::OkStatus();
+  }
+  if (rc == cudaErrorNotReady) {
+    *ready = false;
+    return absl::OkStatus();
+  }
+  return tensorcast::common::cuda_as_status(rc, "cudaEventQuery");
+}
+
 absl::Status event_synchronize(cudaEvent_t event) {
   SC_RETURN_IF_CUDA_ERROR(cudaEventSynchronize(event));
   return absl::OkStatus();
@@ -444,6 +608,118 @@ absl::Status memcpy_peer_async(
     return common::cuda_as_status(err, "cudaMemcpyPeerAsync");
   }
   return absl::OkStatus();
+}
+
+absl::Status cu_init(unsigned int flags) {
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuInit(flags), "cuInit");
+}
+
+absl::Status cu_mem_get_allocation_granularity(
+    size_t* granularity,
+    const CUmemAllocationProp* prop,
+    CUmemAllocationGranularity_flags option) {
+  if (granularity == nullptr) {
+    return absl::InvalidArgumentError("granularity pointer is null");
+  }
+  if (prop == nullptr) {
+    return absl::InvalidArgumentError("prop pointer is null");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(
+      symbols.cuMemGetAllocationGranularity(granularity, prop, option), "cuMemGetAllocationGranularity");
+}
+
+absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags) {
+  if (ptr == nullptr) {
+    return absl::InvalidArgumentError("ptr is null");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemAddressReserve(ptr, size, alignment, addr, flags), "cuMemAddressReserve");
+}
+
+absl::Status cu_mem_create(
+    CUmemGenericAllocationHandle* handle,
+    size_t size,
+    const CUmemAllocationProp* prop,
+    uint64_t flags) {
+  if (handle == nullptr) {
+    return absl::InvalidArgumentError("handle is null");
+  }
+  if (prop == nullptr) {
+    return absl::InvalidArgumentError("prop is null");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemCreate(handle, size, prop, flags), "cuMemCreate");
+}
+
+absl::Status cu_mem_map(
+    CUdeviceptr ptr,
+    size_t size,
+    size_t offset,
+    CUmemGenericAllocationHandle handle,
+    uint64_t flags) {
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemMap(ptr, size, offset, handle, flags), "cuMemMap");
+}
+
+absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDesc* desc, size_t count) {
+  if (desc == nullptr && count != 0) {
+    return absl::InvalidArgumentError("desc is null but count is non-zero");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemSetAccess(ptr, size, desc, count), "cuMemSetAccess");
+}
+
+absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size) {
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemUnmap(ptr, size), "cuMemUnmap");
+}
+
+absl::Status cu_mem_release(CUmemGenericAllocationHandle handle) {
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemRelease(handle), "cuMemRelease");
+}
+
+absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuMemAddressFree(ptr, size), "cuMemAddressFree");
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {

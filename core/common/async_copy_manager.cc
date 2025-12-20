@@ -242,8 +242,15 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
       stage_or(opts, "H2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyHostToDevice, stream_to_use); },
-      // CUDA host callbacks must avoid CUDA APIs; defer user callback onto CPU worker.
-      [this, p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+      // CUDA host callbacks must avoid CUDA APIs; run inline hooks and defer user callbacks onto the CPU worker.
+      [this,
+       p,
+       inline_cb = opts.callbacks.on_copy_done_inline,
+       cb = opts.callbacks.on_copy_done,
+       device_id = dst.device_id](absl::Status completion_status) {
+        if (inline_cb) {
+          inline_cb(completion_status);
+        }
         {
           absl::MutexLock lock(&p->mu);
           p->status = completion_status;
@@ -316,7 +323,14 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
       stage_or(opts, "D2D/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToDevice, stream_to_use); },
-      [this, p, cb = opts.callbacks.on_copy_done, device_id = dst.device_id](absl::Status completion_status) {
+      [this,
+       p,
+       inline_cb = opts.callbacks.on_copy_done_inline,
+       cb = opts.callbacks.on_copy_done,
+       device_id = dst.device_id](absl::Status completion_status) {
+        if (inline_cb) {
+          inline_cb(completion_status);
+        }
         {
           absl::MutexLock lock(&p->mu);
           p->status = completion_status;
@@ -384,7 +398,14 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
       stage_or(opts, "D2H/Copy"),
       stream_to_use,
       [&]() { return cuda::memcpy_async(dst_ptr, src_ptr, bytes, cudaMemcpyDeviceToHost, stream_to_use); },
-      [this, p, cb = opts.callbacks.on_copy_done, device_id = src.device_id](absl::Status completion_status) {
+      [this,
+       p,
+       inline_cb = opts.callbacks.on_copy_done_inline,
+       cb = opts.callbacks.on_copy_done,
+       device_id = src.device_id](absl::Status completion_status) {
+        if (inline_cb) {
+          inline_cb(completion_status);
+        }
         {
           absl::MutexLock lock(&p->mu);
           p->status = completion_status;
@@ -428,9 +449,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2h(
   const void* src_ptr = src.base;
   void* dst_ptr = const_cast<void*>(dst.base);
   const size_t bytes = src.length;
+  auto inline_cb = opts.callbacks.on_copy_done_inline;
   auto on_done = opts.callbacks.on_copy_done;
-  enqueue_callback_([p, dst_ptr, src_ptr, bytes, on_done = std::move(on_done)]() mutable {
+  enqueue_callback_([p, dst_ptr, src_ptr, bytes, inline_cb, on_done = std::move(on_done)]() mutable {
     std::memcpy(dst_ptr, src_ptr, bytes);
+    if (inline_cb) {
+      inline_cb(absl::OkStatus());
+    }
     {
       absl::MutexLock lock(&p->mu);
       p->status = absl::OkStatus();

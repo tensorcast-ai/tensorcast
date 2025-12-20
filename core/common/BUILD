@@ -19,9 +19,14 @@ sc_cc_library(
         ":use_fake_cuda": ["USE_FAKE_CUDA"],
         "//conditions:default": [],
     }),
+    linkopts = select({
+        ":use_fake_cuda": [],
+        "//conditions:default": ["-ldl"],
+    }),
     visibility = ["//visibility:public"],
     deps = [
         ":error_handling_lib",
+        "//third_party/cuda_compat:nv_target",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/synchronization",
@@ -39,7 +44,7 @@ sc_cc_library(
         "@nvjitlink//:nvJitLink",
     ] + select({
         ":use_fake_cuda": [],
-        "//conditions:default": [],
+        "//conditions:default": ["@cusolver"],
     }),
     alwayslink = True,
 )

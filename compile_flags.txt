@@ -13,6 +13,7 @@
 -Itensorcast
 -Iproto/gen/cc
 -Itests/cpp
+-Ithird_party/cuda_compat
 -Ithird_party/dev_includes
 -Ibazel-bin/external/catch2+
 -Ibazel-bin/external/folly+
@@ -29,12 +30,12 @@
 -Iexternal/opentelemetry-cpp+/api/include
 -Iexternal/opentelemetry-cpp+/sdk/include
 -Iexternal/opentelemetry-cpp+/exporters/otlp/include
+-Iexternal/+_repo_rules+nccl/nvidia/nccl/include/
+-Iexternal/+_repo_rules+libtorch/torch/include/
+-Iexternal/+_repo_rules+libtorch/torch/include/torch/csrc/api/include
+-Iexternal/+_repo_rules+triton/triton/backends/nvidia/include
 -Iexternal/fmt+/include
 -Iexternal/double-conversion+
-
--I.venv/lib/python3.10/site-packages/torch/include
--I.venv/lib/python3.10/site-packages/torch/include/torch/csrc/api/include
--I.venv/lib64/python3.10/site-packages/triton/backends/nvidia/include
 
 -I/usr/include/python3.10
 

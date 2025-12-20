@@ -177,6 +177,44 @@ TEST_CASE("CUDA API abstraction layer", "[cuda]") {
     REQUIRE(status.ok());
   }
 
+  SECTION("CUDA VMM (Driver API) wrappers") {
+    // This unit test is primarily for FakeCuda. The real backend may require a
+    // functional NVIDIA driver (libcuda.so) and compatible GPU.
+    if (!cuda::is_fake()) {
+      SUCCEED("Skipping CUDA VMM wrapper test on real backend");
+      return;
+    }
+
+    CUmemAllocationProp prop{};
+    prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+    prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+    prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+    prop.location.id = 0;
+
+    size_t granularity = 0;
+    REQUIRE(cuda::cu_mem_get_allocation_granularity(&granularity, &prop, CU_MEM_ALLOC_GRANULARITY_MINIMUM).ok());
+    REQUIRE(granularity > 0);
+
+    CUdeviceptr reserved = 0;
+    REQUIRE(cuda::cu_mem_address_reserve(&reserved, granularity, granularity, 0, 0).ok());
+    REQUIRE(reserved != 0);
+
+    CUmemGenericAllocationHandle handle = 0;
+    REQUIRE(cuda::cu_mem_create(&handle, granularity, &prop, 0).ok());
+    REQUIRE(handle != 0);
+
+    REQUIRE(cuda::cu_mem_map(reserved, granularity, 0, handle, 0).ok());
+
+    CUmemAccessDesc access{};
+    access.location = prop.location;
+    access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+    REQUIRE(cuda::cu_mem_set_access(reserved, granularity, &access, 1).ok());
+
+    REQUIRE(cuda::cu_mem_unmap(reserved, granularity).ok());
+    REQUIRE(cuda::cu_mem_release(handle).ok());
+    REQUIRE(cuda::cu_mem_address_free(reserved, granularity).ok());
+  }
+
   SECTION("Synchronization operations") {
     // These should always succeed
     auto status = cuda::device_synchronize();

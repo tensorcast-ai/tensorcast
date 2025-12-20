@@ -10,6 +10,11 @@ cc_import(
 
 cc_library(
     name = "nccl",
+    hdrs = glob([
+        "nvidia/nccl/include/**/*.h",
+    ]),
+    includes = ["nvidia/nccl/include/"],
+    linkopts = ["-Wl,-rpath,lib/"],
     visibility = ["//visibility:public"],
     deps = [
         "nccl_lib",

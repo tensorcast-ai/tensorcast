@@ -1,0 +1,86 @@
+#ifndef TENSORCAST_CUDA_COMPAT_NV_TARGET_H_
+#define TENSORCAST_CUDA_COMPAT_NV_TARGET_H_
+
+// Some CUDA Runtime distributions (e.g., CUDA runtime wheels) do not ship
+// <nv/target>, but CUDA headers like cuda_fp16.h/cuda_bf16.h expect it.
+// Prefer the real header when present, otherwise provide a minimal fallback.
+
+#if defined(__has_include_next)
+#if __has_include_next(<nv/target>)
+#include_next <nv/target>
+#endif
+#endif
+
+#ifndef NV_IS_DEVICE
+#if defined(__CUDA_ARCH__)
+#define NV_IS_DEVICE 1
+#else
+#define NV_IS_DEVICE 0
+#endif
+#endif
+
+#ifndef NV_IS_HOST
+#define NV_IS_HOST (!NV_IS_DEVICE)
+#endif
+
+#ifndef NV_PROVIDES_SM_53
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 530)
+#define NV_PROVIDES_SM_53 1
+#else
+#define NV_PROVIDES_SM_53 0
+#endif
+#endif
+
+#ifndef NV_PROVIDES_SM_60
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 600)
+#define NV_PROVIDES_SM_60 1
+#else
+#define NV_PROVIDES_SM_60 0
+#endif
+#endif
+
+#ifndef NV_PROVIDES_SM_70
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 700)
+#define NV_PROVIDES_SM_70 1
+#else
+#define NV_PROVIDES_SM_70 0
+#endif
+#endif
+
+#ifndef NV_PROVIDES_SM_80
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
+#define NV_PROVIDES_SM_80 1
+#else
+#define NV_PROVIDES_SM_80 0
+#endif
+#endif
+
+#ifndef NV_PROVIDES_SM_90
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+#define NV_PROVIDES_SM_90 1
+#else
+#define NV_PROVIDES_SM_90 0
+#endif
+#endif
+
+#ifndef NV_TARGET_CONCAT_INNER
+#define NV_TARGET_CONCAT_INNER(a, b) a##b
+#endif
+
+#ifndef NV_TARGET_CONCAT
+#define NV_TARGET_CONCAT(a, b) NV_TARGET_CONCAT_INNER(a, b)
+#endif
+
+#ifndef NV_IF_ELSE_TARGET
+#define NV_IF_ELSE_TARGET(cond, true_code, false_code) \
+  NV_TARGET_CONCAT(NV_IF_ELSE_TARGET_, cond)(true_code, false_code)
+#define NV_IF_ELSE_TARGET_1(true_code, false_code) true_code
+#define NV_IF_ELSE_TARGET_0(true_code, false_code) false_code
+#endif
+
+#ifndef NV_IF_TARGET
+#define NV_IF_TARGET(cond, code) NV_IF_ELSE_TARGET(cond, code, )
+#endif
+
+#endif  // TENSORCAST_CUDA_COMPAT_NV_TARGET_H_
+

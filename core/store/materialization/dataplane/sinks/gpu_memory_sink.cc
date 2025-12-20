@@ -2,17 +2,22 @@
 
 #include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
+
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
 #include "absl/log/vlog_is_on.h"
 #include "absl/strings/str_format.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
 #include "core/common/device_guard.h"
@@ -27,8 +32,11 @@ namespace {
 struct GpuSchedDev {
   size_t inflight_bytes{0};
   size_t inflight_copies{0};
-  size_t limit_bytes{512ull * 1024ull * 1024ull}; // default 512 MiB
-  size_t limit_copies{2};
+  size_t limit_bytes{static_cast<size_t>(DEFAULT_GPU_SCHED_LIMIT_BYTES)};
+  size_t limit_copies{static_cast<size_t>(DEFAULT_GPU_SCHED_LIMIT_COPIES)};
+  uint64_t waits{0};
+  double wait_sec{0.0};
+  bool enabled{true};
   absl::CondVar cv;
 };
 
@@ -67,13 +75,11 @@ inline void ensure_metrics_init_() {
   }
 }
 
-inline bool gpu_sched_enabled() {
-  return true;
-}
-
-inline void maybe_init_limits_(GpuSchedDev& dev) {
-  // In V3 final state, use built-in defaults; no env overrides.
-  (void)dev; // defaults already set in struct initializer
+inline size_t normalize_sched_limit_(size_t limit, size_t min) {
+  if (limit == 0) {
+    return std::numeric_limits<size_t>::max();
+  }
+  return std::max(limit, min);
 }
 
 inline bool debug_copy_checks_enabled() {
@@ -144,18 +150,34 @@ struct DebugCopyPayload {
   }
 };
 
-inline void sched_acquire(int device_id, size_t bytes) {
-  if (!gpu_sched_enabled())
-    return;
+inline void sched_acquire(int device_id, size_t bytes, bool enabled, size_t limit_bytes, size_t limit_copies) {
   absl::MutexLock lk(&g_sched_mu);
   ensure_metrics_init_();
   auto& ptr = g_sched[device_id];
   if (!ptr)
     ptr = std::make_unique<GpuSchedDev>();
   GpuSchedDev* dev = ptr.get();
-  maybe_init_limits_(*dev);
-  while ((dev->inflight_bytes + bytes > dev->limit_bytes) || (dev->inflight_copies >= dev->limit_copies)) {
+
+  const size_t next_limit_bytes = normalize_sched_limit_(limit_bytes, /*min=*/1);
+  const size_t next_limit_copies = normalize_sched_limit_(limit_copies, /*min=*/1);
+  const bool config_changed =
+      (dev->enabled != enabled) || (dev->limit_bytes != next_limit_bytes) || (dev->limit_copies != next_limit_copies);
+  dev->enabled = enabled;
+  dev->limit_bytes = next_limit_bytes;
+  dev->limit_copies = next_limit_copies;
+  if (config_changed) {
+    dev->cv.SignalAll();
+  }
+  if (!enabled) {
+    return;
+  }
+
+  while ((dev->inflight_bytes + bytes > std::max(dev->limit_bytes, bytes)) ||
+         (dev->inflight_copies >= dev->limit_copies)) {
+    dev->waits += 1;
+    const absl::Time t0 = absl::Now();
     dev->cv.Wait(&g_sched_mu);
+    dev->wait_sec += absl::ToDoubleSeconds(absl::Now() - t0);
   }
   dev->inflight_bytes += bytes;
   dev->inflight_copies += 1;
@@ -163,10 +185,7 @@ inline void sched_acquire(int device_id, size_t bytes) {
 }
 
 inline void sched_release(int device_id, size_t bytes) {
-  if (!gpu_sched_enabled())
-    return;
   absl::MutexLock lk(&g_sched_mu);
-  ensure_metrics_init_();
   auto it = g_sched.find(device_id);
   if (it != g_sched.end() && it->second) {
     GpuSchedDev* dev = it->second.get();
@@ -183,6 +202,29 @@ inline void sched_release(int device_id, size_t bytes) {
   // Metrics hooks can be added here (omitted to avoid extra deps in loader).
 }
 } // namespace
+
+GpuSchedulerStats get_gpu_scheduler_stats(int device_id) {
+  absl::MutexLock lk(&g_sched_mu);
+  auto it = g_sched.find(device_id);
+  if (it == g_sched.end() || !it->second) {
+    return GpuSchedulerStats{};
+  }
+  const GpuSchedDev& dev = *it->second;
+  return GpuSchedulerStats{
+      .waits = dev.waits,
+      .wait_sec = dev.wait_sec,
+      .inflight_bytes = static_cast<uint64_t>(dev.inflight_bytes),
+      .inflight_copies = static_cast<uint64_t>(dev.inflight_copies),
+      .limit_bytes = static_cast<uint64_t>(dev.limit_bytes),
+      .limit_copies = static_cast<uint64_t>(dev.limit_copies),
+      .enabled = dev.enabled,
+  };
+}
+
+void reset_gpu_scheduler_stats_for_testing() {
+  absl::MutexLock lk(&g_sched_mu);
+  g_sched.clear();
+}
 
 GpuMemorySink::GpuMemorySink(Options options) : options_(std::move(options)) {}
 
@@ -261,7 +303,12 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
   // Submit H2D via ACM; caller is responsible for waiting before reusing src
   // memory (e.g., pump will defer returning SPB slot until handle completes).
   // Apply per-GPU scheduling limits when enabled.
-  sched_acquire(options_.device_id, bytes);
+  sched_acquire(
+      options_.device_id,
+      bytes,
+      options_.gpu_sched_enabled,
+      static_cast<size_t>(options_.gpu_sched_limit_bytes),
+      static_cast<size_t>(options_.gpu_sched_limit_copies));
   char* gpu_dest = static_cast<char*>(options_.gpu_base_ptr.get()) + offset;
   common::HostRegion h{.base = src, .length = bytes, .pinned = true};
   common::DeviceRegion d{.device_id = options_.device_id, .dev_ptr = gpu_dest, .length = bytes};
@@ -287,15 +334,21 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
     }
   }
   auto user_cb = effective_opts.callbacks.on_copy_done;
-  effective_opts.callbacks.on_copy_done = [release_cb = std::move(release_token), debug_payload, user_cb](
-                                              absl::Status st) {
+  auto user_inline_cb = effective_opts.callbacks.on_copy_done_inline;
+  effective_opts.callbacks.on_copy_done_inline = [release_cb = std::move(release_token),
+                                                  user_inline_cb](absl::Status st) {
+    release_cb();
+    if (user_inline_cb) {
+      user_inline_cb(st);
+    }
+  };
+  effective_opts.callbacks.on_copy_done = [debug_payload, user_cb](absl::Status st) {
     if (st.ok() && debug_payload) {
       debug_payload->verify();
     } else if (!st.ok() && debug_payload) {
       LOG(ERROR) << "GpuMemorySink async copy failed before debug verify device=" << debug_payload->device_id
                  << " offset=" << debug_payload->gpu_offset << " bytes=" << debug_payload->bytes << " status=" << st;
     }
-    release_cb();
     if (user_cb) {
       user_cb(st);
     }
@@ -323,6 +376,9 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
     return overall_status_;
   }
   auto handle = std::move(*hdl_or);
+  // Maintain compatibility with tests and callers that validate completeness on close().
+  // Callers are responsible for awaiting returned handles; pump_ranges does so before calling close().
+  total_bytes_written_ += bytes;
 
   if (is_last_chunk) {
     auto wait_status = handle.wait();
