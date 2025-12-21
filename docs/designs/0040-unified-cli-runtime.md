@@ -44,20 +44,20 @@ tensorcast
 │   │        [--mem-pool-size-bytes SIZE] [--pinned-pool-bytes SIZE] [--enable-rdma]
 │   │        [--log-level LEVEL] [--global-store-endpoints HOST:PORT]
 │   │        [--global-store-mode connect|start|none]
-│   │        [--global-store-address HOST:PORT] [--session SID] [--json]
+│   │        [--global-store-address HOST:PORT] [--session SID] [--json] [--blocking]
 │   ├── stop [--force] [--session SID]
 │   ├── status [--session SID] [--json]
 │   ├── logs [-f/--follow] [--stderr] [--session SID]
 │   └── restart [...]
 └── global
     ├── start [--config PATH] [--listen-host HOST] [--listen-port PORT]
-    │        [--gs-session GID] [--json]
+    │        [--gs-session GID] [--json] [--blocking]
     ├── stop [--force] [--gs-session GID]
     ├── status [--gs-session GID] [--json]
     └── logs [-f/--follow] [--stderr] [--gs-session GID]
 ```
 
-- Default UX: `tensorcast global start` (if needed) → `tensorcast daemon start` with an explicit `global_store_mode` (`connect`/`start`). Start is always blocking (waits for readiness) and has no user-configurable startup timeout. Daemon commands respect `current_session`; Global Store commands respect `current_global_session`.
+- Default UX: `tensorcast global start` (if needed) → `tensorcast daemon start` with an explicit `global_store_mode` (`connect`/`start`). Start always waits for readiness (no startup timeout). Use `--blocking` to keep the process attached and stop it when the CLI exits; otherwise starts are detached. Daemon commands respect `current_session`; Global Store commands respect `current_global_session`.
 - `global_store_mode`: `connect` (must reach an existing GS), `start` (start a local GS if needed), `none` (skip HA). Default is `none`. `--global-store-address` implies `connect`.
 - `--set KEY=VALUE` overlays daemon config values using dot-paths (proto field names). Values are YAML-parsed and applied before HA injection and port backfill; repeat to set multiple fields.
 - Convenience flags (`--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`, `--enable-rdma`, `--log-level`) are translated into config overlays. `--global-store-endpoints` seeds both GS resolution (connect-only) and HA endpoint injection.
@@ -78,11 +78,13 @@ RuntimeSession start(
     cluster_id: str | None = None,
     reuse_existing: bool = False,
     fate_share: bool = True,
+    blocking: bool = False,
+    to_console: bool = True,
 )
 ```
 
 - Two-phase launch: reconcile state → resolve/start Global Store (health + cluster token) → materialize daemon config with HA endpoints → start daemon via `service_manager` → write session/runtime state atomically.
-- Startup readiness is always awaited; there is no `no-wait` mode and no global startup timeout (the call returns only when healthy or if the process exits with an error).
+- Startup readiness is always awaited; there is no `no-wait` mode and no global startup timeout. In foreground (`blocking`) mode the call remains attached until the service exits.
 - Owner stop: `runtime.stop()` checks `session_state.global_store.owner`; if true, it stops the Global Store before stopping the daemon.
 - When `session_id` is omitted, `runtime.stop()` resolves the active daemon from `runtime/state.json` first, then falls back to `current_session`.
 - SDK `tensorcast.init(mode="create")` forwards `global_store_mode/address/cluster_id/session_id` into `runtime.start`, preserving CLI semantics. Ephemeral/private sessions are supported by passing an explicit `session_id` and skipping `current_session` writes.
@@ -179,7 +181,9 @@ Key schemas (schema_version=1):
 - Daemon config is materialized per session into `effective_daemon_config.yaml`; CLI overlays apply first, ports may be user-set or discovered, and `ha_endpoints` is injected from the resolved Global Store address unless `global_store_mode="none"`.
 - Startup waits for daemon readiness via `GetServerConfig` and does not treat an open TCP port as ready, then writes runtime and session state atomically. PID records are append-only and include role, argv, and log paths.
 - Only one daemon instance is allowed per `$TENSORCAST_HOME`; `daemon start` refuses to launch a second instance and instead surfaces the existing session details.
-- CLI launches are detached from the caller process so daemons (and any CLI-started Global Store) stay running after the command returns.
+- CLI launches are detached from the caller process so daemons (and any CLI-started Global Store) stay running after the command returns unless `--blocking` is used.
+- Blocking-mode shutdown handlers are idempotent to avoid duplicate stop attempts when signals and `atexit` both fire.
+- In blocking mode, Ctrl+C triggers a SIGTERM and the CLI waits for a graceful shutdown (up to ~35s) before escalating to SIGKILL so workers can unregister cleanly.
 - Stop honors ownership: if the session owns the GS, `stop_global_store` is invoked before `stop_service`. Non-owners only clear current-session pointers.
 
 ## SDK integration

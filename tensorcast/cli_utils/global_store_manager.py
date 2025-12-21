@@ -56,6 +56,7 @@ from tensorcast.cli_utils.process import (
     prune_process_records,
     read_json_default,
     read_runtime_state,
+    register_blocking_cleanup,
     register_process,
     start_log_threads,
     update_runtime_global_store,
@@ -260,11 +261,13 @@ def start_global_store(
     metrics_port: int | None = None,
     to_console: bool = False,
     fate_share: bool = True,
+    blocking: bool = False,
+    announce: bool = True,
 ) -> GlobalStoreInstance:
     """Start the Global Store (single-instance guarded).
 
-    This entry point is always blocking: it returns only once the Global Store
-    is healthy (or the process exits with an error).
+    This entry point always waits for readiness; with blocking=True it remains
+    attached until the process exits.
     """
 
     provided_cluster_token = cluster_token
@@ -366,7 +369,7 @@ def start_global_store(
     ]
     try:
         preexec_fn = preexec_fate_sharing if fate_share else preexec_detached
-        use_pipes = fate_share
+        use_pipes = blocking or fate_share
         stdout_target = subprocess.PIPE if use_pipes else so
         stderr_target = subprocess.PIPE if use_pipes else se
         proc = subprocess.Popen(
@@ -501,10 +504,7 @@ def start_global_store(
         with contextlib.suppress(Exception):
             load_or_create_cluster_token(cluster_token)
 
-    click.echo(
-        f"Global Store started (session={inst.id}) at {address_eff}. Logs: {inst.logs}"
-    )
-    return GlobalStoreInstance(
+    instance = GlobalStoreInstance(
         id=inst.id,
         pid=int(proc.pid),
         address=address_eff,
@@ -517,6 +517,24 @@ def start_global_store(
         db_file=db_file,
         owner=True,
     )
+    if blocking:
+
+        def _cleanup() -> None:
+            with contextlib.suppress(Exception):
+                stop_global_store(session_id=inst.id, quiet=True)
+
+        register_blocking_cleanup(_cleanup)
+
+        ret = proc.wait()
+        join_threads(log_threads)
+        click.echo(f"global store exited with code {ret}")
+        return instance
+
+    if announce:
+        click.echo(
+            f"Global Store started (session={inst.id}) at {address_eff}. Logs: {inst.logs}"
+        )
+    return instance
 
 
 def stop_global_store(

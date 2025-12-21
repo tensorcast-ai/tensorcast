@@ -60,10 +60,12 @@ Session state (schema_version=1)
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import fcntl
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -197,6 +199,33 @@ def clear_runtime_global_store(
     else:
         state.pop("global_store", None)
     return write_runtime_state(path, state)
+
+
+def register_blocking_cleanup(cleanup: Callable[[], None]) -> None:
+    """Register cleanup for blocking CLI runs (signal + normal exit)."""
+
+    called = False
+
+    def _call_once() -> None:
+        nonlocal called
+        if called:
+            return
+        called = True
+        cleanup()
+
+    atexit.register(_call_once)
+
+    def _handle_signal(signum, _frame) -> None:  # noqa: ANN001
+        _call_once()
+        try:
+            sys.exit(128 + int(signum))
+        except SystemExit:
+            raise
+
+    with contextlib.suppress(Exception):
+        signal.signal(signal.SIGTERM, _handle_signal)
+    with contextlib.suppress(Exception):
+        signal.signal(signal.SIGINT, _handle_signal)
 
 
 def write_session_state(path: Path, payload: dict[str, Any]) -> dict[str, Any]:

@@ -83,7 +83,7 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
     - Status: `uv run tensorcast-cli global status --json`
     - Logs: `uv run tensorcast-cli global logs -f`
   - Start daemon (connects to existing GS): `uv run tensorcast-cli daemon start --global-store-mode connect`
-    - Start is blocking and returns only when the daemon is ready (or on error).
+    - Start waits for readiness and returns only when the daemon is ready (or on error); add `--blocking` to keep it attached after readiness.
     - Override config values inline: `--set engine.memory_tiers.stable_bytes=4GB` (repeatable).
   - Status: `uv run tensorcast-cli daemon status --json`
   - Logs (follow): `uv run tensorcast-cli daemon logs -f`

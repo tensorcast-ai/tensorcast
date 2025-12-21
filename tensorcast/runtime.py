@@ -302,6 +302,7 @@ def _resolve_global_store(
     allow_gs_fallback: bool,
     cluster_id: str | None,
     fate_share: bool = True,
+    to_console: bool = False,
 ) -> _ResolvedGlobalStore:
     runtime_state = None
     with contextlib.suppress(Exception):
@@ -418,6 +419,7 @@ def _resolve_global_store(
         inst = global_store_manager.start_global_store(
             cluster_token=cluster_id or cluster_token_hint,
             fate_share=fate_share,
+            to_console=to_console,
         )
     except ServiceError:
         if allow_gs_fallback:
@@ -477,6 +479,7 @@ def start(
         allow_gs_fallback=allow_gs_fallback,
         cluster_id=cluster_id,
         fate_share=fate_share,
+        to_console=blocking,
     )
     resolved_ha_endpoints: list[str] = []
     if resolved_gs.mode != "none":

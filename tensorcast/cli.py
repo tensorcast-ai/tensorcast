@@ -231,6 +231,11 @@ def daemon():
     is_flag=True,
     help="Emit daemon status as JSON after startup",
 )
+@click.option(
+    "--blocking",
+    is_flag=True,
+    help="Run in foreground; stream logs to console and stop on exit.",
+)
 def daemon_start(
     config: Path | None,
     global_store_mode: GlobalStoreMode,
@@ -244,6 +249,7 @@ def daemon_start(
     session: str | None,
     config_overrides: tuple[str, ...],
     as_json: bool,
+    blocking: bool,
 ):
     """Start the Store Daemon via the unified runtime orchestrator."""
     try:
@@ -326,10 +332,13 @@ def daemon_start(
             global_store_address=global_store_address,
             config_overrides=overrides or None,
             ha_endpoints=endpoints or None,
+            blocking=blocking,
             to_console=True,
             reuse_existing=False,
-            fate_share=False,
+            fate_share=blocking,
         )
+        if blocking:
+            return
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -529,12 +538,18 @@ def global_group():
 )
 @click.option("--gs-session", default=None, help="Override global session id")
 @click.option("--json", "as_json", is_flag=True, help="Emit status as JSON after start")
+@click.option(
+    "--blocking",
+    is_flag=True,
+    help="Run in foreground; stream logs to console and stop on exit.",
+)
 def global_start(
     config: Path | None,
     listen_host: str | None,
     listen_port: int | None,
     gs_session: str | None,
     as_json: bool,
+    blocking: bool,
 ):
     """Start the Global Store (single-instance)."""
     try:
@@ -544,8 +559,12 @@ def global_start(
             listen_host=listen_host,
             listen_port=listen_port,
             to_console=True,
-            fate_share=False,
+            fate_share=blocking,
+            blocking=blocking,
+            announce=False,
         )
+        if blocking:
+            return
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

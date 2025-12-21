@@ -9,10 +9,8 @@ stop_service, check_service_status, logs_tail, and session helpers.
 
 from __future__ import annotations
 
-import atexit
 import contextlib
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -61,6 +59,7 @@ from tensorcast.cli_utils.process import (
     prune_process_records,
     read_json_default,
     read_runtime_state,
+    register_blocking_cleanup,
     register_process,
     start_log_threads,
     update_runtime_daemon,
@@ -72,6 +71,9 @@ from tensorcast.daemon_runtime_config import (
     dump_daemon_config,
     load_daemon_config,
 )
+
+# Allow the daemon's 30s shutdown deadline to drain and unregister workers.
+_DEFAULT_DAEMON_SHUTDOWN_GRACE = 35.0
 
 
 @contextlib.contextmanager
@@ -401,17 +403,7 @@ def start_service(
             with contextlib.suppress(Exception):
                 stop_service(session_id=inst.id)
 
-        atexit.register(_cleanup)
-
-        def _handle_signal(signum, _frame) -> None:  # noqa: ANN001
-            _cleanup()
-            try:
-                sys.exit(128 + int(signum))
-            except SystemExit:
-                raise
-
-        signal.signal(signal.SIGTERM, _handle_signal)
-        signal.signal(signal.SIGINT, _handle_signal)
+        register_blocking_cleanup(_cleanup)
 
         ret = proc.wait()
         join_threads(log_threads)
@@ -425,7 +417,10 @@ def start_service(
 
 
 def stop_service(
-    *, session_id: str | None = None, grace: float = 10.0, force: bool = False
+    *,
+    session_id: str | None = None,
+    grace: float = _DEFAULT_DAEMON_SHUTDOWN_GRACE,
+    force: bool = False,
 ) -> None:
     sid = session_id or get_current_session_id()
     if not sid:
