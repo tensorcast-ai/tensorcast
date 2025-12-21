@@ -193,7 +193,7 @@ if TYPE_CHECKING:
         store,
         unregister_vram_region,
     )
-    from tensorcast.api.store import (
+    from tensorcast.api.store import (  # pyright: ignore[no-redef]
         artifact as _artifact,
     )
 
