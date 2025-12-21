@@ -80,7 +80,7 @@ Behavioral notes
 - Runs Begin → Feed (for Lease) → optional KeepAlive → Commit.
 - vram_coalesced: Daemon allocates coalesced VRAM; client writes via IPC; Commit registers COALESCED_VRAM.
 - vram_leased: Currently only `lease_in_place=True` (LIP) is implemented and registered at Commit (ephemeral, TTL/KeepAlive). The `lease_in_place=False` (materialize to COALESCED_VRAM at Commit) variant is not implemented in this release.
-- API users must call `tensorcast.init()` before invoking registration helpers; the runtime reuses the singleton daemon client established during initialization.
+- API users must call `tensorcast.init(mode=...)` before invoking registration helpers; the runtime reuses the singleton daemon client established during initialization.
 
 ## Control Plane RPCs (Unified)
 

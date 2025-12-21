@@ -48,6 +48,7 @@ from tensorcast.cli_utils.proc import (
     is_matching_daemon_process,
     kill_force,
     kill_gracefully,
+    preexec_detached,
     preexec_fate_sharing,
 )
 from tensorcast.cli_utils.process import (
@@ -66,7 +67,11 @@ from tensorcast.cli_utils.process import (
     write_session_state,
 )
 from tensorcast.cli_utils.status import check_service_status as _check_service_status
-from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
+from tensorcast.daemon_runtime_config import (
+    apply_daemon_config_overrides,
+    dump_daemon_config,
+    load_daemon_config,
+)
 
 
 @contextlib.contextmanager
@@ -93,8 +98,6 @@ def start_service(
     session_id: str | None = None,
     blocking: bool = False,
     to_console: bool = True,
-    wait: bool = False,
-    timeout: float = 15.0,
     register_current: bool = True,
     publish_meta: bool = True,
     ephemeral: bool = False,
@@ -104,16 +107,24 @@ def start_service(
     global_store: dict[str, Any] | None = None,
     listen_host: str | None = None,
     listen_port: int | None = None,
+    config_overrides: tuple[str, ...] | list[str] | None = None,
     ha_endpoints: list[str] | None = None,
     ha_enabled: bool | None = None,
+    fate_share: bool = True,
 ) -> DaemonSession:
     """Start the C++ StoreDaemon.
 
     - If config listen.port is 0 or missing, pick a free TCP port and pass derived config to daemon.
-    - In non-blocking mode, when wait=True, wait up to `timeout` seconds for readiness before returning.
+    - Startup is always blocking: this call returns only once the daemon is ready (or the process exits).
     """
     cfg = load_daemon_config(config_path)
     cfg_modified = False
+    if config_overrides:
+        try:
+            apply_daemon_config_overrides(cfg, config_overrides)
+        except ValueError as exc:
+            raise ServiceError(f"Invalid config override: {exc}") from exc
+        cfg_modified = True
 
     if listen_host is not None:
         cfg.server.listen.host = listen_host
@@ -212,14 +223,26 @@ def start_service(
     env = build_daemon_process_env({**os.environ, "TENSORCAST_INSTANCE": inst.id})
 
     try:
+        preexec_fn = preexec_fate_sharing if fate_share else preexec_detached
+        use_pipes = blocking or fate_share
+        stdout_target = (
+            subprocess.PIPE
+            if use_pipes
+            else (so if so is not None else subprocess.DEVNULL)
+        )
+        stderr_target = (
+            subprocess.PIPE
+            if use_pipes
+            else (se if se is not None else subprocess.DEVNULL)
+        )
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_target,
+            stderr=stderr_target,
             cwd=inst.session,
             env=env,
-            preexec_fn=lambda: preexec_fate_sharing(),
+            preexec_fn=preexec_fn,
             close_fds=True,
         )
     except Exception:
@@ -248,16 +271,25 @@ def start_service(
             lock_path=None,
         )
 
-    sinks_out: list[Any] = []
-    sinks_err: list[Any] = []
-    if persist_logs and so is not None:
-        sinks_out.append(so)
-    if persist_logs and se is not None:
-        sinks_err.append(se)
-    if to_console:
-        sinks_out.append(sys.stdout)
-        sinks_err.append(sys.stderr)
-    log_threads = start_log_threads(proc, sinks_out, sinks_err)
+    if not use_pipes:
+        with contextlib.suppress(Exception):
+            if so is not None:
+                so.close()
+        with contextlib.suppress(Exception):
+            if se is not None:
+                se.close()
+        log_threads: list[Any] = []
+    else:
+        sinks_out: list[Any] = []
+        sinks_err: list[Any] = []
+        if persist_logs and so is not None:
+            sinks_out.append(so)
+        if persist_logs and se is not None:
+            sinks_err.append(se)
+        if to_console:
+            sinks_out.append(sys.stdout)
+            sinks_err.append(sys.stderr)
+        log_threads = start_log_threads(proc, sinks_out, sinks_err)
 
     def _persist_state() -> None:
         session_state = {
@@ -305,31 +337,29 @@ def start_service(
     # - Register atexit to stop the daemon session we started
     # - Install SIGINT/SIGTERM handlers to call stop_service before exiting
     daemon_cfg = None
-    if wait:
-        try:
-            ensure_process_started(
-                proc,
-                inst.logs if persist_logs else None,
-                startup_grace=min(timeout, 1.0),
-            )
-        except ServiceError:
-            _cleanup_failed_start(proc, log_threads, inst, so, se)
-            raise
+    try:
+        ensure_process_started(
+            proc,
+            inst.logs if persist_logs else None,
+            startup_grace=1.0,
+        )
+    except ServiceError:
+        _cleanup_failed_start(proc, log_threads, inst, so, se)
+        raise
 
-        ready = wait_daemon_ready(connect_host, port, timeout=timeout, proc=proc)
-        if not ready:
-            retcode = proc.poll()
-            _cleanup_failed_start(proc, log_threads, inst, so, se)
-            log_hint = f" See logs under {inst.logs}" if persist_logs else ""
-            if retcode is not None:
-                raise ServiceError(
-                    f"Daemon exited with code {retcode} during startup (address={connect_host}:{port})."
-                    + log_hint
-                )
+    ready = wait_daemon_ready(connect_host, port, timeout=None, proc=proc)
+    if not ready:
+        retcode = proc.poll()
+        _cleanup_failed_start(proc, log_threads, inst, so, se)
+        log_hint = f" See logs under {inst.logs}" if persist_logs else ""
+        if retcode is not None:
             raise ServiceError(
-                f"Daemon failed to become ready within {timeout:.0f}s (address={connect_host}:{port})."
+                f"Daemon exited with code {retcode} during startup (address={connect_host}:{port})."
                 + log_hint
             )
+        raise ServiceError(
+            f"Daemon exited during startup (address={connect_host}:{port})." + log_hint
+        )
 
     # Best-effort backfill of effective listen/p2p ports from daemon once it is serving.
     with contextlib.suppress(Exception):

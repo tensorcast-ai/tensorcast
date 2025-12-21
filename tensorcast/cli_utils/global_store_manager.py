@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import click
+import psutil
 
 from tensorcast.cli_utils.config import (
     build_embedded_global_store_config,
@@ -42,6 +43,7 @@ from tensorcast.cli_utils.paths import (
 from tensorcast.cli_utils.proc import (
     kill_force,
     kill_gracefully,
+    preexec_detached,
     preexec_fate_sharing,
 )
 from tensorcast.cli_utils.process import (
@@ -75,6 +77,53 @@ class GlobalStoreInstance:
     cluster_token: str | None
     db_file: str | None
     owner: bool
+
+
+def _extract_config_path(cmd: Any) -> str | None:
+    if not isinstance(cmd, list):
+        return None
+    for idx, item in enumerate(cmd):
+        if not isinstance(item, str):
+            continue
+        if item == "--config" and idx + 1 < len(cmd):
+            value = cmd[idx + 1]
+            return value if isinstance(value, str) and value else None
+        if item.startswith("--config="):
+            value = item.split("=", 1)[1].strip()
+            return value or None
+    return None
+
+
+def _process_group_contains_global_store(pgid: int, *, config_path: str | None) -> bool:
+    if pgid <= 0:
+        return False
+    wanted_cfg = None
+    if config_path:
+        with contextlib.suppress(Exception):
+            wanted_cfg = str(Path(config_path).expanduser().resolve())
+        wanted_cfg = wanted_cfg or config_path
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            pid = int(proc.info.get("pid") or 0)
+        except Exception:
+            continue
+        if pid <= 0:
+            continue
+        try:
+            if os.getpgid(pid) != pgid:
+                continue
+        except ProcessLookupError:
+            continue
+        cmdline = proc.info.get("cmdline") or []
+        if not isinstance(cmdline, list) or not cmdline:
+            continue
+        cmd_str = " ".join(str(part) for part in cmdline)
+        if "tensorcast.global_store" not in cmd_str:
+            continue
+        if wanted_cfg and wanted_cfg not in cmd_str:
+            continue
+        return True
+    return False
 
 
 def _current_global_session_id() -> str | None:
@@ -206,14 +255,17 @@ def start_global_store(
     config_path: Path | None = None,
     cluster_token: str | None = None,
     session_id: str | None = None,
-    wait: bool = True,
-    timeout: float = 15.0,
     listen_host: str | None = None,
     listen_port: int | None = None,
     metrics_port: int | None = None,
     to_console: bool = False,
+    fate_share: bool = True,
 ) -> GlobalStoreInstance:
-    """Start the Global Store (single-instance guarded)."""
+    """Start the Global Store (single-instance guarded).
+
+    This entry point is always blocking: it returns only once the Global Store
+    is healthy (or the process exits with an error).
+    """
 
     provided_cluster_token = cluster_token
     runtime_state_file = runtime_state_path()
@@ -313,13 +365,17 @@ def start_global_store(
         str(effective_cfg_path),
     ]
     try:
+        preexec_fn = preexec_fate_sharing if fate_share else preexec_detached
+        use_pipes = fate_share
+        stdout_target = subprocess.PIPE if use_pipes else so
+        stderr_target = subprocess.PIPE if use_pipes else se
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stdout=stdout_target,
+            stderr=stderr_target,
             cwd=inst.session,
-            preexec_fn=lambda: preexec_fate_sharing(),
+            preexec_fn=preexec_fn,
             close_fds=True,
         )
     except Exception:
@@ -341,40 +397,43 @@ def start_global_store(
             lock_path=None,
         )
 
-    sinks_out: list[Any] = []
-    sinks_err: list[Any] = []
-    if so is not None:
-        sinks_out.append(so)
-    if se is not None:
-        sinks_err.append(se)
-    if to_console:
-        sinks_out.append(sys.stdout)
-        sinks_err.append(sys.stderr)
-    log_threads = start_log_threads(proc, sinks_out, sinks_err)
+    if not use_pipes:
+        with contextlib.suppress(Exception):
+            so.close()
+        with contextlib.suppress(Exception):
+            se.close()
+        log_threads: list[Any] = []
+    else:
+        sinks_out: list[Any] = []
+        sinks_err: list[Any] = []
+        if so is not None:
+            sinks_out.append(so)
+        if se is not None:
+            sinks_err.append(se)
+        if to_console:
+            sinks_out.append(sys.stdout)
+            sinks_err.append(sys.stderr)
+        log_threads = start_log_threads(proc, sinks_out, sinks_err)
 
-    health = None
-    if wait:
-        try:
-            ensure_process_started(proc, inst.logs, startup_grace=min(timeout, 1.0))
-        except ServiceError:
-            _cleanup_failed_start(proc, log_threads, inst, so, se)
-            raise
+    try:
+        ensure_process_started(proc, inst.logs, startup_grace=1.0)
+    except ServiceError:
+        _cleanup_failed_start(proc, log_threads, inst, so, se)
+        raise
 
-        connect_host = pb_cfg.server.listen.host or "127.0.0.1"
-        connect_port = int(pb_cfg.server.listen.port or 0)
-        address = f"{connect_host}:{connect_port}"
-        health = wait_for_global_store(address, timeout=timeout)
-        if health is None:
-            retcode = proc.poll()
-            _cleanup_failed_start(proc, log_threads, inst, so, se)
-            hint = f" See logs under {inst.logs}"
-            if retcode is not None:
-                raise ServiceError(
-                    f"Global Store exited with code {retcode} during startup.{hint}"
-                )
+    connect_host = pb_cfg.server.listen.host or "127.0.0.1"
+    connect_port = int(pb_cfg.server.listen.port or 0)
+    address = f"{connect_host}:{connect_port}"
+    health = wait_for_global_store(address, timeout=None, proc=proc)
+    if health is None:
+        retcode = proc.poll()
+        _cleanup_failed_start(proc, log_threads, inst, so, se)
+        hint = f" See logs under {inst.logs}"
+        if retcode is not None:
             raise ServiceError(
-                f"Global Store failed to become ready within {timeout:.0f}s.{hint}"
+                f"Global Store exited with code {retcode} during startup.{hint}"
             )
+        raise ServiceError("Global Store exited during startup." + hint)
 
     if health and health.cluster_token:
         cluster_token = health.cluster_token
@@ -487,16 +546,26 @@ def stop_global_store(
             pid = int(proc.get("pid", 0))
             if pid <= 0:
                 continue
+            config_path = _extract_config_path(proc.get("cmd"))
+            pgid = None
             try:
                 pgid = os.getpgid(pid)
             except ProcessLookupError:
-                continue
+                pgid = pid
+                try:
+                    os.killpg(pgid, 0)
+                except ProcessLookupError:
+                    continue
+                if not _process_group_contains_global_store(
+                    pgid, config_path=config_path
+                ):
+                    continue
             targets.append(pid)
             if force:
-                kill_force(pgid)
+                kill_force(int(pgid))
             else:
-                if not kill_gracefully(pgid, grace=10.0):
-                    kill_force(pgid)
+                if not kill_gracefully(int(pgid), grace=10.0):
+                    kill_force(int(pgid))
         if targets:
             prune_process_records(
                 pids_path=inst.pids_json,

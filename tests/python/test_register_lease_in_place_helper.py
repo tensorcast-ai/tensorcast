@@ -30,7 +30,7 @@ def test_register_artifact_lease_in_place_helper(tmp_path: Path):
     except RuntimeError as e:
         pytest.fail(str(e))
     try:
-        startup.init(address=listen)
+        startup.init(mode="connect", address=listen)
         store = Store(listen)
         try:
             dev = torch.device("cuda", 0)

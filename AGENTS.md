@@ -96,6 +96,11 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 - When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
 - `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.
 
+### Configuration management rule (required for agents)
+
+- When introducing or changing configuration options, follow the unified runtime config design in `docs/designs/0004-unified-runtime-config.md` so config is centrally managed and organized.
+- Do not add ad-hoc environment variables or scattered config flags that bypass the unified configuration system.
+
 ## Platform Assumptions
 
 - Supported OS: Linux only

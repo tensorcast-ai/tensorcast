@@ -46,3 +46,7 @@
 -Wno-unused-variable
 
 -DJEMALLOC_NO_RENAME
+
+-DGLOG_DEPRECATED=__attribute__((deprecated))
+-DGLOG_EXPORT=__attribute__((visibility("default")))
+-DGLOG_NO_EXPORT=__attribute__((visibility("default")))

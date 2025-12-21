@@ -6,7 +6,7 @@ import json
 import uuid
 from pathlib import Path
 
-from tensorcast._C import inspect_or_generate_descriptor
+from tensorcast._c_ext import inspect_or_generate_descriptor
 
 from ._errors import DiskIndexMismatch, IndexParseError
 

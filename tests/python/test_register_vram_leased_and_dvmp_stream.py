@@ -35,7 +35,7 @@ def test_register_vram_leased_commit(tmp_path: Path):
     except RuntimeError as e:
         pytest.fail(str(e))
     try:
-        startup.init(address=listen)
+        startup.init(mode="connect", address=listen)
         store = Store(listen)
         try:
             device = torch.device("cuda", 0)
@@ -75,7 +75,7 @@ def test_register_vram_lease_shuffled_segments(tmp_path: Path, monkeypatch):
         pytest.fail(str(e))
 
     try:
-        startup.init(address=listen)
+        startup.init(mode="connect", address=listen)
         store = Store(listen)
         try:
             device = torch.device("cuda", 0)
@@ -172,7 +172,7 @@ def test_ttl_expiry_on_lease_feed_path(tmp_path: Path, monkeypatch):
         pytest.fail(str(e))
 
     try:
-        startup.init(address=listen)
+        startup.init(mode="connect", address=listen)
         store = Store(listen)
         try:
             device = torch.device("cuda", 0)

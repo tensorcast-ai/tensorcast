@@ -17,7 +17,7 @@ related_code:
 
 # Summary
 
-TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). Every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned without dropping cluster identity. SDK `tensorcast.init()` forwards directly into the orchestrator, giving identical behavior to the CLI (including `global_store_mode` and ownership semantics).
+TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). When HA is enabled, every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned without dropping cluster identity. SDK `tensorcast.init(mode="connect"|"create")` forwards into the orchestrator (create) or binds to an existing daemon (connect), preserving CLI semantics including `global_store_mode` and ownership behavior for created sessions.
 
 # Goals / Non-Goals
 
@@ -40,23 +40,27 @@ TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. T
 ```
 tensorcast
 ├── daemon
-│   ├── start [--config PATH] [--global-store-mode auto|connect|start|none]
-│   │        [--global-store-address HOST:PORT] [--wait/--no-wait]
-│   │        [--timeout SECS] [--session SID] [--json]
+│   ├── start [--config PATH] [--set KEY=VALUE] [--stable-bytes SIZE]
+│   │        [--mem-pool-size-bytes SIZE] [--pinned-pool-bytes SIZE] [--enable-rdma]
+│   │        [--log-level LEVEL] [--global-store-endpoints HOST:PORT]
+│   │        [--global-store-mode connect|start|none]
+│   │        [--global-store-address HOST:PORT] [--session SID] [--json]
 │   ├── stop [--force] [--session SID]
 │   ├── status [--session SID] [--json]
 │   ├── logs [-f/--follow] [--stderr] [--session SID]
 │   └── restart [...]
 └── global
     ├── start [--config PATH] [--listen-host HOST] [--listen-port PORT]
-    │        [--wait/--no-wait] [--timeout SECS] [--gs-session GID] [--json]
+    │        [--gs-session GID] [--json]
     ├── stop [--force] [--gs-session GID]
     ├── status [--gs-session GID] [--json]
     └── logs [-f/--follow] [--stderr] [--gs-session GID]
 ```
 
-- Default UX: `tensorcast global start --wait` (if none is healthy) → `tensorcast daemon start --wait`. Daemon commands respect `current_session`; Global Store commands respect `current_global_session`.
-- `global_store_mode`: `auto` (discover or start), `connect` (must reach an existing GS), `start` (force local GS), `none` (skip HA). `--global-store-address` forces connect-only.
+- Default UX: `tensorcast global start` (if needed) → `tensorcast daemon start` with an explicit `global_store_mode` (`connect`/`start`). Start is always blocking (waits for readiness) and has no user-configurable startup timeout. Daemon commands respect `current_session`; Global Store commands respect `current_global_session`.
+- `global_store_mode`: `connect` (must reach an existing GS), `start` (start a local GS if needed), `none` (skip HA). Default is `none`. `--global-store-address` implies `connect`.
+- `--set KEY=VALUE` overlays daemon config values using dot-paths (proto field names). Values are YAML-parsed and applied before HA injection and port backfill; repeat to set multiple fields.
+- Convenience flags (`--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`, `--enable-rdma`, `--log-level`) are translated into config overlays. `--global-store-endpoints` seeds both GS resolution (connect-only) and HA endpoint injection.
 - Cluster identity is implicit. The runtime refuses to start a new GS when a cluster token already exists but is unreachable unless the caller explicitly cleans state.
 
 ## Runtime orchestrator (CLI + SDK)
@@ -67,19 +71,21 @@ tensorcast
 RuntimeSession start(
     daemon_config: Path | None,
     session_id: str | None,
-    global_store_mode: Literal["auto","connect","start","none"],
+    global_store_mode: Literal["connect","start","none"],
     global_store_address: str | None,
-    wait: bool = True,
-    timeout: float = 30.0,
+    ha_endpoints: list[str] | None = None,
     allow_gs_fallback: bool = False,
     cluster_id: str | None = None,
     reuse_existing: bool = False,
+    fate_share: bool = True,
 )
 ```
 
 - Two-phase launch: reconcile state → resolve/start Global Store (health + cluster token) → materialize daemon config with HA endpoints → start daemon via `service_manager` → write session/runtime state atomically.
+- Startup readiness is always awaited; there is no `no-wait` mode and no global startup timeout (the call returns only when healthy or if the process exits with an error).
 - Owner stop: `runtime.stop()` checks `session_state.global_store.owner`; if true, it stops the Global Store before stopping the daemon.
-- SDK `tensorcast.init()` forwards `global_store_mode/address/cluster_id/session_id` into `runtime.start`, preserving CLI semantics. Ephemeral/private sessions are supported by passing an explicit `session_id` and skipping `current_session` writes.
+- When `session_id` is omitted, `runtime.stop()` resolves the active daemon from `runtime/state.json` first, then falls back to `current_session`.
+- SDK `tensorcast.init(mode="create")` forwards `global_store_mode/address/cluster_id/session_id` into `runtime.start`, preserving CLI semantics. Ephemeral/private sessions are supported by passing an explicit `session_id` and skipping `current_session` writes.
 
 ## Runtime layout & state contracts
 
@@ -143,7 +149,7 @@ Key schemas (schema_version=1):
       "config_path": ".../effective_daemon_config.yaml"
     },
     "global_store": {
-      "mode": "auto",
+      "mode": "start",
       "address": "127.0.0.1:50051",
       "session": "gs-20250304-1159-33cc",
       "owner": true,
@@ -170,13 +176,15 @@ Key schemas (schema_version=1):
 
 ## Daemon lifecycle and HA injection
 
-- Daemon config is materialized per session into `effective_daemon_config.yaml`; ports may be user-set or discovered, and `ha_endpoints` is injected from the resolved Global Store address unless `global_store_mode="none"`.
-- Startup waits for daemon readiness via gRPC health (falling back to `GetServerConfig`), then writes runtime and session state atomically. PID records are append-only and include role, argv, and log paths.
+- Daemon config is materialized per session into `effective_daemon_config.yaml`; CLI overlays apply first, ports may be user-set or discovered, and `ha_endpoints` is injected from the resolved Global Store address unless `global_store_mode="none"`.
+- Startup waits for daemon readiness via `GetServerConfig` and does not treat an open TCP port as ready, then writes runtime and session state atomically. PID records are append-only and include role, argv, and log paths.
+- Only one daemon instance is allowed per `$TENSORCAST_HOME`; `daemon start` refuses to launch a second instance and instead surfaces the existing session details.
+- CLI launches are detached from the caller process so daemons (and any CLI-started Global Store) stay running after the command returns.
 - Stop honors ownership: if the session owns the GS, `stop_global_store` is invoked before `stop_service`. Non-owners only clear current-session pointers.
 
 ## SDK integration
 
-- `tensorcast.init()` and `tensorcast.shutdown()` delegate to `runtime.start/stop`, exposing `global_store_mode`, `global_store_address`, `cluster_id`, `session_id`, `allow_gs_fallback`, and `wait/timeout` controls.
+- `tensorcast.init(mode="create")` and `tensorcast.shutdown()` delegate to `runtime.start/stop`, exposing `global_store_mode`, `global_store_address`, `cluster_id`, `session_id`, and `allow_gs_fallback`. Initialization is blocking and returns only when the daemon is ready (or on error).
 - Clients reading daemon addresses first consult runtime state, then `current_session`, preserving behavior consistency with the CLI.
 - Private sessions are supported for tests by passing a custom `session_id` and skipping `register_current`.
 
@@ -187,14 +195,14 @@ flowchart TD
     A["CLI/SDK entry"] --> B["Acquire runtime lock + reconcile (state + health + fingerprints)"]
     B --> C{"global_store_mode"}
     C -->|none| D["Skip GS, inject empty HA endpoints"]
-    C -->|auto/connect/start| E["Resolve GS (env/flags/runtime)"]
+    C -->|connect/start| E["Resolve GS (env/flags/runtime)"]
     E -->|healthy| F["Use existing GS (token-validated)"]
     E -->|unreachable| G["Start GS (single-instance, write state)"]
-    D --> H["Materialize daemon config + inject HA endpoints"]
+    D --> H["Materialize daemon config (apply --set) + inject HA endpoints"]
     F --> H
     G --> H
     H --> I["Start daemon via service_manager"]
-    I --> J["Wait for readiness (health/GetServerConfig)"]
+    I --> J["Wait for readiness (GetServerConfig)"]
     J --> K["Write session_state + runtime state (atomic)"]
 ```
 

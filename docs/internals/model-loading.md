@@ -28,7 +28,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 
 ## Runtime Initialization
 
-All client processes call `tensorcast.init(...)` to establish the daemon session. Initialization pins
+All client processes call `tensorcast.init(mode=...)` to establish the daemon session. Initialization pins
 the daemon endpoint and constructs the shared Store used by the module-level helpers. The Store owns
 retry policy, lease keepalive, and fallback orchestration for the process. Advanced integrations can
 access it via `tensorcast.store()`, but day-to-day usage goes through the functional helpers.
@@ -189,7 +189,7 @@ These APIs keep view normalization, selection, and hashing anchored in the C++ c
 
 ### Client Reuse & Resiliency
 
-- The Python SDK establishes a single gRPC client per process during `tensorcast.init()`; all
+- The Python SDK establishes a single gRPC client per process during `tensorcast.init(mode=...)`; all
   subsequent API calls reuse the same Store session obtained via `tensorcast.store()`. This ensures
   every helper targets the same daemon endpoint and prevents accidental cross-daemon usage.
 - The underlying client enables gRPC keepalive and performs a light retry with channel refresh on transient errors (`UNAVAILABLE`, `INTERNAL`, `UNKNOWN`, `DEADLINE_EXCEEDED`).

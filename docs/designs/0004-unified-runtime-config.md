@@ -64,6 +64,7 @@ Common types live in `proto/tensorcast/config/v1/common.proto` (e.g., `SocketAdd
 - Defaults: centralized `normalize_defaults(...)` functions set numeric and duration defaults only; do not override explicit booleans. Use `optional` fields in `.proto` where presence is required.
 - Units: `*_bytes` accept plain integers; loaders may support `KB/MB/GB` suffixes. Durations use `google.protobuf.Duration` or loaders accept `ms/s/m` with strict parsing.
 - Single flag: processes accept only `--config=/path/to/file`; if missing, the process exits with a clear error and sample path.
+- CLI/SDK overlays: the orchestrator may materialize an effective config by applying CLI overlays (including convenience flags and `--set`) to a base config, but the daemon still receives a single config file and enforces the same schema/validation.
 
 ## Normalization & Aliases (Cross‑Language)
 
@@ -94,7 +95,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 
 # Invariants & Error Model
 
-- Single source of truth: only the configuration file influences runtime behavior for covered areas; ENV and ad‑hoc flags are not read.
+- Single source of truth: only the final configuration file influences runtime behavior for covered areas; ENV and ad‑hoc flags are not read by processes.
 - Determinism: all defaults are applied in one place; behavior does not depend on process environment.
 - Fail‑fast: unknown fields, type mismatches, and invalid units/durations cause startup failure.
 - Cross‑language equivalence: the same file yields identical Protobuf messages in C++ and Python.
@@ -145,7 +146,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
   - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.
   - Durations use canonical Protobuf strings; C++ additionally accepts `ms/s/m/h` shorthand.
 - Environment variables and ad‑hoc flags that previously affected runtime behavior are removed or ignored in favor of config fields.
-- Example configurations are available under `examples/config/` for each process.
+- Example configurations in `examples/config/store_daemon_config.yaml` and `examples/config/global_store_config.yaml` stay in sync with config changes (add/remove fields or default updates).
 - Documentation for daemon, global store, and client reflects the single‑file configuration model.
 
 # References

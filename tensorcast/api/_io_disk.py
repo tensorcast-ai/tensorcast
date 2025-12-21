@@ -7,7 +7,7 @@ from pathlib import Path
 
 import torch
 
-from tensorcast._C import restore_tensors_from_disk, save_model_to_disk
+from tensorcast._c_ext import restore_tensors_from_disk, save_model_to_disk
 
 from ._device import resolve_device
 from ._indices import calculate_tensor_device_offsets, load_tensor_indices_from_dir

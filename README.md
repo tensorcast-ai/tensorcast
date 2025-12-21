@@ -65,6 +65,10 @@ uv run pytest tests/python/**.py
 # Run cli target
 uv run tensorcast-cli --help
 
+# Note: top-level `tensorcast` re-exports and the native `_C` extension are
+# loaded lazily; CLI commands that only manage services avoid importing heavy
+# SDK dependencies until a tensor operation is invoked.
+
 # Run specific file
 uv run xxx/xxx.py
 ```
@@ -75,15 +79,15 @@ The StoreDaemon service is implemented in C++ and launched by the Python CLI.
 
 - Development (from source):
   - Build once with Bazel: `bazel build //daemon:tensorcast_daemon`
-  - Start Global Store (single-instance): `uv run -q python -m tensorcast.cli global start --listen-port 0 --wait`
-    - Status: `uv run -q python -m tensorcast.cli global status --json`
-    - Logs: `uv run -q python -m tensorcast.cli global logs -f`
-  - Start daemon (binds to existing GS or auto-starts if needed): `uv run -q python -m tensorcast.cli daemon start --global-store-mode auto`
-    - By default non-blocking start waits until the daemon is ready (timeout 30s). Use `--no-wait` to return immediately.
-    - Customize readiness timeout: `--timeout 30`
-  - Status: `uv run -q python -m tensorcast.cli daemon status --json`
-  - Logs (follow): `uv run -q python -m tensorcast.cli daemon logs -f`
-  - Stop (owner cascades GS if it was started by daemon start): `uv run -q python -m tensorcast.cli daemon stop`
+  - Start Global Store (single-instance): `uv run tensorcast-cli global start --listen-port 0`
+    - Status: `uv run tensorcast-cli global status --json`
+    - Logs: `uv run tensorcast-cli global logs -f`
+  - Start daemon (connects to existing GS): `uv run tensorcast-cli daemon start --global-store-mode connect`
+    - Start is blocking and returns only when the daemon is ready (or on error).
+    - Override config values inline: `--set engine.memory_tiers.stable_bytes=4GB` (repeatable).
+  - Status: `uv run tensorcast-cli daemon status --json`
+  - Logs (follow): `uv run tensorcast-cli daemon logs -f`
+  - Stop (owner cascades GS if it was started by daemon start): `uv run tensorcast-cli daemon stop`
   - The CLI automatically locates the binary from `bazel-bin/daemon/tensorcast_daemon` or the packaged wheel.
 
 - Packaged (wheel) usage:
@@ -135,27 +139,29 @@ Use the unified, Linux-only launch/connect API from Python:
 from tensorcast import init
 
 # Connect to current runtime (prefers existing daemon + Global Store discovered from runtime state)
-ctx = init()
+ctx = init(mode="connect")
 
 # Force local launch (private session). If daemon_config_path is omitted,
-# init() will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/config/daemon.yaml,
+# init(mode="create") will try $TENSORCAST_DAEMON_CONFIG, ~/.tensorcast/config/daemon.yaml,
 # and finally an embedded loopback config with ephemeral ports and a writable cache
 # under ~/.tensorcast (or a temp dir).
 # Private launches do not publish ~/.tensorcast/current_session and bind to 127.0.0.1.
 ctx = init(
+    mode="create",
     daemon_config_path="~/.tensorcast/config/daemon.yaml",
-    global_store_mode="auto",  # or "connect"/"start"/"none"
+    global_store_mode="start",  # or "connect"/"none"
     session_id="tc-private-demo",
 )
 
 # Connect to a specific daemon
-ctx = init(address="127.0.0.1:50052", global_store_mode="connect")
+ctx = init(mode="connect", address="127.0.0.1:50052")
 
 # Context is process-scoped and is automatically closed at process exit (atexit).
-# Call tensorcast.shutdown() to close early if needed.
+# In connect mode, shutdown only releases the client; in create mode it also
+# stops the owned daemon. Call tensorcast.shutdown() to close early if needed.
 ```
 
-Call `tensorcast.init(...)` once per process before interacting with the daemon. The user-facing
+Call `tensorcast.init(mode=...)` once per process before interacting with the daemon. The user-facing
 API is intentionally lightweight—operate through the top-level helpers and let TensorCast manage
 the session state for you:
 
@@ -163,7 +169,7 @@ the session state for you:
 import tensorcast as tc
 import torch
 
-tc.init()
+tc.init(mode="connect")
 
 state_dict = {"layer.weight": torch.randn(8, 8, device="cuda")}
 
@@ -196,12 +202,12 @@ session with `set_register_fn`/`set_materialize_fn`—no global monkeypatching r
 Notes on signals and cleanup:
 - The SDK does not override your process SIGINT/SIGTERM by default. Child processes are still cleaned up reliably via Linux PDEATHSIG when the parent really exits.
 - To opt-in to SDK-installed signal handling (e.g., in standalone scripts), pass `install_signal_handlers=True`:
-  - `init(..., install_signal_handlers=True)` installs graceful handlers that stop the owned daemon and then exit.
-  - `init(..., install_signal_handlers=True, fate_share_sigterm=True)` installs hard-exit handlers that immediately terminate the process to trigger PDEATHSIG (use sparingly).
+  - `init(mode="create", ..., install_signal_handlers=True)` installs graceful handlers that stop the owned daemon and then exit.
+  - `init(mode="create", ..., install_signal_handlers=True, fate_share_sigterm=True)` installs hard-exit handlers that immediately terminate the process to trigger PDEATHSIG (use sparingly).
 
 CLI-launched daemon sessions are recorded under `~/.tensorcast/sessions/<session_id>` with `session/`, `logs/`, `pids.json`, and `meta.json`. Global Store sessions live under `~/.tensorcast/global_sessions/<gid>`. The authoritative pointer for discovery is `~/.tensorcast/runtime/state.json` (daemon + Global Store + cluster_token); `~/.tensorcast/current_session` and `~/.tensorcast/current_global_session` are convenience pointers used by CLI defaults. When the config specifies `listen.port: 0` (or is omitted), the CLI pre‑assigns a free TCP port and writes an effective config under the session directory; `meta.json` contains the final `address` used by clients. The same applies to `server.p2p_listen.port`.
 
-SDK launches via `init(..., session_id="tc-private-<uuid>")` are private: they do not update `current_session` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
+SDK launches via `init(mode="create", session_id="tc-private-<uuid>")` are private: they do not update `current_session` and bind to loopback only, so other processes and tools cannot auto‑discover them. The returned `Context` manages the lifecycle of that private session.
 
 CLI duplicate protection: `tensorcast daemon start` refuses to start a new local daemon if a current session is already healthy. Use `tensorcast daemon restart` to stop and start, or `tensorcast daemon stop` first. If the daemon start also launched the Global Store, `tensorcast daemon stop` will cascade and stop it.
 
@@ -328,7 +334,7 @@ Note that currently, P2P unit tests fail when being called by bazel test, and ne
 ## Run the Global Store Server
 ```bash
 # Start the Global Store service (single-instance). Default port: 50051, workers: 10.
-uv run -q python -m tensorcast.cli global start --config=examples/config/global_store_config.yaml --wait
+uv run tensorcast-cli global start --config=examples/config/global_store_config.yaml
 
 # Direct module entry remains available for debugging if needed:
 # uv run -m tensorcast.global_store --config=examples/config/global_store_config.yaml

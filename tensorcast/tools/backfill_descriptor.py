@@ -22,7 +22,7 @@ import json
 import sys
 from pathlib import Path
 
-from tensorcast._C import inspect_or_generate_descriptor
+from tensorcast._c_ext import inspect_or_generate_descriptor
 
 
 def backfill_one(artifact_path: Path) -> None:

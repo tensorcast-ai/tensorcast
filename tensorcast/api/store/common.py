@@ -142,12 +142,15 @@ def lease_handle_from_result(lease: RegisteredLease | None) -> LeaseHandle | Non
     )
 
 
-def select_device_for_put(tensors: TensorDict) -> int:
+def select_device_for_put(tensors: TensorDict) -> int | None:
     device_id: int | None = None
+    saw_cpu = False
+    saw_cuda = False
     for tensor in tensors.values():
         if not isinstance(tensor, torch.Tensor):
             continue
         if tensor.is_cuda:
+            saw_cuda = True
             idx = tensor.device.index or 0
             if device_id is None:
                 device_id = idx
@@ -157,14 +160,19 @@ def select_device_for_put(tensors: TensorDict) -> int:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
+        else:
+            saw_cpu = True
+    if saw_cpu and saw_cuda:
+        raise ArtifactError(
+            "Artifact tensors must be all CPU or all CUDA tensors on the same device",
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
     if device_id is not None:
         return device_id
-    if torch.cuda.is_available():
-        try:
-            return int(torch.cuda.current_device())
-        except Exception:  # noqa: BLE001
-            return 0
-    return 0
+    if saw_cpu:
+        return None
+    return None
 
 
 def validate_targets(

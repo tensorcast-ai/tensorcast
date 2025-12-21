@@ -68,7 +68,6 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
     )
 
     instance = start_global_store(
-        wait=True,
         listen_host="127.0.0.1",
         listen_port=50051,
         metrics_port=8000,
@@ -91,7 +90,6 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
 
     # Second start should reuse existing healthy GS (no new popen)
     second = start_global_store(
-        wait=True,
         listen_host="127.0.0.1",
         listen_port=50051,
         metrics_port=8000,

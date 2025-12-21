@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import socket
 import subprocess
 import time
@@ -30,42 +31,37 @@ def pick_free_tcp_port() -> int:
         return int(s.getsockname()[1])
 
 
-def tcp_port_open(host: str, port: int, timeout: float = 0.5) -> bool:
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(timeout)
-            return s.connect_ex((host, port)) == 0
-    except OSError:
-        return False
-
-
 def wait_daemon_ready(
     host: str,
     port: int,
-    timeout: float = 20.0,
+    timeout: float | None = 20.0,
     *,
     proc: subprocess.Popen[Any] | None = None,
 ) -> bool:
-    deadline = time.time() + timeout
+    deadline = None if timeout is None else time.time() + timeout
     addr = f"{host}:{port}"
     last_err: Exception | None = None
     if proc is not None and proc.poll() is not None:
         return False
-    while time.time() < deadline:
-        if proc is not None and proc.poll() is not None:
-            return False
-        try:
-            channel = grpc.insecure_channel(addr)
-            stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
-            stub.GetServerConfig(store_daemon_pb2.GetServerConfigRequest(), timeout=0.8)
-            return True
-        except Exception as e:  # noqa: BLE001
-            last_err = e
+    channel = grpc.insecure_channel(addr)
+    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+    try:
+        while deadline is None or time.time() < deadline:
             if proc is not None and proc.poll() is not None:
                 return False
-            if tcp_port_open(host, port, timeout=0.4):
+            try:
+                stub.GetServerConfig(
+                    store_daemon_pb2.GetServerConfigRequest(), timeout=0.8
+                )
                 return True
-            time.sleep(0.2)
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if proc is not None and proc.poll() is not None:
+                    return False
+                time.sleep(0.2)
+    finally:
+        with contextlib.suppress(Exception):
+            channel.close()
     # For debugging purposes; caller can log if desired
     _ = last_err
     return False

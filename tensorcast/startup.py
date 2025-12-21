@@ -3,7 +3,7 @@
 """
 Runtime startup and connection utilities for TensorCast.
 
-- Provides a unified `init()` entrypoint that either connects to an existing
+- Provides a unified `init(mode=...)` entrypoint that either connects to an existing
   Store Daemon or launches one locally and connects to it.
 - Returns a Context object whose lifecycle is process-scoped. The context is
   automatically closed at process exit via atexit when we launched the daemon
@@ -135,14 +135,13 @@ def _current_session_address() -> str | None:
 
 def init(
     *,
+    mode: Literal["connect", "create"],
     address: str | None = None,
     daemon_config_path: str | None = None,
-    wait: bool = True,
-    timeout: float = 20.0,
     install_signal_handlers: bool = False,
     fate_share_sigterm: bool = False,
     show_daemon_logs: bool = True,
-    global_store_mode: Literal["auto", "connect", "start", "none"] = "auto",
+    global_store_mode: Literal["connect", "start", "none"] = "none",
     global_store_address: str | None = None,
     cluster_id: str | None = None,
     allow_gs_fallback: bool = False,
@@ -151,8 +150,9 @@ def init(
     """Launch or connect to a Store Daemon and set global address.
 
     Usage patterns:
-    - Connect: `init(address="host:port")`
-    - Launch:  `init(global_store_mode="auto", daemon_config_path="/path/to/config.yaml")`
+    - Connect: `init(mode="connect", address="host:port")`
+    - Connect (auto-discover local): `init(mode="connect")`
+    - Launch:  `init(mode="create", global_store_mode="start", daemon_config_path="/path/to/config.yaml")`
 
     When launching, the SDK will pick a config in the following order:
     1) user-provided `daemon_config_path`
@@ -161,18 +161,18 @@ def init(
        under ~/.tensorcast or a tempdir).
 
     Args:
+        mode: Required init mode. Use "connect" to attach to an existing daemon,
+            "create" to launch a new daemon owned by the current process.
         address: Optional target daemon address (connect-only).
         daemon_config_path: Config file when launching a local daemon.
-        wait: Wait for startup readiness when launching.
-        timeout: Startup readiness timeout in seconds.
         install_signal_handlers: Install SIGTERM/SIGINT handlers on success.
         fate_share_sigterm: Force hard exit on signals when handlers installed.
         show_daemon_logs: Mirror daemon stdout/stderr to the current console when
             launching locally.
-        global_store_mode: auto|connect|start|none orchestration mode shared with CLI.
+        global_store_mode: connect|start|none orchestration mode shared with CLI.
         global_store_address: Optional Global Store host:port to connect.
         cluster_id: Optional cluster identity to enforce when connecting/starting GS.
-        allow_gs_fallback: If True, auto mode may fall back to none on GS failure.
+        allow_gs_fallback: If True, start mode may fall back to none on GS failure.
         session_id: Optional explicit daemon session id (treated as private/ephemeral).
     """
     global _current_ctx, _atexit_registered, _ctx_lock
@@ -185,16 +185,26 @@ def init(
         if _current_ctx is not None and not _current_ctx._closed:  # noqa: SLF001
             return _current_ctx
 
-        # Address resolution (shared helper)
-        # Fast-path: explicit address connect
-        if address and address not in {"auto", "local"}:
-            if not ping_daemon(address):
-                raise RuntimeError(f"No daemon found at {address}")
-            set_daemon_address(address)
-            client = get_daemon_client(address)
-            logger.info("✅ Connected to daemon at %s", address)
+        if mode == "connect":
+            # Connect path: never start/stop daemon; just bind to an existing session.
+            target_address: str | None = None
+            if address and address not in {"auto", "local"}:
+                target_address = address
+            else:
+                target_address = _current_session_address()
+            if not target_address:
+                raise RuntimeError(
+                    "No local daemon session found. Start one with "
+                    "'tensorcast daemon start' or call "
+                    "tensorcast.startup.init(mode='create', ...)."
+                )
+            if not ping_daemon(target_address):
+                raise RuntimeError(f"No daemon found at {target_address}")
+            set_daemon_address(target_address)
+            client = get_daemon_client(target_address)
+            logger.info("✅ Connected to daemon at %s", target_address)
             ctx = Context(
-                address=address,
+                address=target_address,
                 is_owner=False,
                 session_id=None,
                 session_dir=None,
@@ -209,6 +219,15 @@ def init(
                 atexit.register(lambda: _current_ctx and _current_ctx.close())  # type: ignore[func-returns-value]
                 _atexit_registered = True
             return ctx
+
+        if mode != "create":
+            raise ValueError(f"Unknown init mode: {mode}")
+
+        if address and address not in {"auto", "local"}:
+            raise ValueError(
+                "init(mode='create') does not accept 'address'. "
+                "Use mode='connect' to attach to an existing daemon."
+            )
 
         # Launch requires a config file (optional; defaults to embedded)
         cfg_path: Path | None = None
@@ -235,8 +254,6 @@ def init(
         session_obj = runtime.start(
             daemon_config=cfg_path,
             session_id=session_id,
-            wait=wait,
-            timeout=timeout,
             global_store_mode=global_store_mode,
             global_store_address=global_store_address,
             allow_gs_fallback=allow_gs_fallback,
@@ -245,7 +262,7 @@ def init(
             ephemeral=session_id is not None,
             restrict_to_localhost=restrict_localhost,
             to_console=show_daemon_logs,
-            reuse_existing=True,
+            reuse_existing=False,
         )
 
         daemon_address = session_obj.daemon_address or _current_session_address()
@@ -291,7 +308,8 @@ def require_initialized() -> Context:
     ctx = _current_ctx
     if ctx is None or ctx._closed:
         raise RuntimeError(
-            "TensorCast runtime is not initialized. Call tensorcast.startup.init() first."
+            "TensorCast runtime is not initialized. "
+            "Call tensorcast.startup.init(mode='connect'|'create') first."
         )
     return ctx
 

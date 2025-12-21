@@ -7,7 +7,7 @@ from tensorcast import FallbackOptions
 
 
 def main() -> None:
-    tc.init(address="127.0.0.1:50052")
+    tc.init(mode="connect", address="127.0.0.1:50052")
 
     # Prefer daemon MaterializeByKey path (no client-side disk fallback)
     fallback = FallbackOptions(prefer_disk=False, allow_p2p=True)
