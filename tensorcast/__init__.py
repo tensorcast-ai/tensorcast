@@ -179,7 +179,7 @@ if TYPE_CHECKING:
         calculate_tensor_device_offsets,
         save_dict,
     )
-    from tensorcast.api.store import (  # noqa: F401
+    from tensorcast.api.store import (  # noqa: F401 # pyright: ignore[no-redef]
         PrefetchTicket,
         artifact,
         artifact_async,
