@@ -80,6 +80,12 @@ class GlobalStoreInstance:
     owner: bool
 
 
+def _normalize_exit_code(return_code: int) -> int:
+    if return_code < 0:
+        return 128 + (-return_code)
+    return return_code
+
+
 def _extract_config_path(cmd: Any) -> str | None:
     if not isinstance(cmd, list):
         return None
@@ -528,6 +534,8 @@ def start_global_store(
         ret = proc.wait()
         join_threads(log_threads)
         click.echo(f"global store exited with code {ret}")
+        if ret != 0:
+            raise click.exceptions.Exit(code=_normalize_exit_code(ret))
         return instance
 
     if announce:

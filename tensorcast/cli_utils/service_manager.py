@@ -84,6 +84,12 @@ def _runtime_and_session_lock(inst: DaemonSession) -> Any:
         yield
 
 
+def _normalize_exit_code(return_code: int) -> int:
+    if return_code < 0:
+        return 128 + (-return_code)
+    return return_code
+
+
 def discover_default_config_path() -> Path | None:
     """Discover a default StoreDaemon config path for convenience starts.
 
@@ -408,6 +414,8 @@ def start_service(
         ret = proc.wait()
         join_threads(log_threads)
         click.echo(f"daemon exited with code {ret}")
+        if ret != 0:
+            raise click.exceptions.Exit(code=_normalize_exit_code(ret))
         return inst
 
     click.echo(

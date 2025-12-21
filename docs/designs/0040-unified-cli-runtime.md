@@ -231,6 +231,7 @@ flowchart TD
 - Single-instance guards hold: one daemon per session, one GS per home, both enforced by locks + health checks + append-only PID records.
 - Owner-aware stop cascades: a daemon session that owns the GS stops it first; borrowed GS instances are never stopped by non-owners.
 - Logs and status are separated: `tensorcast daemon logs/status` target daemon data only; `tensorcast global logs/status` target GS data with health and metrics info.
+- Blocking starts propagate child exit status so callers can detect failed daemon/GS startups.
 - SDK `init()` matches CLI behavior for modes, addresses, and ownership, including optional fallback to `none` when `allow_gs_fallback` is set.
 
 # References
