@@ -181,7 +181,7 @@ if TYPE_CHECKING:
     )
     from tensorcast.api.store import (  # noqa: F401 # pyright: ignore[no-redef]
         PrefetchTicket,
-        artifact,
+        artifact,  # pyright: ignore[no-redef]
         artifact_async,
         deregister_artifact,
         from_disk,
