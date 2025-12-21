@@ -181,6 +181,7 @@ if TYPE_CHECKING:
     )
     from tensorcast.api.store import (  # noqa: F401
         PrefetchTicket,
+        artifact,
         artifact_async,
         deregister_artifact,
         from_disk,
@@ -193,11 +194,6 @@ if TYPE_CHECKING:
         store,
         unregister_vram_region,
     )
-    from tensorcast.api.store import (  # pyright: ignore[no-redef]
-        artifact as _artifact,
-    )
-
-    artifact = _artifact
     from tensorcast.startup import init, is_initialized, shutdown  # noqa: F401
 
 
