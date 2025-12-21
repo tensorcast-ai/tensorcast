@@ -185,6 +185,16 @@ def preexec_fate_sharing(
         )
 
 
+def preexec_detached(ignore_sigint: bool = True) -> None:
+    os.setsid()
+    if ignore_sigint:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    with contextlib.suppress(AttributeError, OSError):
+        signal.pthread_sigmask(
+            signal.SIG_BLOCK, [signal.SIGTTOU, signal.SIGTTIN, signal.SIGTSTP]
+        )
+
+
 def pump(src, sinks: Iterable[Any]) -> None:
     import sys as _sys
 

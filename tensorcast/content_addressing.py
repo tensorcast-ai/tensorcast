@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tensorcast._C import inspect_or_generate_descriptor
+from tensorcast._c_ext import inspect_or_generate_descriptor
 
 
 def generate_artifact_id_from_path(artifact_path: str | Path) -> dict:

@@ -16,11 +16,12 @@ import contextlib
 # eagerly importing PyTorch (and its dependency chain) we install the patch via
 # a meta path hook that runs immediately before ``tensorcast._C`` is imported.
 # -----------------------------------------------------------------------------
+import importlib
 import importlib.abc
 import sys
 import threading
 from types import ModuleType
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 
 class _TensorCastCExtensionBootstrap(importlib.abc.MetaPathFinder):
@@ -90,88 +91,110 @@ def _install_c_extension_bootstrap() -> None:
 _install_c_extension_bootstrap()
 
 # -----------------------------------------------------------------------------
-# Build configuration validation
+# Build configuration helpers
 # -----------------------------------------------------------------------------
-# Validate that the C extension's CUDA backend matches the runtime environment.
-# This catches a common misconfiguration where the extension is built with
-# USE_FAKE_CUDA=1 but PyTorch has real CUDA available.
-from tensorcast._build_config import (  # noqa: E402
+# Validation runs on first C-extension load via tensorcast._c_ext to avoid
+# importing the heavy extension at package import time.
+from tensorcast._build_config import (  # noqa: E402, F401
     BuildConfigMismatchError,
     validate_cuda_backend_consistency,
 )
-
-validate_cuda_backend_consistency()
+from tensorcast._version import __version__  # noqa: E402, F401
 
 # -----------------------------------------------------------------------------
-# Public package interface remains unchanged below.
+# Lazy public API re-exports
 # -----------------------------------------------------------------------------
+_LAZY_ATTRS: dict[str, tuple[str, str]] = {
+    "Artifact": ("tensorcast.api", "Artifact"),
+    "ArtifactDescriptor": ("tensorcast.api", "ArtifactDescriptor"),
+    "ArtifactError": ("tensorcast.api", "ArtifactError"),
+    "ArtifactFuture": ("tensorcast.api", "ArtifactFuture"),
+    "FallbackOptions": ("tensorcast.api", "FallbackOptions"),
+    "GetArtifactOptions": ("tensorcast.api", "GetArtifactOptions"),
+    "PlanType": ("tensorcast.api", "PlanType"),
+    "RegisterArtifactOptions": ("tensorcast.api", "RegisterArtifactOptions"),
+    "RegisteredArtifact": ("tensorcast.api", "RegisteredArtifact"),
+    "RegisteredLease": ("tensorcast.api", "RegisteredLease"),
+    "RegistrationResult": ("tensorcast.api", "RegistrationResult"),
+    "Store": ("tensorcast.api", "Store"),
+    "StoreOptions": ("tensorcast.api", "StoreOptions"),
+    "build_indices_from_safetensors": (
+        "tensorcast.api",
+        "build_indices_from_safetensors",
+    ),
+    "calculate_tensor_device_offsets": (
+        "tensorcast.api",
+        "calculate_tensor_device_offsets",
+    ),
+    "save_dict": ("tensorcast.api", "save_dict"),
+    "PrefetchTicket": ("tensorcast.api.store", "PrefetchTicket"),
+    "artifact": ("tensorcast.api.store", "artifact"),
+    "artifact_async": ("tensorcast.api.store", "artifact_async"),
+    "deregister_artifact": ("tensorcast.api.store", "deregister_artifact"),
+    "from_disk": ("tensorcast.api.store", "from_disk"),
+    "put": ("tensorcast.api.store", "put"),
+    "put_async": ("tensorcast.api.store", "put_async"),
+    "register": ("tensorcast.api.store", "register"),
+    "register_async": ("tensorcast.api.store", "register_async"),
+    "register_view": ("tensorcast.api.store", "register_view"),
+    "register_vram_region": ("tensorcast.api.store", "register_vram_region"),
+    "store": ("tensorcast.api.store", "store"),
+    "unregister_vram_region": ("tensorcast.api.store", "unregister_vram_region"),
+    "init": ("tensorcast.startup", "init"),
+    "is_initialized": ("tensorcast.startup", "is_initialized"),
+    "shutdown": ("tensorcast.startup", "shutdown"),
+}
 
-import tensorcast.api.store as _store_api  # noqa: E402
-from tensorcast._version import __version__  # noqa: E402
-from tensorcast.api import (  # noqa: E402
-    Artifact,
-    ArtifactDescriptor,
-    ArtifactError,
-    ArtifactFuture,
-    FallbackOptions,
-    GetArtifactOptions,
-    PlanType,
-    RegisterArtifactOptions,
-    RegisteredArtifact,
-    RegisteredLease,
-    RegistrationResult,
-    Store,
-    StoreOptions,
-    build_indices_from_safetensors,
-    calculate_tensor_device_offsets,
-    save_dict,
-)
-from tensorcast.api.store import (  # noqa: E402
-    PrefetchTicket,
-    deregister_artifact,
-    from_disk,
-    put,
-    put_async,
-    register,
-    register_async,
-    register_view,
-    register_vram_region,
-    store,
-    unregister_vram_region,
-)
-from tensorcast.startup import init, is_initialized, shutdown  # noqa: E402
+
+def __getattr__(name: str) -> Any:
+    if name not in _LAZY_ATTRS:
+        raise AttributeError(name)
+    module_name, attr_name = _LAZY_ATTRS[name]
+    module = importlib.import_module(module_name)
+    value = getattr(module, attr_name)
+    globals()[name] = value
+    return value
 
 
-def artifact(
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    disk_path: str | None = None,
-    fallback: FallbackOptions | str | None = None,
-) -> Artifact:
-    """Return a process Store-backed Artifact handle."""
-    return _store_api.artifact(
-        artifact_id=artifact_id,
-        key=key,
-        disk_path=disk_path,
-        fallback=fallback,
+def __dir__() -> list[str]:
+    return sorted(set(globals()).union(_LAZY_ATTRS))
+
+
+if TYPE_CHECKING:
+    from tensorcast.api import (  # noqa: F401
+        Artifact,
+        ArtifactDescriptor,
+        ArtifactError,
+        ArtifactFuture,
+        FallbackOptions,
+        GetArtifactOptions,
+        PlanType,
+        RegisterArtifactOptions,
+        RegisteredArtifact,
+        RegisteredLease,
+        RegistrationResult,
+        Store,
+        StoreOptions,
+        build_indices_from_safetensors,
+        calculate_tensor_device_offsets,
+        save_dict,
     )
-
-
-async def artifact_async(
-    *,
-    artifact_id: str | None = None,
-    key: str | None = None,
-    disk_path: str | None = None,
-    fallback: FallbackOptions | str | None = None,
-) -> Artifact:
-    """Async shortcut for creating Artifact handles."""
-    return await _store_api.artifact_async(
-        artifact_id=artifact_id,
-        key=key,
-        disk_path=disk_path,
-        fallback=fallback,
+    from tensorcast.api.store import (  # noqa: F401 # pyright: ignore[no-redef]
+        PrefetchTicket,
+        artifact,  # pyright: ignore[no-redef]
+        artifact_async,
+        deregister_artifact,
+        from_disk,
+        put,
+        put_async,
+        register,
+        register_async,
+        register_view,
+        register_vram_region,
+        store,
+        unregister_vram_region,
     )
+    from tensorcast.startup import init, is_initialized, shutdown  # noqa: F401
 
 
 __all__ = [

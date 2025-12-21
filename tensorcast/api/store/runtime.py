@@ -602,7 +602,13 @@ def get_context(
         from tensorcast import startup  # Local import to avoid cycles
 
         if not startup.is_initialized():
-            startup.init()
+            if daemon_endpoint:
+                startup.init(mode="connect", address=daemon_endpoint)
+            else:
+                try:
+                    startup.init(mode="connect")
+                except RuntimeError:
+                    startup.init(mode="create")
             runtime = runtime_provider()
         else:
             raise

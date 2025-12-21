@@ -8,7 +8,7 @@ from pathlib import Path
 
 import torch
 
-from tensorcast._C import build_canonical_index_from_safetensors
+from tensorcast._c_ext import build_canonical_index_from_safetensors
 from tensorcast.api._config import DEFAULT_ALIGN
 from tensorcast.api._errors import IndexParseError
 

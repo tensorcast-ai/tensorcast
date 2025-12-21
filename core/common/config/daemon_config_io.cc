@@ -9,6 +9,7 @@
 #include <fstream>
 #include <optional>
 #include <sstream>
+#include <string_view>
 
 #include "absl/status/status.h"
 #include "absl/strings/ascii.h"
@@ -29,13 +30,16 @@ namespace tensorcast::common::config {
 namespace {
 
 // Convert a YAML::Node tree into nlohmann::json for uniform JsonStringToMessage parsing.
-nlohmann::json yaml_node_to_json(const YAML::Node& node) {
+nlohmann::json yaml_node_to_json(const YAML::Node& node, std::string_view key = {}) {
   using nlohmann::json;
   switch (node.Type()) {
     case YAML::NodeType::Null:
       return json(nullptr);
     case YAML::NodeType::Scalar: {
       const std::string s = node.as<std::string>();
+      if (key == "sampler_arg") {
+        return json(s);
+      }
       if (s == "true" || s == "True")
         return json(true);
       if (s == "false" || s == "False")
@@ -69,8 +73,10 @@ nlohmann::json yaml_node_to_json(const YAML::Node& node) {
     }
     case YAML::NodeType::Map: {
       nlohmann::json obj = nlohmann::json::object();
-      for (const auto& it : node)
-        obj[it.first.as<std::string>()] = yaml_node_to_json(it.second);
+      for (const auto& it : node) {
+        const std::string k = it.first.as<std::string>();
+        obj[k] = yaml_node_to_json(it.second, k);
+      }
       return obj;
     }
     case YAML::NodeType::Undefined:
@@ -214,6 +220,17 @@ void normalize_size_fields(nlohmann::json& root) {
         to_bytes(mt["stable_bytes"]);
       if (mt.contains("preemptible_limit_bytes"))
         to_bytes(mt["preemptible_limit_bytes"]);
+    }
+  }
+  // communicator.pool.* bytes
+  if (root.contains("communicator") && root["communicator"].is_object()) {
+    auto& comm = root["communicator"];
+    if (comm.contains("pool") && comm["pool"].is_object()) {
+      auto& pool = comm["pool"];
+      if (pool.contains("pool_size_bytes"))
+        to_bytes(pool["pool_size_bytes"]);
+      if (pool.contains("chunk_bytes"))
+        to_bytes(pool["chunk_bytes"]);
     }
   }
   // checkpoint.streaming.* bytes

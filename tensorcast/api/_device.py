@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import torch
 
-from tensorcast._C import get_device_uuid_map
+from tensorcast._c_ext import get_device_uuid_map
 
 from ._errors import DeviceMismatch
 

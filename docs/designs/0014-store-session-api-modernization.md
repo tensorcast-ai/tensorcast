@@ -39,13 +39,13 @@ Non-Goals
 ```python
 import tensorcast as tc
 
-tc.init(address="auto")
+tc.init(mode="connect", address="auto")
 artifact = tc.register(tensors=model_state_dict, key="model/latest")
 latest = tc.get(key="model/latest", device="cuda:0")
 tc.get_into(buffers, artifact_id=artifact.artifact_id, device="cuda:0")
 ```
 
-- `tc.init(...)` establishes the daemon session and creates the shared Store.
+- `tc.init(mode=...)` establishes the daemon session and creates the shared Store.
 - `tc.register`, `tc.put`, `tc.get`, and `tc.get_into` are thin wrappers that route to the Store while keeping the API surface functional and stateless for callers.
 - `tc.store()` exposes the underlying Store when advanced integrations need asynchronous verbs, telemetry, or direct lease management; routine code should not instantiate `Store` manually.
 ## Type aliases and helper classes
@@ -206,7 +206,7 @@ Responsibilities
 
 The first-version Store treats all local CUDA devices as in-scope; explicit device scoping is deferred. When new GPUs appear, the Store refreshes device metadata lazily on demand.
 
-While the Store remains the canonical implementation of the session API, production callers acquire the shared instance through `tensorcast.init()` / `tensorcast.store()` rather than constructing it directly.
+While the Store remains the canonical implementation of the session API, production callers acquire the shared instance through `tensorcast.init(mode=...)` / `tensorcast.store()` rather than constructing it directly.
 
 ## Register (by-reference registration)
 
@@ -400,7 +400,7 @@ Default deadlines and SDK-managed retries:
 ```python
 import tensorcast as tc
 
-tc.init(address="auto")
+tc.init(mode="connect", address="auto")
 artifact = tc.register(tensors=model_state_dict, key="model/latest")
 restored = tc.get(key="model/latest", device="cuda:0")
 tc.get_into(buffers, artifact_id=artifact.artifact_id, device="cuda:1")
@@ -411,7 +411,7 @@ future = store.get_async(artifact_id=artifact.artifact_id, device="cuda:1")
 next_state = future.result()
 ```
 
-These helpers reuse the single process-wide Store instance created by `tc.init()`. Advanced callers
+These helpers reuse the single process-wide Store instance created by `tc.init(mode=...)`. Advanced callers
 can drop down to `tc.store()` for asynchronous operations, telemetry, or fine-grained lease control,
 but the public contract exposed to applications is the functional interface shown above.
 

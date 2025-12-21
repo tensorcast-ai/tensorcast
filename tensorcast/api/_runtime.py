@@ -37,7 +37,7 @@ def apply_client_load_defaults_if_present(
     if cfg_target and cfg_target != runtime_address:
         raise RuntimeError(
             "ClientConfig daemon target does not match initialized daemon address. "
-            "Call tensorcast.startup.init() with the desired daemon first."
+            "Call tensorcast.startup.init(mode='connect'|'create') with the desired daemon first."
         )
 
     if (

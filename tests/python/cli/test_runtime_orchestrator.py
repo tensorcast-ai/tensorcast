@@ -61,12 +61,79 @@ def _stub_daemon_start(monkeypatch, gs_state: dict[str, Any]):
     return started
 
 
+def test_runtime_start_rejects_existing_daemon(monkeypatch):
+    inst = session_paths("sess-existing")
+    update_runtime_daemon(
+        path=runtime_state_path(),
+        session_id=inst.id,
+        pid=4242,
+        address="127.0.0.1:61000",
+        p2p_address="127.0.0.1:61001",
+        owner=True,
+        fingerprint=instance_fingerprint(4242),
+    )
+    monkeypatch.setattr(runtime, "is_process_alive", lambda _pid: True)
+    monkeypatch.setattr(runtime, "ping_daemon", lambda _address: True)
+
+    def _fail_start(**_kwargs):
+        raise AssertionError("start_service should not be called")
+
+    monkeypatch.setattr(runtime.service_manager, "start_service", _fail_start)
+
+    with pytest.raises(ServiceError, match="already running"):
+        runtime.start(session_id="sess-new")
+
+
+def test_reconcile_keeps_alive_daemon_when_ping_fails(monkeypatch):
+    inst = session_paths("sess-existing")
+    update_runtime_daemon(
+        path=runtime_state_path(),
+        session_id=inst.id,
+        pid=4242,
+        address="127.0.0.1:61000",
+        p2p_address="127.0.0.1:61001",
+        owner=True,
+        fingerprint=instance_fingerprint(4242),
+    )
+    monkeypatch.setattr(runtime, "is_process_alive", lambda _pid: True)
+    monkeypatch.setattr(runtime, "ping_daemon", lambda _address: False)
+
+    session = runtime.reconcile()
+    assert session is not None
+    assert session.session_id == inst.id
+
+
+def test_runtime_stop_uses_runtime_state(monkeypatch):
+    inst = session_paths("sess-running")
+    update_runtime_daemon(
+        path=runtime_state_path(),
+        session_id=inst.id,
+        pid=4242,
+        address="127.0.0.1:61000",
+        p2p_address="127.0.0.1:61001",
+        owner=True,
+        fingerprint=instance_fingerprint(4242),
+    )
+    monkeypatch.setattr(runtime, "is_process_alive", lambda _pid: True)
+    monkeypatch.setattr(runtime, "ping_daemon", lambda _address: False)
+
+    stopped: dict[str, Any] = {}
+
+    def _fake_stop_service(**kwargs):
+        stopped.update(kwargs)
+
+    monkeypatch.setattr(runtime.service_manager, "stop_service", _fake_stop_service)
+
+    runtime.stop()
+
+    assert stopped["session_id"] == inst.id
+
+
 def test_runtime_start_injects_global_store(monkeypatch):
     captured: dict[str, Any] = {}
 
     def _fake_start_global_store(**kwargs):
         captured["cluster_token"] = kwargs.get("cluster_token")
-        captured["wait"] = kwargs.get("wait")
         return SimpleNamespace(
             id="gs-123",
             pid=1111,
@@ -85,16 +152,21 @@ def test_runtime_start_injects_global_store(monkeypatch):
         runtime.global_store_manager, "start_global_store", _fake_start_global_store
     )
 
-    gs_state = {"mode": "auto", "address": "127.0.0.1:50051", "session": "gs-123", "owner": True}
+    gs_state = {
+        "mode": "start",
+        "address": "127.0.0.1:50051",
+        "session": "gs-123",
+        "owner": True,
+    }
     started = _stub_daemon_start(monkeypatch, gs_state)
 
-    session = runtime.start(global_store_mode="auto")
+    session = runtime.start(global_store_mode="start")
 
     assert session.global_store_address == "127.0.0.1:50051"
     assert started["ha_endpoints"] == ["127.0.0.1:50051"]
     assert captured["cluster_token"] is None
     assert session.global_store_session == "gs-123"
-    assert session.global_store_mode == "auto"
+    assert session.global_store_mode == "start"
 
 
 def test_runtime_stop_cascades_global_store(monkeypatch):
@@ -108,14 +180,14 @@ def test_runtime_stop_cascades_global_store(monkeypatch):
         runtime.global_store_manager, "stop_global_store", _fake_stop_global_store
     )
     gs_state = {
-        "mode": "auto",
+        "mode": "start",
         "address": "127.0.0.1:50051",
         "session": "gs-own",
         "owner": True,
     }
     _stub_daemon_start(monkeypatch, gs_state)
 
-    session = runtime.start(global_store_mode="auto")
+    session = runtime.start(global_store_mode="start")
     runtime.stop(session_id=session.session_id)
 
     assert stop_calls["session_id"] == "gs-own"
@@ -167,10 +239,8 @@ def test_runtime_rejects_mismatched_cluster_token(monkeypatch):
 
     with pytest.raises(ServiceError, match="mismatched cluster token"):
         runtime._resolve_global_store(
-            mode="auto",
+            mode="connect",
             address=None,
-            wait=False,
-            timeout=1.0,
             allow_gs_fallback=False,
             cluster_id=None,
         )

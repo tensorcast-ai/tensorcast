@@ -8,7 +8,7 @@ from transformers.models.auto.modeling_auto import AutoModelForCausalLM
 import tensorcast as tc
 from tensorcast.testing.dict import assert_state_dict_equal
 
-tc.init(address="127.0.0.1:50052")
+tc.init(mode="connect", address="127.0.0.1:50052")
 
 hf_model_name = "Qwen/Qwen3-0.6B"
 # Load a artifact from HuggingFace artifact hub.

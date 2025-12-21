@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 from google.protobuf.json_format import MessageToDict, MessageToJson, ParseDict
@@ -174,6 +174,118 @@ def _normalize_units_inplace(data: Any, desc) -> None:
     elif isinstance(data, list):
         for item in data:
             _normalize_units_inplace(item, desc)
+
+
+def _parse_override_value(value: str) -> Any:
+    if value == "":
+        return ""
+    parsed = yaml.safe_load(value)
+    if parsed is None:
+        raise ValueError(
+            "Override value cannot be null; use an explicit empty string or []"
+        )
+    return parsed
+
+
+def _parse_override_path(raw_key: str) -> list[str]:
+    key = raw_key.strip()
+    if not key:
+        raise ValueError("Override key cannot be empty")
+    if key.startswith(".") or key.endswith(".") or ".." in key:
+        raise ValueError(f"Invalid override key '{raw_key}'")
+    parts = key.split(".")
+    if any(not part for part in parts):
+        raise ValueError(f"Invalid override key '{raw_key}'")
+    return parts
+
+
+def _validate_override_path(path: list[str], desc) -> None:
+    from google.protobuf.descriptor import FieldDescriptor
+
+    current = desc
+    for idx, part in enumerate(path):
+        field = current.fields_by_name.get(part)
+        if field is None:
+            raise ValueError(f"Unknown config key '{'.'.join(path[: idx + 1])}'")
+        if idx < len(path) - 1:
+            if field.type != FieldDescriptor.TYPE_MESSAGE:
+                raise ValueError(
+                    f"Config key '{'.'.join(path[: idx + 1])}' is not a message; "
+                    f"cannot set subfield '{path[idx + 1]}'"
+                )
+            if (
+                field.label == FieldDescriptor.LABEL_REPEATED
+                and not field.message_type.GetOptions().map_entry
+            ):
+                raise ValueError(
+                    f"Config key '{'.'.join(path[: idx + 1])}' is repeated; "
+                    "set the full list instead of subfields"
+                )
+            if field.message_type.GetOptions().map_entry:
+                raise ValueError(
+                    f"Config key '{'.'.join(path[: idx + 1])}' is a map; "
+                    "set the full mapping instead of subfields"
+                )
+            if (
+                field.label == FieldDescriptor.LABEL_REPEATED
+                and field.message_type.GetOptions().map_entry
+            ):
+                raise ValueError(
+                    f"Config key '{'.'.join(path[: idx + 1])}' is a map; "
+                    "set the full mapping instead of subfields"
+                )
+            current = field.message_type
+
+
+def _apply_override(tree: dict[str, Any], path: list[str], value: Any) -> None:
+    node: dict[str, Any] = tree
+    for part in path[:-1]:
+        existing = node.get(part)
+        if existing is None:
+            node[part] = {}
+            node = node[part]
+        elif isinstance(existing, dict):
+            node = existing
+        else:
+            raise ValueError(
+                f"Override path '{'.'.join(path)}' conflicts with earlier value at '{part}'"
+            )
+    leaf = path[-1]
+    if leaf in node:
+        raise ValueError(f"Duplicate override for '{'.'.join(path)}'")
+    node[leaf] = value
+
+
+def _build_override_tree(overrides: Iterable[str], desc) -> dict[str, Any]:
+    tree: dict[str, Any] = {}
+    for raw in overrides:
+        if raw is None:
+            continue
+        if "=" not in raw:
+            raise ValueError(f"Override '{raw}' must be in key=value form")
+        key, value = raw.split("=", 1)
+        path = _parse_override_path(key)
+        _validate_override_path(path, desc)
+        parsed_value = _parse_override_value(value)
+        _apply_override(tree, path, parsed_value)
+    return tree
+
+
+def apply_daemon_config_overrides(
+    msg: cfg_pb.DaemonConfig, overrides: Iterable[str] | None
+) -> None:
+    if not overrides:
+        return
+    overlay = _build_override_tree(overrides, cfg_pb.DaemonConfig.DESCRIPTOR)
+    if not overlay:
+        return
+    normalize_enum_aliases_inplace(overlay, cfg_pb.DaemonConfig.DESCRIPTOR)
+    _normalize_units_inplace(overlay, cfg_pb.DaemonConfig.DESCRIPTOR)
+    ParseDict(overlay, msg, ignore_unknown_fields=False)
+    if msg.engine.HasField("memory_tiers"):
+        mt = msg.engine.memory_tiers
+        if mt.preemptible_low_watermark_ratio <= 0:
+            mt.preemptible_low_watermark_ratio = 0.4
 
 
 def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:

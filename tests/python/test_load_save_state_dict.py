@@ -90,7 +90,7 @@ if __name__ == "__main__":
 
     try:
         torch_state_dict = torch.load(path_to_torch_state_dict)
-        startup.init(address="127.0.0.1:8073")
+        startup.init(mode="connect", address="127.0.0.1:8073")
         try:
             fallback = FallbackOptions(
                 disk_path=path_to_sc_model_dir,

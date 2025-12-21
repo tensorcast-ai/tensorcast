@@ -54,7 +54,7 @@ def test_shared_storage_roundtrip(tmp_path):
     listen = f"127.0.0.1:{get_free_port()}"
     daemon_proc = start_daemon_binary(listen, tmp_path / "daemon-storage")
     try:
-        startup.init(address=listen)
+        startup.init(mode="connect", address=listen)
         try:
             fallback = FallbackOptions(
                 disk_path=str(save_path),

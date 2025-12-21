@@ -7,7 +7,7 @@ from typing import Dict, Mapping
 
 import torch
 
-from tensorcast._C import collect_tensor_storage_graph
+from tensorcast._c_ext import collect_tensor_storage_graph
 from tensorcast.api._indices import TensorDataIndex, TensorMetaIndex
 
 

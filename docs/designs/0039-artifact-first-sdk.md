@@ -21,7 +21,7 @@ Goals
 - One-concept-per-interface: each user goal maps to exactly one public function or method.
 - Artifact-first retrieval: all fetch, view, batch, async, and prefetch flows hang off `Artifact`.
 - Minimal, user-friendly parameters: hide internal knobs; keep enums small and intention-based.
-- Default “just works”: per-process daemon launch via `tc.init()`, lazy resolution, P2P-by-default retrieval with safe fallbacks.
+- Default “just works”: per-process daemon launch via `tc.init(mode="create")`, lazy resolution, P2P-by-default retrieval with safe fallbacks.
 - Clean slate: remove redundant/legacy verbs once the new surface ships (no compatibility constraints).
 
 Non-Goals
@@ -33,9 +33,10 @@ Non-Goals
 
 ## Top-Level API (functional)
 
-- `tc.init(address="local", daemon_config_path=None, wait=True, timeout=20.0, show_daemon_logs=True, install_signal_handlers=False, fate_share_sigterm=False)`  
-  Launch or connect to a single per-process daemon (prefers launch); sets global daemon address used by the process Store.  
-  **Default config:** if no config path is provided and none is discoverable, the SDK falls back to an embedded minimal daemon config (loopback bind, ephemeral or standard port, default cache path) so `tc.init()` “just works” after install.
+- `tc.init(mode="connect", address="local")`  
+- `tc.init(mode="create", daemon_config_path=None, show_daemon_logs=True, install_signal_handlers=False, fate_share_sigterm=False)`  
+  Connects to an existing daemon (`connect`) or launches a new per-process daemon (`create`); sets the global daemon address used by the process Store.  
+  **Default config:** if no config path is provided and none is discoverable, the SDK falls back to an embedded minimal daemon config (loopback bind, ephemeral or standard port, default cache path) so `tc.init(mode="create")` “just works” after install.
 - `tc.shutdown()`, `tc.is_initialized()`.
 - `tc.artifact(key=None, artifact_id=None, disk_path=None, fallback=None) -> Artifact`  
   Lazy handle factory; no data transfer; resolves key/disk lazily on first touch. `artifact_async(...)` mirrors it.
@@ -77,7 +78,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - `PlanType`: user-facing strings `plan="lease" | "copy"` (default `lease`), coerced internally to `PlanType.VRAM_LEASED` / `PlanType.VRAM_COALESCED`; enum remains for power users.
 - `RegisterArtifactOptions`: public-facing fields `plan`, `lease_in_place`, `max_inflight_bytes`, `release_on_tensor_commit`; accept string `plan` and map to enum internally; keep advanced knobs optional.
 - `GetArtifactOptions`: `prefer` (mirrors `FallbackOptions`), `wait_for_completion` (default `True`), `enable_verification` (default `True`), `transport_hold_ms` (advanced).
-- Devices: accept `str | torch.device`; default to current CUDA device if available, otherwise require explicit CPU with disk fallback.
+- Devices: accept `str | torch.device`; retrieval defaults to the current CUDA device if available (otherwise require explicit CPU with disk fallback). For `put`, CUDA inputs target their device unless `device` is provided (must match), while CPU inputs default to the current CUDA device.
 
 ## Behavioral Notes
 
@@ -121,7 +122,7 @@ None. No persistent schema or proto schema changes are required; reuse existing 
 - No backward-compatibility promise (project not yet GA); redundant verbs removed from public surface once this design is implemented.
 - Acceptance:
   - Functional API limited to the set above; retrieval only via `Artifact` methods.
-  - `tc.init()` defaults to launch-per-process; docs updated accordingly.
+  - `tc.init(mode="create")` defaults to launch-per-process; docs updated accordingly.
   - Options enforce small, intention-based enums with validation and clear errors.
   - All public docs/README/AGENTS updated to reflect the new surface; legacy examples removed.
   - Tests cover handle flows (sync/async), views, batch, prefetch, region lifecycle, and init/shutdown paths.

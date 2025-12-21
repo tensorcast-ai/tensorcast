@@ -69,14 +69,14 @@ high_availability:
   periodic_sync_interval: 10s # chunk sync loop; 0 disables
 ```
 
-> The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
+> The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address` or `--global-store-endpoints`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
 
 ## Usage
 
 ### Start Global Store (single instance)
 
 ```bash
-uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml --wait
+uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml
 ```
 
 - Use a persistent DuckDB path (`database.db_file`) for recovery.
@@ -88,8 +88,7 @@ uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml --wait
 uv run tensorcast daemon start \
   --config=/etc/tensorcast/daemon.yaml \
   --global-store-mode connect \
-  --global-store-address 10.0.0.5:50051 \
-  --wait
+  --global-store-address 10.0.0.5:50051
 ```
 
 - The orchestrator writes an effective config that enables HA, injects the Global Store endpoint, and fills missing listen/p2p ports.
@@ -169,13 +168,13 @@ resp = stub.SynchronizeWorkerState(
 - Use persistent storage for the Global Store database; back up `cluster_token` with it.
 - Set a routable `server.advertise.host` and non-zero `server.p2p_listen.port` before enabling HA.
 - Only enable `high_availability.force_full_sync_on_empty_inventory` when deliberately draining/retiring a node; otherwise keep the default conservative behavior.
-- Run with `--wait` to ensure both services reach healthy state before clients connect.
+- Start is blocking and returns only when services are healthy (or on error) before clients connect.
 - Keep configs proto-valid (strict parsing) and avoid relying on multiple endpoints—the first `global_store_endpoints` entry is used today.
 
 ## Migration from Legacy Setup
 
-1. Add a persistent `database.db_file` and optional `meta.cluster_token` to the Global Store config, then restart with `uv run tensorcast global start --config=... --wait`.
-2. Update daemon config to include `high_availability` and a routable `server.advertise.host`/`p2p_listen.port`, then restart with `uv run tensorcast daemon start --global-store-address <addr> --wait`.
+1. Add a persistent `database.db_file` and optional `meta.cluster_token` to the Global Store config, then restart with `uv run tensorcast global start --config=...`.
+2. Update daemon config to include `high_availability` and a routable `server.advertise.host`/`p2p_listen.port`, then restart with `uv run tensorcast daemon start --global-store-address <addr>`.
 3. Verify via `HealthCheck`, metrics scrape, and a forced `RequestFullStateSync` (daemon restart) before rolling out broadly.
 
 ## Limitations

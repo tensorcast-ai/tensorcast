@@ -11,7 +11,7 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast._C import get_cuda_memory_ptr, restore_tensors
+from tensorcast._c_ext import get_cuda_memory_ptr, restore_tensors
 from tensorcast.api._config import GetArtifactOptions
 from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError

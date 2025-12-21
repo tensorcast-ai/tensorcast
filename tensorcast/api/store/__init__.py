@@ -10,7 +10,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import torch
 
-from tensorcast._C import get_cuda_memory_handle
+from tensorcast._c_ext import get_cuda_memory_handle
 from tensorcast.api._config import RegisterArtifactOptions
 from tensorcast.api._materialize import (
     MaterializationPayload,

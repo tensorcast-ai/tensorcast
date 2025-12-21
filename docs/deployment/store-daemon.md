@@ -20,16 +20,20 @@ bazel build //daemon:tensorcast_daemon
 
 ## Launch via Python CLI
 
-Use the unified YAML config and start via CLI:
+Use the unified YAML config and start via CLI (default `--global-store-mode` is `none`):
 
 ```
-uv run -q python -m tensorcast.cli daemon start --global-store-mode auto
+uv run tensorcast-cli daemon start --global-store-mode connect --global-store-address 127.0.0.1:50051
 ```
 
 If you omit `--config`, the CLI tries `$TENSORCAST_DAEMON_CONFIG` or
 `~/.tensorcast/config/daemon.yaml` and otherwise materializes an embedded
 loopback config (port=0, storage under `~/.tensorcast`). Set listen/advertise
 addresses through the config file instead of CLI flags.
+You can also override config values inline with `--set KEY=VALUE` (repeatable).
+Example: `--set engine.memory_tiers.stable_bytes=4GB`.
+Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`,
+`--enable-rdma`, `--log-level`.
 
 The CLI locates the binary from the wheel or development path automatically
 and extends ``LD_LIBRARY_PATH`` with the TensorCast shared library bundle as
@@ -39,32 +43,34 @@ namespace) that live inside the active Python environment. This allows the
 daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
 
-During startup, the CLI mirrors daemon stdout and stderr into the invoking
+During startup, the CLI can mirror daemon stdout and stderr into the invoking
 terminal in addition to persisting them under `~/.tensorcast/sessions/<id>/logs`.
-Use `tensorcast daemon start --no-wait` to skip the readiness wait while still
-emitting logs; library callers can disable console mirroring by invoking
-`start_service(..., to_console=False)` if needed. The CLI also validates that
-the daemon process stays alive before waiting for the gRPC ready probe, failing
-fast with the daemon's exit code when configuration issues prevent startup.
-Failed launches leave the session log directory intact so the captured
-`daemon.out` / `daemon.err` streams remain available for troubleshooting.
 
 ## Manage Daemon Sessions
 
 Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
 current session id is stored in `~/.tensorcast/current_session`.
 
+Only one Store Daemon instance is allowed per `$TENSORCAST_HOME`. If you run
+`tensorcast-cli daemon start` while another daemon is already running, the CLI
+returns an error and prints the existing daemon session details; reuse that
+instance or stop it before starting a new one.
+
+When `tensorcast-cli daemon stop` is invoked without a session id, the CLI
+resolves the active daemon from `~/.tensorcast/runtime/state.json` first, then
+falls back to `~/.tensorcast/current_session`.
+
 Common commands:
 
 ```
 # Status (connects to daemon gRPC if available, otherwise shows process info)
-uv run -q python -m tensorcast.cli daemon status
+uv run tensorcast-cli daemon status
 
 # Logs (stdout by default, --stderr for stderr; add -f to follow)
-uv run -q python -m tensorcast.cli daemon logs -f
+uv run tensorcast-cli daemon logs -f
 
 # Stop current session (SIGTERM with SIGKILL fallback)
-uv run -q python -m tensorcast.cli daemon stop
+uv run tensorcast-cli daemon stop
 ```
 
 ## Observability
@@ -138,6 +144,12 @@ Pair this panel with a counter visualization for `tc_store_operation_retries_tot
 All runtime parameters are configured via the unified config. The daemon only
 accepts `--config=/path/to/file`. See `examples/config/store_daemon_config.yaml`.
 Enum fields accept friendly values and are normalized (case-insensitive): `observability.otel.exporter_protocol: grpc | http/protobuf`, `observability.logging.level: debug|info|warn|error`.
+
+For long-lived clients, prefer a non-zero `server.grpc.max_connection_idle` and
+explicit keepalive settings (for example `keepalive_time: 30s`,
+`keepalive_timeout: 10s`) to avoid idle GOAWAY churn. The Python SDK reuses a
+single gRPC channel/stub per `DaemonCtl` instance, so keep the instance around
+instead of recreating it for each RPC.
 ```yaml
 network:
 high_availability:
@@ -170,15 +182,15 @@ rdma:
   qp_retry: 7
 pool:
   preregister_mr: true
-  pool_size_bytes: 8589934592
-  chunk_bytes: 67108864
+  pool_size_bytes: 8GB
+  chunk_bytes: 64MB
 transport:
   tcp_conn_count: 8
   connect_timeout_sec: 10
   tcp_tos: 0
 ```
 
-Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`.
+Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`. `pool_size_bytes` and `chunk_bytes` accept humanized sizes like `8GB`/`64MB` when embedded in the daemon config.
 
 ## Launch Example (Unified Config)
 

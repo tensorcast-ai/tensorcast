@@ -22,7 +22,42 @@ from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
 
-GlobalStoreMode = Literal["auto", "connect", "start", "none"]
+GlobalStoreMode = Literal["connect", "start", "none"]
+
+_LOG_LEVELS = ("debug", "info", "warn", "warning", "error")
+
+
+def _extract_override_key(raw: str) -> str:
+    if "=" not in raw:
+        raise ServiceError(f"Invalid --set override '{raw}'; expected key=value")
+    key = raw.split("=", 1)[0].strip()
+    if not key:
+        raise ServiceError(f"Invalid --set override '{raw}'; empty key")
+    return key
+
+
+def _paths_conflict(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    return a.startswith(f"{b}.") or b.startswith(f"{a}.")
+
+
+def _parse_endpoint(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise ServiceError("Global Store endpoint cannot be empty")
+    try:
+        host, port_s = raw.rsplit(":", 1)
+        if not host:
+            raise ValueError("missing host")
+        port = int(port_s)
+    except Exception as exc:  # noqa: BLE001
+        raise ServiceError(f"Invalid Global Store endpoint '{value}'") from exc
+    if port < 0 or port > 65535:
+        raise ServiceError(
+            f"Invalid Global Store endpoint '{value}'; port out of range"
+        )
+    return f"{host}:{port}"
 
 
 def _runtime_session_to_dict(session: runtime.RuntimeSession) -> dict:
@@ -58,7 +93,7 @@ def _echo_daemon_status(session: runtime.RuntimeSession) -> None:
         click.echo(f"  p2p address : {session.daemon_p2p_address}")
     if session.logs_dir:
         click.echo(f"  logs        : {session.logs_dir}")
-    gs_mode = session.global_store_mode or "auto"
+    gs_mode = session.global_store_mode or "none"
     gs_owner = "owner" if session.global_store_owner else "borrowed"
     if session.global_store_address:
         click.echo(
@@ -117,7 +152,7 @@ def cli():
 
 @cli.group()
 def daemon():
-    """Manage the local Store Daemon (requires explicit Global Store)."""
+    """Manage the local Store Daemon."""
 
 
 @daemon.command("start")
@@ -134,8 +169,8 @@ def daemon():
 )
 @click.option(
     "--global-store-mode",
-    type=click.Choice(["auto", "connect", "start", "none"]),
-    default="auto",
+    type=click.Choice(["connect", "start", "none"]),
+    default="none",
     show_default=True,
     help="Global Store orchestration mode.",
 )
@@ -145,22 +180,50 @@ def daemon():
     help="Explicit Global Store host:port (connect-only when provided).",
 )
 @click.option(
-    "--wait/--no-wait",
-    default=True,
-    show_default=True,
-    help="Wait for daemon readiness before returning",
+    "--global-store-endpoints",
+    "global_store_endpoints",
+    multiple=True,
+    help="Repeatable Global Store host:port list for HA injection and connect mode.",
 )
 @click.option(
-    "--timeout",
-    type=float,
-    default=30.0,
-    show_default=True,
-    help="Readiness wait timeout in seconds",
+    "--stable-bytes",
+    default=None,
+    help="Override engine.memory_tiers.stable_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--mem-pool-size-bytes",
+    default=None,
+    help="Override engine.mem_pool_size_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--pinned-pool-bytes",
+    default=None,
+    help="Override checkpoint.streaming.pinned_pool_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--enable-rdma",
+    is_flag=True,
+    help="Enable RDMA (communicator.enable_rdma=true).",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(_LOG_LEVELS, case_sensitive=False),
+    default=None,
+    help="Override observability.logging.level.",
 )
 @click.option(
     "--session",
     default=None,
     help="Override session id to use for this daemon",
+)
+@click.option(
+    "--set",
+    "config_overrides",
+    multiple=True,
+    help=(
+        "Override daemon config values (key=value). Repeatable; values are YAML-parsed. "
+        "Quote strings containing ':' or spaces."
+    ),
 )
 @click.option(
     "--json",
@@ -172,22 +235,100 @@ def daemon_start(
     config: Path | None,
     global_store_mode: GlobalStoreMode,
     global_store_address: str | None,
-    wait: bool,
-    timeout: float,
+    global_store_endpoints: tuple[str, ...],
+    stable_bytes: str | None,
+    mem_pool_size_bytes: str | None,
+    pinned_pool_bytes: str | None,
+    enable_rdma: bool,
+    log_level: str | None,
     session: str | None,
+    config_overrides: tuple[str, ...],
     as_json: bool,
 ):
     """Start the Store Daemon via the unified runtime orchestrator."""
     try:
+        overrides = list(config_overrides or ())
+        override_paths = {_extract_override_key(entry) for entry in overrides}
+
+        def _check_conflict(path: str) -> None:
+            for existing in override_paths:
+                if _paths_conflict(existing, path):
+                    raise ServiceError(
+                        f"Config override '{path}' conflicts with existing override '{existing}'"
+                    )
+
+        if stable_bytes:
+            _check_conflict("engine.memory_tiers.stable_bytes")
+            overrides.append(f"engine.memory_tiers.stable_bytes={stable_bytes}")
+            override_paths.add("engine.memory_tiers.stable_bytes")
+        if mem_pool_size_bytes:
+            _check_conflict("engine.mem_pool_size_bytes")
+            overrides.append(f"engine.mem_pool_size_bytes={mem_pool_size_bytes}")
+            override_paths.add("engine.mem_pool_size_bytes")
+        if pinned_pool_bytes:
+            _check_conflict("checkpoint.streaming.pinned_pool_bytes")
+            overrides.append(
+                f"checkpoint.streaming.pinned_pool_bytes={pinned_pool_bytes}"
+            )
+            override_paths.add("checkpoint.streaming.pinned_pool_bytes")
+        if enable_rdma:
+            _check_conflict("communicator.enable_rdma")
+            overrides.append("communicator.enable_rdma=true")
+            override_paths.add("communicator.enable_rdma")
+        if log_level:
+            _check_conflict("observability.logging.level")
+            overrides.append(f"observability.logging.level={log_level}")
+            override_paths.add("observability.logging.level")
+
+        endpoints = [_parse_endpoint(ep) for ep in global_store_endpoints if ep]
+        if endpoints:
+            _check_conflict("high_availability.global_store_endpoints")
+            if global_store_mode == "start":
+                raise ServiceError(
+                    "--global-store-endpoints cannot be used with --global-store-mode start"
+                )
+            if global_store_address:
+                normalized_addr = _parse_endpoint(global_store_address)
+                global_store_address = normalized_addr
+                if normalized_addr not in endpoints:
+                    raise ServiceError(
+                        "--global-store-address must match one of --global-store-endpoints"
+                    )
+            else:
+                global_store_address = endpoints[0]
+            global_store_mode = "connect"
+        if global_store_address:
+            if global_store_mode == "start":
+                raise ServiceError(
+                    "--global-store-address cannot be used with --global-store-mode start"
+                )
+            if global_store_mode != "connect":
+                global_store_mode = "connect"
+            global_store_address = _parse_endpoint(global_store_address)
+
+        existing = runtime.status()
+        if existing is not None:
+            click.echo(
+                "Error: A StoreDaemon is already running. Use the existing daemon "
+                "or stop it before starting another.",
+                err=True,
+            )
+            if as_json:
+                click.echo(json.dumps(_runtime_session_to_dict(existing), indent=2))
+                sys.exit(1)
+            _echo_daemon_status(existing)
+            sys.exit(1)
+
         session_obj = runtime.start(
             daemon_config=config,
             session_id=session,
-            wait=wait,
-            timeout=timeout,
             global_store_mode=global_store_mode,
             global_store_address=global_store_address,
+            config_overrides=overrides or None,
+            ha_endpoints=endpoints or None,
             to_console=True,
             reuse_existing=False,
+            fate_share=False,
         )
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)
@@ -268,8 +409,8 @@ def daemon_status(session: str | None, as_json: bool):
 )
 @click.option(
     "--global-store-mode",
-    type=click.Choice(["auto", "connect", "start", "none"]),
-    default="auto",
+    type=click.Choice(["connect", "start", "none"]),
+    default="none",
     show_default=True,
     help="Global Store orchestration mode.",
 )
@@ -279,31 +420,64 @@ def daemon_status(session: str | None, as_json: bool):
     help="Explicit Global Store host:port (connect-only when provided).",
 )
 @click.option(
-    "--wait/--no-wait",
-    default=True,
-    show_default=True,
-    help="Wait for daemon readiness before returning",
+    "--global-store-endpoints",
+    "global_store_endpoints",
+    multiple=True,
+    help="Repeatable Global Store host:port list for HA injection and connect mode.",
 )
 @click.option(
-    "--timeout",
-    type=float,
-    default=30.0,
-    show_default=True,
-    help="Readiness wait timeout in seconds",
+    "--stable-bytes",
+    default=None,
+    help="Override engine.memory_tiers.stable_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--mem-pool-size-bytes",
+    default=None,
+    help="Override engine.mem_pool_size_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--pinned-pool-bytes",
+    default=None,
+    help="Override checkpoint.streaming.pinned_pool_bytes (supports KB/MB/GB).",
+)
+@click.option(
+    "--enable-rdma",
+    is_flag=True,
+    help="Enable RDMA (communicator.enable_rdma=true).",
+)
+@click.option(
+    "--log-level",
+    type=click.Choice(_LOG_LEVELS, case_sensitive=False),
+    default=None,
+    help="Override observability.logging.level.",
 )
 @click.option(
     "--session",
     default=None,
     help="Override session id to restart",
 )
+@click.option(
+    "--set",
+    "config_overrides",
+    multiple=True,
+    help=(
+        "Override daemon config values (key=value). Repeatable; values are YAML-parsed. "
+        "Quote strings containing ':' or spaces."
+    ),
+)
 def daemon_restart(
     force: bool,
     config: Path | None,
     global_store_mode: GlobalStoreMode,
     global_store_address: str | None,
-    wait: bool,
-    timeout: float,
+    global_store_endpoints: tuple[str, ...],
+    stable_bytes: str | None,
+    mem_pool_size_bytes: str | None,
+    pinned_pool_bytes: str | None,
+    enable_rdma: bool,
+    log_level: str | None,
     session: str | None,
+    config_overrides: tuple[str, ...],
 ):
     """Restart the Store Daemon (stop then start)."""
     daemon_stop(force=force, session=session)
@@ -311,9 +485,14 @@ def daemon_restart(
         config=config,
         global_store_mode=global_store_mode,
         global_store_address=global_store_address,
-        wait=wait,
-        timeout=timeout,
+        global_store_endpoints=global_store_endpoints,
+        stable_bytes=stable_bytes,
+        mem_pool_size_bytes=mem_pool_size_bytes,
+        pinned_pool_bytes=pinned_pool_bytes,
+        enable_rdma=enable_rdma,
+        log_level=log_level,
         session=session,
+        config_overrides=config_overrides,
         as_json=False,
     )
 
@@ -348,16 +527,12 @@ def global_group():
 @click.option(
     "--listen-port", type=int, default=None, help="Listen port override (0 allowed)"
 )
-@click.option("--wait/--no-wait", default=True, show_default=True)
-@click.option("--timeout", type=float, default=15.0, show_default=True)
 @click.option("--gs-session", default=None, help="Override global session id")
 @click.option("--json", "as_json", is_flag=True, help="Emit status as JSON after start")
 def global_start(
     config: Path | None,
     listen_host: str | None,
     listen_port: int | None,
-    wait: bool,
-    timeout: float,
     gs_session: str | None,
     as_json: bool,
 ):
@@ -366,11 +541,10 @@ def global_start(
         inst = global_store_manager.start_global_store(
             config_path=config,
             session_id=gs_session,
-            wait=wait,
-            timeout=timeout,
             listen_host=listen_host,
             listen_port=listen_port,
             to_console=True,
+            fate_share=False,
         )
     except ServiceError as e:
         click.echo(f"Error: {e}", err=True)

@@ -18,7 +18,7 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast._C import (
+from tensorcast._c_ext import (
     compute_view_registration_plan,
     get_cuda_memory_handle,
     get_cuda_memory_ptr,
@@ -157,7 +157,7 @@ class RegisteredArtifact:
         if client is None:
             raise RuntimeError(
                 "RegisteredArtifact requires an active TensorCast session. "
-                "Call tensorcast.startup.init() before using registration APIs."
+                "Call tensorcast.startup.init(mode='connect'|'create') before using registration APIs."
             )
         # Cache client for this handle's lifetime
         self._ctl = client
@@ -405,34 +405,56 @@ class BuildContext:
     def from_artifact(
         artifact: dict[str, torch.Tensor], device_id: int | torch.device | None
     ) -> "BuildContext":
-        if device_id is None:
-            dev_index: int | None = None
-            for t in artifact.values():
-                if not t.is_cuda:
-                    raise DeviceMismatch(
-                        "When device_id is None, all tensors must be CUDA tensors on the same device"
-                    )
+        has_cuda = False
+        has_cpu = False
+        cuda_device_id: int | None = None
+        for t in artifact.values():
+            if t.is_cuda:
+                has_cuda = True
                 this_idx = t.device.index if t.device.index is not None else 0
-                if dev_index is None:
-                    dev_index = this_idx
-                elif this_idx != dev_index:
-                    raise DeviceMismatch(
-                        "All CUDA tensors must be on the same device when inferring device_id"
-                    )
-            if dev_index is None:
-                raise TensorCastError(
-                    "artifact is empty or has no tensors to infer device from"
-                )
-            target_device_id = int(dev_index)
+                if cuda_device_id is None:
+                    cuda_device_id = this_idx
+                elif this_idx != cuda_device_id:
+                    raise DeviceMismatch("All CUDA tensors must be on the same device")
+            else:
+                has_cpu = True
+
+        if has_cuda and has_cpu:
+            raise DeviceMismatch(
+                "Artifact tensors must be all CPU or all CUDA tensors on the same device"
+            )
+
+        if has_cuda:
             input_mode = "cuda"
+            inferred_device_id = int(cuda_device_id or 0)
+        else:
+            input_mode = "cpu"
+            inferred_device_id = None
+
+        target_device_id: int
+        if device_id is None:
+            if input_mode == "cuda":
+                if inferred_device_id is None:
+                    raise DeviceMismatch("CUDA tensors require a resolved device id")
+                target_device_id = inferred_device_id
+            else:
+                if torch.cuda.is_available():
+                    try:
+                        target_device_id = int(torch.cuda.current_device())
+                    except Exception:  # noqa: BLE001
+                        target_device_id = 0
+                else:
+                    target_device_id = 0
         else:
             target_device_id = resolve_device(device_id)
-            for t in artifact.values():
-                if t.is_cuda:
-                    raise DeviceMismatch(
-                        "When device_id is specified, artifact must contain CPU tensors only"
-                    )
-            input_mode = "cpu"
+            if (
+                input_mode == "cuda"
+                and inferred_device_id is not None
+                and inferred_device_id != target_device_id
+            ):
+                raise DeviceMismatch(
+                    f"Tensor device mismatch: expected cuda:{target_device_id}, got cuda:{inferred_device_id}"
+                )
 
         storage_graph = build_tensor_storage_graph(artifact)
         if input_mode == "cuda":

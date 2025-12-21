@@ -4,7 +4,7 @@ import torch
 
 import tensorcast as tc
 
-tc.init(address="127.0.0.1:50052")
+tc.init(mode="connect", address="127.0.0.1:50052")
 
 device = "cuda:0" if torch.cuda.is_available() else "cpu"
 state_dict = tc.get(key="test:model:001", device=device)

@@ -64,23 +64,70 @@ def test_daemon_start_passes_options(monkeypatch):
         [
             "daemon",
             "start",
-            "--global-store-mode",
-            "connect",
-            "--global-store-address",
-            "addr:1",
-            "--timeout",
-            "5",
+            "--global-store-endpoints",
+            "10.0.0.1:50051",
+            "--global-store-endpoints",
+            "10.0.0.2:50051",
             "--session",
             "sess-x",
+            "--stable-bytes",
+            "4GB",
+            "--mem-pool-size-bytes",
+            "8GB",
+            "--pinned-pool-bytes",
+            "2GB",
+            "--enable-rdma",
+            "--log-level",
+            "warn",
+            "--set",
+            "engine.tx_slice_bytes=64MB",
             "--json",
-            "--no-wait",
         ],
     )
     assert res.exit_code == 0
     assert captured["global_store_mode"] == "connect"
-    assert captured["global_store_address"] == "addr:1"
+    assert captured["global_store_address"] == "10.0.0.1:50051"
+    assert captured["ha_endpoints"] == ["10.0.0.1:50051", "10.0.0.2:50051"]
     assert captured["session_id"] == "sess-x"
-    assert captured["wait"] is False
+    assert captured["fate_share"] is False
+    assert set(captured["config_overrides"]) == {
+        "engine.memory_tiers.stable_bytes=4GB",
+        "engine.mem_pool_size_bytes=8GB",
+        "checkpoint.streaming.pinned_pool_bytes=2GB",
+        "communicator.enable_rdma=true",
+        "observability.logging.level=warn",
+        "engine.tx_slice_bytes=64MB",
+    }
+    assert "wait" not in captured
+    assert "timeout" not in captured
+
+
+def test_daemon_start_reports_existing(monkeypatch):
+    session = runtime.RuntimeSession(
+        session_id="sess-1",
+        daemon_pid=123,
+        daemon_address="127.0.0.1:6000",
+        daemon_p2p_address="127.0.0.1:7000",
+        logs_dir=None,
+        started_at=1.0,
+        owner=True,
+        global_store_mode="connect",
+        global_store_address="127.0.0.1:50051",
+        global_store_session="gs-1",
+        global_store_owner=False,
+        cluster_token="tok",
+    )
+    monkeypatch.setattr(cli_mod.runtime, "status", lambda _sid=None: session)
+
+    def _fail_start(**_kwargs):
+        raise AssertionError("runtime.start should not be called")
+
+    monkeypatch.setattr(cli_mod.runtime, "start", _fail_start)
+
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["daemon", "start"])
+    assert res.exit_code == 1
+    assert "Daemon session: sess-1" in res.output
 
 
 def test_global_status_json(monkeypatch):

@@ -10,7 +10,7 @@ from tensorcast import PlanType, RegisterArtifactOptions
 
 def main() -> None:
     # Connect to the Store Daemon
-    tc.init(address="127.0.0.1:50052")
+    tc.init(mode="connect", address="127.0.0.1:50052")
 
     # Create a tiny dummy state_dict
     state_dict: dict[str, torch.Tensor] = {

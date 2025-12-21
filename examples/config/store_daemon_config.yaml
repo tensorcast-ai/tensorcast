@@ -1,54 +1,261 @@
+# Config metadata for auditing and cluster safety.
+meta:
+  # Schema version label for auditing; keep empty unless you enforce schema checks.
+  schema_version: ""
+  # Free-form description for operators and change tracking.
+  description: ""
+  # Cluster identity token to prevent split-brain when talking to Global Store.
+  cluster_token: ""
+
+# gRPC server and daemon identity settings.
 server:
+  # Control-plane listen socket for the gRPC API.
   listen:
+    # Bind host for gRPC; use 0.0.0.0 to expose all NICs or a specific interface to fence access.
     host: 0.0.0.0
+    # gRPC listen port; this is the port advertised to Global Store regardless of advertise.port.
     port: 50052
-  # Optional: explicitly control the address advertised to the Global Store
-  # advertise:
-  #   host: 192.168.1.10
+  # Advertised address for Global Store registration; set when auto-detect might pick a non-routable IP.
+  advertise:
+    # Routable host that clients and Global Store should dial; avoid loopback and link-local.
+    host: ""
+    # Port is ignored by registration; keep aligned with listen.port if you set it.
+    port: 0
+  # Dedicated P2P listen socket; use a separate NIC/port to isolate data-plane traffic.
   p2p_listen:
+    # Bind host for P2P transfers; often set to the RDMA or high-bandwidth interface.
     host: 0.0.0.0
+    # P2P port; must be non-zero when high_availability.enabled is true.
     port: 65090
+  # Root directory for daemon-owned artifacts; disk materialization and fallback paths derive from here.
   storage_path: /data/models
+  # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
+  # gRPC server channel args and TLS.
+  grpc:
+    # Max concurrent HTTP/2 streams; 0 uses gRPC default.
+    max_concurrent_streams: 0
+    # Keepalive ping interval; set 0s to disable periodic pings.
+    keepalive_time: 30s
+    # Keepalive timeout before terminating a dead connection.
+    keepalive_timeout: 10s
+    # Close idle connections after this duration; 0s disables.
+    max_connection_idle: 10m
+    # Hard connection max age; 0s disables.
+    max_connection_age: 0s
+    # Disable Nagle when true; set true for low-latency RPCs.
+    tcp_nodelay: false
+    # Enable SO_REUSEPORT for listener load balancing.
+    so_reuseport: false
+    tls:
+      # Enable TLS for the daemon gRPC server.
+      enabled: false
+      # PEM-encoded server certificate.
+      cert_file: ""
+      # PEM-encoded private key for cert_file.
+      key_file: ""
+      # Optional client CA bundle for mTLS; empty disables client cert checks.
+      client_ca_file: ""
+
+# StoreEngine and data-plane memory/transfer tuning.
 engine:
+  # Pinned host pool for data-plane transfers; larger improves concurrency but reduces DRAM for UMA tiers.
   mem_pool_size_bytes: 8GB
+  # Transfer slice size (pinned pool block); must divide artifact_chunk_bytes to avoid cross-chunk slices.
   tx_slice_bytes: 256MB
+  # UMA chunk granularity; larger chunks reduce metadata but make eviction/leases coarser.
   artifact_chunk_bytes: 256MB
+  # Memory tiers define stable/preemptible behavior; tune for DRAM pressure and HA telemetry.
+  memory_tiers:
+    # When false, CPU chunks stay resident (no preemptible marking); use for stability or debugging.
+    enable_preemptible: false
+    # Stable budget in bytes; must fit in host DRAM minus mem_pool_size_bytes or startup fails.
+    stable_bytes: 4GB
+    # Cap for preemptible pool; ignored when enable_preemptible=false (0 means no preemptible budget).
+    preemptible_limit_bytes: 0
+    # Reclaim target ratio for preemptible pressure; lower values reclaim more aggressively.
+    preemptible_low_watermark_ratio: 0.4
+  # Upper bound on concurrent streaming sessions leasing pinned buffers from the shared pool.
   streaming_buffer_max_concurrent_sessions: 1
+  # Wait time for pinned buffer allocation under pressure; raise if large transfers outlive the default.
   pinned_allocation_timeout: 30s
+  # Optional disk fallback directory for P2P loads; invalid paths are ignored with a warning.
   p2p_fallback_disk_dir: ""
-  # Optional: limit daemon-served disk materialization to these path prefixes. Empty list allows all.
+  # Allowlist for daemon-side disk materialization; empty list permits all paths (use with care).
   disk_path_whitelist: []
+
+# Global Store registration and heartbeat coordination.
 high_availability:
+  # When true, the daemon registers with Global Store and emits heartbeats/sync; requires p2p_listen.port.
   enabled: true
+  # Global Store endpoints; keep the first entry as the primary registration target.
   global_store_endpoints:
-    - host: 127.0.0.1
+    -
+      # Host for Global Store gRPC; must be reachable from the daemon.
+      host: 127.0.0.1
+      # Port for Global Store gRPC.
       port: 50051
+  # Heartbeat cadence; lower values detect failures faster but add RPC load.
+  heartbeat_interval: 5s
+  # Chunk inventory sync cadence; set 0s to disable sync thread.
+  periodic_sync_interval: 10s
+  # Retry attempts for HA registration/requests; currently uses GlobalStoreClient defaults.
+  max_retries: 3
+  # Backoff between registration retries; currently not wired in the daemon.
+  registration_retry_delay: 100ms
+  # When true, an empty local inventory is treated as authoritative and removes replicas during sync.
+  force_full_sync_on_empty_inventory: false
+
+# Background cleanup, eviction, and TTL scheduling.
 lifecycle:
+  # GPU memory fraction that triggers eviction when periodic eviction is enabled; lower values evict earlier.
   gpu_memory_limit_fraction: 0.75
+  # Enable background eviction loop; disable if you want strictly demand-driven eviction.
   enable_periodic_eviction: false
+  # Eviction poll cadence; smaller improves responsiveness but increases background work.
   eviction_loop_interval: 1s
+  # Legacy alias for eviction_loop_interval; 0s keeps eviction_loop_interval in effect.
+  eviction_check_interval: 0s
+  # PID liveness polling interval used when pidfd is unavailable; shorter detects dead clients faster.
   proc_check_interval: 5s
+  # Sweep interval for session TTL cleanup; keep below sessions_ttl for timely reclamation.
   sessions_sweep_interval: 10s
+  # Sweep interval for transport lock expiry; keep below locks_ttl to avoid stale locks.
   locks_sweep_interval: 10s
+  # Sweep interval for verification tracker cleanup/timeouts; smaller reduces tail latency on failures.
   verification_sweep_interval: 500ms
+  # Session TTL; must exceed client keepalive cadence to avoid premature eviction.
   sessions_ttl: 60s
+  # Transport lock TTL; long enough for worst-case transfers but short enough to recover from leaks.
   locks_ttl: 120s
+
+# Communicator transport configuration (TCP/RDMA).
 communicator:
+  # Enable RDMA transport; requires RDMA-capable NICs and correct kernel/driver setup.
   enable_rdma: false
+  # Example tuning block (defaults shown below); adjust per workload.
+  stager:
+    # Stage CPU tensors for RDMA; disable only if you rely on direct GPU RDMA paths.
+    stage_cpu_for_rdma: true
+    # GPU staging chunk size (MB); larger boosts throughput but raises per-transfer latency.
+    stage_chunk_mb_gpu: 16
+    # CPU staging chunk size (MB); smaller favors latency, larger favors bandwidth.
+    stage_chunk_mb_cpu: 4
+    # Buffers per flow; more buffers increase overlap but require a larger pool.
+    buffers_per_flow: 4
+    # Cap concurrent in-flight segments; 0 inherits buffers_per_flow.
+    max_window_segments: 0
+    # Cap concurrent GPU channels so pool sizing is predictable (0 = auto).
+    expected_gpu_channels: 0
+    # Direct RDMA window size (MB); set 0 to inherit stage_chunk_mb_gpu.
+    direct_chunk_mb: 0
+  rdma:
+    # Outstanding WRs per QP; increase for bandwidth, decrease to reduce CPU/latency.
+    outstanding_wr: 64
+    # ACK TTL; increase on high-latency fabrics to avoid premature cleanup.
+    ack_ttl_ms: 30000
+    # QP tuning; adjust only if you understand fabric QoS/timeouts.
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
+  pool:
+    # Communicator pinned pool (separate from engine.mem_pool_size_bytes).
+    pool_size_bytes: 8GB
+    # Staging slice size; align with tx_slice_bytes or multiples for reuse.
+    chunk_bytes: 64MB
+    # Pre-register MRs for lower RDMA latency; disable to reduce startup cost.
+    preregister_mr: true
+  transport:
+    # TCP connections per peer; more lanes help bandwidth but add CPU overhead.
+    tcp_conn_count: 8
+    # Connect timeout; increase when handshakes are slow or firewalled.
+    connect_timeout_sec: 10
+    # TOS/DSCP value; keep 0 unless fabric QoS is configured.
+    tcp_tos: 0
+    # Allow SO_REUSEPORT on listeners; disable if OS load balancing is undesirable.
+    so_reuseport: true
+  affinity:
+    # Reserved for future CPU pinning policies.
+    enable: false
+  simple_numa:
+    # NIC/GPU locality mapping for multi-socket nodes.
+    enable: false
+    # Example topology mapping:
+    # nodes:
+    #   - id: 0
+    #     nics: ["mlx5_0", "mlx5_1"]
+    #     gpus: [0, 1]
+    #     is_default: true
+    nodes: []
+
+# Logging and tracing configuration (best-effort).
 observability:
+  # Logging output and verbosity controls.
   logging:
+    # Minimum severity emitted; higher levels reduce noise at the cost of debugging detail.
     level: INFO
+    # Optional plain-text logfile; empty logs only to stderr.
+    file: ""
+    # When true, include trace/span IDs in logs (if tracing is enabled).
+    otel_context_enabled: false
+    # Optional enriched sink file with trace/span IDs; leave empty to disable.
+    sink_file: ""
+    # VLOG verbosity level; 0 disables VLOG.
+    vlog_level: 0
+  # OpenTelemetry export settings.
   otel:
+    # Enable OTLP export; when false, other OTel settings are ignored.
     enabled: false
+    # Collector endpoint; must be reachable from the daemon host.
     exporter_otlp_endpoint: http://127.0.0.1:4317
+    # Transport protocol for OTLP; aliases like "grpc" or "http/protobuf" are normalized.
     exporter_protocol: grpc
+    # Stable logical service name for grouping traces/metrics across nodes.
     service_name: tensorcast-store-daemon
+    # Sampler name for Python OTel SDK; C++ currently ignores this field.
+    sampler: parentbased_traceidratio
+    # Sampler argument (ratio for traceidratio); keep 1.0 for full sampling.
+    sampler_arg: "1.0"
+  otel_cxx:
+    # Disable the C++ SDK when embedding in C++ processes.
+    sdk_disabled: false
+    # Force insecure OTLP gRPC; set true when using non-TLS collectors.
+    exporter_insecure: false
+    # Static OTLP headers (e.g., auth tokens).
+    exporter_headers: {}
+    # Emit spans to stdout for debugging.
+    console_exporter: false
+  tracing:
+    # Chrome trace output directory; empty disables.
+    chrome_trace_dir: ""
+
+# Compatibility toggles for legacy behavior.
+compatibility:
+  # Require explicit disk_path for confirm RPCs; reserved for legacy clients.
+  confirm_requires_disk_path: false
+  # Status to return on verification timeouts; set OK or DEADLINE when wired.
+  verification_timeout_status: VERIFICATION_TIMEOUT_STATUS_UNSPECIFIED
+  # Evict replicas on dead PID detection; reserved until wired.
+  evict_on_dead_pid: false
+  # Auto-register disk loads; reserved until wired.
+  auto_register_disk_loads: false
+  # Force full-digest verification on load; reserved until wired.
+  force_full_digest_on_load: false
+
+# Checkpoint streaming defaults used by save/restore flows.
 checkpoint:
+  # Streaming checkpoint IO tuning; larger buffers improve throughput but reserve more pinned memory.
   streaming:
+    # Number of in-flight buffers in the circular writer; scale with disk throughput and GPU overlap.
     num_buffers: 4
+    # Per-buffer IO chunk size; trade syscall overhead against latency and buffer reuse.
     io_chunk_bytes: 256MB
+    # Total pinned pool for streaming; keep >= num_buffers * io_chunk_bytes to avoid rounding up.
     pinned_pool_bytes: 2GB
+
+# Debug-only toggles; keep disabled in production unless explicitly needed.
 debug:
+  # CUDA debug toggles used for tests and local runs.
   cuda:
+    # Same-process CUDA IPC fallback for tests; breaks real IPC semantics across processes.
     enable_same_process_ipc_fallback: false

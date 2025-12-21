@@ -19,6 +19,7 @@ from tensorcast.cli_utils.paths import (
     runtime_state_path,
     session_paths,
 )
+from tensorcast.cli_utils.proc import is_matching_daemon_process
 from tensorcast.cli_utils.process import (
     clear_runtime_daemon,
     file_lock,
@@ -44,7 +45,7 @@ class RuntimeSession:
     logs_dir: Path | None
     started_at: float | None
     owner: bool | None = None
-    global_store_mode: Literal["auto", "connect", "start", "none"] | None = None
+    global_store_mode: Literal["connect", "start", "none"] | None = None
     global_store_address: str | None = None
     global_store_session: str | None = None
     global_store_owner: bool | None = None
@@ -53,7 +54,7 @@ class RuntimeSession:
 
 @dataclass(frozen=True)
 class _ResolvedGlobalStore:
-    mode: Literal["auto", "connect", "start", "none"]
+    mode: Literal["connect", "start", "none"]
     address: str | None
     session_id: str | None
     owner: bool
@@ -95,7 +96,7 @@ def _build_runtime_session(session_id: str) -> RuntimeSession | None:
         started_at_raw = session_state.get("started_at")
         if started_at_raw is not None:
             started_at = float(started_at_raw)
-    global_store_mode: Literal["auto", "connect", "start", "none"] | None = None
+    global_store_mode: Literal["connect", "start", "none"] | None = None
     global_store_address = None
     global_store_session = None
     global_store_owner = None
@@ -205,34 +206,62 @@ def reconcile(session_id: str | None = None) -> RuntimeSession | None:
         address = daemon_state.get("address")
         if isinstance(daemon_state.get("instance_fingerprint"), dict):
             runtime_fp = daemon_state["instance_fingerprint"]
-    if pid is None and isinstance(pids_data, dict):
-        procs = pids_data.get("processes", [])
-        if isinstance(procs, list) and procs:
-            for proc in procs:
-                try:
-                    candidate_pid = int(proc.get("pid", 0) or 0)
-                except Exception:
-                    candidate_pid = 0
-                if candidate_pid > 0:
-                    pid = candidate_pid
-                    break
+    processes: list[dict[str, Any]] = []
+    if isinstance(pids_data, dict):
+        raw_procs = pids_data.get("processes", [])
+        if isinstance(raw_procs, list):
+            processes = [proc for proc in raw_procs if isinstance(proc, dict)]
+
+    expected_cmd0: str | None = None
+    if pid is None and processes:
+        for proc in processes:
+            try:
+                candidate_pid = int(proc.get("pid", 0) or 0)
+            except Exception:
+                candidate_pid = 0
+            if candidate_pid > 0:
+                pid = candidate_pid
+                cmd = proc.get("cmd")
+                if isinstance(cmd, list) and cmd:
+                    expected_cmd0 = str(cmd[0])
+                break
+    if expected_cmd0 is None and pid is not None and processes:
+        for proc in processes:
+            try:
+                candidate_pid = int(proc.get("pid", 0) or 0)
+            except Exception:
+                candidate_pid = 0
+            if candidate_pid == pid:
+                cmd = proc.get("cmd")
+                if isinstance(cmd, list) and cmd:
+                    expected_cmd0 = str(cmd[0])
+                break
 
     fingerprint_mismatch = False
     if runtime_fp is not None:
-        current_fp = instance_fingerprint(pid)
-        try:
-            fingerprint_mismatch = runtime_fp.get("host_id") != current_fp.get(
-                "host_id"
-            ) or runtime_fp.get("boot_id") != current_fp.get("boot_id")
-        except Exception:
+        if pid is None:
             fingerprint_mismatch = True
+        else:
+            current_fp = instance_fingerprint(pid)
+            try:
+                fingerprint_mismatch = runtime_fp.get("host_id") != current_fp.get(
+                    "host_id"
+                ) or runtime_fp.get("boot_id") != current_fp.get("boot_id")
+            except Exception:
+                fingerprint_mismatch = True
 
     alive = pid is not None and is_process_alive(pid)
-    health_ok = alive and not fingerprint_mismatch
-    if health_ok and address:
+    health_ok = False
+    if address:
         health_ok = ping_daemon(address)
 
-    if not health_ok:
+    if health_ok:
+        session = _build_runtime_session(target_session)
+        if session is not None and pid is not None and not alive:
+            session.daemon_pid = None
+        return session
+
+    if not alive or fingerprint_mismatch or pid is None:
         reasons: list[str] = []
         if fingerprint_mismatch:
             reasons.append("instance fingerprint mismatch (boot/host changed)")
@@ -240,10 +269,16 @@ def reconcile(session_id: str | None = None) -> RuntimeSession | None:
             reasons.append("no recorded pid")
         elif not alive:
             reasons.append("pid not alive")
-        elif address:
-            reasons.append(f"health check failed for {address}")
         _prune_stale_session(
             target_session, pid, reason="; ".join(reasons) or "unhealthy"
+        )
+        return None
+
+    if expected_cmd0 and not is_matching_daemon_process(pid, expected_cmd0):
+        _prune_stale_session(
+            target_session,
+            pid,
+            reason="pid no longer matches tensorcast_daemon process",
         )
         return None
 
@@ -262,12 +297,11 @@ def _split_address(address: str | None) -> tuple[str | None, int | None]:
 
 def _resolve_global_store(
     *,
-    mode: Literal["auto", "connect", "start", "none"],
+    mode: Literal["connect", "start", "none"],
     address: str | None,
-    wait: bool,
-    timeout: float,
     allow_gs_fallback: bool,
     cluster_id: str | None,
+    fate_share: bool = True,
 ) -> _ResolvedGlobalStore:
     runtime_state = None
     with contextlib.suppress(Exception):
@@ -288,49 +322,90 @@ def _resolve_global_store(
             cluster_token=cluster_id or cluster_token_hint,
         )
 
-    candidates: list[str] = []
-    seen: set[str] = set()
-    for candidate in (
-        address,
-        os.environ.get("TENSORCAST_GLOBAL_STORE_ADDRESS"),
-        os.environ.get("TENSORCAST_GLOBAL_STORE"),
-        (runtime_gs.get("address") if isinstance(runtime_gs, dict) else None),
-    ):
-        if candidate and candidate not in seen:
-            candidates.append(candidate)
-            seen.add(candidate)
+    if address and mode != "connect":
+        raise ServiceError("global_store_address requires global_store_mode=connect")
 
-    for candidate in candidates:
-        health = ping_global_store(candidate, timeout=min(timeout, 2.0))
-        if not health:
-            continue
-        if cluster_id and health.cluster_token and health.cluster_token != cluster_id:
-            raise ServiceError(
-                f"Global Store at {candidate} has mismatched cluster token; expected {cluster_id}"
-            )
-        if (
-            cluster_token_hint
-            and health.cluster_token
-            and health.cluster_token != cluster_token_hint
-        ):
-            raise ServiceError(
-                f"Global Store at {candidate} has mismatched cluster token; expected "
-                "recorded runtime cluster token"
-            )
-        return _ResolvedGlobalStore(
-            mode="connect" if mode == "connect" else mode,
-            address=f"{health.listen_host}:{health.listen_port}"
-            if health.listen_host and health.listen_port
-            else candidate,
-            session_id=(
-                runtime_gs.get("session_id") if isinstance(runtime_gs, dict) else None
-            ),
-            owner=False,
-            cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
-        )
+    runtime_gs_session = (
+        runtime_gs.get("session_id") if isinstance(runtime_gs, dict) else None
+    )
+    runtime_gs_address = (
+        runtime_gs.get("address") if isinstance(runtime_gs, dict) else None
+    )
 
     if mode == "connect":
+        candidates: list[str] = []
+        seen: set[str] = set()
+        for candidate in (
+            address,
+            os.environ.get("TENSORCAST_GLOBAL_STORE_ADDRESS"),
+            os.environ.get("TENSORCAST_GLOBAL_STORE"),
+            runtime_gs_address,
+        ):
+            if candidate and candidate not in seen:
+                candidates.append(candidate)
+                seen.add(candidate)
+
+        for candidate in candidates:
+            health = ping_global_store(candidate, timeout=2.0)
+            if not health:
+                continue
+            if (
+                cluster_id
+                and health.cluster_token
+                and health.cluster_token != cluster_id
+            ):
+                raise ServiceError(
+                    f"Global Store at {candidate} has mismatched cluster token; expected {cluster_id}"
+                )
+            if (
+                cluster_token_hint
+                and health.cluster_token
+                and health.cluster_token != cluster_token_hint
+            ):
+                raise ServiceError(
+                    f"Global Store at {candidate} has mismatched cluster token; expected "
+                    "recorded runtime cluster token"
+                )
+            return _ResolvedGlobalStore(
+                mode="connect",
+                address=f"{health.listen_host}:{health.listen_port}"
+                if health.listen_host and health.listen_port
+                else candidate,
+                session_id=runtime_gs_session,
+                owner=False,
+                cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
+            )
+
         raise ServiceError("Global Store connect mode requires a reachable address")
+
+    if runtime_gs_address:
+        health = ping_global_store(runtime_gs_address, timeout=2.0)
+        if health:
+            if (
+                cluster_id
+                and health.cluster_token
+                and health.cluster_token != cluster_id
+            ):
+                raise ServiceError(
+                    f"Global Store cluster token mismatch; expected {cluster_id}"
+                )
+            if (
+                cluster_token_hint
+                and health.cluster_token
+                and health.cluster_token != cluster_token_hint
+            ):
+                raise ServiceError(
+                    "Global Store cluster token mismatch; expected recorded runtime cluster token"
+                )
+            return _ResolvedGlobalStore(
+                mode="start",
+                address=f"{health.listen_host}:{health.listen_port}"
+                if health.listen_host and health.listen_port
+                else runtime_gs_address,
+                session_id=runtime_gs_session,
+                owner=False,
+                cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
+            )
 
     if cluster_token_hint and not allow_gs_fallback:
         raise ServiceError(
@@ -342,11 +417,10 @@ def _resolve_global_store(
     try:
         inst = global_store_manager.start_global_store(
             cluster_token=cluster_id or cluster_token_hint,
-            wait=wait,
-            timeout=min(timeout, 15.0),
+            fate_share=fate_share,
         )
     except ServiceError:
-        if mode == "auto" and allow_gs_fallback:
+        if allow_gs_fallback:
             logger.warning(
                 "Global Store failed to start; continuing with global_store_mode=none"
             )
@@ -372,10 +446,10 @@ def start(
     *,
     daemon_config: Path | None = None,
     session_id: str | None = None,
-    wait: bool = True,
-    timeout: float = 30.0,
     global_store_address: str | None = None,
-    global_store_mode: Literal["auto", "connect", "start", "none"] = "auto",
+    global_store_mode: Literal["connect", "start", "none"] = "none",
+    config_overrides: list[str] | tuple[str, ...] | None = None,
+    ha_endpoints: list[str] | tuple[str, ...] | None = None,
     register_current: bool = True,
     ephemeral: bool = False,
     restrict_to_localhost: bool = False,
@@ -386,8 +460,9 @@ def start(
     allow_gs_fallback: bool = False,
     cluster_id: str | None = None,
     reuse_existing: bool = False,
+    fate_share: bool = True,
 ) -> RuntimeSession:
-    existing = reconcile(session_id)
+    existing = reconcile()
     if existing is not None:
         if reuse_existing:
             return existing
@@ -399,16 +474,21 @@ def start(
     resolved_gs = _resolve_global_store(
         mode=global_store_mode,
         address=global_store_address,
-        wait=wait,
-        timeout=timeout,
         allow_gs_fallback=allow_gs_fallback,
         cluster_id=cluster_id,
+        fate_share=fate_share,
     )
-    ha_endpoints = (
-        [resolved_gs.address]
-        if resolved_gs.address and resolved_gs.mode != "none"
-        else []
-    )
+    resolved_ha_endpoints: list[str] = []
+    if resolved_gs.mode != "none":
+        if ha_endpoints:
+            resolved_ha_endpoints = list(ha_endpoints)
+            if resolved_gs.address:
+                if resolved_ha_endpoints:
+                    resolved_ha_endpoints[0] = resolved_gs.address
+                else:
+                    resolved_ha_endpoints = [resolved_gs.address]
+        elif resolved_gs.address:
+            resolved_ha_endpoints = [resolved_gs.address]
     gs_state: dict[str, Any] = {
         "mode": resolved_gs.mode,
         "required": resolved_gs.mode != "none",
@@ -433,19 +513,19 @@ def start(
         session_id=inst_paths.id,
         blocking=blocking,
         to_console=to_console,
-        wait=wait,
-        timeout=timeout,
         register_current=register_current,
         publish_meta=True,
         ephemeral=ephemeral,
         persist_runtime_state=True,
         owner=True,
         restrict_to_localhost=restrict_to_localhost,
+        config_overrides=config_overrides,
         global_store=gs_state,
         listen_host=listen_host,
         listen_port=listen_port,
-        ha_endpoints=ha_endpoints or None,
+        ha_endpoints=resolved_ha_endpoints or None,
         ha_enabled=resolved_gs.mode != "none",
+        fate_share=fate_share,
     )
 
     if resolved_gs.address and not resolved_gs.owner and resolved_gs.mode != "none":
@@ -476,9 +556,17 @@ def start(
 
 
 def stop(*, session_id: str | None = None, force: bool = False) -> None:
-    sid = session_id or get_current_session_id()
+    sid = session_id
     if not sid:
-        raise ServiceError("No session id provided and no current session found")
+        existing = reconcile()
+        if existing is not None:
+            sid = existing.session_id
+    if not sid:
+        sid = get_current_session_id()
+    if not sid:
+        raise ServiceError(
+            "No local daemon session found. Start one with 'tensorcast daemon start'."
+        )
 
     session_state = None
     with contextlib.suppress(Exception):

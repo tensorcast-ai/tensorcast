@@ -48,7 +48,7 @@ Session state (schema_version=1)
     "binary": "/path/to/tensorcast_daemon"
   },
   "global_store": {
-    "mode": "auto",
+    "mode": "connect",
     "required": true,
     "address": "127.0.0.1:50051",
     "session": "gs-20240604T1159Z"
