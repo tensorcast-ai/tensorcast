@@ -44,7 +44,7 @@ sc_cc_library(
         "@nvjitlink//:nvJitLink",
     ] + select({
         ":use_fake_cuda": [],
-        "//conditions:default": [],
+        "//conditions:default": ["@cusolver"],
     }),
     alwayslink = True,
 )
