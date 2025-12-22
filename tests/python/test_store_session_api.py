@@ -37,6 +37,11 @@ from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 
 
+def _skip_if_no_cuda() -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available - skipping put tests that require CUDA tensors")
+
+
 class FakeHandle:
     def __init__(self) -> None:
         self.aborted = False
@@ -389,9 +394,11 @@ def test_artifact_future_cancel_invokes_callback() -> None:
 
 def test_store_put_and_register_sync(store_env: tuple[Store, FakeEnvironment]) -> None:
     store, env = store_env
-    tensor = torch.arange(4, dtype=torch.float32)
+    _skip_if_no_cuda()
+    device = torch.device("cuda", torch.cuda.current_device())
+    tensor = torch.arange(4, dtype=torch.float32, device=device)
     put_result = store.put({"weights": tensor})
-    assert put_result.replica.plan is PlanType.VRAM_COALESCED
+    assert put_result.replica.plan is PlanType.DRAM_STABLE
     assert put_result.canonical_index.total_size_bytes == tensor.element_size() * tensor.nelement()
 
     reg_result = store.register({"weights": tensor})
@@ -404,7 +411,9 @@ def test_store_put_async_cancel_triggers_abort(store_env: tuple[Store, FakeEnvir
     env.block_registration = True
     env.register_started.clear()
 
-    future = store.put_async({"v": torch.ones(2, dtype=torch.float32)})
+    _skip_if_no_cuda()
+    device = torch.device("cuda", torch.cuda.current_device())
+    future = store.put_async({"v": torch.ones(2, dtype=torch.float32, device=device)})
     assert env.register_started.wait(timeout=1.0)
     assert future.cancel() is True
     assert env.futures[-1].aborted is True

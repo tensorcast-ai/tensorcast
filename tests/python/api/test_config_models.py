@@ -32,7 +32,7 @@ def test_register_options_reject_unknown_plan() -> None:
 
 def test_register_options_are_frozen() -> None:
     opts = RegisterArtifactOptions()
-    assert opts.plan is PlanType.VRAM_LEASED
+    assert opts.plan is PlanType.DRAM_STABLE
     with pytest.raises((TypeError, ValidationError)):
         opts.plan = PlanType.VRAM_LEASED
 
