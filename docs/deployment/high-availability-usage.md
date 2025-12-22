@@ -81,6 +81,7 @@ uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml
 
 - Use a persistent DuckDB path (`database.db_file`) for recovery.
 - The CLI persists `cluster_token` under `~/.tensorcast/runtime/cluster_token` to detect split-brain and returns the metrics port in the startup log.
+- Add `--blocking` to keep the Global Store attached to the CLI and stop it when the CLI exits.
 
 ### Start Store Daemon with HA
 
@@ -93,6 +94,7 @@ uv run tensorcast daemon start \
 
 - The orchestrator writes an effective config that enables HA, injects the Global Store endpoint, and fills missing listen/p2p ports.
 - Startup will fail fast if `server.p2p_listen.port` is zero or if `advertise.host` is loopback/unspecified.
+- Add `--blocking` to keep the daemon attached to the CLI and stop it when the CLI exits (SIGTERM with a ~35s grace before SIGKILL).
 
 ### Manual RPC examples (generated stubs)
 
@@ -168,7 +170,7 @@ resp = stub.SynchronizeWorkerState(
 - Use persistent storage for the Global Store database; back up `cluster_token` with it.
 - Set a routable `server.advertise.host` and non-zero `server.p2p_listen.port` before enabling HA.
 - Only enable `high_availability.force_full_sync_on_empty_inventory` when deliberately draining/retiring a node; otherwise keep the default conservative behavior.
-- Start is blocking and returns only when services are healthy (or on error) before clients connect.
+- Start always waits for readiness and returns only when services are healthy (or on error) before clients connect; `--blocking` keeps the process attached after readiness.
 - Keep configs proto-valid (strict parsing) and avoid relying on multiple endpoints—the first `global_store_endpoints` entry is used today.
 
 ## Migration from Legacy Setup

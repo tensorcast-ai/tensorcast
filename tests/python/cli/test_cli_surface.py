@@ -102,6 +102,36 @@ def test_daemon_start_passes_options(monkeypatch):
     assert "timeout" not in captured
 
 
+def test_daemon_start_blocking_passes_flags(monkeypatch):
+    captured = {}
+
+    def _fake_start(**kwargs):
+        captured.update(kwargs)
+        return runtime.RuntimeSession(
+            session_id="sess-blocking",
+            daemon_pid=999,
+            daemon_address="127.0.0.1:50052",
+            daemon_p2p_address=None,
+            logs_dir=None,
+            started_at=2.0,
+            owner=True,
+            global_store_mode=kwargs.get("global_store_mode"),
+            global_store_address=kwargs.get("global_store_address"),
+            global_store_session=None,
+            global_store_owner=False,
+            cluster_token=None,
+        )
+
+    monkeypatch.setattr(cli_mod.runtime, "start", _fake_start)
+    monkeypatch.setattr(cli_mod.runtime, "status", lambda _sid=None: None)
+
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["daemon", "start", "--blocking"])
+    assert res.exit_code == 0
+    assert captured["blocking"] is True
+    assert captured["fate_share"] is True
+
+
 def test_daemon_start_reports_existing(monkeypatch):
     session = runtime.RuntimeSession(
         session_id="sess-1",
@@ -174,3 +204,28 @@ def test_global_start_echo(monkeypatch):
     payload = json.loads(res.output)
     assert payload["session_id"] == "gs-2"
     assert payload["address"] == "127.0.0.1:50052"
+
+
+def test_global_start_blocking_passes_flags(monkeypatch):
+    captured = {}
+    inst = SimpleNamespace(
+        id="gs-3",
+        pid=333,
+        address="127.0.0.1:50053",
+        metrics_port=8002,
+        logs_dir="/logs",
+    )
+
+    def _fake_start_global_store(**kwargs):
+        captured.update(kwargs)
+        return inst
+
+    monkeypatch.setattr(
+        cli_mod.global_store_manager, "start_global_store", _fake_start_global_store
+    )
+
+    runner = CliRunner()
+    res = runner.invoke(cli_mod.cli, ["global", "start", "--blocking"])
+    assert res.exit_code == 0
+    assert captured["blocking"] is True
+    assert captured["fate_share"] is True

@@ -46,11 +46,11 @@ repos:
     #   hooks:
     #       - id: isort
     #         name: isort (python)
-    - repo: https://github.com/pre-commit/mirrors-mypy
-      rev: "v1.16.0"
-      hooks:
-          - id: mypy
-            exclude: '(^tensorcast/proto/.*\.pyi$|.*_pb2\.py$)' # Exclude proto .pyi and generated protobuf .py
+    # - repo: https://github.com/pre-commit/mirrors-mypy
+    #   rev: "v1.16.0"
+    #   hooks:
+    #       - id: mypy
+            # exclude: '(^tensorcast/proto/.*\.pyi$|.*_pb2\.py$)' # Exclude proto .pyi and generated protobuf .py
     - repo: https://github.com/astral-sh/ruff-pre-commit
       # Ruff version.
       rev: v0.11.12

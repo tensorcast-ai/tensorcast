@@ -45,6 +45,10 @@ when only the binary is present on disk.
 
 During startup, the CLI can mirror daemon stdout and stderr into the invoking
 terminal in addition to persisting them under `~/.tensorcast/sessions/<id>/logs`.
+By default the daemon runs in the background after `tensorcast-cli daemon start`
+returns; add `--blocking` to keep it attached to the CLI, stream logs to the
+terminal, and stop it when the CLI exits (SIGTERM with a ~35s grace before
+SIGKILL).
 
 ## Manage Daemon Sessions
 
@@ -69,7 +73,7 @@ uv run tensorcast-cli daemon status
 # Logs (stdout by default, --stderr for stderr; add -f to follow)
 uv run tensorcast-cli daemon logs -f
 
-# Stop current session (SIGTERM with SIGKILL fallback)
+# Stop current session (SIGTERM with a ~35s grace before SIGKILL)
 uv run tensorcast-cli daemon stop
 ```
 
