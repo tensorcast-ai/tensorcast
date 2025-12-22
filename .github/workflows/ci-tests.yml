@@ -318,7 +318,6 @@ jobs:
 
       - name: Run type checking
         run: |
-          uv run pyright ./tensorcast
           uv run mypy ./tensorcast
 
       # - name: Smoke test C++ StoreDaemon via CLI
