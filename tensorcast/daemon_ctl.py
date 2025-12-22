@@ -15,6 +15,7 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
 from tensorcast.api._config import PlacementPolicy
+from tensorcast.api._errors import TensorCastError
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -45,6 +46,7 @@ from tensorcast.types import (
     RegisterStorage,
     RegisterTensorAlias,
     ServerConfig,
+    StableDramHandshake,
     VramRegionHandle,
 )
 
@@ -1207,6 +1209,12 @@ class DaemonCtl:
                 )
             elif resp.HasField("lease"):
                 handshake = LeaseHandshake()
+            elif resp.HasField("stable_dram"):
+                handshake = StableDramHandshake(
+                    staging_cuda_ipc_handle=bytes(
+                        resp.stable_dram.staging_cuda_ipc_handle
+                    )
+                )
             else:
                 # Should not happen
                 raise RuntimeError("BeginRegisterArtifact: missing handshake")
@@ -1735,10 +1743,13 @@ class DaemonCtl:
                     span=span,
                     retries=1,
                 )
-                return bool(resp.ok)
+                if not resp.ok:
+                    reason = resp.conflict_reason or "key already mapped"
+                    raise TensorCastError(f"Failed to publish key '{key}': {reason}")
+                return True
             except grpc.RpcError as e:
                 logger.error(f"PublishReplicaKey failed: {e}")
-                return False
+                raise
 
     # ------------------------------------------------------------------
     # RFC-0014 helpers to keep API layer decoupled from Global Store

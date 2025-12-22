@@ -104,6 +104,10 @@ class Replica {
   [[nodiscard]] std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal_for(
       common::memory::MemoryLocation target_location) const ABSL_LOCKS_EXCLUDED(mutex_);
 
+  absl::Status mark_loaded(common::memory::MemoryLocation location) ABSL_LOCKS_EXCLUDED(mutex_);
+  void set_ready_signal(common::memory::MemoryLocation location, const absl::Status& status)
+      ABSL_LOCKS_EXCLUDED(mutex_);
+
   /**
    * @brief Releases the memory associated with the specified location.
    *        Refuses to release if the memory is currently LOADING.

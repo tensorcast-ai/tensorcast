@@ -61,6 +61,8 @@ from tensorcast.types import (
     LeaseSegment,
     RegisterStorage,
     RegisterTensorAlias,
+    StableDramHandshake,
+    StableDramPlan,
 )
 
 # Internal alignment hint for layout computation.
@@ -337,12 +339,15 @@ def _upsert_key_mapping_if_needed(
         ok = client.publish_replica_key(
             key=key, descriptor=descriptor, disk_path=disk_path or ""
         )
-        if not ok:
-            logger.warning(
-                "Daemon refused to publish key %s for artifact %s", key, artifact_id
-            )
+    except TensorCastError:
+        raise
     except Exception:  # noqa: BLE001
         logger.exception("Failed to publish key %s via daemon", key)
+        return
+    if not ok:
+        raise TensorCastError(
+            f"Failed to publish key '{key}': daemon refused mapping for {artifact_id}"
+        )
 
 
 def _persist_publish_if_needed(
@@ -371,6 +376,8 @@ def _persist_publish_if_needed(
                 descriptor=desc,
                 client=client,
             )
+        except TensorCastError:
+            raise
         except Exception:
             pass
     else:
@@ -796,8 +803,16 @@ def _materialize_canonical_tensors(
 
 def make_plan_model(
     options: RegisterArtifactOptions, total_size_bytes: int | None = None
-) -> CoalescedPlan | LeasePlan:
+) -> CoalescedPlan | LeasePlan | StableDramPlan:
     plan_type: PlanType = options.plan
+    if plan_type is PlanType.DRAM_STABLE:
+        if not options.stage_on_gpu:
+            raise InvalidPlan("dram_stable with stage_on_gpu=false is not implemented")
+        return StableDramPlan(
+            kind="dram_stable",
+            stage_on_gpu=options.stage_on_gpu,
+            release_gpu_on_commit=options.release_gpu_on_commit,
+        )
     if plan_type is PlanType.VRAM_COALESCED:
         return CoalescedPlan(
             kind="coalesced",
@@ -836,6 +851,55 @@ class _CoalescedUploader:
             raise TensorCastError("Unexpected handshake type for coalesced plan")
         cuda_handle = handshake.daemon_ipc_handle
         base_ptr = get_cuda_memory_ptr(ctx.device_id, cuda_handle)
+        dest_state_dict = restore_tensors(
+            ctx.tensor_meta_index,
+            {ctx.device_id: int(base_ptr)},
+            layout.offsets,
+            True,
+        )
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError
+        for name, src in artifact.items():
+            if cancel_event and cancel_event.is_set():
+                raise CancelledError
+            dst = dest_state_dict[name]
+            local = src
+            if not local.is_cuda:
+                local = local.to(torch.device("cuda", ctx.device_id), non_blocking=True)
+            else:
+                if (local.device.index or 0) != int(ctx.device_id):
+                    raise DeviceMismatch(
+                        f"Tensor '{name}' device mismatch: expected cuda:{ctx.device_id}, got {local.device}"
+                    )
+            if local.dtype != dst.dtype:
+                local = local.to(dst.dtype)
+            if tuple(local.shape) != tuple(dst.shape):
+                raise DeviceMismatch(
+                    f"Shape mismatch for tensor '{name}': {tuple(local.shape)} vs {tuple(dst.shape)}"
+                )
+            dst.copy_(local, non_blocking=True)
+        if cancel_event and cancel_event.is_set():
+            raise CancelledError
+        torch.cuda.synchronize(ctx.device_id)
+        return dest_state_dict
+
+
+class _StableDramUploader:
+    def upload(
+        self,
+        *,
+        artifact: dict[str, torch.Tensor],
+        ctx: BuildContext,
+        layout: CoalescedLayout,
+        handle: RegisteredArtifact,
+        handshake: Handshake,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if not isinstance(handshake, StableDramHandshake):
+            raise TensorCastError("Unexpected handshake type for dram_stable plan")
+        if not handshake.staging_cuda_ipc_handle:
+            raise TensorCastError("dram_stable requires a staging CUDA IPC handle")
+        base_ptr = get_cuda_memory_ptr(ctx.device_id, handshake.staging_cuda_ipc_handle)
         dest_state_dict = restore_tensors(
             ctx.tensor_meta_index,
             {ctx.device_id: int(base_ptr)},
@@ -998,6 +1062,7 @@ class _LeaseUploader:
 
 
 PLAN_REGISTRY: dict[PlanType, object] = {
+    PlanType.DRAM_STABLE: _StableDramUploader(),
     PlanType.VRAM_COALESCED: _CoalescedUploader(),
     PlanType.VRAM_LEASED: _LeaseUploader(),
 }
@@ -1091,6 +1156,8 @@ def _register_artifact_core(
         plan_model = make_plan_model(options, layout.total_size)
 
     # Plan input-mode constraints
+    if plan_type is PlanType.DRAM_STABLE and not options.stage_on_gpu:
+        raise InvalidPlan("dram_stable with stage_on_gpu=false is not implemented")
     if plan_type is PlanType.VRAM_LEASED and ctx.input_mode != "cuda":
         raise DeviceMismatch(
             "vram_leased plan requires CUDA tensors (device_id must be inferred)"
@@ -1099,6 +1166,7 @@ def _register_artifact_core(
         raise InvalidPlan("View registration requires vram_coalesced plan")
 
     span_names = {
+        PlanType.DRAM_STABLE: "Client/RegisterArtifact.StableDram",
         PlanType.VRAM_COALESCED: "Client/RegisterArtifact.Coalesced",
         PlanType.VRAM_LEASED: "Client/RegisterArtifact.Lease",
     }
@@ -1187,7 +1255,7 @@ def _register_artifact_core(
         with handle:
             try:
                 # Upload per plan
-                if isinstance(registrar, _CoalescedUploader):
+                if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
                     state_dict = registrar.upload(
                         artifact=artifact,
                         ctx=ctx,
@@ -1200,12 +1268,21 @@ def _register_artifact_core(
                         raise CancelledError
                     commit_res = handle.commit(timeout_s=60.0)
                     desc = commit_res.descriptor
-                    _persist_publish_if_needed(
-                        desc=desc,
-                        options=options,
-                        state_dict_to_save=state_dict,
-                        client=ctl,
-                    )
+                    if isinstance(registrar, _StableDramUploader):
+                        _persist_publish_if_needed(
+                            desc=desc,
+                            options=options,
+                            state_dict_to_save=artifact,
+                            client=ctl,
+                        )
+                        state_dict = None
+                    else:
+                        _persist_publish_if_needed(
+                            desc=desc,
+                            options=options,
+                            state_dict_to_save=state_dict,
+                            client=ctl,
+                        )
                     return RegistrationResult(
                         state_dict=state_dict,
                         descriptor=desc,

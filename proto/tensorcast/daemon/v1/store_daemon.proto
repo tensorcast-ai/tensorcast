@@ -463,6 +463,7 @@ message BeginRegisterArtifactRequest {
   oneof plan {
     CoalescedOptions coalesced = 10;
     LeaseOptions lease = 12;
+    StableDramOptions stable_dram = 13;
   }
 
   ViewRegistrationOptions view = 1001;
@@ -487,6 +488,11 @@ message LeaseOptions {
   bool in_place = 4; // When true, Commit registers an in-place lease (LIP)
 }
 
+message StableDramOptions {
+  bool stage_on_gpu = 1;
+  bool release_gpu_on_commit = 2;
+}
+
 // Begin registration response
 message BeginRegisterArtifactResponse {
   string registration_id = 1; // Registration ID for subsequent calls
@@ -495,6 +501,7 @@ message BeginRegisterArtifactResponse {
   oneof handshake {
     CoalescedHandshake coalesced = 10;
     LeaseHandshake lease = 12;
+    StableDramHandshake stable_dram = 13;
   }
 }
 
@@ -503,6 +510,10 @@ message CoalescedHandshake {
 }
 
 message LeaseHandshake {}
+
+message StableDramHandshake {
+  bytes staging_cuda_ipc_handle = 1;
+}
 
 // Stream variants must not reuse unary messages per lint
 message FeedRegisterArtifactStreamRequest {

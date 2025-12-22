@@ -193,7 +193,12 @@ class CanonicalIndex:
     avbs_hash: str
 
 
-ReplicaType = Literal["COALESCED_VRAM", "VRAM_LEASE_IN_PLACE", "VRAM_LEASED"]
+ReplicaType = Literal[
+    "COALESCED_VRAM",
+    "DRAM_STABLE",
+    "VRAM_LEASE_IN_PLACE",
+    "VRAM_LEASED",
+]
 
 
 @dataclass(frozen=True)

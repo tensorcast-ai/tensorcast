@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import threading
 import time
@@ -27,6 +28,7 @@ from tensorcast.api._register import (
     _register_artifact_core,
 )
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
+from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
     canonical_index_from_bytes,
     canonical_index_from_result,
@@ -228,6 +230,15 @@ class RegistrationPipeline:
             view_registration=view_ctx,
         )
 
+    @staticmethod
+    def _require_cuda_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
+        if any(not tensor.is_cuda for tensor in tensors.values()):
+            raise ArtifactError(
+                "put requires CUDA tensors; CPU tensors are not supported yet",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
     def put(
         self,
         tensors: Mapping[str, torch.Tensor],
@@ -237,13 +248,16 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
+        self._require_cuda_tensors(tensors)
         return self._perform_registration(
             tensors,
             artifact_id=artifact_id,
             key=key,
-            plan=PlanType.VRAM_COALESCED,
+            plan=PlanType.DRAM_STABLE,
             options_override=options,
             device_override=device,
+            cache_on_success=True,
+            force_plan=False,
         )
 
     def put_async(
@@ -255,6 +269,7 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
+        self._require_cuda_tensors(tensors)
         cancel_event = threading.Event()
         handle_lock = threading.Lock()
         handle_ref: dict[str, _RegisterHandle | None] = {"handle": None}
@@ -269,11 +284,13 @@ class RegistrationPipeline:
                     tensors,
                     artifact_id=artifact_id,
                     key=key,
-                    plan=PlanType.VRAM_COALESCED,
+                    plan=PlanType.DRAM_STABLE,
                     cancel_event=cancel_event,
                     on_begin=_on_begin,
                     options_override=options,
                     device_override=device,
+                    cache_on_success=True,
+                    force_plan=False,
                 )
             finally:
                 with handle_lock:
@@ -438,6 +455,44 @@ class RegistrationPipeline:
             persistence_task_id=persistence_task_id,
         )
 
+    @staticmethod
+    def _compute_generation(canonical_index_bytes: bytes) -> int | None:
+        if not canonical_index_bytes:
+            return None
+        digest = hashlib.sha256(canonical_index_bytes).digest()
+        return int.from_bytes(digest[:8], "big")
+
+    def _cache_local_metadata(
+        self,
+        result: RegisteredArtifact,
+        *,
+        key: str | None,
+        options: RegisterArtifactOptions | None,
+    ) -> None:
+        artifact_id = result.artifact_id
+        if not artifact_id:
+            return
+        resolved_key = key or (options.key if options is not None else None)
+        disk_path = None
+        if options is not None and options.disk_path:
+            disk_path = options.disk_path
+        if resolved_key:
+            self._runtime.cache_key_mapping(
+                resolved_key, artifact_id=artifact_id, disk_path=disk_path
+            )
+        registration = result.registration_result
+        if registration is None or not registration.index_bytes:
+            return
+        entry = ArtifactCacheEntry(
+            artifact_id=artifact_id,
+            canonical_index_bytes=registration.index_bytes,
+            parsed_index=result.canonical_index,
+            generation=self._compute_generation(registration.index_bytes),
+            disk_path=disk_path,
+            expires_at=time.monotonic(),
+        )
+        self._runtime.cache_artifact_index(entry)
+
     def _perform_registration(
         self,
         tensors: Mapping[str, torch.Tensor],
@@ -451,14 +506,31 @@ class RegistrationPipeline:
         ttl_override: int | None = None,
         device_override: int | torch.device | None = None,
         view_registration: ViewRegistrationContext | None = None,
+        cache_on_success: bool = False,
+        force_plan: bool = True,
     ) -> RegisteredArtifact:
-        method = "register" if plan is PlanType.VRAM_LEASED else "put"
-        span_name = "Store/Register" if plan is PlanType.VRAM_LEASED else "Store/Put"
+        resolved_plan = plan
+        resolved_options = options_override
+        resolved_key = key
+        if options_override is not None:
+            if force_plan:
+                if options_override.plan is not plan:
+                    resolved_options = options_override.model_copy(
+                        update={"plan": plan}
+                    )
+            else:
+                resolved_plan = options_override.plan
+            if resolved_key is None:
+                resolved_key = options_override.key
+        method = "register" if resolved_plan is PlanType.VRAM_LEASED else "put"
+        span_name = (
+            "Store/Register" if resolved_plan is PlanType.VRAM_LEASED else "Store/Put"
+        )
         attributes: dict[str, SpanAttributeValue] = {
             "tc.store.daemon": self._runtime.daemon_endpoint,
             "tc.store.session_id": self._runtime.session_id,
-            "tc.store.plan": plan.value,
-            "tc.store.key_present": bool(key),
+            "tc.store.plan": resolved_plan.value,
+            "tc.store.key_present": bool(resolved_key),
             "tc.store.client_artifact_id": artifact_id or "",
         }
         policy = self._runtime.retry_policies.get(method)
@@ -491,23 +563,29 @@ class RegistrationPipeline:
                     result = self._attempt_registration(
                         tensors,
                         artifact_id=artifact_id,
-                        key=key,
-                        plan=plan,
+                        key=resolved_key,
+                        plan=resolved_plan,
                         cancel_event=cancel_event,
                         on_begin=on_begin,
-                        options_override=options_override,
+                        options_override=resolved_options,
                         ttl_override=ttl_override,
                         device_override=device_override,
                         view_registration=view_registration,
                     )
                     self._runtime.invalidate_artifact(
-                        result.artifact_id, key=key, reason="registration"
+                        result.artifact_id, key=resolved_key, reason="registration"
                     )
+                    if cache_on_success:
+                        self._cache_local_metadata(
+                            result, key=resolved_key, options=resolved_options
+                        )
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
                     span.set_attribute("tc.replica.type", result.replica.replica_type)
+                    device_index = result.replica.device.index
                     span.set_attribute(
-                        "tc.device.id", int(result.replica.device.index or 0)
+                        "tc.device.id",
+                        int(device_index) if device_index is not None else -1,
                     )
                     span.set_status(Status(StatusCode.OK))
                     span.set_attribute("tc.artifact.id", result.artifact_id)

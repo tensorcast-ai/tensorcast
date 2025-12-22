@@ -162,6 +162,8 @@ grpc::Status RegistrationController::begin(
   RegistrationManager::RegPlan plan = RegistrationManager::RegPlan::COALESCED;
   if (req.has_lease())
     plan = RegistrationManager::RegPlan::LEASE;
+  if (req.has_stable_dram())
+    plan = RegistrationManager::RegPlan::STABLE_DRAM;
   RegistrationManager::RegMeta meta;
   meta.plan = plan;
   meta.total_size = req.total_size();
@@ -180,6 +182,10 @@ grpc::Status RegistrationController::begin(
   }
   if (req.has_lease())
     meta.lease_in_place = req.lease().in_place();
+  if (req.has_stable_dram()) {
+    meta.stage_on_gpu = req.stable_dram().stage_on_gpu();
+    meta.release_gpu_on_commit = req.stable_dram().release_gpu_on_commit();
+  }
   if (req.has_ttl_ms() && req.ttl_ms() > 0) {
     meta.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req.ttl_ms());
     meta.ttl_ms = static_cast<uint32_t>(req.ttl_ms());
@@ -211,7 +217,7 @@ grpc::Status RegistrationController::begin(
     meta.view_allow_partial = view_reg.allow_partial;
   }
 
-  if (plan == RegistrationManager::RegPlan::COALESCED) {
+  if (plan == RegistrationManager::RegPlan::COALESCED || plan == RegistrationManager::RegPlan::STABLE_DRAM) {
     if (req.has_tensor_index_key())
       reg.tensor_index_key = req.tensor_index_key();
     if (req.has_tensor_index_data()) {
@@ -222,22 +228,41 @@ grpc::Status RegistrationController::begin(
     if (!meta.client_artifact_id.empty()) {
       reg.client_artifact_id = meta.client_artifact_id;
     }
+    if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+      reg.plan = store::runtime::metadata::RegistrationPlan::kStableDram;
+      reg.stable_dram.stage_on_gpu = meta.stage_on_gpu;
+      reg.stable_dram.release_gpu_on_commit = meta.release_gpu_on_commit;
+      if (!meta.stage_on_gpu) {
+        return {StatusCode::UNIMPLEMENTED, "dram_stable with stage_on_gpu=false is not implemented"};
+      }
+    }
     auto begin_or = d_.engine.begin_register_artifact(reg);
     if (!begin_or.ok())
       return to_grpc_status(begin_or.status());
     const auto& out = begin_or.value();
     resp.set_registration_id(out.registration_id);
-    auto* hs = resp.mutable_coalesced();
-    hs->set_daemon_ipc_handle(
-        reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+    if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+      auto* hs = resp.mutable_stable_dram();
+      hs->set_staging_cuda_ipc_handle(
+          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+    } else {
+      auto* hs = resp.mutable_coalesced();
+      hs->set_daemon_ipc_handle(
+          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+    }
     resp.set_device_id(out.device_id);
     resp.set_total_size(out.size_bytes);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_begin_coalesced_total");
-      counter->Add(1.0);
+      static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_begin_coalesced_total");
+      static auto stable_counter = meter->CreateDoubleCounter("tc_register_begin_stable_dram_total");
+      if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+        stable_counter->Add(1.0);
+      } else {
+        coalesced_counter->Add(1.0);
+      }
     } catch (...) {
-      VLOG(1) << "metrics counter tc_register_begin_coalesced_total unavailable";
+      VLOG(1) << "metrics counter tc_register_begin_(stable_dram|coalesced)_total unavailable";
     }
     d_.reg.set_meta(out.registration_id, meta);
     rctx.mark_success();
@@ -822,14 +847,10 @@ grpc::Status RegistrationController::commit(
       }
     }
     if (out.existed) {
-      // Join reference to existing GPU replica for coalesced plan duplicates
-      store::loading::ReplicaKey key{
-          .artifact_id = out.artifact_id,
-          .device = store::DeviceKey{.type = DeviceType::GPU, .ordinal = meta.device_id, .uuid = ""},
-          .replica = 0};
+      store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
       d_.refs.add_ref(key, meta.owner_pid);
-      if (d_.lifecycle && meta.ttl_ms > 0) {
-        SessionLifecycleManager::ReplicaSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
+      if (d_.lifecycle && meta.ttl_ms > 0 && out.device.type == DeviceType::GPU) {
+        SessionLifecycleManager::ReplicaSubject subj{.artifact_id = out.artifact_id, .device_id = out.device.ordinal};
         auto lease_or = d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
         if (lease_or.ok()) {
           meta.use_lease_id = *lease_or;
@@ -837,6 +858,7 @@ grpc::Status RegistrationController::commit(
           LOG(ERROR) << "failed to create ttl use lease: " << lease_or.status();
         }
       }
+      meta.device_id = out.device.ordinal;
       meta.joined_existing = true;
       meta.artifact_id_mi2 = out.artifact_id;
       d_.reg.set_meta(req.registration_id(), meta);
@@ -845,10 +867,15 @@ grpc::Status RegistrationController::commit(
     }
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
-      counter->Add(1.0);
+      static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
+      static auto stable_counter = meter->CreateDoubleCounter("tc_register_commit_stable_dram_total");
+      if (meta.plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+        stable_counter->Add(1.0);
+      } else {
+        coalesced_counter->Add(1.0);
+      }
     } catch (...) {
-      VLOG(1) << "metrics counter tc_register_commit_coalesced_total unavailable";
+      VLOG(1) << "metrics counter tc_register_commit_(stable_dram|coalesced)_total unavailable";
     }
     rctx.mark_success();
     return Status::OK;
