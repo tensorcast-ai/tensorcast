@@ -105,7 +105,7 @@ Contract highlights:
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
 - `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
-- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; `start()` just performs the handshake and initial registration.
+- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; `start()` just performs the handshake and initial registration, and shutdown signals interruptible waits so stop exits promptly.
 - `server_main.cc`: flags/bootstrap and service registration.
 
 ## Build, Run, Test

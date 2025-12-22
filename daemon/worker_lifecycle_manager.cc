@@ -203,6 +203,7 @@ void WorkerLifecycleManager::stop() {
     return;
   }
   stop_.store(true);
+  stop_cv_.notify_all();
   if (hb_thread_.joinable())
     hb_thread_.join();
   if (sync_thread_.joinable())
@@ -232,6 +233,11 @@ void WorkerLifecycleManager::stop() {
       worker_id_.clear();
     }
   }
+}
+
+bool WorkerLifecycleManager::wait_for_stop(std::chrono::milliseconds interval) {
+  std::unique_lock<std::mutex> lock(stop_mu_);
+  return stop_cv_.wait_for(lock, interval, [this]() { return stop_.load(); });
 }
 
 void WorkerLifecycleManager::heartbeat_loop() {
@@ -491,7 +497,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
       if (memory_tier_enabled_) {
         reconcile_memory_tier_leases_once();
       }
-      std::this_thread::sleep_for(interval);
+      if (wait_for_stop(interval)) {
+        break;
+      }
       hb_ticks_.fetch_add(1);
     }
   } catch (const std::exception& e) {
@@ -660,7 +668,9 @@ void WorkerLifecycleManager::chunk_sync_loop() {
           }
         }
       }
-      std::this_thread::sleep_for(interval);
+      if (wait_for_stop(interval)) {
+        break;
+      }
       sync_ticks_.fetch_add(1);
     }
   } catch (const std::exception& e) {
@@ -713,7 +723,9 @@ void WorkerLifecycleManager::monitor_loop() {
       sync_restarts_.fetch_add(1);
       sync_thread_ = std::thread(&WorkerLifecycleManager::chunk_sync_loop, this);
     }
-    std::this_thread::sleep_for(5s);
+    if (wait_for_stop(5s)) {
+      break;
+    }
   }
 }
 

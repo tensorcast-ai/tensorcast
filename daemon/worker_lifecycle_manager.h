@@ -3,7 +3,9 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -78,6 +80,7 @@ class WorkerLifecycleManager {
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
+  bool wait_for_stop(std::chrono::milliseconds interval);
 
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
@@ -101,6 +104,8 @@ class WorkerLifecycleManager {
   // explicit shutdown path and destructor). When true, subsequent calls to
   // stop() are no-ops.
   std::atomic<bool> stop_called_{false};
+  std::mutex stop_mu_;
+  std::condition_variable stop_cv_;
   std::thread hb_thread_;
   std::thread sync_thread_;
   std::thread monitor_thread_;
