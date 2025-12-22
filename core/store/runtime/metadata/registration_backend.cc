@@ -512,9 +512,6 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       if (!sync_status.ok()) {
         return sync_status;
       }
-      if (entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
-        entry->staging_gpu.reset();
-      }
     }
   }
 
@@ -761,6 +758,12 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
     canonical_leaf_indices = view::compute_fully_covered_canonical_leaf_indices(
         entry->view_state->options.canonical_ranges, leaf_chunk_bytes.value_or(0));
+  }
+
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
+      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
+    entry->staging_gpu.reset();
+    entry->gpu_ptr = nullptr;
   }
 
   if (entry->id_kind == common::ArtifactIdKind::kMi2 && entry->view_state && leaf_chunk_bytes.has_value() &&

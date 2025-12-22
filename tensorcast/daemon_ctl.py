@@ -15,7 +15,6 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
 from tensorcast.api._config import PlacementPolicy
-from tensorcast.api._errors import TensorCastError
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -1745,7 +1744,8 @@ class DaemonCtl:
                 )
                 if not resp.ok:
                     reason = resp.conflict_reason or "key already mapped"
-                    raise TensorCastError(f"Failed to publish key '{key}': {reason}")
+                    logger.warning("PublishReplicaKey refused key %s: %s", key, reason)
+                    return False
                 return True
             except grpc.RpcError as e:
                 logger.error(f"PublishReplicaKey failed: {e}")

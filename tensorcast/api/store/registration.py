@@ -10,6 +10,7 @@ import time
 from collections.abc import Mapping
 from typing import Callable, Sequence
 
+import grpc
 import torch
 from opentelemetry.trace import Status, StatusCode
 
@@ -395,6 +396,30 @@ class RegistrationPipeline:
             registration_result, persistence_task_id=task_id
         )
 
+    def _precheck_key_mapping(
+        self,
+        *,
+        key: str,
+        artifact_id: str | None,
+    ) -> None:
+        try:
+            mapped_id, _ = self._runtime.ensure_client().resolve_key_mapping(key)
+        except grpc.RpcError as exc:
+            if exc.code() == grpc.StatusCode.NOT_FOUND:
+                return
+            raise map_registration_error(exc) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise map_registration_error(exc) from exc
+        if not mapped_id:
+            return
+        if artifact_id and mapped_id == artifact_id:
+            return
+        raise ArtifactError(
+            f"Failed to publish key '{key}': key already mapped to {mapped_id}",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
+
     def _should_prevalidate_disk(self, options: RegisterArtifactOptions) -> bool:
         disk_path = options.disk_path
         if disk_path is None:
@@ -522,6 +547,9 @@ class RegistrationPipeline:
                 resolved_plan = options_override.plan
             if resolved_key is None:
                 resolved_key = options_override.key
+        normalized_artifact_id = artifact_id.strip() if artifact_id else None
+        if normalized_artifact_id == "":
+            normalized_artifact_id = None
         method = "register" if resolved_plan is PlanType.VRAM_LEASED else "put"
         span_name = (
             "Store/Register" if resolved_plan is PlanType.VRAM_LEASED else "Store/Put"
@@ -549,6 +577,18 @@ class RegistrationPipeline:
                     store_metrics.increment_error(
                         method, self._runtime.daemon_endpoint, status
                     )
+
+            if resolved_key:
+                try:
+                    self._precheck_key_mapping(
+                        key=resolved_key,
+                        artifact_id=normalized_artifact_id,
+                    )
+                except ArtifactError as error:
+                    span.record_exception(error)
+                    record_outcome(error.status_code)
+                    span.set_status(Status(StatusCode.ERROR, error.status_code))
+                    raise
 
             while True:
                 if cancel_event and cancel_event.is_set():

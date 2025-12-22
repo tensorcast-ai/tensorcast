@@ -339,15 +339,16 @@ def _upsert_key_mapping_if_needed(
         ok = client.publish_replica_key(
             key=key, descriptor=descriptor, disk_path=disk_path or ""
         )
-    except TensorCastError:
-        raise
     except Exception:  # noqa: BLE001
         logger.exception("Failed to publish key %s via daemon", key)
         return
     if not ok:
-        raise TensorCastError(
-            f"Failed to publish key '{key}': daemon refused mapping for {artifact_id}"
+        logger.warning(
+            "Key mapping for %s already exists; keeping registration for %s",
+            key,
+            artifact_id,
         )
+        return
 
 
 def _persist_publish_if_needed(
@@ -1256,7 +1257,7 @@ def _register_artifact_core(
             try:
                 # Upload per plan
                 if isinstance(registrar, (_CoalescedUploader, _StableDramUploader)):
-                    state_dict = registrar.upload(
+                    state_dict: dict[str, torch.Tensor] | None = registrar.upload(
                         artifact=artifact,
                         ctx=ctx,
                         layout=layout,
