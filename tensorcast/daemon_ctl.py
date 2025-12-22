@@ -45,6 +45,7 @@ from tensorcast.types import (
     RegisterStorage,
     RegisterTensorAlias,
     ServerConfig,
+    StableDramHandshake,
     VramRegionHandle,
 )
 
@@ -1207,6 +1208,12 @@ class DaemonCtl:
                 )
             elif resp.HasField("lease"):
                 handshake = LeaseHandshake()
+            elif resp.HasField("stable_dram"):
+                handshake = StableDramHandshake(
+                    staging_cuda_ipc_handle=bytes(
+                        resp.stable_dram.staging_cuda_ipc_handle
+                    )
+                )
             else:
                 # Should not happen
                 raise RuntimeError("BeginRegisterArtifact: missing handshake")
@@ -1735,10 +1742,14 @@ class DaemonCtl:
                     span=span,
                     retries=1,
                 )
-                return bool(resp.ok)
+                if not resp.ok:
+                    reason = resp.conflict_reason or "key already mapped"
+                    logger.warning("PublishReplicaKey refused key %s: %s", key, reason)
+                    return False
+                return True
             except grpc.RpcError as e:
                 logger.error(f"PublishReplicaKey failed: {e}")
-                return False
+                raise
 
     # ------------------------------------------------------------------
     # RFC-0014 helpers to keep API layer decoupled from Global Store

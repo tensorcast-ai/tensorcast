@@ -21,7 +21,7 @@ namespace tensorcast::daemon {
 
 class RegistrationManager {
  public:
-  enum class RegPlan : uint8_t { COALESCED = 0, LEASE = 1 };
+  enum class RegPlan : uint8_t { COALESCED = 0, LEASE = 1, STABLE_DRAM = 2 };
 
   struct RegMeta {
     RegPlan plan{RegPlan::COALESCED};
@@ -32,6 +32,8 @@ class RegistrationManager {
     int device_id{0};
     int owner_pid{0};
     bool lease_in_place{false};
+    bool stage_on_gpu{true};
+    bool release_gpu_on_commit{true};
     std::string index_key_hex;
     std::string index_data;
     tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
@@ -254,6 +256,9 @@ inline std::ostream& operator<<(std::ostream& os, RegistrationManager::RegPlan p
       break;
     case RegistrationManager::RegPlan::LEASE:
       os << "lease";
+      break;
+    case RegistrationManager::RegPlan::STABLE_DRAM:
+      os << "stable_dram";
       break;
     default:
       os << "unknown(" << static_cast<int>(plan) << ")";

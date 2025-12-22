@@ -47,9 +47,17 @@ class LeaseHandshake(BaseModel):
     kind: Literal["lease"] = "lease"
 
 
+class StableDramHandshake(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["dram_stable"] = "dram_stable"
+    staging_cuda_ipc_handle: bytes = b""
+
+
 Handshake = Union[
     CoalescedHandshake,
     LeaseHandshake,
+    StableDramHandshake,
 ]
 
 
@@ -185,7 +193,21 @@ class LeasePlan(PlanBase):
         req.lease.CopyFrom(lo)
 
 
-Plan = Union[CoalescedPlan, LeasePlan]
+class StableDramPlan(PlanBase):
+    kind: Literal["dram_stable"] = "dram_stable"
+    stage_on_gpu: bool = True
+    release_gpu_on_commit: bool = True
+
+    def apply_to_begin_request(
+        self, req: store_daemon_pb2.BeginRegisterArtifactRequest
+    ) -> None:
+        opts = store_daemon_pb2.StableDramOptions()
+        opts.stage_on_gpu = bool(self.stage_on_gpu)
+        opts.release_gpu_on_commit = bool(self.release_gpu_on_commit)
+        req.stable_dram.CopyFrom(opts)
+
+
+Plan = Union[CoalescedPlan, LeasePlan, StableDramPlan]
 
 
 # ---------------------------- Segment feed model ---------------------------
@@ -282,6 +304,7 @@ __all__ = [
     "ServerConfig",
     "CoalescedHandshake",
     "LeaseHandshake",
+    "StableDramHandshake",
     "Handshake",
     "BeginRegisterArtifactResult",
     "ArtifactDescriptor",
@@ -290,6 +313,7 @@ __all__ = [
     "PlanBase",
     "CoalescedPlan",
     "LeasePlan",
+    "StableDramPlan",
     "Plan",
     "LeaseSegment",
     "RegisterStorage",

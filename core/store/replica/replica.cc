@@ -374,6 +374,27 @@ std::shared_ptr<common::ReadySignal<absl::Status>> Replica::ready_signal_for(Mem
   return nullptr;
 }
 
+absl::Status Replica::mark_loaded(MemoryLocation location) {
+  return memory_manager_->set_state(location, MemoryState::LOADED);
+}
+
+void Replica::set_ready_signal(MemoryLocation location, const absl::Status& status) {
+  absl::MutexLock lock(&mutex_);
+  std::shared_ptr<common::ReadySignal<absl::Status>>* slot = nullptr;
+  if (location == MemoryLocation::CPU) {
+    slot = &cpu_ready_signal_;
+  } else if (location == MemoryLocation::GPU) {
+    slot = &gpu_ready_signal_;
+  } else {
+    LOG(WARNING) << "Replica(" << key_.artifact_id << "): Invalid location for ready signal";
+    return;
+  }
+  if (*slot == nullptr) {
+    *slot = std::make_shared<common::ReadySignal<absl::Status>>();
+  }
+  (*slot)->set_value(status);
+}
+
 absl::StatusOr<common::memory::MemoryLocation> Replica::find_best_source_for_target(
     common::memory::MemoryLocation target_location) const {
   // Assumes mutex_ is held. (Now called within lock scope in ensure_loaded_async)

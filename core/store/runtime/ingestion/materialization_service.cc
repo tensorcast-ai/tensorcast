@@ -2,9 +2,11 @@
 
 #include "core/store/runtime/ingestion/materialization_service.h"
 
+#include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -15,9 +17,11 @@
 #include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_identity.h"
+#include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
+#include "core/store/replica/transfer_helpers.h"
 #include "gsl/pointers"
 #include "nlohmann/json.hpp"
 
@@ -29,6 +33,8 @@ using common::memory::MemoryLocation;
 using loading::InlineBufferSource;
 using loading::TransformPlacement;
 using replica::MemoryState;
+
+constexpr size_t kLocalCopyStreamingChunks = 16;
 
 absl::Status validate_mi2_descriptor_matches_request(const loading::MaterializationRequest& request) {
   if (!absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
@@ -89,6 +95,13 @@ absl::StatusOr<ReplicaHandle> MaterializationService::execute(const Materializat
   if (!absl::IsNotFound(existing_or.status())) {
     return existing_or.status();
   }
+  auto local_or = copy_from_local_cpu(request);
+  if (local_or.ok()) {
+    return *local_or;
+  }
+  if (!absl::IsNotFound(local_or.status())) {
+    return local_or.status();
+  }
 
   switch (request.mode()) {
     case MaterializeMode::COPY_ONLY:
@@ -117,6 +130,147 @@ absl::StatusOr<ReplicaHandle> MaterializationService::try_reuse_replica(const Ma
       replica,
       replica->ready_signal_for(request.target_location()),
       loading::MaterializationSource::kLocalReplica);
+}
+
+absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const MaterializationRequest& request) const {
+  if (request.mode() != MaterializeMode::AUTO) {
+    return absl::NotFoundError("Local CPU copy only applies to AUTO materialization");
+  }
+  if (!request.target_is_gpu()) {
+    return absl::NotFoundError("Local CPU copy requires a GPU target");
+  }
+  if (request.canonical_artifact_id().empty()) {
+    return absl::NotFoundError("Local CPU copy requires a canonical artifact id");
+  }
+
+  const auto candidates = deps_.replica_registry->find_by_artifact(request.canonical_artifact_id());
+  for (const auto& cand_key : candidates) {
+    if (cand_key.device.type != DeviceType::CPU) {
+      continue;
+    }
+    if (cand_key.view_id != request.requested_view_id()) {
+      continue;
+    }
+
+    auto src_or = deps_.replica_registry->find(cand_key);
+    if (!src_or.ok()) {
+      continue;
+    }
+    const auto& src_replica = src_or.value();
+    if (src_replica->get_memory_state(MemoryLocation::CPU) != MemoryState::LOADED) {
+      continue;
+    }
+    const auto cpu_ptrs = src_replica->get_data_pointer(MemoryLocation::CPU);
+    if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+      continue;
+    }
+
+    uint64_t expected_size = 0;
+    if (auto sz_or = src_replica->get_artifact_size(); sz_or.ok()) {
+      expected_size = *sz_or;
+    } else {
+      return sz_or.status();
+    }
+
+    InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
+    replica::ReplicaConfig cfg{
+        .source = ib_source,
+        .artifact_identifier = request.canonical_artifact_id(),
+        .device_type = DeviceType::GPU,
+        .local_device_id = request.target_device().ordinal,
+        .pinned_buffer_pool = deps_.memory_pool,
+        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{deps_.async_runtime},
+        .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
+        .expected_artifact_size = expected_size,
+        .view_plan = src_replica->view_plan(),
+        .memory_tier_config = src_replica->get_memory_manager().memory_tier_config()};
+    cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
+    cfg.view_id = request.requested_view_id();
+    cfg.transform_placement =
+        request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
+
+    auto dst_or = replica::Replica::create(cfg);
+    if (!dst_or.ok()) {
+      return dst_or.status();
+    }
+    auto dst_replica = std::shared_ptr<replica::Replica>(std::move(dst_or.value()));
+
+    auto& memory_manager = dst_replica->get_memory_manager();
+    absl::Status alloc_status = memory_manager.allocate_memory(MemoryLocation::GPU);
+    if (!alloc_status.ok()) {
+      return alloc_status;
+    }
+    const auto gpu_ptrs = memory_manager.get_pointer(MemoryLocation::GPU);
+    if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
+      return absl::FailedPreconditionError("GPU pointer unavailable for local CPU copy");
+    }
+    if (expected_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      return absl::OutOfRangeError("Artifact size exceeds host copy limits");
+    }
+    const auto total_bytes = static_cast<size_t>(expected_size);
+    if (total_bytes > 0) {
+      const size_t slice_bytes = deps_.memory_pool->slice_bytes();
+      if (slice_bytes == 0) {
+        return absl::FailedPreconditionError("Pinned buffer pool slice size is zero");
+      }
+      const size_t needed_chunks = (total_bytes + slice_bytes - 1) / slice_bytes;
+      size_t pool_capacity = deps_.memory_pool->capacity_slices();
+      if (pool_capacity == 0) {
+        pool_capacity = kLocalCopyStreamingChunks;
+      }
+      const size_t num_chunks =
+          std::max<size_t>(1, std::min({needed_chunks, kLocalCopyStreamingChunks, pool_capacity}));
+      auto streaming_buf =
+          std::make_shared<common::memory::StreamingPinnedBuffer>(num_chunks, slice_bytes, deps_.memory_pool);
+      auto init_status = streaming_buf->initialize(deps_.pinned_memory_timeout);
+      if (!init_status.ok()) {
+        return init_status;
+      }
+      auto copy_status = replica::perform_copy_cpu_to_gpu_streaming(
+          src_replica->artifact_id(),
+          static_cast<uint32_t>(request.target_device().ordinal),
+          streaming_buf,
+          gsl::not_null<void*>{gpu_ptrs[0]},
+          total_bytes,
+          gsl::not_null<void*>{cpu_ptrs[0]},
+          src_replica->get_memory_manager().memory_authority(),
+          src_replica->replica_key());
+      if (!copy_status.ok()) {
+        return copy_status;
+      }
+    }
+    auto mark_status = dst_replica->mark_loaded(MemoryLocation::GPU);
+    if (!mark_status.ok()) {
+      return mark_status;
+    }
+    dst_replica->set_ready_signal(MemoryLocation::GPU, absl::OkStatus());
+
+    absl::Status emplace_status = deps_.replica_registry->emplace(request.replica_key(), gsl::not_null{dst_replica});
+    if (absl::IsAlreadyExists(emplace_status)) {
+      auto existing_or = deps_.replica_registry->find(request.replica_key());
+      if (!existing_or.ok()) {
+        return existing_or.status();
+      }
+      const auto& existing = existing_or.value();
+      (void)existing->ensure_loaded_async(
+          request.target_location(), deps_.num_threads, request.target_device().ordinal);
+      return build_handle(
+          request,
+          existing,
+          existing->ready_signal_for(request.target_location()),
+          loading::MaterializationSource::kLocalReplica);
+    }
+    if (!emplace_status.ok()) {
+      return emplace_status;
+    }
+    return build_handle(
+        request,
+        dst_replica,
+        dst_replica->ready_signal_for(request.target_location()),
+        loading::MaterializationSource::kLocalReplica);
+  }
+
+  return absl::NotFoundError("No suitable CPU replica for local copy");
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const MaterializationRequest& request) const {

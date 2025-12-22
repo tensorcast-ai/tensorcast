@@ -60,6 +60,8 @@ class RegistrationBackend {
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
   std::shared_ptr<components::CommunicationManager> communication_manager_;
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
+  std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
+  std::optional<MemoryTierConfig> memory_tier_config_;
   ReplicaFactory replica_factory_;
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};

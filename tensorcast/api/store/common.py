@@ -111,6 +111,8 @@ def canonical_index_from_result(result: RegistrationResult) -> CanonicalIndex:
 
 
 def replica_type_for_plan(plan: PlanType) -> tuple[ReplicaType, PlanType]:
+    if plan is PlanType.DRAM_STABLE:
+        return "DRAM_STABLE", PlanType.DRAM_STABLE
     if plan is PlanType.VRAM_COALESCED:
         return "COALESCED_VRAM", PlanType.VRAM_COALESCED
     return "VRAM_LEASE_IN_PLACE", PlanType.VRAM_LEASED
@@ -118,7 +120,10 @@ def replica_type_for_plan(plan: PlanType) -> tuple[ReplicaType, PlanType]:
 
 def replica_info_from_result(result: RegistrationResult) -> ReplicaInfo:
     replica_type, plan = replica_type_for_plan(result.plan)
-    device = torch.device("cuda", int(result.build.device_id))
+    if plan is PlanType.DRAM_STABLE:
+        device = torch.device("cpu")
+    else:
+        device = torch.device("cuda", int(result.build.device_id))
     size_bytes = int(result.layout.total_size)
     replica_id = result.descriptor.artifact_id
     return ReplicaInfo(

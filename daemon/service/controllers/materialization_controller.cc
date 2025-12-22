@@ -24,6 +24,7 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
@@ -928,7 +929,7 @@ grpc::Status MaterializationController::materialize_by_key(
   if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
     return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
   }
-  const auto dev = store::DeviceKey{.type = DeviceType::GPU, .ordinal = req.device_id(), .uuid = ""};
+  const auto dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
   store::loading::MaterializeHints hints;
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());

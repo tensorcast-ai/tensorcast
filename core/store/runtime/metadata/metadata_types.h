@@ -27,6 +27,8 @@
 #include "core/store/components/replica_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/memory_tier_budget.h"
+#include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
@@ -36,6 +38,13 @@ namespace tensorcast::store::runtime::metadata {
 enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
 
 using CanonicalRange = tensorcast::store::view::CanonicalRange;
+
+enum class RegistrationPlan : uint8_t { kCoalesced = 0, kStableDram = 1 };
+
+struct StableDramOptions {
+  bool stage_on_gpu{true};
+  bool release_gpu_on_commit{true};
+};
 
 struct ViewRegistration {
   std::string view_id;
@@ -52,6 +61,8 @@ struct ArtifactRegistration {
   std::optional<std::string> tensor_index_data;
   std::string schema_version{"v3"};
   std::string encoding{"json"};
+  RegistrationPlan plan{RegistrationPlan::kCoalesced};
+  StableDramOptions stable_dram;
   int device_id{0};
   uint64_t total_size_bytes{0};
   bool enable_p2p{true};
@@ -93,6 +104,8 @@ struct RegistrationResources {
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
   std::shared_ptr<components::CommunicationManager> communication_manager;
   std::shared_ptr<common::AsyncRuntime> async_runtime;
+  std::shared_ptr<MemoryTierBudget> memory_tier_budget;
+  std::optional<MemoryTierConfig> memory_tier_config;
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;

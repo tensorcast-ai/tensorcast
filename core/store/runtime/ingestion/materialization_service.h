@@ -59,6 +59,7 @@ class MaterializationService {
   MaterializationDeps deps_;
 
   [[nodiscard]] absl::StatusOr<ReplicaHandle> try_reuse_replica(const MaterializationRequest& request) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> copy_from_local_cpu(const MaterializationRequest& request) const;
   [[nodiscard]] absl::StatusOr<ReplicaHandle> copy_from_peer(const MaterializationRequest& request) const;
   [[nodiscard]] absl::StatusOr<ReplicaHandle> load_from_disk(const MaterializationRequest& request) const;
   [[nodiscard]] absl::StatusOr<ReplicaHandle> run_auto(const MaterializationRequest& request) const;

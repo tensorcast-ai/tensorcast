@@ -17,8 +17,10 @@
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
 #include "core/common/cuda_api.h"
+#include "core/common/memory/cuda_memory.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/store/components/eviction_service.h"
+#include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
@@ -85,7 +87,7 @@ std::string make_registration_id() {
 } // namespace
 
 struct RegistrationBackend::PendingRegistrationContext {
-  enum class Plan : uint8_t { kCoalesced = 0, kCpu = 1 };
+  enum class Plan : uint8_t { kCoalesced = 0, kStableDram = 1 };
 
   std::string registration_id;
   std::string artifact_id;
@@ -101,6 +103,8 @@ struct RegistrationBackend::PendingRegistrationContext {
   std::shared_ptr<replica::Replica> replica;
   void* gpu_ptr{nullptr};
   cudaIpcMemHandle_t ipc_handle{};
+  std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
+  StableDramOptions stable_dram;
   std::chrono::steady_clock::time_point expiry_time;
   std::chrono::steady_clock::time_point begin_time;
   Plan plan{Plan::kCoalesced};
@@ -129,6 +133,8 @@ RegistrationBackend::RegistrationBackend(
       memory_pool_(resources.memory_pool),
       communication_manager_(std::move(resources.communication_manager)),
       async_runtime_(std::move(resources.async_runtime)),
+      memory_tier_budget_(std::move(resources.memory_tier_budget)),
+      memory_tier_config_(resources.memory_tier_config),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
@@ -151,8 +157,12 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   if (reg.total_size_bytes == 0) {
     return absl::InvalidArgumentError("total_size_bytes must be > 0");
   }
+  const bool stable_dram = reg.plan == RegistrationPlan::kStableDram;
   if (reg.device_id < 0) {
     return absl::InvalidArgumentError("device_id must be >= 0");
+  }
+  if (stable_dram && !reg.stable_dram.stage_on_gpu) {
+    return absl::UnimplementedError("stable_dram stage_on_gpu=false is not implemented");
   }
   if (!reg.schema_version.empty() && reg.schema_version != "v3") {
     return absl::InvalidArgumentError(
@@ -216,28 +226,38 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   replica::ReplicaConfig cfg{
       .source = ib_source,
       .artifact_identifier = reg.artifact_id,
-      .device_type = DeviceType::GPU,
-      .local_device_id = reg.device_id,
+      .device_type = stable_dram ? DeviceType::CPU : DeviceType::GPU,
+      .local_device_id = stable_dram ? -1 : reg.device_id,
       .pinned_buffer_pool = memory_pool_,
       .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{async_runtime_},
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
+  if (memory_tier_config_.has_value()) {
+    cfg.memory_tier_config = memory_tier_config_;
+  }
 
-  if (auto free_or = device_manager_->get_free_memory(reg.device_id); free_or.ok()) {
-    size_t free_bytes = free_or.value();
-    if (reg.total_size_bytes > free_bytes) {
-      auto evict_status = components::evict_for_gpu(
-          *replica_registry_, *device_manager_, *metrics_collector_, reg.device_id, reg.total_size_bytes - free_bytes);
-      if (!evict_status.ok()) {
-        return absl::ResourceExhaustedError(
-            absl::StrCat(
-                "Insufficient GPU memory available. Requested: ",
-                reg.total_size_bytes,
-                " bytes, Free: ",
-                free_bytes,
-                ". ",
-                evict_status.message()));
+  const bool needs_gpu_staging = !stable_dram || reg.stable_dram.stage_on_gpu;
+  if (needs_gpu_staging) {
+    if (auto free_or = device_manager_->get_free_memory(reg.device_id); free_or.ok()) {
+      size_t free_bytes = free_or.value();
+      if (reg.total_size_bytes > free_bytes) {
+        auto evict_status = components::evict_for_gpu(
+            *replica_registry_,
+            *device_manager_,
+            *metrics_collector_,
+            reg.device_id,
+            reg.total_size_bytes - free_bytes);
+        if (!evict_status.ok()) {
+          return absl::ResourceExhaustedError(
+              absl::StrCat(
+                  "Insufficient GPU memory available. Requested: ",
+                  reg.total_size_bytes,
+                  " bytes, Free: ",
+                  free_bytes,
+                  ". ",
+                  evict_status.message()));
+        }
       }
     }
   }
@@ -248,20 +268,50 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   }
   auto replica = std::move(replica_or.value());
 
-  absl::Status alloc_status = replica->get_memory_manager().allocate_memory(common::memory::MemoryLocation::GPU);
-  if (!alloc_status.ok()) {
-    return alloc_status;
+  if (memory_tier_budget_) {
+    replica->get_memory_manager().set_memory_tier_budget(memory_tier_budget_);
   }
 
-  auto ipc_or = replica->get_memory_manager().get_ipc_handle();
-  if (!ipc_or.ok()) {
-    return ipc_or.status();
+  void* base_ptr = nullptr;
+  cudaIpcMemHandle_t ipc_handle{};
+  std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
+  if (stable_dram) {
+    absl::Status alloc_status = replica->get_memory_manager().allocate_memory(common::memory::MemoryLocation::CPU);
+    if (!alloc_status.ok()) {
+      return alloc_status;
+    }
+    if (reg.stable_dram.stage_on_gpu) {
+      staging_gpu = std::make_unique<common::memory::GpuDeviceMemory>();
+      absl::Status staging_status = staging_gpu->allocate(reg.total_size_bytes, reg.device_id);
+      if (!staging_status.ok()) {
+        return staging_status;
+      }
+      base_ptr = staging_gpu->get();
+      if (base_ptr == nullptr) {
+        return absl::InternalError("Stable DRAM staging pointer is null");
+      }
+      auto ipc_status = cuda::get_ipc_mem_handle(&ipc_handle, base_ptr);
+      if (!ipc_status.ok()) {
+        return ipc_status;
+      }
+    }
+  } else {
+    absl::Status alloc_status = replica->get_memory_manager().allocate_memory(common::memory::MemoryLocation::GPU);
+    if (!alloc_status.ok()) {
+      return alloc_status;
+    }
+
+    auto ipc_or = replica->get_memory_manager().get_ipc_handle();
+    if (!ipc_or.ok()) {
+      return ipc_or.status();
+    }
+    ipc_handle = *ipc_or;
+    const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
+    base_ptr = (!gpu_ptrs.empty() ? gpu_ptrs[0] : nullptr);
   }
 
-  const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
-  void* base_ptr = (!gpu_ptrs.empty() ? gpu_ptrs[0] : nullptr);
-
-  DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = reg.device_id, .uuid = ""};
+  DeviceKey dev_key = stable_dram ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
+                                  : DeviceRegistry::instance().gpu_key(reg.device_id);
   loading::ReplicaKey inst_key{.artifact_id = reg.artifact_id, .device = dev_key, .replica = 0};
   {
     absl::Status emplace_status =
@@ -295,8 +345,11 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   }
   entry->replica = replica;
   entry->gpu_ptr = base_ptr;
-  entry->ipc_handle = *ipc_or;
-  entry->plan = PendingRegistrationContext::Plan::kCoalesced;
+  entry->ipc_handle = ipc_handle;
+  entry->staging_gpu = std::move(staging_gpu);
+  entry->stable_dram = reg.stable_dram;
+  entry->plan =
+      stable_dram ? PendingRegistrationContext::Plan::kStableDram : PendingRegistrationContext::Plan::kCoalesced;
   entry->begin_time = std::chrono::steady_clock::now();
 
   if (view_plan.has_value()) {
@@ -325,7 +378,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   out.registration_id = entry->registration_id;
   out.device_id = reg.device_id;
   out.size_bytes = reg.total_size_bytes;
-  std::memcpy(out.cuda_ipc_handle_bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+  std::memcpy(out.cuda_ipc_handle_bytes.data(), &ipc_handle, sizeof(cudaIpcMemHandle_t));
   return out;
 }
 
@@ -362,7 +415,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   if (expired_entry) {
     record_pending_gauge(pending_size_after_expire);
     record_commit_latency(*expired_entry, "expired");
-    const auto location = expired_entry->plan == PendingRegistrationContext::Plan::kCpu
+    const auto location = expired_entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU
         : common::memory::MemoryLocation::GPU;
     release_replica_memory(expired_entry->replica, location);
@@ -437,6 +490,31 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram) {
+    if (entry->stable_dram.stage_on_gpu) {
+      if (entry->gpu_ptr == nullptr) {
+        return absl::FailedPreconditionError("Stable DRAM staging pointer is null");
+      }
+      const auto cpu_ptrs = entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
+      if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+        return absl::FailedPreconditionError("CPU pointer unavailable for stable DRAM commit");
+      }
+      auto dev_status = cuda::set_device(entry->device_id);
+      if (!dev_status.ok()) {
+        return dev_status;
+      }
+      auto copy_status =
+          cuda::memcpy(cpu_ptrs[0], entry->gpu_ptr, static_cast<size_t>(entry->size_bytes), cudaMemcpyDeviceToHost);
+      if (!copy_status.ok()) {
+        return copy_status;
+      }
+      auto sync_status = cuda::device_synchronize();
+      if (!sync_status.ok()) {
+        return sync_status;
+      }
+    }
+  }
+
   std::string index_multihash;
   std::string data_multihash;
   std::vector<loader::SegmentPiece> segment_plan;
@@ -456,7 +534,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
 
     absl::StatusOr<std::string> data_mh_or;
-    if (entry->plan == PendingRegistrationContext::Plan::kCpu) {
+    if (entry->plan == PendingRegistrationContext::Plan::kStableDram) {
       if (!entry->replica) {
         return absl::FailedPreconditionError("CPU registration missing backing replica");
       }
@@ -515,10 +593,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     data_multihash.clear();
   }
 
-  DeviceKey dev_key{
-      .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
-      .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
-      .uuid = ""};
+  DeviceKey dev_key = entry->plan == PendingRegistrationContext::Plan::kStableDram
+      ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
+      : DeviceRegistry::instance().gpu_key(entry->device_id);
   loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
   bool reuse_existing = false;
@@ -542,8 +619,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (reuse_existing) {
-    const auto location = entry->plan == PendingRegistrationContext::Plan::kCpu ? common::memory::MemoryLocation::CPU
-                                                                                : common::memory::MemoryLocation::GPU;
+    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+        ? common::memory::MemoryLocation::CPU
+        : common::memory::MemoryLocation::GPU;
     release_replica_memory(entry->replica, location);
     size_t pending_size_after = 0;
     erase_pending(registration_id, &pending_size_after);
@@ -567,10 +645,11 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
 
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
-  if (entry->plan != PendingRegistrationContext::Plan::kCpu && entry->enable_p2p && communication_manager_ &&
-      communication_manager_->is_enabled()) {
-    auto reg_info_or = entry->replica->enable_remote_memory_access(
-        common::memory::MemoryLocation::GPU, communication_manager_->get_engine());
+  if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
+    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+        ? common::memory::MemoryLocation::CPU
+        : common::memory::MemoryLocation::GPU;
+    auto reg_info_or = entry->replica->enable_remote_memory_access(location, communication_manager_->get_engine());
     if (!reg_info_or.ok()) {
       return reg_info_or.status();
     }
@@ -581,18 +660,20 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  DeviceKey device{
-      .type = (entry->plan == PendingRegistrationContext::Plan::kCpu ? DeviceType::CPU : DeviceType::GPU),
-      .ordinal = (entry->plan == PendingRegistrationContext::Plan::kCpu ? -1 : entry->device_id),
-      .uuid = ""};
+  DeviceKey device = entry->plan == PendingRegistrationContext::Plan::kStableDram
+      ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
+      : DeviceRegistry::instance().gpu_key(entry->device_id);
   std::optional<std::string> verification_json;
   if (!remote_keys.empty()) {
-    std::vector<void*> data_ptrs =
-        entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
+    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+        ? common::memory::MemoryLocation::CPU
+        : common::memory::MemoryLocation::GPU;
+    std::vector<void*> data_ptrs = entry->replica->get_memory_manager().get_pointer(location);
     if (!data_ptrs.empty() && data_ptrs[0] != nullptr) {
       std::vector<size_t> data_sizes{static_cast<size_t>(entry->size_bytes)};
+      const int verify_device = (location == common::memory::MemoryLocation::GPU) ? entry->device_id : -1;
       auto info_or = common::ArtifactVerifier::generate_verification_info(
-          data_ptrs, data_sizes, entry->device_id, common::VerificationLevel::KEY_POINTS);
+          data_ptrs, data_sizes, verify_device, common::VerificationLevel::KEY_POINTS);
       if (info_or.ok()) {
         verification_json = info_or->to_json();
       }
@@ -679,11 +760,17 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         entry->view_state->options.canonical_ranges, leaf_chunk_bytes.value_or(0));
   }
 
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_dram.stage_on_gpu &&
+      entry->stable_dram.release_gpu_on_commit && entry->staging_gpu) {
+    entry->staging_gpu.reset();
+    entry->gpu_ptr = nullptr;
+  }
+
   if (entry->id_kind == common::ArtifactIdKind::kMi2 && entry->view_state && leaf_chunk_bytes.has_value() &&
       !canonical_leaf_indices.empty() && !index_multihash.empty()) {
     loader::verification::MemoryView canonical_view;
     canonical_view.size_bytes = entry->size_bytes;
-    if (entry->plan == PendingRegistrationContext::Plan::kCpu) {
+    if (entry->plan == PendingRegistrationContext::Plan::kStableDram) {
       canonical_view.location = common::memory::MemoryLocation::CPU;
       const auto cpu_ptrs = entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
       if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
@@ -773,6 +860,16 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
                    << " view_id=" << entry->view_state->options.view_id << ": " << update_status;
     }
   }
+  {
+    const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+        ? common::memory::MemoryLocation::CPU
+        : common::memory::MemoryLocation::GPU;
+    auto mark_status = entry->replica->mark_loaded(location);
+    if (!mark_status.ok()) {
+      return mark_status;
+    }
+    entry->replica->set_ready_signal(location, absl::OkStatus());
+  }
   record_commit_latency(*entry, "ok");
   return result;
 }
@@ -838,8 +935,9 @@ absl::Status RegistrationBackend::abort(std::string_view registration_id) {
   }
   record_pending_gauge(pending_size_after);
   record_commit_latency(*entry, "aborted");
-  const auto location = entry->plan == PendingRegistrationContext::Plan::kCpu ? common::memory::MemoryLocation::CPU
-                                                                              : common::memory::MemoryLocation::GPU;
+  const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
+      ? common::memory::MemoryLocation::CPU
+      : common::memory::MemoryLocation::GPU;
   release_replica_memory(entry->replica, location);
   return absl::OkStatus();
 }

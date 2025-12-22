@@ -23,6 +23,7 @@
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
+#include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/memory_export_registry.h"
 #include "core/store/replica/transfer_service.h"
@@ -40,7 +41,7 @@ namespace {
 DeviceKey normalize_device_key(DeviceKey key) {
   if (key.type == DeviceType::GPU) {
     key.ordinal = (key.ordinal >= 0) ? key.ordinal : 0;
-    return key;
+    return DeviceRegistry::instance().normalize(key);
   }
   key.type = DeviceType::CPU;
   key.ordinal = -1;

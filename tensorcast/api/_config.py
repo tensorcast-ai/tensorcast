@@ -59,6 +59,7 @@ def get_global_store_address() -> str:
 
 
 class PlanType(Enum):
+    DRAM_STABLE = "dram_stable"
     VRAM_COALESCED = "vram_coalesced"
     VRAM_LEASED = "vram_leased"
 
@@ -67,12 +68,15 @@ class PlanType(Enum):
         if isinstance(value, PlanType):
             return value
         s = str(value).strip().lower()
+        if s in ("dram_stable", "dram"):
+            return PlanType.DRAM_STABLE
         if s in ("vram_coalesced", "coalesced", "copy"):
             return PlanType.VRAM_COALESCED
         if s in ("vram_leased", "lease"):
             return PlanType.VRAM_LEASED
         raise InvalidPlan(
-            f"Unknown plan '{value}'; expected 'lease' or 'copy' (or PlanType enum)."
+            "Unknown plan "
+            f"'{value}'; expected 'dram', 'lease', or 'copy' (or PlanType enum)."
         )
 
 
@@ -100,7 +104,7 @@ class PlacementPolicy(Enum):
 class RegisterArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    plan: PlanType = PlanType.VRAM_LEASED
+    plan: PlanType = PlanType.DRAM_STABLE
     placement_policy: PlacementPolicy = PlacementPolicy.LOCAL_ONLY
     persist: bool = False
     p2p_prefer: str = "vram"
@@ -111,6 +115,9 @@ class RegisterArtifactOptions(BaseModel):
     lease_bytes_limit: int = 0
     # Lease/LIP specific: opt-in in-place mode per RFC-0014
     lease_in_place: bool = False
+    # Stable DRAM options
+    stage_on_gpu: bool = True
+    release_gpu_on_commit: bool = True
     # CPU path removed
     key: str | None = None
     disk_path: str | None = None
