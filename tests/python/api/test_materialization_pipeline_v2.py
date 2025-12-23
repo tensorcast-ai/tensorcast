@@ -17,7 +17,12 @@ from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
-from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
+from tensorcast.api.store.types import (
+    ArtifactError,
+    FallbackOptions,
+    StoreCapabilities,
+    StoreOptions,
+)
 from tensorcast.api.store.views import ViewOrchestrator
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
@@ -114,6 +119,15 @@ class _RuntimeStub:
         self._artifact_cache = ArtifactCache(
             daemon_endpoint="daemon", ttl_seconds=10, max_entries=8
         )
+        self._capabilities = StoreCapabilities(
+            mem_pool_bytes=0,
+            tx_slice_bytes=0,
+            artifact_chunk_bytes=0,
+            supports_coalesced=False,
+            supports_lease=False,
+            supports_region_backed_get_into=False,
+            server_config=None,
+        )
 
     def track_future(self, future: concurrent.futures.Future[object]) -> None:
         self.futures.append(future)
@@ -137,6 +151,10 @@ class _RuntimeStub:
         self, *, key: str
     ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         return None, None
+
+    @property
+    def capabilities(self) -> StoreCapabilities:
+        return self._capabilities
 
     @contextmanager
     def operation_span(self, *_args, **_kwargs):

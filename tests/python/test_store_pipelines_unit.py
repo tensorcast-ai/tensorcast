@@ -26,6 +26,7 @@ from tensorcast.api.store.types import (
     ArtifactError,
     FallbackOptions,
     RetryPolicy,
+    StoreCapabilities,
     StoreOptions,
 )
 from tensorcast.api.store.views import ViewOrchestrator
@@ -120,16 +121,16 @@ class _DummyRuntime:
         yield _DummySpan()
 
     @property
-    def capabilities(self):
-        class _Caps:
-            mem_pool_bytes = 0
-            tx_slice_bytes = 0
-            artifact_chunk_bytes = 0
-            supports_coalesced = False
-            supports_lease = False
-            server_config = None
-
-        return _Caps()
+    def capabilities(self) -> StoreCapabilities:
+        return StoreCapabilities(
+            mem_pool_bytes=0,
+            tx_slice_bytes=0,
+            artifact_chunk_bytes=0,
+            supports_coalesced=False,
+            supports_lease=False,
+            supports_region_backed_get_into=False,
+            server_config=None,
+        )
 
     def close(self) -> None:
         self.executor.shutdown(wait=True)
