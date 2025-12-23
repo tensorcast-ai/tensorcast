@@ -917,8 +917,8 @@ class MaterializationPipeline:
             )
         region_base_offset = int(storage_base_ptr) - int(region.base_ptr)
         storage_id = f"storage:{device_id}:{storage_base_ptr:x}:{logical_total_size}"
-        for entry in offsets:
-            entry.storage_id = storage_id
+        for offset_entry in offsets:
+            offset_entry.storage_id = storage_id
         layout = store_daemon_v2_pb2.TargetLayout(
             layout_kind=store_daemon_v2_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
             index_kind=store_daemon_v2_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
