@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Torch version management utilities and CLI.
 
@@ -43,17 +43,47 @@ __all__ = [
 #  Low-level helpers (moved from torch_version_utils)                         #
 ###############################################################################
 
+def _format_cuda_suffix(cuda_version: str) -> str:
+    parts = cuda_version.split(".")
+    if len(parts) >= 2:
+        return f"cu{parts[0]}{parts[1]}"
+    return f"cu{cuda_version.replace('.', '')}"
+
+
+def _format_torch_version(version: str, cuda_version: str | None) -> str:
+    base_version = version.split("+")[0]
+    if cuda_version:
+        return f"{base_version}+{_format_cuda_suffix(cuda_version)}"
+    return base_version
+
+
 def _get_torch_version_from_python() -> str | None:
     """Return the torch version installed in the current (or .venv) env."""
     try:
         import torch  # local import to avoid heavy dependency at import time
 
-        return torch.__version__.split("+")[0]
+        return _format_torch_version(torch.__version__, torch.version.cuda)
     except ImportError:
         # Try inside project venv (helps when running via system python)
         try:
             result = subprocess.run(
-                [".venv/bin/python", "-c", "import torch, sys; sys.stdout.write(torch.__version__.split('+')[0])"],
+                [
+                    ".venv/bin/python",
+                    "-c",
+                    (
+                        "import torch, sys\n"
+                        "version = torch.__version__\n"
+                        "cuda = torch.version.cuda\n"
+                        "base = version.split('+')[0]\n"
+                        "if cuda:\n"
+                        "    parts = cuda.split('.')\n"
+                        "    suffix = f\"cu{parts[0]}{parts[1]}\" if len(parts) >= 2 else f\"cu{cuda.replace('.', '')}\"\n"
+                        "    version = f\"{base}+{suffix}\"\n"
+                        "else:\n"
+                        "    version = base\n"
+                        "sys.stdout.write(version)"
+                    ),
+                ],
                 capture_output=True,
                 text=True,
                 check=True,

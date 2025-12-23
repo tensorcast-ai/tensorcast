@@ -5,6 +5,11 @@ package(default_visibility = ["//visibility:public"])
 cc_library(
     name = "cusparselt",
     srcs = [
-        "cusparselt/lib/libcusparseLt.so.0",
+        "nvidia/cusparselt/lib/libcusparseLt.so.0",
     ],
+    hdrs = glob([
+        "nvidia/cusparselt/include/**/*.h",
+    ]),
+    includes = ["nvidia/cusparselt/include/"],
+    linkopts = ["-Wl,-rpath,lib/"],
 )
