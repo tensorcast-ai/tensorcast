@@ -19,7 +19,7 @@ cc_library(
 cc_library(
     name = "nvrtc_builtins",
     srcs = [
-        "nvidia/cuda_nvrtc/lib/libnvrtc-builtins.so.12.4",
+        "nvidia/cuda_nvrtc/lib/libnvrtc-builtins.so.12.8",
     ],
     hdrs = glob([
         "nvidia/cuda_nvrtc/include/**/*.h",

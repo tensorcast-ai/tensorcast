@@ -27,6 +27,7 @@ from shutil import copyfile, rmtree, which
 import torch  # Import torch to get version info
 import yaml
 from setuptools import find_packages, setup
+from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.editable_wheel import editable_wheel
 from setuptools.command.install import install
@@ -174,25 +175,30 @@ if (gpu_arch_version := os.environ.get("CU_VERSION")) is None:
 if BUILD_EXTENSION or BUILD_CORE:
     validate_build_environment()
 
+def _format_cuda_suffix(cuda_version: str | None) -> str | None:
+    if not cuda_version:
+        return None
+    parts = cuda_version.split(".")
+    if len(parts) >= 2:
+        return f"cu{parts[0]}{parts[1]}"
+    return f"cu{cuda_version.replace('.', '')}"
+
+
 def get_torch_version_suffix() -> str:
     """Get torch version suffix for package versioning."""
     # Get PyTorch version
     torch_version = torch.__version__.split('+')[0]  # Remove +cu118 etc.
     torch_major_minor = '.'.join(torch_version.split('.')[:2])  # Get major.minor
 
-    # Get CUDA version from torch
+    # Get CUDA version from torch even when no GPU is present.
     cuda_suffix = ""
-    if torch.cuda.is_available():
-        # Extract CUDA version from torch version string if available
-        if '+' in torch.__version__ and 'cu' in torch.__version__:
-            cuda_part = torch.__version__.split('+')[1]
-            if cuda_part.startswith('cu'):
-                cuda_suffix = f".{cuda_part}"  # Use dot instead of +
-        else:
-            # Try to get CUDA version from torch.version.cuda
-            cuda_version = torch.version.cuda
-            cuda_major_minor = ''.join(cuda_version.split('.')[:2])
-            cuda_suffix = f".cu{cuda_major_minor}"  # Use dot instead of +
+    cuda_tag = _format_cuda_suffix(torch.version.cuda)
+    if cuda_tag:
+        cuda_suffix = f".{cuda_tag}"
+    elif "+cu" in torch.__version__:
+        cuda_part = torch.__version__.split("+", 1)[1]
+        if cuda_part.startswith("cu"):
+            cuda_suffix = f".{cuda_part}"
 
     # Format: torch26 or torch26.cu118 (PEP 440 compliant)
     torch_suffix = f"torch{torch_major_minor.replace('.', '')}{cuda_suffix}"
@@ -402,6 +408,36 @@ def copy_schema_sql() -> None:
         print(f"Warning: Failed to copy schema.sql into package: {e}")
 
 
+def ensure_proto_python_generated() -> None:
+    """Ensure generated Python protos exist and are linked into the package tree."""
+    proto_gen_dir = Path(dir_path) / "proto" / "gen" / "python" / "tensorcast"
+    if not proto_gen_dir.exists():
+        script_path = Path(dir_path) / "tools" / "build_proto_python.sh"
+        if not script_path.exists():
+            raise RuntimeError(
+                f"Missing generated protos at {proto_gen_dir} and build script not found at {script_path}"
+            )
+        print("Generating Python proto stubs via tools/build_proto_python.sh")
+        subprocess.check_call(["bash", str(script_path)], cwd=dir_path)
+
+    if not proto_gen_dir.exists():
+        raise RuntimeError(f"Python proto stubs not found at {proto_gen_dir}")
+
+    proto_link = Path(dir_path) / "tensorcast" / "proto"
+    if proto_link.exists():
+        return
+    if proto_link.is_symlink():
+        try:
+            proto_link.unlink()
+        except Exception:
+            pass
+    proto_link.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.symlink(str(proto_gen_dir.resolve()), str(proto_link))
+        print(f"Created symlink: {proto_link} -> {proto_gen_dir}")
+    except Exception as e:
+        print(f"Warning: Failed to create proto symlink: {e}")
+
 
 def find_bazel_daemon_binary() -> Path | None:
     candidate = Path(dir_path) / "bazel-bin" / "daemon" / "tensorcast_daemon"
@@ -602,6 +638,14 @@ class CleanCommand(Command):
                 os.remove(path)
 
 
+class BuildPyCommand(build_py):
+    description = "Builds the Python package sources"
+
+    def run(self):
+        ensure_proto_python_generated()
+        build_py.run(self)
+
+
 ext_modules = []
 
 
@@ -768,6 +812,7 @@ cmd_class = {
         "develop": DevelopCommand,
         "bdist_wheel": BdistCommand,
         "editable_wheel": EditableWheelCommand,
+        "build_py": BuildPyCommand,
 }
 
 if BuildExtension is not None:
@@ -780,7 +825,16 @@ setup(
     cmdclass=cmd_class,
     zip_safe=False,
     packages=find_packages(exclude=["*.csrc.*"]),
-    package_data={"tensorcast": ["schema.sql", "*.so", "lib/*.so", "bin/*"]},
+    package_data={
+        "tensorcast": [
+            "schema.sql",
+            "*.so",
+            "lib/*.so",
+            "bin/*",
+            "proto/**/*.py",
+            "proto/**/*.pyi",
+        ]
+    },
     exclude_package_data={
         # "tensorcast": [
         #     "tensorcast/csrc/*.cc",

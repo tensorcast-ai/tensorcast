@@ -18,7 +18,8 @@ cc_library(
 
 cc_library(
     name = "torch",
-    srcs = glob(["torch/lib/libgomp-*.so.1"]) + [
+    srcs = [
+        "torch/lib/libgomp.so.1",
         "torch/lib/libtorch.so",
         "torch/lib/libtorch_cpu.so",
         "torch/lib/libtorch_cuda.so",

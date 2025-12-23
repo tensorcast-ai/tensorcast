@@ -1,7 +1,7 @@
 [build-system]
 # Note: The torch version here is the default. When building releases,
 # use tools/release.sh with --torch-version to specify different versions
-requires = ["setuptools>=68.0.0", "pyyaml>=6.0", "torch==2.6.0", "toml"]
+requires = ["setuptools>=68.0.0", "pyyaml", "torch==2.8.0+cu128", "toml"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,7 +19,7 @@ dependencies = [
     "pandas>=2.2.3",
     "prometheus-client>=0.21.1",
     "py-grpc-prometheus>=0.8.0",
-    "torch==2.6.0",
+    "torch==2.8.0+cu128",
     "protobuf==6.31.1",
     # OpenTelemetry is a required dependency. No automatic downgrade.
     "opentelemetry-api>=1.36.0",
@@ -28,6 +28,10 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.36.0",
     "opentelemetry-instrumentation-grpc>=0.57b0",
     "uvicorn>=0.32.0",
+    "pyyaml>=6.0.2",
+    "duckdb>=1.2.1",
+    "pydantic>=2.0.0",
+    "psutil>=7.0.0",
 ]
 
 dynamic = ["version"]
@@ -66,10 +70,6 @@ tensorcast-cli = "tensorcast.cli:main"
 
 [project.optional-dependencies]
 build = ["setuptools", "cython"]
-global = [
-    "duckdb>=1.2.1",
-    "pydantic>=2.0.0",
-]
 
 
 [tool.mypy]
@@ -86,7 +86,7 @@ disable_error_code = [
     "type-arg",
     "var-annotated",
     "no-any-return",
-    "misc"
+    "misc",
 ]
 show_error_codes = true
 check_untyped_defs = true
@@ -121,7 +121,7 @@ exclude = [
     "setup.py",
     "*_pb2.py",
     "*_pb2_grpc.py",
-    "*.pyi"
+    "*.pyi",
 ]
 
 [tool.ruff.lint]
@@ -141,7 +141,7 @@ ignore = [
     # "B905",
     # "E402",
     # "C408",   # C408 ignored because we like the dict keyword argument syntax
-    "E501",   # E501 is not flexible enough, we're using B950 instead
+    "E501", # E501 is not flexible enough, we're using B950 instead
     # "E721",
     # "E731",   # Assign lambda expression
     # "E741",
@@ -183,9 +183,7 @@ select = [
     "PERF",
     "PLE",
 ]
-extend-select = [
-    "I",
-]
+extend-select = ["I"]
 # Allow unused variables when underscore-prefixed.
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
@@ -245,19 +243,26 @@ max-complexity = 10
 
 
 [tool.pyright]
-include = [
-    "tensorcast/**",
-    "tests/python/**",
-]
+include = ["tensorcast/**", "tests/python/**"]
 
-exclude = [
-    "tensorcast/proto/*",
-    "tensorcast/proto/**/*.pyi"
-]
+exclude = ["tensorcast/proto/*", "tensorcast/proto/**/*.pyi"]
 # strict = ["tensorcast/global_store"]
 typeCheckingMode = "standard"
 reportMissingImports = "error"
 reportMissingModuleSource = "none"
 pythonVersion = "3.10"
 reportAttributeAccessIssue = "none"
-reportUnknownMemberType="none"
+reportUnknownMemberType = "none"
+
+[[tool.uv.index]]
+default = true
+name = "private-index"
+url = "http://mirrors.i.basemind.com/pypi/simple"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/simple"
+explicit = true

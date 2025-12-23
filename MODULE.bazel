@@ -91,149 +91,148 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 http_archive(
     name = "cudnn",
     build_file = "@//third_party/cudnn/archive:BUILD",
-    integrity = "sha256-Fldk9E74xh/N/f2+dp1ofgY3QFn7s4i2yJ7LDih5Om8=",
+    integrity = "sha256-lJRSvmV/oWaH0JMJM/Ayg1lR7wiSs30tU4JNGoTcl6g=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/9f/fd/713452cd72343f682b1c7b9321e23829f00b842ceaedcda96e742ea0b0b3/nvidia_cudnn_cu12-9.1.0.70-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/9f/fd/713452cd72343f682b1c7b9321e23829f00b842ceaedcda96e742ea0b0b3/nvidia_cudnn_cu12-9.1.0.70-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/ba/51/e123d997aa098c61d029f76663dedbfb9bc8dcf8c60cbd6adbe42f76d049/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl",
+        "https://files.pythonhosted.org/packages/ba/51/e123d997aa098c61d029f76663dedbfb9bc8dcf8c60cbd6adbe42f76d049/nvidia_cudnn_cu12-9.10.2.21-py3-none-manylinux_2_27_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "nccl",
     build_file = "@//third_party/nccl:BUILD",
-    integrity = "sha256-hXkHbTCowkmIg0RF+NYzxpfUI5fpL/w/Y/omdm0l4KA=",
+    integrity = "sha256-rfJ8z0I4JT4LgmvOP/X6Uy1l/EIyLIv9+vKAJMD74Dk=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/df/99/12cd266d6233f47d00daf3a72739872bdc10267d0383508b0b9c84a18bb6/nvidia_nccl_cu12-2.21.5-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/df/99/12cd266d6233f47d00daf3a72739872bdc10267d0383508b0b9c84a18bb6/nvidia_nccl_cu12-2.21.5-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/5c/5b/4e4fff7bad39adf89f735f2bc87248c81db71205b62bcc0d5ca5b606b3c3/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/5c/5b/4e4fff7bad39adf89f735f2bc87248c81db71205b62bcc0d5ca5b606b3c3/nvidia_nccl_cu12-2.27.3-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "libtorch",
     build_file = "@//third_party/libtorch:BUILD",
-    integrity = "sha256-aGDfE9mRGsFY9MRAMWCXAOHroHkW//YuIeb/oKngGWE=",
+    integrity = "sha256-DJaZnRXPHxPdfJE+CyGpo1VTjmz8EIYaFxWDICkvWVQ=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/37/81/aa9ab58ec10264c1abe62c8b73f5086c3c558885d6beecebf699f0dbeaeb/torch-2.6.0-cp310-cp310-manylinux1_x86_64.whl",
-        "https://files.pythonhosted.org/packages/37/81/aa9ab58ec10264c1abe62c8b73f5086c3c558885d6beecebf699f0dbeaeb/torch-2.6.0-cp310-cp310-manylinux1_x86_64.whl",
+        "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/torch/2.8.0+cu128/torch-2.8.0+cu128-cp310-cp310-manylinux_2_28_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cusparselt",
     build_file = "@//third_party/cusparselt:BUILD",
-    integrity = "sha256-3ywkUC/Xbrr+dFfbxHFrL+wHGquu1Pt2kaIBzeA3BNk=",
+    integrity = "sha256-8btwHWuTDVp86kTBnOuXMxFQCEf4G2NNgCt7U53FViM=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/78/a8/bcbb63b53a4b1234feeafb65544ee55495e1bb37ec31b999b963cbccfd1d/nvidia_cusparselt_cu12-0.6.2-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/78/a8/bcbb63b53a4b1234feeafb65544ee55495e1bb37ec31b999b963cbccfd1d/nvidia_cusparselt_cu12-0.6.2-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl",
+        "https://files.pythonhosted.org/packages/56/79/12978b96bd44274fe38b5dde5cfb660b1d114f70a65ef962bcbbed99b549/nvidia_cusparselt_cu12-0.7.1-py3-none-manylinux2014_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cupti",
     build_file = "@//third_party/cupti:BUILD",
-    integrity = "sha256-nexg9awSb3u1UcBVBytp2FOSsTMR/MG82iIC0XLfMPs=",
+    integrity = "sha256-6gywfr2ia7mym6gs2jSEnnPBZsGBYtORNXWwyduaYYI=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/67/42/f4f60238e8194a3106d06a058d494b18e006c10bb2b915655bd9f6ea4cb1/nvidia_cuda_cupti_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/67/42/f4f60238e8194a3106d06a058d494b18e006c10bb2b915655bd9f6ea4cb1/nvidia_cuda_cupti_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/f8/02/2adcaa145158bf1a8295d83591d22e4103dbfd821bcaf6f3f53151ca4ffa/nvidia_cuda_cupti_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/f8/02/2adcaa145158bf1a8295d83591d22e4103dbfd821bcaf6f3f53151ca4ffa/nvidia_cuda_cupti_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cublas",
     build_file = "@//third_party/cublas:BUILD",
-    integrity = "sha256-L8jaYN9GP976geMj7vLjZInhyUM1tTWLyzg2Ct91rJs=",
+    integrity = "sha256-isTncdWjSMVRsqQm7aYZPBmqYwI2tBgIYCDfW6lmcUI=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/ae/71/1c91302526c45ab494c23f61c7a84aa568b8c1f9d196efa5993957faf906/nvidia_cublas_cu12-12.4.5.8-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/ae/71/1c91302526c45ab494c23f61c7a84aa568b8c1f9d196efa5993957faf906/nvidia_cublas_cu12-12.4.5.8-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/dc/61/e24b560ab2e2eaeb3c839129175fb330dfcfc29e5203196e5541a4c44682/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl",
+        "https://files.pythonhosted.org/packages/dc/61/e24b560ab2e2eaeb3c839129175fb330dfcfc29e5203196e5541a4c44682/nvidia_cublas_cu12-12.8.4.1-py3-none-manylinux_2_27_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cufft",
     build_file = "@//third_party/cufft:BUILD",
-    integrity = "sha256-8IP8JJEqpBC+IfoW0Vf+0gVdqxzEtpNKDgPLpp6yQrk=",
+    integrity = "sha256-TS3SHsC4jPYbYua0NWQ1XlIi5KP7OUysDbEB8t0NT3Q=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/27/94/3266821f65b92b3138631e9c8e7fe1fb513804ac934485a8d05776e1dd43/nvidia_cufft_cu12-11.2.1.3-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/27/94/3266821f65b92b3138631e9c8e7fe1fb513804ac934485a8d05776e1dd43/nvidia_cufft_cu12-11.2.1.3-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/1f/13/ee4e00f30e676b66ae65b4f08cb5bcbb8392c03f54f2d5413ea99a5d1c80/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/1f/13/ee4e00f30e676b66ae65b4f08cb5bcbb8392c03f54f2d5413ea99a5d1c80/nvidia_cufft_cu12-11.3.3.83-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cudart",
     build_file = "@//third_party/cudart:BUILD",
-    integrity = "sha256-ZEAyiPohNu6ORnzcnJQn4ENBEImdB8d58ltcBok0+qU=",
+    integrity = "sha256-ra3o3L0O30J7cgTUgNYGbTOQLKsqRwfc/Eii0P1Eq5A=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/ea/27/1795d86fe88ef397885f2e580ac37628ed058a92ed2c39dc8eac3adf0619/nvidia_cuda_runtime_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/ea/27/1795d86fe88ef397885f2e580ac37628ed058a92ed2c39dc8eac3adf0619/nvidia_cuda_runtime_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/0d/9b/a997b638fcd068ad6e4d53b8551a7d30fe8b404d6f1804abf1df69838932/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/0d/9b/a997b638fcd068ad6e4d53b8551a7d30fe8b404d6f1804abf1df69838932/nvidia_cuda_runtime_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "curand",
     build_file = "@//third_party/curand:BUILD",
-    integrity = "sha256-qI9YPU4LtkPEl0NGmWQQOqWff3CNhiw92w/Af4UeO4s=",
+    integrity = "sha256-syMx1PTfXW7voFVMVltibHIW+HoGpPVvqyfDtoqDDsk=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/8a/6d/44ad094874c6f1b9c654f8ed939590bdc408349f137f9b98a3a23ccec411/nvidia_curand_cu12-10.3.5.147-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/8a/6d/44ad094874c6f1b9c654f8ed939590bdc408349f137f9b98a3a23ccec411/nvidia_curand_cu12-10.3.5.147-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/fb/aa/6584b56dc84ebe9cf93226a5cde4d99080c8e90ab40f0c27bda7a0f29aa1/nvidia_curand_cu12-10.3.9.90-py3-none-manylinux_2_27_x86_64.whl",
+        "https://files.pythonhosted.org/packages/fb/aa/6584b56dc84ebe9cf93226a5cde4d99080c8e90ab40f0c27bda7a0f29aa1/nvidia_curand_cu12-10.3.9.90-py3-none-manylinux_2_27_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cusparse",
     build_file = "@//third_party/cusparse:BUILD",
-    integrity = "sha256-6k8RopBOKo3EsYM8wbUYHN5WTt0NXNM+PBaO/y0YY/E=",
+    integrity = "sha256-HsBddru9i2GwaoDh6vjPSVnD1M6OcRtl69BEO7DrsTs=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/db/f7/97a9ea26ed4bbbfc2d470994b8b4f338ef663be97b8f677519ac195e113d/nvidia_cusparse_cu12-12.3.1.170-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/db/f7/97a9ea26ed4bbbfc2d470994b8b4f338ef663be97b8f677519ac195e113d/nvidia_cusparse_cu12-12.3.1.170-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/c2/f5/e1854cb2f2bcd4280c44736c93550cc300ff4b8c95ebe370d0aa7d2b473d/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/c2/f5/e1854cb2f2bcd4280c44736c93550cc300ff4b8c95ebe370d0aa7d2b473d/nvidia_cusparse_cu12-12.5.8.93-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "cusolver",
     build_file = "@//third_party/cusolver:BUILD",
-    integrity = "sha256-GeM/pEK8/QhbMIbE6/fo3rwHz+AeEVE8xtMy/ZGKwmA=",
+    integrity = "sha256-Q3bBGtJjFSvVDqKVwFNwNgd2+MNCezCZHfd0+fsmxFA=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/3a/e1/5b9089a4b2a4790dfdea8b3a006052cfecff58139d5a4e34cb1a51df8d6f/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/3a/e1/5b9089a4b2a4790dfdea8b3a006052cfecff58139d5a4e34cb1a51df8d6f/nvidia_cusolver_cu12-11.6.1.9-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/85/48/9a13d2975803e8cf2777d5ed57b87a0b6ca2cc795f9a4f59796a910bfb80/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl",
+        "https://files.pythonhosted.org/packages/85/48/9a13d2975803e8cf2777d5ed57b87a0b6ca2cc795f9a4f59796a910bfb80/nvidia_cusolver_cu12-11.7.3.90-py3-none-manylinux_2_27_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "nvjitlink",
     build_file = "@//third_party/nvjitlink:BUILD",
-    integrity = "sha256-BrO5slvz+K81HWZJeMomoW0sUSfb1TwEl+KNH7lhHVc=",
+    integrity = "sha256-gf9jNxp+vW5kUZcGhPkWvi6rBzIbc8nSRNwrTaf3O4g=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/ff/ff/847841bacfbefc97a00036e0fce5a0f086b640756dc38caea5e1bb002655/nvidia_nvjitlink_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/ff/ff/847841bacfbefc97a00036e0fce5a0f086b640756dc38caea5e1bb002655/nvidia_nvjitlink_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/f6/74/86a07f1d0f42998ca31312f998bd3b9a7eff7f52378f4f270c8679c77fb9/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+        "https://files.pythonhosted.org/packages/f6/74/86a07f1d0f42998ca31312f998bd3b9a7eff7f52378f4f270c8679c77fb9/nvidia_nvjitlink_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "nvrtc",
     build_file = "@//third_party/nvrtc:BUILD",
-    integrity = "sha256-oXh1nrsJWCe9MO9WWY7BgrhVR/FQiUGj1WDrfqH78zg=",
+    integrity = "sha256-p3VlKIUu+Il3KoTGzYnUHfp0Zn4kzKFrsx+PBh4+mZQ=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/2c/14/91ae57cd4db3f9ef7aa99f4019cfa8d54cb4caa7e00975df6467e9725a9f/nvidia_cuda_nvrtc_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/2c/14/91ae57cd4db3f9ef7aa99f4019cfa8d54cb4caa7e00975df6467e9725a9f/nvidia_cuda_nvrtc_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
+        "https://files.pythonhosted.org/packages/05/6b/32f747947df2da6994e999492ab306a903659555dddc0fbdeb9d71f75e52/nvidia_cuda_nvrtc_cu12-12.8.93-py3-none-manylinux2010_x86_64.manylinux_2_12_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "nvtx",
     build_file = "@//third_party/nvtx:BUILD",
-    integrity = "sha256-eB6VDZufYNgkHM6ldbMvUQWluvTCNRyrUlaiSGnxKho=",
+    integrity = "sha256-WxfiABzA11GlvCxuxtJq2VkTMkpK24Z4jJRPjOm6RB8=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/87/20/199b8713428322a2f22b722c62b8cc278cc53dffa9705d744484b5035ee9/nvidia_nvtx_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/87/20/199b8713428322a2f22b722c62b8cc278cc53dffa9705d744484b5035ee9/nvidia_nvtx_cu12-12.4.127-py3-none-manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/a2/eb/86626c1bbc2edb86323022371c39aa48df6fd8b0a1647bc274577f72e90b/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "https://files.pythonhosted.org/packages/a2/eb/86626c1bbc2edb86323022371c39aa48df6fd8b0a1647bc274577f72e90b/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
     ],
 )
 
 http_archive(
     name = "triton",
     build_file = "@//third_party/triton:BUILD",
-    integrity = "sha256-s+VJg81Rh1hV2nxo7AXAXPi7CN82Gx1baeBeQLDJvWI=",
+    integrity = "sha256-f/J4Xem8AvUA4IVCAnO7XMnJu3Z1hKSqKNbjYM7HASg=",
     urls = [
-        "http://mirrors.i.basemind.com/pypi/packages/01/65/3ffa90e158a2c82f0716eee8d26a725d241549b7d7aaf7e4f44ac03ebd89/triton-3.2.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-        "https://files.pythonhosted.org/packages/01/65/3ffa90e158a2c82f0716eee8d26a725d241549b7d7aaf7e4f44ac03ebd89/triton-3.2.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
+        "http://mirrors.i.basemind.com/pypi/packages/packages/62/ee/0ee5f64a87eeda19bbad9bc54ae5ca5b98186ed00055281fd40fb4beb10e/triton-3.4.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
+        "https://files.pythonhosted.org/packages/62/ee/0ee5f64a87eeda19bbad9bc54ae5ca5b98186ed00055281fd40fb4beb10e/triton-3.4.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl",
     ],
 )
