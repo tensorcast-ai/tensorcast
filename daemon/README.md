@@ -62,6 +62,7 @@ flowchart TB
 
 - Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`.
 - Loading v2 (gated): `MaterializeByKey`/`MaterializeReplica` with descriptor payloads plus `GetMaterializeCapabilities` (SDK probe) under `StoreDaemonServiceV2`. Descriptors are derived from UMA view plans (offset/stride/byte-length) when a view is requested so the exported buffer layout matches the planner, and disk fallbacks stay daemon-owned via `DiskFallbackHint` (respecting `verify_checksums`).
+- Loading v2 (region-backed): `MaterializeIntoTarget` streams bytes directly into a client-registered CUDA region when the SDK supplies a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`, `index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`) and `artifact_id`. The daemon validates layout/device constraints, maps the IPC handle, and never allocates a daemon-owned replica.
 - Disk fallbacks honor `verify_checksums` on `DiskFallbackHint`/`MaterializeReplicaRequest` and propagate the flag into engine `MaterializeHints` so checksum/descriptor validation is enforced by default but can be disabled for local development.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
@@ -74,6 +75,7 @@ Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
 - `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
+- `MaterializeIntoTarget` requires canonical layouts and `artifact_id` in Phase 1, skips verification, and returns `DATA_LOSS` on post-start failures after poisoning the region to prevent reuse.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 
 ### Variant Views (v1)
@@ -104,6 +106,7 @@ Contract highlights:
 - `verification_tracker.h`: completion-driven verification tracking (ReadySignal subscriptions) with capacity/expiry pruning.
 - `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
 - `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
+- `ipc_region_registry.{h,cc}`: tracks client-registered CUDA IPC regions with TTL, refcounts, and poison state.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
 - `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; `start()` just performs the handshake and initial registration, and shutdown signals interruptible waits so stop exits promptly.
 - `server_main.cc`: flags/bootstrap and service registration.

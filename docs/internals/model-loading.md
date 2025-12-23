@@ -81,6 +81,18 @@ sequenceDiagram
     Note left of LocalStoreDaemon: RPC: UnloadReplica (drops refs/leases)
 ```
 
+## Region-backed tensor_dict_into
+
+Region-backed into calls bypass daemon-owned replicas by streaming bytes into a
+client-registered CUDA region using `MaterializeIntoTarget`. The SDK computes a
+full coalesced `TargetLayout` from the target tensors, validates against the
+canonical index, and invokes the v2 RPC directly. The daemon maps the IPC handle,
+streams bytes from P2P or disk, and releases the region reference on completion
+without allocating VRAM.
+
+See [tensor_dict_into dataflow](tensor_dict_into_dataflow.md) for the detailed
+sequence and Phase 1 constraints.
+
 ### Lease-In-Place Fast Path & Use Leases
 
 `MaterializeByKey` still resolves the human key via `MetadataGateway::resolve_key_mapping`, but before it coordinates transport it now asks `LipManager::try_satisfy_from_lip` for a replica that already lives on the requested GPU. When this fast path hits, the daemon reuses the existing CUDA IPC handle, marks the status as `ALLOCATED`, and returns both `artifact_id` and `used_disk_path` to the client without invoking the bulk materialization pipeline. If the fast path misses, the controller immediately falls through to the engine-backed path described below.

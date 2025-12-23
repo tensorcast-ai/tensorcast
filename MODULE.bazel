@@ -35,6 +35,7 @@ bazel_dep(name = "rules_proto_grpc_cpp", version = "5.7.1")
 bazel_dep(name = "toolchains_protoc", version = "0.5.0")
 bazel_dep(name = "protobuf", version = "31.1")
 bazel_dep(name = "gsl", version = "4.0.0")
+bazel_dep(name = "glog", version = "0.7.1")
 bazel_dep(name = "boringssl", version = "0.20250818.0")
 bazel_dep(name = "opentelemetry-cpp", version = "1.22.0")
 bazel_dep(name = "grpc", version = "1.74.1")
@@ -42,6 +43,13 @@ bazel_dep(name = "rules_buf", version = "0.5.2")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "folly", version = "2025.01.13.00.bcr.3")
 bazel_dep(name = "double-conversion", version = "3.3.1")
+
+single_version_override(
+    module_name = "glog",
+    patch_strip = 1,
+    patches = ["//third_party/glog/patches:0001-export-macros.patch"],
+    version = "0.7.1",
+)
 
 protoc = use_extension("@toolchains_protoc//protoc:extensions.bzl", "protoc")
 protoc.toolchain(

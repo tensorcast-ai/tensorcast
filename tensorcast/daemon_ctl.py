@@ -539,8 +539,66 @@ class DaemonCtl:
                 if e.code() == grpc.StatusCode.UNIMPLEMENTED:
                     return store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse(
                         supports_view_subset_hash=False,
+                        supports_region_backed_get_into=False,
                     )
                 raise RuntimeError("GetMaterializeCapabilities failed") from e
+        return response
+
+    def materialize_into_target_v2(
+        self,
+        *,
+        artifact_id: str,
+        target_layout: store_daemon_v2_pb2.TargetLayout,
+        device_uuid: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        disk_path: str | None = None,
+        pid: int | None = None,
+        return_response: bool = True,
+    ) -> store_daemon_v2_pb2.MaterializeIntoTargetResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/MaterializeIntoTarget") as span:
+            request = store_daemon_v2_pb2.MaterializeIntoTargetRequest(
+                artifact_id=artifact_id,
+                target_layout=target_layout,
+                device_uuid=device_uuid,
+                pid=pid_value,
+                preference=preference
+                if preference is not None
+                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+            )
+            if disk_path:
+                request.disk_fallback.disk_path = disk_path
+                request.disk_fallback.verify_checksums = True
+            try:
+                response: store_daemon_v2_pb2.MaterializeIntoTargetResponse = (
+                    self._unary_call(
+                        self.stub_v2.MaterializeIntoTarget,
+                        request,
+                        timeout=60,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise RuntimeError(
+                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                    ) from e
+                raise RuntimeError(f"Error: {e}") from e
+        if not return_response:
+            raise RuntimeError(
+                "materialize_into_target_v2 requires return_response=True"
+            )
         return response
 
     def query_replica_status(

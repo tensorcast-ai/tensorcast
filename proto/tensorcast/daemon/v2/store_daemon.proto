@@ -8,6 +8,7 @@ import "tensorcast/daemon/v1/store_daemon.proto";
 // Materialization v2 RPC surface focused on streaming payload descriptors.
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
+  rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
   rpc GetMaterializeCapabilities(GetMaterializeCapabilitiesRequest) returns (GetMaterializeCapabilitiesResponse) {}
@@ -29,6 +30,39 @@ message TensorPayloadDescriptor {
   uint64 storage_offset = 6;
   string dtype = 7;
   string device_uuid = 8;
+}
+
+message TargetTensorOffset {
+  string name = 1;
+  string storage_id = 2;
+  uint64 storage_offset = 3;
+  uint64 logical_length = 4;
+}
+
+message TargetLayout {
+  enum LayoutKind {
+    LAYOUT_KIND_COALESCED_UNSPECIFIED = 0;
+    LAYOUT_KIND_TENSOR_TABLE = 1;
+  }
+
+  enum IndexKind {
+    INDEX_KIND_CANONICAL_UNSPECIFIED = 0;
+    INDEX_KIND_VIEW = 1;
+  }
+
+  enum TensorSpecKind {
+    TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED = 0;
+    TENSOR_SPEC_KIND_OFFSETS = 1;
+  }
+
+  repeated tensorcast.daemon.v1.StorageEntry storages = 1;
+  repeated tensorcast.daemon.v1.TensorAlias aliases = 2;
+  repeated TargetTensorOffset offsets = 3;
+  LayoutKind layout_kind = 4;
+  IndexKind index_kind = 5;
+  string view_id = 6;
+  TensorSpecKind tensor_spec_kind = 7;
+  bytes logical_layout_hash = 8;
 }
 
 message ViewSubset {
@@ -86,6 +120,40 @@ message MaterializeReplicaResponse {
   uint64 generation = 11;
 }
 
+message MaterializeIntoTargetRequest {
+  oneof artifact_ref {
+    string artifact_id = 1;
+    string key = 2;
+  }
+  DiskFallbackHint disk_fallback = 3;
+
+  TargetLayout target_layout = 4;
+  int32 pid = 5;
+  string device_uuid = 6;
+
+  tensorcast.daemon.v1.SourcePreference preference = 7;
+
+  repeated string tensor_names = 8;
+  bytes view_subset_hash = 9;
+
+  oneof view_identity {
+    tensorcast.daemon.v1.ViewSpec view = 1001;
+    string view_id = 1002;
+  }
+
+  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+}
+
+message MaterializeIntoTargetResponse {
+  string artifact_id = 1;
+  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
+  tensorcast.daemon.v1.MaterializationSource source = 3;
+  bytes canonical_index_bytes = 4;
+  ViewSubset view_subset = 5;
+  bytes view_index_bytes = 6;
+  uint64 generation = 7;
+}
+
 message MaterializeByKeyRequest {
   string key = 1;
   int32 device_id = 2;
@@ -131,6 +199,7 @@ message GetMaterializeCapabilitiesRequest {}
 
 message GetMaterializeCapabilitiesResponse {
   bool supports_view_subset_hash = 1;
+  bool supports_region_backed_get_into = 2;
 }
 
 message QueryReplicaStatusResponse {

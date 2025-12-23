@@ -113,10 +113,12 @@ def materialize_artifact_v2(
         pinned_ms,
         enable_ver,
         wait_for_completion,
+        region_backed_mode,
     ) = apply_client_load_defaults_if_present(
         opts.pinned_allocation_timeout_ms,
         opts.enable_verification,
         opts.wait_for_completion,
+        opts.region_backed_mode,
         runtime_address=daemon_address,
     )
 
@@ -125,6 +127,7 @@ def materialize_artifact_v2(
             "pinned_allocation_timeout_ms": pinned_ms,
             "enable_verification": enable_ver,
             "wait_for_completion": wait_for_completion,
+            "region_backed_mode": region_backed_mode,
         }
     )
 

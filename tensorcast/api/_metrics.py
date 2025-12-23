@@ -35,6 +35,8 @@ class _MeterState:
         self._batch_coalesced: _Counter | None = None
         self._batch_latency: _Histogram | None = None
         self._prefetch_events: _Counter | None = None
+        self._region_backed_fallbacks: _Counter | None = None
+        self._region_backed_verification_skipped: _Counter | None = None
         self._disabled = False
 
     @property
@@ -120,6 +122,16 @@ class _MeterState:
                     unit="1",
                     description="Prefetch ticket lifecycle events.",
                 )
+                self._region_backed_fallbacks = meter.create_counter(
+                    name="tc_store_region_backed_fallback_total",
+                    unit="1",
+                    description="Count of region-backed get_into fallbacks.",
+                )
+                self._region_backed_verification_skipped = meter.create_counter(
+                    name="tc_store_region_backed_verification_skipped_total",
+                    unit="1",
+                    description="Count of region-backed get_into verification skips.",
+                )
             except Exception as exc:  # noqa: BLE001
                 self._disabled = True
                 self._latency = None
@@ -133,6 +145,8 @@ class _MeterState:
                 self._batch_coalesced = None
                 self._batch_latency = None
                 self._prefetch_events = None
+                self._region_backed_fallbacks = None
+                self._region_backed_verification_skipped = None
                 _logger.debug("Failed to initialise store OTel metrics", exc_info=exc)
                 return False
         return True
@@ -309,6 +323,34 @@ class _MeterState:
         except Exception:  # noqa: BLE001
             _logger.debug("Failed to record prefetch event", exc_info=True)
 
+    def record_region_backed_fallback(self, daemon: str, reason: str) -> None:
+        if not self.ensure():
+            return
+        if self._region_backed_fallbacks is None:
+            return
+        try:
+            self._region_backed_fallbacks.add(
+                1, attributes={"daemon": daemon, "reason": reason}
+            )
+        except Exception:  # noqa: BLE001
+            _logger.debug(
+                "Failed to record region-backed fallback event", exc_info=True
+            )
+
+    def record_region_backed_verification_skipped(self, daemon: str) -> None:
+        if not self.ensure():
+            return
+        if self._region_backed_verification_skipped is None:
+            return
+        try:
+            self._region_backed_verification_skipped.add(
+                1, attributes={"daemon": daemon}
+            )
+        except Exception:  # noqa: BLE001
+            _logger.debug(
+                "Failed to record region-backed verification skipped", exc_info=True
+            )
+
 
 _METRICS = _MeterState()
 
@@ -379,3 +421,11 @@ def record_batch_latency(daemon: str, duration_s: float) -> None:
 
 def record_prefetch_event(daemon: str, status: str) -> None:
     _METRICS.record_prefetch_event(daemon, status)
+
+
+def record_region_backed_fallback(daemon: str, reason: str) -> None:
+    _METRICS.record_region_backed_fallback(daemon, reason)
+
+
+def record_region_backed_verification_skipped(daemon: str) -> None:
+    _METRICS.record_region_backed_verification_skipped(daemon)

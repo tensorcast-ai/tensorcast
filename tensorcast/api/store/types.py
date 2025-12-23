@@ -225,6 +225,7 @@ class StoreCapabilities:
     artifact_chunk_bytes: int
     supports_coalesced: bool
     supports_lease: bool
+    supports_region_backed_get_into: bool
     server_config: ServerConfig | None = None
 
 

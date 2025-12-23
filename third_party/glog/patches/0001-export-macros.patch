@@ -1,0 +1,36 @@
+diff --git a/src/glog/logging.h b/src/glog/logging.h
+index 0e9d3e4..7c0ac1a 100644
+--- a/src/glog/logging.h
++++ b/src/glog/logging.h
+@@ -52,6 +52,13 @@
+ #if defined(GLOG_USE_GLOG_EXPORT)
+ #  include "glog/export.h"
+ #endif
++
++#if !defined(_WIN32)
++#undef GLOG_EXPORT
++#undef GLOG_NO_EXPORT
++#define GLOG_EXPORT __attribute__((visibility("default")))
++#define GLOG_NO_EXPORT __attribute__((visibility("default")))
++#endif
+
+ #if !defined(GLOG_EXPORT) || !defined(GLOG_NO_EXPORT)
+ #  error <glog/logging.h> was not included correctly. See the documentation for how to consume the library.
+ #endif
+diff --git a/src/glog/flags.h b/src/glog/flags.h
+index 02d63c0..2d96d10 100644
+--- a/src/glog/flags.h
++++ b/src/glog/flags.h
+@@ -36,6 +36,11 @@
+ #if defined(GLOG_USE_GLOG_EXPORT)
+ #  include "glog/export.h"
+ #endif
++
++#if !defined(_WIN32)
++#undef GLOG_EXPORT
++#define GLOG_EXPORT __attribute__((visibility("default")))
++#endif
+
+ #if !defined(GLOG_EXPORT)
+ #  error <glog/flags.h> was not included correctly. See the documentation for how to consume the library.
+ #endif

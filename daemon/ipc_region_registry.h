@@ -47,6 +47,7 @@ class IpcRegionRegistry {
     std::string session_id;
     std::string region_name;
     absl::Time expires_at = absl::InfiniteFuture();
+    bool poisoned = false;
   };
 
   explicit IpcRegionRegistry(Options opts);
@@ -75,12 +76,19 @@ class IpcRegionRegistry {
   // Release a previously acquired region.
   absl::Status release(const std::string& region_id);
 
+  // Mark a region as poisoned to prevent further writes.
+  absl::Status mark_poisoned(const std::string& region_id);
+
+  // Check if a region is poisoned.
+  bool is_poisoned(const std::string& region_id) const;
+
  private:
   struct RegionRecord {
     RegionDescriptor desc;
     std::string handle_bytes;
     uint64_t refcount = 0;
     absl::Time inserted_at = absl::Now();
+    bool poisoned = false;
   };
 
   std::string mint_region_id_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);

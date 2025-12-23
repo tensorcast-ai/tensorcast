@@ -47,6 +47,14 @@ class IngestionRuntime {
       loading::MaterializeMode mode,
       const loading::MaterializeHints& hints);
 
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
+      const DeviceKey& target_device,
+      gsl::not_null<void*> target_ptr,
+      uint64_t total_size,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints);
+
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,
