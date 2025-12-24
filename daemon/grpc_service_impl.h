@@ -99,6 +99,16 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         verif_tracker_(gsl::not_null<std::unique_ptr<VerificationTracker>>(std::make_unique<VerificationTracker>())),
         reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
         opts_(opts) {
+    if (!opts_.storage_path.empty()) {
+      std::error_code ec;
+      auto canonical = std::filesystem::weakly_canonical(opts_.storage_path, ec);
+      if (ec) {
+        ec.clear();
+        canonical = opts_.storage_path.lexically_normal();
+      }
+      opts_.storage_path = std::move(canonical);
+    }
+
     verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
     start_sweepers();
     persistence_mgr_ = std::make_unique<PersistenceManager>(
