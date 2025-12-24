@@ -47,6 +47,27 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
 - Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePreference=PREFER_DISK` (including the `verify_checksums` hint) so all disk reads stay in the daemon data path.
 
+## Region-backed get_into
+
+`tensor_dict_into` / `tensor_into` / `get_into` can stream bytes directly into
+caller-owned CUDA regions via the v2 `MaterializeIntoTarget` RPC. The SDK
+computes a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`,
+`index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`)
+from the target tensors, validates
+dtype/shape/stride against the canonical index, and requests the daemon to
+materialize into the mapped region. The daemon does not allocate VRAM, and the
+SDK does not call `UnloadReplica` for this path.
+
+The `region_backed_mode` default in the unified runtime config controls the
+behavior:
+
+- `auto`: try region-backed first; fall back to the legacy replica path on
+  validation failures.
+- `require`: enforce region-backed and surface errors.
+
+`get` / `get_view` always use the daemon-owned replica path and ignore
+`region_backed_mode`.
+
 ## Device requirements
 
 `Artifact.tensor*`/`tensor_dict*` default to materializing replicas onto CUDA

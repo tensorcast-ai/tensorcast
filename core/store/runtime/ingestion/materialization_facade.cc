@@ -2,20 +2,101 @@
 
 #include "core/store/runtime/ingestion/materialization_facade.h"
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <filesystem>
+#include <functional>
 #include <utility>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
 #include "core/store/materialization/control/materialize_orchestrator.h"
+#include "core/store/materialization/dataplane/loaders/disk_loader.h"
+#include "core/store/materialization/dataplane/loaders/p2p_loader.h"
+#include "core/store/materialization/dataplane/runtime/pump.h"
+#include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
+#include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 
 namespace tensorcast::store::runtime::ingestion {
 
 namespace pipeline = tensorcast::store::materialization::runtime::pipeline;
 using materialization::control::MaterializeOrchestrator;
+
+class PlanBackedSeekableSource final : public loader::SeekableSource {
+ public:
+  PlanBackedSeekableSource(
+      std::unique_ptr<loader::SeekableSource> source,
+      std::shared_ptr<const std::vector<loader::SegmentPiece>> plan,
+      uint64_t total_size)
+      : source_(std::move(source)), plan_(std::move(plan)), total_size_(total_size) {}
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto st = read_at(current_offset_, dst, max_bytes);
+    if (!st.ok()) {
+      return st;
+    }
+    current_offset_ += *st;
+    return st;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_size_) {
+      return static_cast<size_t>(0);
+    }
+    size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
+    auto* out = static_cast<uint8_t*>(dst);
+
+    size_t idx = 0;
+    for (; idx < plan_->size(); ++idx) {
+      const auto& p = (*plan_)[idx];
+      if (offset < p.dst_offset + p.length) {
+        break;
+      }
+    }
+    if (idx == plan_->size()) {
+      return static_cast<size_t>(0);
+    }
+
+    while (remaining > 0 && idx < plan_->size()) {
+      const auto& p = (*plan_)[idx];
+      const uint64_t local = offset - p.dst_offset;
+      const size_t avail = static_cast<size_t>(p.length - local);
+      const size_t take = std::min(remaining, avail);
+      if (p.kind == loader::SegmentPiece::PAD) {
+        std::memset(out, 0, take);
+      } else {
+        auto read_or = source_->read_at(p.src_offset + local, out, take);
+        if (!read_or.ok()) {
+          return read_or.status();
+        }
+        if (*read_or != take) {
+          return absl::DataLossError("Short read while materializing into target");
+        }
+      }
+      out += take;
+      offset += take;
+      remaining -= take;
+      if (take == avail) {
+        ++idx;
+      }
+    }
+    return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
+  }
+
+ private:
+  std::unique_ptr<loader::SeekableSource> source_;
+  std::shared_ptr<const std::vector<loader::SegmentPiece>> plan_;
+  uint64_t total_size_{0};
+  uint64_t current_offset_{0};
+};
 
 MaterializationFacade::MaterializationFacade(Config config)
     : config_(std::move(config)),
@@ -91,6 +172,179 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_replic
     return request_or.status();
   }
   return materialization_service_->execute(request_or.value());
+}
+
+absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_into_target(
+    const DeviceKey& target_device,
+    gsl::not_null<void*> target_ptr,
+    uint64_t total_size,
+    std::string_view canonical_index_json,
+    uint64_t generation,
+    const loading::MaterializeHints& hints) {
+  if (target_device.type != DeviceType::GPU) {
+    return absl::InvalidArgumentError("materialize_into_target requires GPU target device");
+  }
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("materialize_into_target requires total_size > 0");
+  }
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("materialize_into_target requires canonical index bytes");
+  }
+  if (hints.artifact_id.empty()) {
+    return absl::InvalidArgumentError("materialize_into_target requires hints.artifact_id");
+  }
+
+  auto plan_key = [&]() -> std::string {
+    auto mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+    if (mh_or.ok()) {
+      return absl::StrCat(generation, ":", *mh_or);
+    }
+    const size_t fallback_hash = std::hash<std::string_view>{}(canonical_index_json);
+    return absl::StrCat(generation, ":raw:", fallback_hash);
+  }();
+
+  std::shared_ptr<std::vector<loader::SegmentPiece>> plan_ptr;
+  {
+    absl::MutexLock lock(&segment_plan_mu_);
+    auto it = segment_plan_cache_.find(plan_key);
+    if (it != segment_plan_cache_.end()) {
+      plan_ptr = it->second;
+    }
+  }
+  if (!plan_ptr) {
+    auto plan_or = loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size);
+    if (!plan_or.ok()) {
+      return plan_or.status();
+    }
+    plan_ptr = std::make_shared<std::vector<loader::SegmentPiece>>(std::move(*plan_or));
+    absl::MutexLock lock(&segment_plan_mu_);
+    segment_plan_cache_.emplace(plan_key, plan_ptr);
+  }
+
+  auto run_source =
+      [&](std::unique_ptr<IArtifactLoader> loader,
+          loading::MaterializationSource source_kind) -> absl::StatusOr<loading::MaterializeIntoTargetResult> {
+    auto init_status = loader->initialize();
+    if (!init_status.ok()) {
+      return init_status;
+    }
+    auto source_or = loader->open_source();
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
+
+    auto plan_source = std::make_unique<PlanBackedSeekableSource>(std::move(*source_or), plan_ptr, total_size);
+
+    const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
+    if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
+      return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
+    }
+    auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+        /*num_chunks=*/16, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+    const std::chrono::milliseconds timeout =
+        hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
+    auto init_spb_status = session_spb->initialize(timeout);
+    if (!init_spb_status.ok()) {
+      return init_spb_status;
+    }
+    loader::StreamingBufferAdapter adapter(session_spb);
+
+    loader::GpuMemorySink::Options sink_opts{
+        .gpu_base_ptr = target_ptr,
+        .total_size = total_size,
+        .chunk_size = config_.artifact_chunk_bytes,
+        .device_id = target_device.ordinal,
+    };
+    loader::GpuMemorySink sink(std::move(sink_opts));
+
+    const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
+                                                           : std::max(1, config_.num_threads);
+    std::array<loader::Range, 1> ranges{loader::Range{0, static_cast<size_t>(total_size)}};
+    auto pump_status = loader::pump_ranges(
+        *plan_source,
+        sink,
+        adapter,
+        absl::MakeSpan(ranges),
+        concurrency,
+        config_.runtime_context->async_runtime()->blocking_executor());
+    if (!pump_status.ok()) {
+      return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
+    }
+    auto close_status = sink.close();
+    if (!close_status.ok()) {
+      return absl::DataLossError(absl::StrCat("materialize_into_target sink close failed: ", close_status.message()));
+    }
+    return loading::MaterializeIntoTargetResult{.source = source_kind};
+  };
+
+  auto gs_client = config_.runtime_context->global_store_client();
+  const bool gs_connected = gs_client && gs_client->is_connected();
+  const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
+  const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
+  const bool has_disk_path = !hints.disk_path.empty();
+
+  if (prefer_disk && has_disk_path) {
+    loading::DiskSource disk_src;
+    disk_src.path = std::filesystem::path(hints.disk_path);
+    disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
+    auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+    if (disk_or.ok()) {
+      return disk_or;
+    }
+    if (!gs_connected) {
+      return disk_or.status();
+    }
+  }
+
+  if (!gs_connected && !has_disk_path) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  if (gs_connected && !hints.artifact_id.empty()) {
+    auto transport_or = gs_client->request_replica_transport(
+        hints.artifact_id,
+        /*source_node_id=*/"",
+        /*source_address=*/"",
+        /*source_port=*/0,
+        target_device,
+        /*wait_timeout_ms=*/30000);
+    if (transport_or.ok()) {
+      const auto& session = *transport_or;
+      const auto& remote = session.remote_replica;
+      P2PSource p2p_src;
+      p2p_src.size_bytes = remote.memory_size;
+      p2p_src.ip = remote.node_address;
+      p2p_src.port = static_cast<uint16_t>(remote.node_port);
+      p2p_src.memory_keys = remote.remote_memory_keys;
+      p2p_src.buf_sizes = remote.buffer_sizes;
+      p2p_src.verification_json = remote.verification_json;
+      p2p_src.enable_checksum = false;
+      p2p_src.location.type = remote.memory_type;
+      p2p_src.location.device_id = remote.device_id;
+      auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
+      auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+      if (!complete_status.ok()) {
+        LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
+      }
+      if (p2p_or.ok()) {
+        return p2p_or;
+      }
+      if (!has_disk_path || prefer_p2p) {
+        return p2p_or.status();
+      }
+    } else if (!has_disk_path) {
+      return transport_or.status();
+    }
+  }
+
+  if (has_disk_path) {
+    loading::DiskSource disk_src;
+    disk_src.path = std::filesystem::path(hints.disk_path);
+    disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
+    return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+  }
+
+  return absl::FailedPreconditionError("materialize_into_target requires disk_path or Global Store connectivity");
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::ingest_from_disk(

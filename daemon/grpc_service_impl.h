@@ -116,6 +116,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .sessions = *sessions_svc_,
         .lip = *lip_bridge_,
         .devices = devices_,
+        .regions = *region_registry_,
         .is_shutting_down = is_shutting_down_,
         .lifecycle = lifecycle_mgr_.get(),
         .disk_path_whitelist = opts_.disk_path_whitelist};
@@ -420,6 +421,11 @@ class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::MaterializeReplicaRequest* req,
       v2::MaterializeReplicaResponse* resp) override;
+
+  grpc::Status MaterializeIntoTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
 
   grpc::Status MaterializeByKey(
       grpc::ServerContext* ctx,

@@ -101,6 +101,27 @@ class PlacementPolicy(Enum):
         )
 
 
+class RegionBackedMode(Enum):
+    AUTO = "auto"
+    REQUIRE = "require"
+    DISABLE = "disable"
+
+    @staticmethod
+    def parse(value: object) -> "RegionBackedMode":
+        if isinstance(value, RegionBackedMode):
+            return value
+        normalized = str(value).strip().lower()
+        if normalized in {"auto", ""}:
+            return RegionBackedMode.AUTO
+        if normalized in {"require", "required"}:
+            return RegionBackedMode.REQUIRE
+        if normalized in {"disable", "disabled", "off", "false"}:
+            return RegionBackedMode.DISABLE
+        raise ValueError(
+            f"Unknown region_backed_mode '{value}'; expected auto, require, or disable."
+        )
+
+
 class RegisterArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -148,6 +169,7 @@ class GetArtifactOptions(BaseModel):
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     wait_for_completion: bool = True
     enable_verification: bool = True
+    region_backed_mode: RegionBackedMode = RegionBackedMode.AUTO
     # Hint for P2P transport lock TTL extension; forwarded by daemons
     transport_hold_ms: int | None = None
 
@@ -161,6 +183,11 @@ class GetArtifactOptions(BaseModel):
             )
         return normalized
 
+    @field_validator("region_backed_mode", mode="before")
+    @classmethod
+    def _normalize_region_backed_mode(cls, value: object) -> RegionBackedMode:
+        return RegionBackedMode.parse(value)
+
 
 __all__ = [
     "DEFAULT_ALIGN",
@@ -168,6 +195,7 @@ __all__ = [
     "GetArtifactOptions",
     "PlanType",
     "PlacementPolicy",
+    "RegionBackedMode",
     "RegisterArtifactOptions",
     "clear_daemon_address",
     "get_daemon_address",

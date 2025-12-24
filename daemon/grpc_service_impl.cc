@@ -275,6 +275,14 @@ Status StoreDaemonServiceV2Impl::MaterializeReplica(
   return materialization_controller_.materialize_replica_v2(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceV2Impl::MaterializeIntoTarget(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeIntoTargetRequest* req,
+    v2::MaterializeIntoTargetResponse* resp) {
+  RpcContext rctx{"MaterializeIntoTarget", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.materialize_into_target(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceV2Impl::MaterializeByKey(
     grpc::ServerContext* ctx,
     const v2::MaterializeByKeyRequest* req,
@@ -297,6 +305,7 @@ Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
     v2::GetMaterializeCapabilitiesResponse* resp) {
   RpcContext rctx{"GetMaterializeCapabilities", *ctx, allow_high_card_attrs_};
   resp->set_supports_view_subset_hash(true);
+  resp->set_supports_region_backed_get_into(true);
   rctx.mark_success();
   return Status::OK;
 }

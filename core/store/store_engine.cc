@@ -464,6 +464,17 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
   return ingestion_runtime_->materialize_replica(target_device, mode, hints);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_into_target(
+    const DeviceKey& target_device,
+    gsl::not_null<void*> target_ptr,
+    uint64_t total_size,
+    std::string_view canonical_index_json,
+    uint64_t generation,
+    const loading::MaterializeHints& hints) {
+  return ingestion_runtime_->materialize_into_target(
+      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Store registration helper for already-loaded replicas
 // ═══════════════════════════════════════════════════════════════════════════

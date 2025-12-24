@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from tensorcast.api._config import RegionBackedMode
 from tensorcast.proto.config.v1 import client_config_pb2 as cc_pb2
 
 _CLIENT_CFG: Optional[cc_pb2.ClientConfig] = None
@@ -37,8 +38,22 @@ def daemon_target_default() -> Optional[str]:
     return None
 
 
-def client_defaults() -> tuple[Optional[int], Optional[bool], Optional[bool]]:
-    """Return (pinned_allocation_timeout_ms, enable_verification, wait_for_completion)."""
+def _region_backed_mode_from_proto(
+    value: int,
+) -> RegionBackedMode | None:
+    if value == cc_pb2.RegionBackedMode.REGION_BACKED_MODE_AUTO:
+        return RegionBackedMode.AUTO
+    if value == cc_pb2.RegionBackedMode.REGION_BACKED_MODE_REQUIRE:
+        return RegionBackedMode.REQUIRE
+    if value == cc_pb2.RegionBackedMode.REGION_BACKED_MODE_DISABLED:
+        return RegionBackedMode.DISABLE
+    return None
+
+
+def client_defaults() -> tuple[
+    Optional[int], Optional[bool], Optional[bool], RegionBackedMode | None
+]:
+    """Return (pinned_allocation_timeout_ms, enable_verification, wait_for_completion, region_backed_mode)."""
     if _CLIENT_CFG and _CLIENT_CFG.HasField("defaults"):
         d = _CLIENT_CFG.defaults
         timeout_ms = (
@@ -49,5 +64,6 @@ def client_defaults() -> tuple[Optional[int], Optional[bool], Optional[bool]]:
             timeout_ms if timeout_ms > 0 else None,
             d.enable_verification,
             d.wait_for_completion,
+            _region_backed_mode_from_proto(d.region_backed_mode),
         )
-    return (None, None, None)
+    return (None, None, None, None)

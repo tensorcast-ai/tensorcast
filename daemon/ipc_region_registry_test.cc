@@ -96,3 +96,22 @@ TEST_CASE("IpcRegionRegistry TTL refresh and sweep", "[daemon][region]") {
   REQUIRE(expired.size() == 1);
   REQUIRE(expired[0].region_id == region_id);
 }
+
+TEST_CASE("IpcRegionRegistry poison blocks acquire", "[daemon][region]") {
+  IpcRegionRegistry reg(IpcRegionRegistry::Options{});
+  IpcRegionRegistry::RegisterParams params;
+  params.device_id = 0;
+  params.owner_pid = 7;
+  params.size_bytes = 4096;
+  params.ttl_ms = 1000;
+  params.handle_bytes = "h";
+
+  auto desc_or = reg.register_region(params);
+  REQUIRE(desc_or.ok());
+  const std::string region_id = desc_or->region_id;
+
+  REQUIRE(reg.mark_poisoned(region_id).ok());
+  REQUIRE(reg.is_poisoned(region_id));
+  auto acq_or = reg.acquire(region_id, params.owner_pid);
+  REQUIRE_FALSE(acq_or.ok());
+}

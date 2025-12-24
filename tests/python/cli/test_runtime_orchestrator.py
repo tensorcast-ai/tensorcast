@@ -172,10 +172,27 @@ def test_runtime_start_injects_global_store(monkeypatch):
 def test_runtime_stop_cascades_global_store(monkeypatch):
     stop_calls: dict[str, Any] = {}
 
+    def _fake_start_global_store(**_kwargs):
+        return SimpleNamespace(
+            id="gs-own",
+            pid=1111,
+            address="127.0.0.1:50051",
+            listen_host="127.0.0.1",
+            listen_port=50051,
+            metrics_port=8000,
+            logs_dir=None,
+            cluster_token="tok-1",
+            db_file=None,
+            owner=True,
+        )
+
     def _fake_stop_global_store(**kwargs):
         stop_calls["session_id"] = kwargs.get("session_id")
         stop_calls["force"] = kwargs.get("force")
 
+    monkeypatch.setattr(
+        runtime.global_store_manager, "start_global_store", _fake_start_global_store
+    )
     monkeypatch.setattr(
         runtime.global_store_manager, "stop_global_store", _fake_stop_global_store
     )

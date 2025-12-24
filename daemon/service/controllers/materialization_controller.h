@@ -10,6 +10,7 @@
 
 #include "core/store/store_engine.h"
 #include "daemon/device_resolver.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/rpc_context.h"
@@ -27,6 +28,7 @@ class MaterializationController {
     SessionsService& sessions;
     LipBridge& lip;
     DeviceResolver& devices;
+    IpcRegionRegistry& regions;
     std::atomic<bool>& is_shutting_down;
     SessionLifecycleManager* lifecycle{nullptr};
     std::vector<std::filesystem::path> disk_path_whitelist;
@@ -48,6 +50,11 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::MaterializeReplicaRequest& req,
       v2::MaterializeReplicaResponse& resp);
+
+  grpc::Status materialize_into_target(
+      RpcContext& rctx,
+      const v2::MaterializeIntoTargetRequest& req,
+      v2::MaterializeIntoTargetResponse& resp);
 
   grpc::Status materialize_by_key_v2(
       RpcContext& rctx,
