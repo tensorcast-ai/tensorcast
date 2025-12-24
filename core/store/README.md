@@ -110,12 +110,12 @@ graph TB
 ## Public API Surface (StoreEngine)
 
 - Construction: `StoreEngine::StoreEngine(const StoreEngineOptions& opts)`
-  - Configures `storage_path`, pinned pool size/chunk size, UMA chunk size, and optional `CommunicationManager` and `GlobalStore` address.
+  - Configures the shared `storage_path` root, pinned pool size/chunk size, UMA chunk size, and optional `CommunicationManager` and `GlobalStore` address.
 
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
-    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk; when `disk_path` is empty the orchestrator now returns the transport status directly (no implicit fallback).
+    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk unless `hints.source_preference` is `PREFER_P2P`; when `disk_path` is empty the orchestrator returns the transport status directly (no implicit fallback).
     - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
@@ -123,7 +123,7 @@ graph TB
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
-  Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (derived from key mapping). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
+  Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 
 - In-memory registration (RFC-0006/0007):
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`

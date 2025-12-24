@@ -82,10 +82,6 @@ struct StoreEngineOptions {
   // caller needing to set MaterializeHints::verify = FULL_DIGEST.
   bool force_full_digest_on_load{false};
 
-  // Optional on-disk fallback directory for P2P loads. When set, P2PLoader
-  // will mux remote source with the local disk partitions in this directory.
-  std::string p2p_fallback_disk_dir;
-
   // Stable/preemptible memory tier settings (optional). When unset, the
   // engine preserves legacy preemptible behavior.
   std::optional<MemoryTierConfig> memory_tier_config;

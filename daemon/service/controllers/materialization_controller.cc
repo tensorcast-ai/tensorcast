@@ -57,17 +57,40 @@ bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::p
   return true;
 }
 
-absl::StatusOr<std::filesystem::path> normalize_disk_path(std::string_view disk_path) {
+absl::StatusOr<std::filesystem::path> normalize_disk_path(
+    std::string_view disk_path,
+    const std::filesystem::path& storage_root) {
+  if (storage_root.empty()) {
+    return absl::InvalidArgumentError("storage_path is required for disk materialization");
+  }
   std::error_code ec;
-  const auto normalized = std::filesystem::weakly_canonical(disk_path, ec);
+  std::filesystem::path candidate(disk_path);
+  if (!candidate.is_absolute()) {
+    candidate = storage_root / candidate;
+  }
+  auto normalized = std::filesystem::weakly_canonical(candidate, ec);
   if (!ec) {
+    if (!path_has_prefix(normalized, storage_root)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "disk_path must resolve under storage_path: ",
+              normalized.string(),
+              " (root=",
+              storage_root.string(),
+              ")"));
+    }
     return normalized;
   }
-  const std::filesystem::path lex = std::filesystem::path(disk_path).lexically_normal();
-  if (lex.empty()) {
+  normalized = candidate.lexically_normal();
+  if (normalized.empty()) {
     return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
   }
-  return lex;
+  if (!path_has_prefix(normalized, storage_root)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));
+  }
+  return normalized;
 }
 
 void record_disk_path_denied() {
@@ -598,6 +621,13 @@ absl::StatusOr<std::string> resolve_layout_json(
   if (!v1_resp.artifact_id().empty()) {
     return engine.get_canonical_index_by_id(v1_resp.artifact_id());
   }
+  if (!v1_resp.disk_path().empty()) {
+    auto local_or = store::loader::read_from_artifact_dir(v1_resp.disk_path(), /*target_device_id=*/0);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  }
   if (v2_req.has_disk_fallback() && !v2_req.disk_fallback().disk_path().empty()) {
     auto local_or = store::loader::read_from_artifact_dir(v2_req.disk_fallback().disk_path(), /*target_device_id=*/0);
     if (!local_or.ok()) {
@@ -620,21 +650,14 @@ absl::StatusOr<std::string> resolve_layout_json_by_key(
 } // namespace
 
 MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
-  std::error_code ec;
-  for (const auto& entry : d_.disk_path_whitelist) {
-    if (entry.empty()) {
-      continue;
-    }
-    auto normalized = std::filesystem::weakly_canonical(entry, ec);
+  if (!d_.storage_path.empty()) {
+    std::error_code ec;
+    storage_path_ = std::filesystem::weakly_canonical(d_.storage_path, ec);
     if (ec) {
       ec.clear();
-      normalized = entry.lexically_normal();
-    }
-    if (!normalized.empty()) {
-      disk_path_whitelist_.push_back(normalized);
+      storage_path_ = d_.storage_path.lexically_normal();
     }
   }
-  whitelist_enforced_ = !disk_path_whitelist_.empty();
 }
 
 grpc::Status MaterializationController::materialize_replica(
@@ -671,27 +694,14 @@ grpc::Status MaterializationController::materialize_replica(
 
   std::optional<std::filesystem::path> normalized_disk_path;
   if (request_has_disk) {
-    auto normalized_or = normalize_disk_path(req.disk_path());
+    auto normalized_or = normalize_disk_path(req.disk_path(), storage_path_);
     if (!normalized_or.ok()) {
+      record_disk_path_denied();
+      LOG(WARNING) << "disk_path rejected: " << req.disk_path() << ": " << normalized_or.status();
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
       return to_grpc_status(normalized_or.status());
     }
     const auto& normalized = *normalized_or;
-    if (whitelist_enforced_) {
-      bool allowed = false;
-      for (const auto& prefix : disk_path_whitelist_) {
-        if (path_has_prefix(normalized, prefix)) {
-          allowed = true;
-          break;
-        }
-      }
-      if (!allowed) {
-        record_disk_path_denied();
-        LOG(WARNING) << "disk_path not permitted by whitelist: " << normalized;
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::INVALID_ARGUMENT, "disk_path not permitted by daemon whitelist"};
-      }
-    }
     normalized_disk_path = normalized;
     resp.set_disk_path(normalized.string());
     if (rctx.allow_high_card_attrs()) {
@@ -988,6 +998,16 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   const auto& mapping = *mapping_or;
   span->SetAttribute("tc.artifact.id", mapping.artifact_id);
+  std::string used_disk_path;
+  if (!mapping.disk_path.empty()) {
+    auto normalized_or = normalize_disk_path(mapping.disk_path, storage_path_);
+    if (!normalized_or.ok()) {
+      record_disk_path_denied();
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(normalized_or.status());
+    }
+    used_disk_path = normalized_or->string();
+  }
 
   // Try LIP fast path first
   {
@@ -1031,7 +1051,7 @@ grpc::Status MaterializationController::materialize_by_key(
     if (*satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_artifact_id(mapping.artifact_id);
-      resp.set_used_disk_path(mapping.disk_path);
+      resp.set_used_disk_path(used_disk_path);
       resp.set_source(v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
       rctx.mark_success();
@@ -1050,8 +1070,9 @@ grpc::Status MaterializationController::materialize_by_key(
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
   hints.artifact_id = mapping.artifact_id;
-  if (!mapping.disk_path.empty())
-    hints.disk_path = mapping.disk_path;
+  if (!used_disk_path.empty()) {
+    hints.disk_path = used_disk_path;
+  }
 
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
   if (!result.ok()) {
@@ -1088,7 +1109,7 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);
-  resp.set_used_disk_path(mapping.disk_path);
+  resp.set_used_disk_path(used_disk_path);
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   rctx.mark_success();
@@ -1416,7 +1437,14 @@ grpc::Status MaterializationController::materialize_into_target(
   store::loading::MaterializeHints hints;
   hints.artifact_id = req.artifact_id();
   if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
-    hints.disk_path = req.disk_fallback().disk_path();
+    auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
+    if (!normalized_or.ok()) {
+      record_disk_path_denied();
+      record_materialize_into_target(
+          "error", "disk_fallback_invalid", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(normalized_or.status());
+    }
+    hints.disk_path = normalized_or->string();
   }
   hints.source_preference = to_hint_preference(req.preference());
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
@@ -1524,27 +1552,13 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  auto normalized_or = normalize_disk_path(req.disk_path());
+  auto normalized_or = normalize_disk_path(req.disk_path(), storage_path_);
   if (!normalized_or.ok()) {
+    record_disk_path_denied();
     record_disk_resolution_outcome("invalid_argument");
     return to_grpc_status(normalized_or.status());
   }
   const auto& normalized = *normalized_or;
-  if (whitelist_enforced_) {
-    bool allowed = false;
-    for (const auto& prefix : disk_path_whitelist_) {
-      if (path_has_prefix(normalized, prefix)) {
-        allowed = true;
-        break;
-      }
-    }
-    if (!allowed) {
-      record_disk_path_denied();
-      LOG(WARNING) << "disk_path not permitted by whitelist: " << normalized;
-      record_disk_resolution_outcome("whitelist_denied");
-      return {StatusCode::INVALID_ARGUMENT, "disk_path not permitted by daemon whitelist"};
-    }
-  }
   resp.set_disk_path(normalized.string());
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", normalized.string());

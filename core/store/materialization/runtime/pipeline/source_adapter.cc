@@ -145,7 +145,9 @@ absl::Status P2PSourceAdapter::prepare(const P2PSource& source, IngestionContext
   P2PSource normalized = source;
   normalized.comm_engine =
       gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
-  normalized.fallback_disk_dir = ctx.options->p2p_fallback_disk_dir;
+  if (!ctx.hints.disk_path.empty() && ctx.hints.source_preference != loading::SourcePreference::kPreferP2P) {
+    normalized.fallback_disk_dir = ctx.hints.disk_path;
+  }
 
   ctx.p2p.source = std::move(normalized);
   return absl::OkStatus();

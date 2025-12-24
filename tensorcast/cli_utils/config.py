@@ -148,9 +148,7 @@ def build_embedded_daemon_config(
     """Create an embedded daemon config anchored to a session directory."""
 
     storage_dir = session.root / "data"
-    fallback_dir = session.root / "p2p_cache"
     storage_dir.mkdir(parents=True, exist_ok=True)
-    fallback_dir.mkdir(parents=True, exist_ok=True)
 
     cfg = cfg_pb.DaemonConfig()
     listen_host = (
@@ -169,8 +167,6 @@ def build_embedded_daemon_config(
     cfg.engine.tx_slice_bytes = 256 * 1024 * 1024
     cfg.engine.artifact_chunk_bytes = 256 * 1024 * 1024
     cfg.engine.streaming_buffer_max_concurrent_sessions = 1
-    cfg.engine.p2p_fallback_disk_dir = str(fallback_dir)
-    cfg.engine.disk_path_whitelist.extend([str(storage_dir), str(fallback_dir)])
     cfg.engine.pinned_allocation_timeout.FromSeconds(30)
 
     cfg.lifecycle.gpu_memory_limit_fraction = 0.75
