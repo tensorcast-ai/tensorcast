@@ -5,10 +5,14 @@ from __future__ import annotations
 import os
 import threading
 from enum import Enum
+from typing import TYPE_CHECKING, SupportsIndex, SupportsInt, cast
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tensorcast.api._errors import InvalidPlan
+
+if TYPE_CHECKING:
+    from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
 # Module-level constants
 DEFAULT_ALIGN: int = 8
@@ -231,7 +235,7 @@ class TierSpec(BaseModel):
     def _normalize_min_replicas(cls, value: object) -> int:
         if value is None:
             return 1
-        count = int(value)
+        count = int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value))
         if count <= 0:
             raise ValueError("min_replicas must be >= 1")
         return count
@@ -241,7 +245,7 @@ class TierSpec(BaseModel):
     def _normalize_ttl(cls, value: object) -> int | None:
         if value is None:
             return None
-        ttl = int(value)
+        ttl = int(cast(SupportsInt | SupportsIndex | str | bytes | bytearray, value))
         if ttl <= 0:
             raise ValueError("retention_ttl_ms must be > 0")
         return ttl
@@ -283,12 +287,12 @@ class TierSpec(BaseModel):
 
 
 def _policy_proto_maps() -> tuple[
-    dict[StorePolicyProfile, int],
-    dict[PolicyTier, int],
-    dict[PolicyScope, int],
-    dict[RetentionPolicy, int],
-    dict[OverflowPolicy, int],
-    dict[PolicyLayout, int],
+    dict[StorePolicyProfile, "store_daemon_pb2.PolicyProfile"],
+    dict[PolicyTier, "store_daemon_pb2.PolicyTier"],
+    dict[PolicyScope, "store_daemon_pb2.PolicyScope"],
+    dict[RetentionPolicy, "store_daemon_pb2.RetentionPolicy"],
+    dict[OverflowPolicy, "store_daemon_pb2.OverflowPolicy"],
+    dict[PolicyLayout, "store_daemon_pb2.PolicyLayout"],
 ]:
     from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
@@ -337,7 +341,7 @@ def _policy_proto_maps() -> tuple[
 ) = _policy_proto_maps()
 
 
-def _tier_spec_to_proto(tier: TierSpec) -> "object":
+def _tier_spec_to_proto(tier: TierSpec) -> "store_daemon_pb2.TierSpec":
     from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
     spec = store_daemon_pb2.TierSpec(
@@ -510,10 +514,12 @@ class StorePolicy(BaseModel):
         if isinstance(value, StorePolicy):
             return value
         if isinstance(value, str):
-            return StorePolicy(profile=value)
+            if value == "":
+                return StorePolicy(profile=None)
+            return StorePolicy(profile=StorePolicyProfile.parse(value))
         return StorePolicy.model_validate(value)
 
-    def to_proto(self) -> "object":
+    def to_proto(self) -> "store_daemon_pb2.StorePolicy":
         from tensorcast.proto.daemon.v1 import store_daemon_pb2
 
         policy = store_daemon_pb2.StorePolicy()

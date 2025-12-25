@@ -148,16 +148,35 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
   }
   entry.stable_lease = std::move(*lease_or);
 
+  const uint64_t stable_bytes = entry.stable_bytes;
+  bool inserted = false;
   {
     absl::MutexLock lock(&mu_);
-    entries_.emplace(entry.key, entry);
+    if (entries_.contains(entry.key)) {
+      inserted = false;
+    } else {
+      entries_.emplace(entry.key, std::move(entry));
+      inserted = true;
+    }
   }
 
-  bytes_used_.fetch_add(entry.stable_bytes);
-  record_bytes_delta(static_cast<int64_t>(entry.stable_bytes));
+  if (!inserted) {
+    auto uma = request.replica->get_memory_manager().memory_authority();
+    if (uma && entry.stable_lease.has_value()) {
+      absl::Status st = uma->release_stable_lease(*entry.stable_lease);
+      if (!st.ok()) {
+        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << request.key.artifact_id << " status=" << st;
+      }
+    }
+    result.admitted = true;
+    return result;
+  }
 
-  LOG(INFO) << "stable_cache.admit artifact_id=" << request.key.artifact_id << " size_bytes=" << entry.size_bytes
-            << " retention=" << retention_policy_label(entry.policy.retention_policy)
+  bytes_used_.fetch_add(stable_bytes);
+  record_bytes_delta(static_cast<int64_t>(stable_bytes));
+
+  LOG(INFO) << "stable_cache.admit artifact_id=" << request.key.artifact_id << " size_bytes=" << request.size_bytes
+            << " retention=" << retention_policy_label(request.policy.retention_policy)
             << " overflow=" << overflow_policy_label(request.policy.overflow_policy);
   result.admitted = true;
   return result;
@@ -332,7 +351,6 @@ absl::Status StableDramCacheManager::evict_for_bytes(
     if (!release_status.ok()) {
       LOG(WARNING) << "stable_cache.release_memory_failed artifact_id=" << key.artifact_id
                    << " status=" << release_status;
-      continue;
     }
 
     {
