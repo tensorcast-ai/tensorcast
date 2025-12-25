@@ -66,13 +66,14 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     // Persistence
     std::filesystem::path persistence_log_path{"/tmp/tensorcast_persistence.log"};
 
+    // Shared storage root for disk paths (required).
+    std::filesystem::path storage_path;
+
     // API behavior flags
     // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
     // ordering (artifact_id, device_id). If false (default), uses numeric
     // index tokens.
     bool use_cursor_pagination{false};
-
-    std::vector<std::filesystem::path> disk_path_whitelist;
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
@@ -98,6 +99,16 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         verif_tracker_(gsl::not_null<std::unique_ptr<VerificationTracker>>(std::make_unique<VerificationTracker>())),
         reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
         opts_(opts) {
+    if (!opts_.storage_path.empty()) {
+      std::error_code ec;
+      auto canonical = std::filesystem::weakly_canonical(opts_.storage_path, ec);
+      if (ec) {
+        ec.clear();
+        canonical = opts_.storage_path.lexically_normal();
+      }
+      opts_.storage_path = std::move(canonical);
+    }
+
     verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
     start_sweepers();
     persistence_mgr_ = std::make_unique<PersistenceManager>(
@@ -119,7 +130,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .regions = *region_registry_,
         .is_shutting_down = is_shutting_down_,
         .lifecycle = lifecycle_mgr_.get(),
-        .disk_path_whitelist = opts_.disk_path_whitelist};
+        .storage_path = opts_.storage_path};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
         .engine = *engine_,

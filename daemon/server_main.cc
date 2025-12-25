@@ -56,6 +56,38 @@ int main(int argc, char** argv) {
     return 2;
   }
   const auto& cfg = *cfg_or;
+  const std::filesystem::path storage_root_cfg = cfg.server().storage_path();
+  if (storage_root_cfg.empty()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path is required";
+    return 2;
+  }
+  std::error_code storage_ec;
+  const bool storage_exists = std::filesystem::exists(storage_root_cfg, storage_ec);
+  if (storage_ec) {
+    LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
+               << "): " << storage_ec.message();
+    return 2;
+  }
+  if (!storage_exists) {
+    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path does not exist: " << storage_root_cfg.string();
+    return 2;
+  }
+  const bool storage_is_dir = std::filesystem::is_directory(storage_root_cfg, storage_ec);
+  if (storage_ec) {
+    LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
+               << "): " << storage_ec.message();
+    return 2;
+  }
+  if (!storage_is_dir) {
+    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path must be a directory: " << storage_root_cfg.string();
+    return 2;
+  }
+  std::filesystem::path storage_root = std::filesystem::weakly_canonical(storage_root_cfg, storage_ec);
+  if (storage_ec) {
+    LOG(ERROR) << "INVALID_ARGUMENT: Failed to canonicalize server.storage_path (" << storage_root_cfg.string()
+               << "): " << storage_ec.message();
+    return 2;
+  }
 
   // Block SIGINT/SIGTERM in this main thread BEFORE starting any threads so that
   // all subsequently created threads inherit the blocked mask. We'll handle
@@ -74,7 +106,7 @@ int main(int argc, char** argv) {
 
   // Map config to StoreEngineOptions
   store::StoreEngineOptions opts;
-  opts.storage_path = cfg.server().storage_path();
+  opts.storage_path = storage_root.string();
   opts.num_thread = static_cast<int>(cfg.server().num_threads());
   opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
   opts.tx_slice_bytes = static_cast<size_t>(cfg.engine().tx_slice_bytes());
@@ -86,7 +118,6 @@ int main(int argc, char** argv) {
         cfg.engine().pinned_allocation_timeout().seconds() * 1000 +
         cfg.engine().pinned_allocation_timeout().nanos() / 1000000);
   }
-  opts.p2p_fallback_disk_dir = cfg.engine().p2p_fallback_disk_dir();
   if (cfg.engine().has_memory_tiers()) {
     store::MemoryTierConfig tiers;
     const auto& mt = cfg.engine().memory_tiers();
@@ -188,13 +219,11 @@ int main(int argc, char** argv) {
     const auto& d = cfg.lifecycle().eviction_loop_interval();
     svc_opts.eviction_check_interval = std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
   }
+  svc_opts.storage_path = storage_root;
   // Observability high-cardinality attributes: default off (config hook TBD)
   svc_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)
   svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
-  for (const auto& prefix : cfg.engine().disk_path_whitelist()) {
-    svc_opts.disk_path_whitelist.emplace_back(prefix);
-  }
 
   daemon::StoreDaemonServiceImpl service(engine, svc_opts, async_runtime);
   daemon::StoreDaemonServiceV2Impl service_v2(service.materialization_controller(), svc_opts.allow_high_card_attrs);

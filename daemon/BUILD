@@ -710,6 +710,17 @@ cc_test(
 )
 
 cc_test(
+    name = "grpc_service_impl_publish_replica_key_test",
+    srcs = ["grpc_service_impl_publish_replica_key_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_disk_index_test",
     srcs = ["grpc_service_impl_disk_index_test.cc"],
     deps = [

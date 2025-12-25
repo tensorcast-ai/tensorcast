@@ -156,13 +156,12 @@ flowchart TD
   4. Performs checksum verification (always enabled). On mismatch, returns `DATA_LOSS` error.
   5. Emits `MaterializeReplicaResponse` with `source` field so clients know the actual data path.
 
-### Disk Path Whitelist Enforcement
-- The daemon loads a `disk_path_whitelist` (flag or config entry) consisting of absolute path prefixes.
-- Every incoming `disk_path` is canonicalized (e.g., `realpath`) and must begin with one of the configured prefixes.
-- A non-empty whitelist restricts disk access strictly to those prefixes. An empty whitelist explicitly grants full access (legacy behavior) and should only be used in trusted environments.
-- Violations are rejected with `INVALID_ARGUMENT`, and the daemon emits structured logs plus counters (e.g., `store.materialization.denied_disk_path`) so operators can detect misconfiguration quickly.
-- The SDK surfaces the daemon error directly; it never retries locally, ensuring whitelist mistakes are corrected rather than bypassed.
-- Configuration surface: `engine.disk_path_whitelist` in `DaemonConfig` (YAML/JSON) maps directly into the daemon service options.
+### Shared Disk Root Enforcement
+- The daemon requires `server.storage_path` as the shared disk root mounted on every node.
+- Every incoming `disk_path` is resolved against this root (relative paths are joined) and canonicalized.
+- Requests are rejected with `INVALID_ARGUMENT` when the resolved path falls outside the shared root.
+- The daemon returns the canonical absolute path in responses so callers observe a stable, shared-disk location.
+- Configuration surface: `server.storage_path` in `DaemonConfig` (YAML/JSON) maps into daemon service options and validation.
 
 ## SDK Changes
 
@@ -227,6 +226,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 | Daemon gRPC Status | Condition | SDK Behavior |
 |--------------------|-----------|--------------|
 | `NOT_FOUND` | `disk_path` does not exist or artifact not found | Propagate as `ArtifactError`, retryable=false |
+| `INVALID_ARGUMENT` | `disk_path` resolves outside the shared root | Propagate as `ArtifactError`, retryable=false |
 | `DATA_LOSS` | Checksum verification failed | Propagate as `ArtifactError`, retryable=false |
 | `FAILED_PRECONDITION` | Metadata inconsistent or malformed | Propagate as `ArtifactError`, retryable=false |
 | `UNAVAILABLE` | Daemon temporarily unavailable | Propagate as `ArtifactError`, retryable=true |
@@ -239,7 +239,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 | **Daemon regression affects disk-only workflows** | Add dedicated Bazel tests plus Python integration tests to cover disk preference paths. |
 | **Temporary lack of offline loader** | Keep `tensorcast.api._io_disk.load_dict_from_disk()` for regression tests; document that production flows require a daemon. |
 | **Increased daemon responsibilities** | Disk flows already existed in C++; this change simply exposes them through the unified RPC path. |
-| **disk_path whitelist misconfiguration** | Provide counters/logs for denied paths and document that an empty whitelist restores full access. |
+| **Shared root misconfiguration** | Provide counters/logs for denied paths and document that `server.storage_path` must be a shared mount on every node. |
 | **SDK/daemon version mismatch** | Out of scope: single-version deployments mean all components update together. |
 
 # Compatibility & Acceptance Criteria
@@ -259,11 +259,10 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 |----------|-------------------|
 | `disk_path` valid, replica exists | Daemon returns `source=P2P` or `LOCAL_REPLICA` |
 | `disk_path` valid, no replica | Daemon returns `source=DISK` |
-| `disk_path` invalid or missing | Daemon returns `NOT_FOUND` |
+| `disk_path` missing under shared root | Daemon returns `NOT_FOUND` |
+| `disk_path` outside shared root | Daemon returns `INVALID_ARGUMENT` and emits denial metrics/logs |
 | `disk_path` valid, checksum mismatch | Daemon returns `DATA_LOSS` |
 | `preference=PREFER_DISK` without `disk_path` | Daemon uses default source selection (AUTO) |
-| `disk_path` outside whitelist prefixes | Daemon returns `INVALID_ARGUMENT` and emits denial metrics/logs |
-| Whitelist configured as empty | Daemon accepts all disk paths (still verifying metadata and checksums) |
 
 # References
 

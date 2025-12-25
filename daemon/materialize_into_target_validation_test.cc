@@ -36,6 +36,11 @@ std::filesystem::path test_tmpdir() {
   return std::filesystem::temp_directory_path() / "tensorcast_daemon_materialize_into_target_test";
 }
 
+std::filesystem::path ensure_dir(std::filesystem::path path) {
+  std::filesystem::create_directories(path);
+  return path;
+}
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
@@ -60,6 +65,7 @@ struct ValidationFixture {
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
   std::atomic<bool> shutting_down{false};
+  std::filesystem::path storage_root;
   MaterializationController controller;
 
   ValidationFixture()
@@ -72,6 +78,7 @@ struct ValidationFixture {
         scheduler(),
         sessions_svc(session_mgr, verif_tracker, &scheduler, /*lifecycle=*/nullptr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
+        storage_root(ensure_dir(test_tmpdir())),
         controller(MaterializationController(
             MaterializationController::Dep{
                 .engine = *engine,
@@ -82,6 +89,7 @@ struct ValidationFixture {
                 .regions = regions,
                 .is_shutting_down = shutting_down,
                 .lifecycle = nullptr,
+                .storage_path = storage_root,
             })) {}
 };
 

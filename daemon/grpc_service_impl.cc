@@ -6,10 +6,15 @@
 #include <unistd.h>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
@@ -23,6 +28,56 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
+
+namespace {
+
+bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+  }
+  return true;
+}
+
+absl::StatusOr<std::filesystem::path> normalize_disk_path(
+    std::string_view disk_path,
+    const std::filesystem::path& storage_root) {
+  if (storage_root.empty()) {
+    return absl::InvalidArgumentError("storage_path is required for disk materialization");
+  }
+  std::error_code ec;
+  std::filesystem::path candidate(disk_path);
+  if (!candidate.is_absolute()) {
+    candidate = storage_root / candidate;
+  }
+  auto normalized = std::filesystem::weakly_canonical(candidate, ec);
+  if (!ec) {
+    if (!path_has_prefix(normalized, storage_root)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "disk_path must resolve under storage_path: ",
+              normalized.string(),
+              " (root=",
+              storage_root.string(),
+              ")"));
+    }
+    return normalized;
+  }
+  normalized = candidate.lexically_normal();
+  if (normalized.empty()) {
+    return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
+  }
+  if (!path_has_prefix(normalized, storage_root)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));
+  }
+  return normalized;
+}
+
+} // namespace
 
 absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coalesced_int(
     int target_device_id,
@@ -74,8 +129,17 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  std::string normalized_disk_path;
+  if (!req->disk_path().empty()) {
+    auto normalized_or = normalize_disk_path(req->disk_path(), opts_.storage_path);
+    if (!normalized_or.ok()) {
+      return to_grpc_status(normalized_or.status());
+    }
+    normalized_disk_path = normalized_or->string();
+  }
+
   // Use engine's configured Global Store client for upsert.
-  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), req->disk_path());
+  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), normalized_disk_path);
   if (!up.ok()) {
     // For conflicts, return OK with ok=false for idempotency.
     if (absl::IsAlreadyExists(up)) {

@@ -31,7 +31,7 @@ class MaterializationController {
     IpcRegionRegistry& regions;
     std::atomic<bool>& is_shutting_down;
     SessionLifecycleManager* lifecycle{nullptr};
-    std::vector<std::filesystem::path> disk_path_whitelist;
+    std::filesystem::path storage_path;
   };
 
   explicit MaterializationController(Dep d);
@@ -82,8 +82,7 @@ class MaterializationController {
 
  private:
   Dep d_;
-  std::vector<std::filesystem::path> disk_path_whitelist_;
-  bool whitelist_enforced_{false};
+  std::filesystem::path storage_path_;
 };
 
 } // namespace tensorcast::daemon

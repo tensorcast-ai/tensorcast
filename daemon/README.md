@@ -21,6 +21,7 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 - Observability wrappers that attach unified metrics and tracing to each RPC.
 - Handles view registration uploads (slice/transpose) without feature flags: `RegistrationController` streams view chunks to the StoreEngine and publishes variant telemetry through Global Store (see [Variant View Registration Telemetry](../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry)).
 - Enforces non-loopback advertisement when registering with Global Store; startup fails if no routable IP can be determined and `--advertise_host` is unset.
+- Requires `server.storage_path` as a shared disk root; the daemon canonicalizes this root on startup, and all `disk_path` inputs are canonicalized under it and rejected when they escape it.
 - Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
 - Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
 - Join TTL via leases: duplicate coalesced commits (`existed=true`) create a TTL-bound UseLease for the owner PID. On expiry, the lease finalizer drops the lightweight RefTracker ref and may reclaim memory immediately.
