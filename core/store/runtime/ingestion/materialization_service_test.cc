@@ -207,5 +207,5 @@ TEST_CASE("MaterializationService AUTO uses injected orchestrator", "[materializ
   MaterializationService failing_service(harness.BuildDeps());
   auto failing = failing_service.execute(request_or.value());
   REQUIRE_FALSE(failing.ok());
-  REQUIRE(failing.status().code() == absl::StatusCode::kFailedPrecondition);
+  REQUIRE(failing.status().code() == absl::StatusCode::kAborted);
 }

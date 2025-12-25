@@ -6,6 +6,7 @@
 
 #include "absl/status/statusor.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/components/worker_identity.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/control/materialization_backend.h"
@@ -24,7 +25,8 @@ class MaterializeOrchestrator {
  public:
   MaterializeOrchestrator(
       gsl::not_null<MaterializationBackend*> backend,
-      gsl::not_null<components::IGlobalStoreClient*> gs_client);
+      gsl::not_null<components::IGlobalStoreClient*> gs_client,
+      components::WorkerIdentity local_identity);
 
   // Execute the preparation logic.
   absl::StatusOr<ReplicaHandle> run(
@@ -35,6 +37,7 @@ class MaterializeOrchestrator {
  private:
   gsl::not_null<MaterializationBackend*> backend_;
   gsl::not_null<components::IGlobalStoreClient*> gs_client_;
+  components::WorkerIdentity local_identity_;
 };
 
 } // namespace tensorcast::store::materialization::control

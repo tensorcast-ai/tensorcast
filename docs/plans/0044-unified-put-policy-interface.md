@@ -121,10 +121,10 @@ Define the test coverage required to validate the unified `policy` interface for
     - [x] Treat `must` local stable as pinned-for-life: never eligible for eviction, and admission must fail (`RESOURCE_EXHAUSTED`) if the stable budget cannot fit the new artifact without violating pinned entries.
     - [x] Tests: add cases covering “must local stable cannot be evicted by spill/evict overflow” and “must admission fails under pressure”.
 
-- [ ] TODO: Eventual consistency contract for eviction vs Global Store routing (system-level)
-  - [ ] Document and test the “stale routing window”: Global Store may briefly still reference an evicted local replica until chunk/state sync updates propagate.
-  - [ ] Ensure daemon materialization treats placement/routing as a hint and falls back when local replica is missing (e.g., retry remote/disk, and/or emit an explicit degraded reason/metric).
-  - [ ] Add a deterministic test that simulates “GS says local exists but it was evicted” and verifies `get()` succeeds via fallback (or returns a clearly retryable error) without hangs.
+- [x] TODO: Eventual consistency contract for eviction vs Global Store routing (system-level)
+  - [x] Document and test the “stale routing window”: Global Store may briefly still reference an evicted local replica until chunk/state sync updates propagate.
+  - [x] Ensure daemon materialization treats placement/routing as a hint and falls back when local replica is missing (e.g., retry remote/disk, and/or emit an explicit degraded reason/metric).
+  - [x] Add a deterministic test that simulates “GS says local exists but it was evicted” and verifies `get()` succeeds via fallback (or returns a clearly retryable error) without hangs.
 
 - [ ] Phase 6: End-to-end smoke (optional, if harness exists)
   - [ ] Minimal “put with policy → StartPersistence → QueryPersistenceStatus” flow using fakes/deterministic tick advancement to avoid flakiness.

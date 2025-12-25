@@ -183,6 +183,7 @@ Materialization uses a staged ingestion pipeline, orchestrated by `Materializati
 - Artifact identifiers are validated when prefixed with `mi2:`/`cgid:` but local/test identifiers without a canonical prefix are still accepted for CPU/GPU loads.
 - `MaterializeMode::LOAD_ONLY` requires a disk path and never attempts P2P; `MaterializeMode::COPY_ONLY` copies from an already resident GPU replica, reusing UMA metadata.
 - View-aware hints (`MaterializeHints::variant`) propagate canonical + view identifiers into the ingestion pipeline so the resulting `ReplicaKey` encodes `view_id`, and verification helpers recompute `view_data_hash` via `ViewHashComputer`.
+- Global Store routing is treated as a hint: placement updates are asynchronous, so GS may briefly reference an evicted local replica; if a transport plan points at the local node but the local replica has been evicted, the orchestrator treats the route as stale and falls back to disk when available (otherwise returns a retryable error).
 - Dependencies are injected with `MaterializationDeps`: `ReplicaRuntime` for reuse/allocation, the shared `PinnedBufferPool`, `ChunkAwareLoadingStrategy`, `TransferService`, and planner utilities. Tests override these via `MaterializationHooks` to inject fake pipelines, mutate completion events, or short-circuit results without touching production wiring.
 
 ### Ingestion Pipeline Stages

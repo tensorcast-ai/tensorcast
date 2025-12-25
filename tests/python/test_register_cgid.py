@@ -34,6 +34,7 @@ class _FakeDaemonCtl:
         schema_version: str = "v3",
         client_artifact_id: str | None = None,
         plan=None,
+        policy=None,
         timeout_s: float = 30.0,
         view=None,
     ) -> BeginRegisterArtifactResult:

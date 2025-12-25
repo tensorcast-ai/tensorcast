@@ -14,12 +14,14 @@
 #pragma clang diagnostic ignored "-Wmacro-redefined"
 #endif
 #include "catch2/catch_test_macros.hpp"
+#include "core/store/components/worker_identity.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion/testing/fake_ingestion_pipeline.h"
 #include "core/store/runtime/ingestion/testing/scoped_ingestion_runtime_test_harness.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 #if defined(__clang__)
@@ -29,8 +31,10 @@
 
 using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
+using tensorcast::store::DeviceKey;
 using tensorcast::store::P2PSource;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::components::WorkerIdentity;
 using tensorcast::store::runtime::IngestionCompletedEvent;
 using tensorcast::store::runtime::IngestionResultEvent;
 using tensorcast::store::runtime::IngestionStartedEvent;
@@ -38,6 +42,7 @@ using tensorcast::store::runtime::MaterializationHooks;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeContextEvents;
 using tensorcast::store::runtime::ingestion::MaterializationFacade;
+using tensorcast::store::testing::RecordingGlobalStoreClient;
 namespace ingestion_testing = tensorcast::store::runtime::ingestion::testing;
 
 namespace loading = tensorcast::store::loading;
@@ -133,6 +138,43 @@ struct FacadeHarness {
   RuntimeContext& runtime_context() {
     return harness.runtime_context();
   }
+};
+
+class LocalTransportClient final : public RecordingGlobalStoreClient {
+ public:
+  explicit LocalTransportClient(WorkerIdentity local_identity) : local_identity_(std::move(local_identity)) {}
+
+  absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
+      std::string_view artifact_id,
+      std::string_view source_node_id,
+      std::string_view source_address,
+      uint32_t source_port,
+      const DeviceKey& target_device,
+      uint32_t wait_timeout_ms) override {
+    (void)source_node_id;
+    (void)source_address;
+    (void)source_port;
+    (void)wait_timeout_ms;
+    replica_requests.emplace_back(std::string(artifact_id));
+    if (!allow_replica_transport) {
+      return absl::UnavailableError("replica transport disabled in LocalTransportClient");
+    }
+    tensorcast::store::components::TransportSession session;
+    session.transport_id = "local-transport";
+    session.remote_replica.node_id = local_identity_.node_id;
+    session.remote_replica.node_address = local_identity_.node_address;
+    session.remote_replica.node_port = local_identity_.p2p_port;
+    session.remote_replica.memory_size = 16;
+    session.remote_replica.memory_type = MemoryLocation::CPU;
+    session.remote_replica.device_id = target_device.ordinal;
+    session.remote_replica.remote_memory_keys = {"tensor.data_0"};
+    session.remote_replica.buffer_sizes = {16};
+    session.remote_replica.verification_json = "{}";
+    return session;
+  }
+
+ private:
+  WorkerIdentity local_identity_;
 };
 
 } // namespace
@@ -337,6 +379,49 @@ TEST_CASE("MaterializationFacade materialize_replica reuses disk ingestion path"
       target.location.to_device_key(), loading::MaterializeMode::LOAD_ONLY, request_hints);
   REQUIRE(handle_or.ok());
   CHECK(handle_or->replica_key.artifact_id == "artifact_auto");
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stale", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_auto_stale";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  WorkerIdentity identity;
+  identity.worker_id = "worker-0";
+  identity.node_id = "node-0";
+  identity.node_address = "127.0.0.1";
+  identity.grpc_port = 9001;
+  identity.p2p_port = 9002;
+  harness.runtime_context().set_worker_identity(identity);
+
+  auto gs_client = std::make_shared<LocalTransportClient>(identity);
+  gs_client->allow_replica_transport = true;
+  harness.runtime_context().set_global_store_client_for_testing(gs_client);
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "artifact_auto";
+  hints.disk_path = (temp_root / "artifact_fallback").string();
+
+  loading::ReplicaHandle disk_handle;
+  disk_handle.replica_key.artifact_id = hints.artifact_id;
+  disk_handle.replica_key.device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  harness.fake_pipeline->set_next_disk_result(std::move(disk_handle));
+  harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("p2p should be skipped"));
+
+  DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  auto handle_or = harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints);
+  REQUIRE(handle_or.ok());
+  CHECK(harness.fake_pipeline->disk_invocations().size() == 1);
+  CHECK(harness.fake_pipeline->p2p_invocations().empty());
+  CHECK(gs_client->replica_requests.size() == 1);
 
   harness.shutdown();
   std::error_code cleanup_ec;

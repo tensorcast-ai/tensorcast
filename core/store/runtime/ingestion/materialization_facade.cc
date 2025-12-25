@@ -18,6 +18,8 @@
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/store/components/global_store_client.h"
+#include "core/store/components/worker_identity.h"
 #include "core/store/materialization/control/materialize_orchestrator.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
@@ -29,6 +31,35 @@ namespace tensorcast::store::runtime::ingestion {
 
 namespace pipeline = tensorcast::store::materialization::runtime::pipeline;
 using materialization::control::MaterializeOrchestrator;
+
+namespace {
+
+bool is_local_identity(const components::WorkerIdentity& local) {
+  return !local.node_id.empty() || !local.node_address.empty();
+}
+
+bool is_local_replica(const components::RemoteReplicaInfo& remote, const components::WorkerIdentity& local) {
+  if (!is_local_identity(local)) {
+    return false;
+  }
+  if (!local.node_id.empty() && !remote.node_id.empty()) {
+    return local.node_id == remote.node_id;
+  }
+  if (!local.node_address.empty() && !remote.node_address.empty() && local.node_address == remote.node_address) {
+    if (local.p2p_port == 0 || remote.node_port == 0) {
+      return true;
+    }
+    return local.p2p_port == remote.node_port;
+  }
+  return false;
+}
+
+absl::Status stale_local_route_status(std::string_view artifact_id) {
+  return absl::UnavailableError(
+      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
+}
+
+} // namespace
 
 class PlanBackedSeekableSource final : public loader::SeekableSource {
  public:
@@ -148,7 +179,8 @@ MaterializationFacade::MaterializationFacade(Config config)
     }
     MaterializeOrchestrator orchestrator(
         gsl::not_null<materialization::control::MaterializationBackend*>{this},
-        gsl::not_null<components::IGlobalStoreClient*>{client.get()});
+        gsl::not_null<components::IGlobalStoreClient*>{client.get()},
+        config_.runtime_context->worker_identity());
     return orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
   };
 
@@ -282,6 +314,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool has_disk_path = !hints.disk_path.empty();
+  const auto& local_identity = config_.runtime_context->worker_identity();
 
   if (prefer_disk && has_disk_path) {
     loading::DiskSource disk_src;
@@ -303,34 +336,46 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   if (gs_connected && !hints.artifact_id.empty()) {
     auto transport_or = gs_client->request_replica_transport(
         hints.artifact_id,
-        /*source_node_id=*/"",
-        /*source_address=*/"",
-        /*source_port=*/0,
+        local_identity.node_id,
+        local_identity.node_address,
+        local_identity.p2p_port,
         target_device,
         /*wait_timeout_ms=*/30000);
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
-      P2PSource p2p_src;
-      p2p_src.size_bytes = remote.memory_size;
-      p2p_src.ip = remote.node_address;
-      p2p_src.port = static_cast<uint16_t>(remote.node_port);
-      p2p_src.memory_keys = remote.remote_memory_keys;
-      p2p_src.buf_sizes = remote.buffer_sizes;
-      p2p_src.verification_json = remote.verification_json;
-      p2p_src.enable_checksum = false;
-      p2p_src.location.type = remote.memory_type;
-      p2p_src.location.device_id = remote.device_id;
-      auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
-      auto complete_status = gs_client->complete_replica_transport(session.transport_id);
-      if (!complete_status.ok()) {
-        LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
-      }
-      if (p2p_or.ok()) {
-        return p2p_or;
-      }
-      if (!has_disk_path || prefer_p2p) {
-        return p2p_or.status();
+      if (is_local_replica(remote, local_identity)) {
+        LOG(WARNING) << "Global Store returned local replica for artifact_id=" << hints.artifact_id
+                     << "; treating route as stale";
+        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        if (!complete_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
+        }
+        if (!has_disk_path) {
+          return stale_local_route_status(hints.artifact_id);
+        }
+      } else {
+        P2PSource p2p_src;
+        p2p_src.size_bytes = remote.memory_size;
+        p2p_src.ip = remote.node_address;
+        p2p_src.port = static_cast<uint16_t>(remote.node_port);
+        p2p_src.memory_keys = remote.remote_memory_keys;
+        p2p_src.buf_sizes = remote.buffer_sizes;
+        p2p_src.verification_json = remote.verification_json;
+        p2p_src.enable_checksum = false;
+        p2p_src.location.type = remote.memory_type;
+        p2p_src.location.device_id = remote.device_id;
+        auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
+        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        if (!complete_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
+        }
+        if (p2p_or.ok()) {
+          return p2p_or;
+        }
+        if (!has_disk_path || prefer_p2p) {
+          return p2p_or.status();
+        }
       }
     } else if (!has_disk_path) {
       return transport_or.status();
