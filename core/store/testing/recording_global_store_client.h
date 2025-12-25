@@ -32,10 +32,12 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<components::PlacementPlanResult> placement_plans;
   std::vector<components::PersistenceReport> persistence_reports;
   bool allow_plan_placement{true};
+  bool plan_degraded{false};
   bool deny_leases{false};
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
   std::string remote_node_id{"stub-remote"};
+  std::string plan_degraded_reason{"insufficient_remote_capacity"};
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -275,8 +277,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     components::PlacementPlanResult plan;
     plan.plan_id = absl::StrCat("plan-", placement_plans.size());
     plan.effective_policy = policy;
-    plan.degraded = false;
-    plan.degraded_reason = "";
+    plan.degraded = plan_degraded && policy != tensorcast::global_store::v1::PLACEMENT_POLICY_LOCAL_ONLY;
+    plan.degraded_reason = plan.degraded ? plan_degraded_reason : "";
     for (const auto& shard : shards) {
       components::ShardPlacement placement;
       placement.shard = shard;
@@ -284,7 +286,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       target.node_id = std::string(source_node_id);
       target.target_state = tensorcast::global_store::v1::PLACEMENT_TARGET_STATE_PENDING;
       placement.targets.push_back(std::move(target));
-      if (policy != tensorcast::global_store::v1::PLACEMENT_POLICY_LOCAL_ONLY) {
+      if (plan.degraded) {
+        placement.degraded_reason = plan.degraded_reason;
+      } else if (policy != tensorcast::global_store::v1::PLACEMENT_POLICY_LOCAL_ONLY) {
         components::PlacementTargetStatus remote;
         remote.node_id = remote_node_id;
         remote.target_state = tensorcast::global_store::v1::PLACEMENT_TARGET_STATE_PENDING;

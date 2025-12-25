@@ -14,7 +14,7 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast.api._config import PlacementPolicy
+from tensorcast.api._config import StorePolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -124,11 +124,6 @@ def get_host_pid() -> int:
 
 # This is a singleton class that manages the checkpoint
 class DaemonCtl:
-    _PLACEMENT_POLICY_TO_PROTO: dict[str, store_daemon_pb2.PlacementPolicy] = {
-        "local_only": store_daemon_pb2.PLACEMENT_POLICY_LOCAL_ONLY,
-        "replicated": store_daemon_pb2.PLACEMENT_POLICY_REPLICATED,
-        "sharded": store_daemon_pb2.PLACEMENT_POLICY_SHARDED,
-    }
     _PERSISTENCE_STATE_FROM_PROTO = {
         store_daemon_pb2.PERSISTENCE_STATE_PENDING: "pending",
         store_daemon_pb2.PERSISTENCE_STATE_RUNNING: "running",
@@ -1170,6 +1165,7 @@ class DaemonCtl:
         schema_version: str = "v3",
         client_artifact_id: str | None = None,
         plan: Plan | None = None,
+        policy: StorePolicy | dict[str, object] | str | None = None,
         timeout_s: float = 30.0,
         view: store_daemon_pb2.ViewRegistrationOptions | None = None,
     ) -> BeginRegisterArtifactResult:
@@ -1225,6 +1221,9 @@ class DaemonCtl:
             plan = _DefaultPlan()
         kind = plan.kind
         plan.apply_to_begin_request(req)
+        policy_proto = self._policy_to_proto(policy)
+        if policy_proto is not None:
+            req.policy.CopyFrom(policy_proto)
         if view is not None:
             req.view.CopyFrom(view)
 
@@ -1853,19 +1852,15 @@ class DaemonCtl:
             return resp.tensor_index_data
 
     @classmethod
-    def _placement_policy_to_proto(
-        cls, placement_policy: str | PlacementPolicy
-    ) -> store_daemon_pb2.PlacementPolicy:
-        key = (
-            placement_policy.value
-            if isinstance(placement_policy, PlacementPolicy)
-            else str(placement_policy).strip().lower()
-        )
-        if key not in cls._PLACEMENT_POLICY_TO_PROTO:
-            raise ValueError(
-                "placement_policy must be one of: local_only, replicated, sharded"
-            )
-        return cls._PLACEMENT_POLICY_TO_PROTO[key]
+    def _policy_to_proto(
+        cls, policy: StorePolicy | dict[str, object] | str | None
+    ) -> store_daemon_pb2.StorePolicy | None:
+        if policy is None:
+            return None
+        resolved = StorePolicy.parse(policy)
+        if resolved is None:
+            return None
+        return resolved.to_proto()
 
     @classmethod
     def _persistence_state_from_proto(
@@ -1877,18 +1872,15 @@ class DaemonCtl:
         self,
         *,
         artifact_id: str,
-        placement_policy: str | PlacementPolicy = "local_only",
-        persist_to_shared_disk: bool = True,
+        policy: StorePolicy | dict[str, object] | str | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartPersistenceResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
-        policy_proto = self._placement_policy_to_proto(placement_policy)
-        req = store_daemon_pb2.StartPersistenceRequest(
-            artifact_id=artifact_id,
-            placement_policy=policy_proto,
-            persist_to_shared_disk=bool(persist_to_shared_disk),
-        )
+        req = store_daemon_pb2.StartPersistenceRequest(artifact_id=artifact_id)
+        policy_proto = self._policy_to_proto(policy)
+        if policy_proto is not None:
+            req.policy.CopyFrom(policy_proto)
         with self._client_span("Client/StartPersistence") as span:
             return self._unary_call(
                 self.stub.StartPersistence, req, timeout=timeout_s, span=span, retries=0

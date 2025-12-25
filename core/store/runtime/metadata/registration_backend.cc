@@ -20,6 +20,7 @@
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/trace/trace_macros.h"
 #include "core/store/components/eviction_service.h"
+#include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -105,6 +106,7 @@ struct RegistrationBackend::PendingRegistrationContext {
   cudaIpcMemHandle_t ipc_handle{};
   std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
   StableDramOptions stable_dram;
+  std::optional<components::StableDramCachePolicy> stable_cache_policy;
   std::chrono::steady_clock::time_point expiry_time;
   std::chrono::steady_clock::time_point begin_time;
   Plan plan{Plan::kCoalesced};
@@ -132,6 +134,7 @@ RegistrationBackend::RegistrationBackend(
       metrics_collector_(resources.metrics_collector),
       memory_pool_(resources.memory_pool),
       communication_manager_(std::move(resources.communication_manager)),
+      stable_cache_manager_(std::move(resources.stable_cache_manager)),
       async_runtime_(std::move(resources.async_runtime)),
       memory_tier_budget_(std::move(resources.memory_tier_budget)),
       memory_tier_config_(resources.memory_tier_config),
@@ -348,6 +351,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   entry->ipc_handle = ipc_handle;
   entry->staging_gpu = std::move(staging_gpu);
   entry->stable_dram = reg.stable_dram;
+  entry->stable_cache_policy = reg.stable_cache_policy;
   entry->plan =
       stable_dram ? PendingRegistrationContext::Plan::kStableDram : PendingRegistrationContext::Plan::kCoalesced;
   entry->begin_time = std::chrono::steady_clock::now();
@@ -641,6 +645,20 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     result.id_kind = entry->id_kind;
     record_commit_latency(*entry, "existed");
     return result;
+  }
+
+  if (entry->plan == PendingRegistrationContext::Plan::kStableDram && entry->stable_cache_policy.has_value() &&
+      stable_cache_manager_) {
+    components::StableDramCacheManager::AdmissionRequest admit_request;
+    admit_request.key = mi2_key;
+    admit_request.replica = entry->replica;
+    admit_request.size_bytes = entry->size_bytes;
+    admit_request.policy = *entry->stable_cache_policy;
+    auto admit_or = stable_cache_manager_->admit(admit_request);
+    if (!admit_or.ok()) {
+      release_replica_memory(entry->replica, common::memory::MemoryLocation::CPU);
+      return admit_or.status();
+    }
   }
 
   std::vector<std::string> remote_keys;

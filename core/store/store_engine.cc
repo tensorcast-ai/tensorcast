@@ -182,6 +182,15 @@ void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components
   }
 }
 
+void StoreEngine::set_stable_cache_spill_evictable(
+    std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback) {
+  auto cache_manager = runtime_env_->runtime_context().stable_cache_manager();
+  if (!cache_manager) {
+    return;
+  }
+  cache_manager->set_spill_evictable_callback(std::move(callback));
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Status Queries
 // ═══════════════════════════════════════════════════════════════════════════

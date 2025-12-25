@@ -25,6 +25,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_budget.h"
@@ -32,6 +33,10 @@
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
+
+namespace tensorcast::store::components {
+class StableDramCacheManager;
+} // namespace tensorcast::store::components
 
 namespace tensorcast::store::runtime::metadata {
 
@@ -63,6 +68,7 @@ struct ArtifactRegistration {
   std::string encoding{"json"};
   RegistrationPlan plan{RegistrationPlan::kCoalesced};
   StableDramOptions stable_dram;
+  std::optional<components::StableDramCachePolicy> stable_cache_policy;
   int device_id{0};
   uint64_t total_size_bytes{0};
   bool enable_p2p{true};
@@ -103,6 +109,7 @@ struct RegistrationResources {
   gsl::not_null<components::MetricsCollector*> metrics_collector;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
   std::shared_ptr<components::CommunicationManager> communication_manager;
+  std::shared_ptr<components::StableDramCacheManager> stable_cache_manager;
   std::shared_ptr<common::AsyncRuntime> async_runtime;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;

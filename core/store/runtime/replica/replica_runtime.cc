@@ -327,8 +327,26 @@ absl::Status ReplicaRuntime::disable_remote_replica_access(
 }
 
 absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) {
-  return tensorcast::store::components::evict_for_cpu(
-      registry(), *pinned_pool(), metrics(), required_size, [this](const loading::ReplicaKey& evicted_key) {
+  auto stable_cache = context_->stable_cache_manager();
+  const absl::Time now = absl::Now();
+  return tensorcast::store::components::detail::evict_core(
+      [&] { return registry().get_lru_instances(); },
+      [&](const loading::ReplicaKey& key) -> absl::Status {
+        if (stable_cache && !stable_cache->is_evictable(key, now)) {
+          return absl::FailedPreconditionError("stable cache policy prevents eviction");
+        }
+        auto replica_or = registry().find(key);
+        if (!replica_or.ok()) {
+          return replica_or.status();
+        }
+        return replica_or.value()->release_memory(common::memory::MemoryLocation::CPU);
+      },
+      [&] { metrics().record_memory_eviction(); },
+      [&] { return pinned_pool()->get_available_size() >= required_size; },
+      [&](const loading::ReplicaKey& evicted_key) {
+        if (stable_cache) {
+          stable_cache->on_replica_evicted(evicted_key, "pinned_pool_eviction");
+        }
         publish_replica_event(RuntimeEventType::kReplicaEvicted, evicted_key, get_replica_size_or_zero(evicted_key));
       });
 }

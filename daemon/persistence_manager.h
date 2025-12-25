@@ -22,9 +22,14 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
 #include "daemon/background_scheduler.h"
+#include "daemon/store_policy_resolver.h"
 #include "daemon/types.h"
 #include "tensorcast/daemon/v1/store_daemon.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
+
+namespace tensorcast::store {
+class StoreEngine;
+} // namespace tensorcast::store
 
 namespace tensorcast::daemon {
 
@@ -64,6 +69,9 @@ struct PersistenceTaskState {
   std::string artifact_id;
   v1::PlacementPolicy placement_policy{v1::PLACEMENT_POLICY_UNSPECIFIED};
   bool persist_to_shared_disk{false};
+  RequirementLevel remote_requirement{RequirementLevel::kNone};
+  RequirementLevel shared_disk_requirement{RequirementLevel::kNone};
+  v1::PolicyLayout layout{v1::POLICY_LAYOUT_AUTO};
   v1::PersistenceState state{v1::PERSISTENCE_STATE_PENDING};
   double progress{0.0};
   std::string degraded_reason;
@@ -76,27 +84,51 @@ struct PersistenceTaskState {
 // Persistence task tracker with lightweight shard planning/state machine.
 class PersistenceManager {
  public:
+  struct PersistenceSource {
+    std::string artifact_id;
+    uint64_t total_size_bytes{0};
+  };
+
   explicit PersistenceManager(
       BackgroundScheduler* scheduler,
       LipManager* lip_mgr,
+      store::StoreEngine* store_engine,
       size_t artifact_chunk_bytes,
       std::chrono::milliseconds tick_interval = std::chrono::milliseconds(500),
       std::filesystem::path task_log_path = {});
 
-  absl::StatusOr<PersistenceTaskState> start_task(
-      std::string artifact_id,
-      v1::PlacementPolicy placement_policy,
-      bool persist_to_shared_disk);
+  absl::StatusOr<PersistenceTaskState> start_task(std::string artifact_id, const ResolvedStorePolicy& policy);
 
   PersistenceTaskState start_task_for_test(
       std::string artifact_id,
       v1::PlacementPolicy placement_policy,
       bool persist_to_shared_disk,
       uint64_t total_size_bytes = 64ULL * 1024 * 1024) {
-    LipLeaseEntry lease;
-    lease.artifact_id = artifact_id;
-    lease.total_size = total_size_bytes;
-    return start_task_with_lease(std::move(lease), placement_policy, persist_to_shared_disk).value();
+    ResolvedStorePolicy resolved;
+    resolved.shared_disk_requirement = persist_to_shared_disk ? RequirementLevel::kMust : RequirementLevel::kNone;
+    resolved.remote_requirement =
+        placement_policy == v1::PLACEMENT_POLICY_LOCAL_ONLY ? RequirementLevel::kNone : RequirementLevel::kShould;
+    if (placement_policy == v1::PLACEMENT_POLICY_SHARDED) {
+      resolved.layout = v1::POLICY_LAYOUT_SHARDED;
+    } else if (placement_policy == v1::PLACEMENT_POLICY_REPLICATED) {
+      resolved.layout = v1::POLICY_LAYOUT_UNSHARDED;
+    } else {
+      resolved.layout = v1::POLICY_LAYOUT_AUTO;
+    }
+    PersistenceSource source;
+    source.artifact_id = std::move(artifact_id);
+    source.total_size_bytes = total_size_bytes;
+    return start_task_with_source(std::move(source), resolved).value();
+  }
+
+  PersistenceTaskState start_task_for_test_with_policy(
+      std::string artifact_id,
+      const ResolvedStorePolicy& policy,
+      uint64_t total_size_bytes = 64ULL * 1024 * 1024) {
+    PersistenceSource source;
+    source.artifact_id = std::move(artifact_id);
+    source.total_size_bytes = total_size_bytes;
+    return start_task_with_source(std::move(source), policy).value();
   }
 
   absl::optional<PersistenceTaskState> get_by_task_id(absl::string_view task_id) const;
@@ -108,6 +140,11 @@ class PersistenceManager {
   void set_local_node_id(std::string node_id);
   void set_global_store_client(store::components::IGlobalStoreClient* client);
 
+  [[nodiscard]] bool is_spill_evictable(
+      absl::string_view artifact_id,
+      bool require_shared_disk,
+      bool require_remote_stable) const;
+
   void set_fail_shared_disk_for_test(bool fail) {
     fail_shared_disk_for_test_.store(fail);
   }
@@ -116,11 +153,15 @@ class PersistenceManager {
   using PlacementPlanResult = store::components::PlacementPlanResult;
   using PlacementShardSpec = store::components::PlacementShardSpec;
 
-  absl::StatusOr<PersistenceTaskState> start_task_with_lease(
-      LipLeaseEntry lease,
-      v1::PlacementPolicy placement_policy,
-      bool persist_to_shared_disk);
-  absl::StatusOr<std::vector<PersistenceShardState>> plan_shards(const LipLeaseEntry& lease) const;
+  absl::StatusOr<PersistenceTaskState> start_task_with_source(
+      PersistenceSource source,
+      const ResolvedStorePolicy& policy);
+  absl::StatusOr<PersistenceSource> resolve_source(std::string_view artifact_id) const;
+  absl::StatusOr<PersistenceSource> stable_source(std::string_view artifact_id) const;
+  static v1::PlacementPolicy select_placement_policy(const ResolvedStorePolicy& policy, uint64_t total_size_bytes);
+  absl::StatusOr<std::vector<PersistenceShardState>> plan_shards(
+      const PersistenceSource& source,
+      v1::PolicyLayout layout) const;
   absl::Status apply_placement_plan(PersistenceTaskState& task, std::vector<PersistenceShardState>& shards);
   absl::StatusOr<PlacementPlanResult> request_plan(
       const PersistenceTaskState& task,
@@ -131,6 +172,7 @@ class PersistenceManager {
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void advance_shard_locked(PersistenceTaskState& task, PersistenceShardState& shard)
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
+  void update_durability_locked(const PersistenceTaskState& task) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void maybe_report_status_locked(
       const PersistenceTaskState& task,
       std::vector<store::components::PersistenceReport>& reports) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
@@ -149,6 +191,7 @@ class PersistenceManager {
   void advance_locked(std::vector<store::components::PersistenceReport>& reports) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
   LipManager* lip_mgr_; // Not owned.
+  store::StoreEngine* store_engine_{nullptr}; // Not owned.
   store::components::IGlobalStoreClient* global_store_{nullptr}; // Not owned.
   size_t artifact_chunk_bytes_;
   std::string local_node_id_;
@@ -161,6 +204,13 @@ class PersistenceManager {
   absl::flat_hash_map<std::string, std::string> artifact_to_task_ ABSL_GUARDED_BY(mu_);
   std::atomic<uint64_t> counter_{0};
   absl::flat_hash_set<std::string> shared_disk_index_ ABSL_GUARDED_BY(mu_);
+
+  struct DurabilityState {
+    bool shared_disk_complete{false};
+    bool remote_stable_complete{false};
+  };
+
+  absl::flat_hash_map<std::string, DurabilityState> durability_index_ ABSL_GUARDED_BY(mu_);
   std::atomic<bool> fail_shared_disk_for_test_{false};
 };
 
