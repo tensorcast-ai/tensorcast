@@ -140,43 +140,6 @@ struct FacadeHarness {
   }
 };
 
-class LocalTransportClient final : public RecordingGlobalStoreClient {
- public:
-  explicit LocalTransportClient(WorkerIdentity local_identity) : local_identity_(std::move(local_identity)) {}
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
-      std::string_view artifact_id,
-      std::string_view source_node_id,
-      std::string_view source_address,
-      uint32_t source_port,
-      const DeviceKey& target_device,
-      uint32_t wait_timeout_ms) override {
-    (void)source_node_id;
-    (void)source_address;
-    (void)source_port;
-    (void)wait_timeout_ms;
-    replica_requests.emplace_back(std::string(artifact_id));
-    if (!allow_replica_transport) {
-      return absl::UnavailableError("replica transport disabled in LocalTransportClient");
-    }
-    tensorcast::store::components::TransportSession session;
-    session.transport_id = "local-transport";
-    session.remote_replica.node_id = local_identity_.node_id;
-    session.remote_replica.node_address = local_identity_.node_address;
-    session.remote_replica.node_port = local_identity_.p2p_port;
-    session.remote_replica.memory_size = 16;
-    session.remote_replica.memory_type = MemoryLocation::CPU;
-    session.remote_replica.device_id = target_device.ordinal;
-    session.remote_replica.remote_memory_keys = {"tensor.data_0"};
-    session.remote_replica.buffer_sizes = {16};
-    session.remote_replica.verification_json = "{}";
-    return session;
-  }
-
- private:
-  WorkerIdentity local_identity_;
-};
-
 } // namespace
 
 TEST_CASE("MaterializationFacade pipelines disk ingestion and publishes events", "[materialization_facade]") {
@@ -396,13 +359,14 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
 
   WorkerIdentity identity;
   identity.worker_id = "worker-0";
-  identity.node_id = "node-0";
+  // Match RecordingGlobalStoreClient's default transport session so the route is treated as local.
+  identity.node_id = "stub-node";
   identity.node_address = "127.0.0.1";
   identity.grpc_port = 9001;
-  identity.p2p_port = 9002;
+  identity.p2p_port = 12345;
   harness.runtime_context().set_worker_identity(identity);
 
-  auto gs_client = std::make_shared<LocalTransportClient>(identity);
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
   gs_client->allow_replica_transport = true;
   harness.runtime_context().set_global_store_client_for_testing(gs_client);
 
