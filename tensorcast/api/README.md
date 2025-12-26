@@ -16,10 +16,12 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
-## Placement & Persistence Options (Design 0041)
+## Put Policy & Persistence (Design 0044)
 
-- `RegisterArtifactOptions` now exposes `placement_policy` (`local_only` default, `replicated`, `sharded`) and `persist` (default `False`). Calls to `Store.put`/`put_async` forward these values unchanged.
-- When `persist=True`, the registration pipeline invokes daemon RPC `StartPersistence` after commit and records the returned `persistence_task_id` on `RegisteredArtifact`.
+- `RegisterArtifactOptions` exposes `policy` as the single durability/placement control; `Store.put`/`put_async` forward it unchanged to the daemon.
+- Policies can be simple profiles (`cache`, `durable`, `ha`, `cold`, `pinned`) or explicit `must`/`should`/`may` tier lists with `overflow_policy` and `layout` overrides.
+- Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.
+- The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact`.
 - Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
 
 ## Artifact Handles & Metadata Cache

@@ -206,6 +206,36 @@ sc_cc_library(
     ],
 )
 
+sc_header_only_library(
+    name = "stable_dram_cache_policy",
+    hdrs = ["components/stable_dram_cache_policy.h"],
+    visibility = ["//visibility:public"],
+)
+
+sc_cc_library(
+    name = "stable_dram_cache_manager",
+    srcs = ["components/stable_dram_cache_manager.cc"],
+    hdrs = ["components/stable_dram_cache_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":device_types",
+        ":memory_tier_budget",
+        ":replica_registry",
+        ":stable_dram_cache_policy",
+        "//core/common:memory_location_lib",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica",
+        "//core/store/replica:unified_memory_authority",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@gsl",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
 cc_test(
     name = "eviction_service_test",
     srcs = ["components/eviction_service_test.cc"],
@@ -213,6 +243,24 @@ cc_test(
         ":eviction_service",
         "//core/testing:catch_main",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "stable_dram_cache_manager_test",
+    srcs = ["components/stable_dram_cache_manager_test.cc"],
+    deps = [
+        ":memory_tier_budget",
+        ":replica_registry",
+        ":stable_dram_cache_manager",
+        "//core/common:async_runtime_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@abseil-cpp//absl/time",
         "@catch2//:catch2_main",
     ],
 )

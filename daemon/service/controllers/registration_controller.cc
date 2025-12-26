@@ -16,6 +16,7 @@
 #include "core/common/artifact_identity.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/status_utils.h"
+#include "daemon/store_policy_resolver.h"
 #include "opentelemetry/metrics/provider.h"
 #include "tensorcast/common/v1/common.pb.h"
 
@@ -164,6 +165,13 @@ grpc::Status RegistrationController::begin(
     plan = RegistrationManager::RegPlan::LEASE;
   if (req.has_stable_dram())
     plan = RegistrationManager::RegPlan::STABLE_DRAM;
+  if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+    auto policy_or = resolve_store_policy(req.has_policy() ? &req.policy() : nullptr);
+    if (!policy_or.ok()) {
+      return to_grpc_status(policy_or.status());
+    }
+    reg.stable_cache_policy = stable_cache_policy_from_resolved(*policy_or);
+  }
   RegistrationManager::RegMeta meta;
   meta.plan = plan;
   meta.total_size = req.total_size();

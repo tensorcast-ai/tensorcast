@@ -10,7 +10,7 @@ from typing import cast
 
 import pytest
 
-from tensorcast.api._config import PlacementPolicy, RegisterArtifactOptions
+from tensorcast.api._config import RegisterArtifactOptions
 from tensorcast.api.store import Store
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -50,13 +50,11 @@ class _ClientStub:
         self.response = response
         self.query_response = query_response
         self.exc = exc
-        self.start_calls: list[tuple[str, str, bool]] = []
+        self.start_calls: list[tuple[str, object | None]] = []
         self.query_calls: list[tuple[str | None, str | None]] = []
 
-    def start_persistence(
-        self, *, artifact_id: str, placement_policy: str, persist_to_shared_disk: bool
-    ):
-        self.start_calls.append((artifact_id, placement_policy, persist_to_shared_disk))
+    def start_persistence(self, *, artifact_id: str, policy=None):
+        self.start_calls.append((artifact_id, policy))
         if self.exc:
             raise self.exc
         if self.response is not None:
@@ -95,7 +93,7 @@ def _store_with_client(client: _ClientStub) -> Store:
 def test_maybe_start_persistence_skips_when_disabled() -> None:
     client = _ClientStub()
     pipeline = _pipeline(client)
-    options = RegisterArtifactOptions(persist=False)
+    options = RegisterArtifactOptions(policy="cache")
 
     task_id = pipeline._maybe_start_persistence(options, _ResultStub("artifact-1"))
 
@@ -112,20 +110,18 @@ def test_maybe_start_persistence_requests_task() -> None:
     )
     client = _ClientStub(response=response)
     pipeline = _pipeline(client)
-    options = RegisterArtifactOptions(
-        persist=True, placement_policy=PlacementPolicy.REPLICATED
-    )
+    options = RegisterArtifactOptions(policy="durable")
 
     task_id = pipeline._maybe_start_persistence(options, _ResultStub("artifact-7"))
 
     assert task_id == "task-42"
-    assert client.start_calls == [("artifact-7", "replicated", True)]
+    assert client.start_calls == [("artifact-7", options.policy)]
 
 
 def test_maybe_start_persistence_raises_for_missing_artifact() -> None:
     client = _ClientStub()
     pipeline = _pipeline(client)
-    options = RegisterArtifactOptions(persist=True)
+    options = RegisterArtifactOptions(policy="durable")
 
     with pytest.raises(ArtifactError):
         pipeline._maybe_start_persistence(options, _ResultStub(None))
@@ -138,7 +134,7 @@ def test_maybe_start_persistence_propagates_artifact_error() -> None:
         )
     )
     pipeline = _pipeline(client)
-    options = RegisterArtifactOptions(persist=True)
+    options = RegisterArtifactOptions(policy="durable")
 
     with pytest.raises(ArtifactError):
         pipeline._maybe_start_persistence(options, _ResultStub("artifact-8"))
@@ -147,12 +143,12 @@ def test_maybe_start_persistence_propagates_artifact_error() -> None:
 def test_maybe_start_persistence_swallows_unexpected_errors() -> None:
     client = _ClientStub(exc=RuntimeError("transient failure"))
     pipeline = _pipeline(client)
-    options = RegisterArtifactOptions(persist=True)
+    options = RegisterArtifactOptions(policy="durable")
 
     task_id = pipeline._maybe_start_persistence(options, _ResultStub("artifact-9"))
 
     assert task_id is None
-    assert client.start_calls == [("artifact-9", "local_only", True)]
+    assert client.start_calls == [("artifact-9", options.policy)]
 
 
 def test_query_persistence_status_requires_identifier() -> None:

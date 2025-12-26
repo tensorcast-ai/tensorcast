@@ -59,6 +59,7 @@ class RegistrationBackend {
   gsl::not_null<components::MetricsCollector*> metrics_collector_;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool_;
   std::shared_ptr<components::CommunicationManager> communication_manager_;
+  std::shared_ptr<components::StableDramCacheManager> stable_cache_manager_;
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
   std::optional<MemoryTierConfig> memory_tier_config_;

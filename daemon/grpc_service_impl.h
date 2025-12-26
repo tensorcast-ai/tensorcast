@@ -114,9 +114,17 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     persistence_mgr_ = std::make_unique<PersistenceManager>(
         scheduler_.get(),
         lip_mgr_.get().get(),
+        engine_.get().get(),
         engine_->get_artifact_chunk_bytes(),
         std::chrono::milliseconds(500),
         opts_.persistence_log_path);
+    engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
+      if (!persistence_mgr_) {
+        return false;
+      }
+      return persistence_mgr_->is_spill_evictable(
+          key.artifact_id, policy.require_shared_disk_for_spill, policy.require_remote_stable_for_spill);
+    });
     // Wire helper services and controllers (post-scheduler construction)
     sessions_svc_ = std::make_unique<SessionsService>(
         sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(opts_.sessions_ttl.count()));

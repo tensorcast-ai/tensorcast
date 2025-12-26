@@ -19,6 +19,7 @@
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/status_utils.h"
+#include "daemon/store_policy_resolver.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/types.h"
 #include "opentelemetry/metrics/provider.h"
@@ -197,17 +198,17 @@ Status StoreDaemonServiceImpl::StartPersistence(
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
-  if (req->placement_policy() == v1::PLACEMENT_POLICY_UNSPECIFIED) {
-    return {StatusCode::INVALID_ARGUMENT, "placement_policy is required"};
-  }
   if (is_shutting_down_.load()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
   if (!persistence_mgr_) {
     return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
   }
-  auto task_or =
-      persistence_mgr_->start_task(req->artifact_id(), req->placement_policy(), req->persist_to_shared_disk());
+  auto policy_or = resolve_store_policy(req->has_policy() ? &req->policy() : nullptr);
+  if (!policy_or.ok()) {
+    return to_grpc_status(policy_or.status());
+  }
+  auto task_or = persistence_mgr_->start_task(req->artifact_id(), *policy_or);
   if (!task_or.ok()) {
     return to_grpc_status(task_or.status());
   }
@@ -315,6 +316,7 @@ Status StoreDaemonServiceImpl::GetServerConfig(
 // Destructor: stop sweepers
 StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
   stop_sweepers();
+  engine_->set_stable_cache_spill_evictable({});
 }
 
 // ──────────────────────────────────────────────────────────────────────────

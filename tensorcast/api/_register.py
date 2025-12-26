@@ -30,7 +30,7 @@ from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storag
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
 
-from tensorcast.api._config import PlanType, RegisterArtifactOptions
+from tensorcast.api._config import PlanType, RegisterArtifactOptions, StorePolicy
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import (
     DeviceMismatch,
@@ -1177,6 +1177,7 @@ def _register_artifact_core(
         span.set_attribute("tc.artifact.identity_kind", identity_kind.value)
         if normalized_artifact_id:
             span.set_attribute("tc.artifact.client_artifact_id", normalized_artifact_id)
+        policy = StorePolicy.parse(options.policy)
         begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
             total_size_bytes=layout.total_size,
@@ -1186,6 +1187,7 @@ def _register_artifact_core(
             schema_version="v3",
             client_artifact_id=normalized_artifact_id,
             plan=plan_model,
+            policy=policy,
             view=view.view_options if view is not None else None,
             timeout_s=60.0,
         )

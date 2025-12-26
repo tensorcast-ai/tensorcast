@@ -3,6 +3,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -14,6 +15,7 @@
 #include "absl/types/span.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/memory_tier_budget.h"
@@ -175,6 +177,9 @@ class StoreEngine {
    * Ownership is shared so tests may reuse the stub beyond the StoreEngine lifetime.
    */
   void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
+
+  void set_stable_cache_spill_evictable(
+      std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback);
 
   /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.

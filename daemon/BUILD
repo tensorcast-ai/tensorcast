@@ -43,6 +43,7 @@ sc_cc_library(
         ":sessions_service_hdr",
         ":status_controller_hdr",
         ":status_utils",
+        ":store_policy_resolver_lib",
         ":sweep_tasks_hdr",
         ":transport_controller_lib",
         ":transport_lock_manager_hdr",
@@ -63,14 +64,28 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "store_policy_resolver_lib",
+    srcs = ["store_policy_resolver.cc"],
+    hdrs = ["store_policy_resolver.h"],
+    deps = [
+        "//core/store:stable_dram_cache_policy",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+    ],
+)
+
+sc_cc_library(
     name = "persistence_manager_lib",
     srcs = ["persistence_manager.cc"],
     hdrs = ["persistence_manager.h"],
     deps = [
         ":background_scheduler_hdr",
         ":lip_manager_lib",
+        ":store_policy_resolver_lib",
         "//core/common:artifact_hash_lib",
         "//core/store:global_store_client",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica:memory_state",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "//proto/tensorcast/global_store/v1:global_store_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -465,6 +480,7 @@ sc_cc_library(
         ":rpc_context_hdr",
         ":session_lifecycle_hdr",
         ":status_utils",
+        ":store_policy_resolver_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
         "//proto/tensorcast/common/v1:common_cc",
@@ -806,6 +822,17 @@ cc_test(
         ":persistence_manager_lib",
         "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "store_policy_resolver_test",
+    srcs = ["store_policy_resolver_test.cc"],
+    deps = [
+        ":store_policy_resolver_lib",
+        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
 )

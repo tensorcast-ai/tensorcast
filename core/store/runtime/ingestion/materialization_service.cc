@@ -400,6 +400,9 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
+    if (!request.has_disk_path()) {
+      return orchestrated_or.status();
+    }
     LOG(WARNING) << "Materialize AUTO callback failed: " << orchestrated_or.status() << "; falling back to disk load";
   }
 

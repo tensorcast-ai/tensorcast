@@ -15,7 +15,12 @@ import torch
 from opentelemetry.trace import Status, StatusCode
 
 from tensorcast.api import _metrics as store_metrics
-from tensorcast.api._config import PlanType, RegisterArtifactOptions
+from tensorcast.api._config import (
+    PlanType,
+    RegisterArtifactOptions,
+    StorePolicy,
+    policy_requires_persistence,
+)
 from tensorcast.api._device import resolve_device
 from tensorcast.api._register import (
     RegisteredArtifact as _RegisterHandle,
@@ -431,7 +436,8 @@ class RegistrationPipeline:
     def _maybe_start_persistence(
         self, options: RegisterArtifactOptions, result: RegistrationResult
     ) -> str | None:
-        if not options.persist:
+        policy = StorePolicy.parse(options.policy)
+        if not policy_requires_persistence(policy):
             return None
         artifact_id = result.descriptor.artifact_id
         if not artifact_id:
@@ -443,8 +449,7 @@ class RegistrationPipeline:
         try:
             response = self._runtime.ensure_client().start_persistence(
                 artifact_id=artifact_id,
-                placement_policy=options.placement_policy.value,
-                persist_to_shared_disk=True,
+                policy=policy,
             )
         except ArtifactError:
             raise
@@ -453,7 +458,9 @@ class RegistrationPipeline:
                 "store.persistence_start.failed",
                 extra={
                     "tc.artifact.id": artifact_id,
-                    "tc.persist.policy": options.placement_policy.value,
+                    "tc.persist.policy": (
+                        policy.profile.value if policy and policy.profile else "custom"
+                    ),
                     "tc.persist.error": str(exc),
                 },
             )

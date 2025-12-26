@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from tensorcast.api._config import RegionBackedMode
 from tensorcast.proto.config.v1 import client_config_pb2 as cc_pb2
 
 _CLIENT_CFG: Optional[cc_pb2.ClientConfig] = None
+
+if TYPE_CHECKING:
+    from tensorcast.api._config import RegionBackedMode
 
 
 def set_client_config(cfg: cc_pb2.ClientConfig) -> None:
@@ -41,6 +43,8 @@ def daemon_target_default() -> Optional[str]:
 def _region_backed_mode_from_proto(
     value: int,
 ) -> RegionBackedMode | None:
+    from tensorcast.api._config import RegionBackedMode
+
     if value == cc_pb2.RegionBackedMode.REGION_BACKED_MODE_AUTO:
         return RegionBackedMode.AUTO
     if value == cc_pb2.RegionBackedMode.REGION_BACKED_MODE_REQUIRE:

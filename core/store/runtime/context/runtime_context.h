@@ -14,6 +14,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/components/worker_identity.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/memory_tier_budget.h"
@@ -40,6 +41,10 @@ class RuntimeContext {
 
   [[nodiscard]] std::shared_ptr<components::CommunicationManager> communication_manager() const {
     return comm_manager_;
+  }
+
+  [[nodiscard]] std::shared_ptr<components::StableDramCacheManager> stable_cache_manager() const {
+    return stable_cache_manager_;
   }
 
   [[nodiscard]] std::shared_ptr<MemoryTierBudget> memory_tier_budget() const {
@@ -110,12 +115,14 @@ class RuntimeContext {
   std::unique_ptr<components::ReplicaRegistry> replica_registry_;
   std::unique_ptr<components::MetricsCollector> metrics_collector_;
   std::shared_ptr<components::CommunicationManager> comm_manager_;
+  std::shared_ptr<components::StableDramCacheManager> stable_cache_manager_;
   std::shared_ptr<components::IGlobalStoreClient> global_store_client_;
   std::shared_ptr<ViewHashComputer> view_hash_computer_;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   bool owns_async_runtime_{false};
   std::unique_ptr<RuntimeContextEvents> events_;
+  std::unique_ptr<RuntimeContextEvents::Subscription> stable_cache_subscription_;
   std::unique_ptr<ingestion::IngestionEventHub> ingestion_event_hub_;
   components::WorkerIdentity worker_identity_;
   std::atomic<uint64_t> publish_context_counter_{1};

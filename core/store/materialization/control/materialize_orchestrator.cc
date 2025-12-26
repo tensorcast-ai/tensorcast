@@ -3,6 +3,7 @@
 #include "core/store/materialization/control/materialize_orchestrator.h"
 
 #include <filesystem>
+#include <utility>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -12,15 +13,47 @@
 namespace tensorcast::store::materialization::control {
 
 using tensorcast::store::P2PSource;
+using tensorcast::store::components::RemoteReplicaInfo;
+using tensorcast::store::components::WorkerIdentity;
 using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializeHints;
 using tensorcast::store::loading::ReplicaHandle;
 using tensorcast::store::loading::ReplicaTarget;
 
+namespace {
+
+bool is_local_identity(const WorkerIdentity& local) {
+  return !local.node_id.empty() || !local.node_address.empty();
+}
+
+bool is_local_replica(const RemoteReplicaInfo& remote, const WorkerIdentity& local) {
+  if (!is_local_identity(local)) {
+    return false;
+  }
+  if (!local.node_id.empty() && !remote.node_id.empty()) {
+    return local.node_id == remote.node_id;
+  }
+  if (!local.node_address.empty() && !remote.node_address.empty() && local.node_address == remote.node_address) {
+    if (local.p2p_port == 0 || remote.node_port == 0) {
+      return true;
+    }
+    return local.p2p_port == remote.node_port;
+  }
+  return false;
+}
+
+absl::Status stale_local_route_status(std::string_view artifact_id) {
+  return absl::UnavailableError(
+      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
+}
+
+} // namespace
+
 MaterializeOrchestrator::MaterializeOrchestrator(
     gsl::not_null<MaterializationBackend*> backend,
-    gsl::not_null<components::IGlobalStoreClient*> gs_client)
-    : backend_(backend), gs_client_(gs_client) {}
+    gsl::not_null<components::IGlobalStoreClient*> gs_client,
+    WorkerIdentity local_identity)
+    : backend_(backend), gs_client_(gs_client), local_identity_(std::move(local_identity)) {}
 
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     std::string_view artifact_id,
@@ -87,9 +120,9 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       transport_or = gs_client_->request_view_transport(
           artifact_id,
           *view_id,
-          /*source_node_id=*/"",
-          /*source_address=*/"",
-          /*source_port=*/0,
+          local_identity_.node_id,
+          local_identity_.node_address,
+          local_identity_.p2p_port,
           target_device,
           /*wait_timeout_ms=*/30000);
       if (!transport_or.ok()) {
@@ -98,9 +131,9 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
                     << "); falling back to canonical routing";
           transport_or = gs_client_->request_replica_transport(
               artifact_id,
-              /*source_node_id=*/"",
-              /*source_address=*/"",
-              /*source_port=*/0,
+              local_identity_.node_id,
+              local_identity_.node_address,
+              local_identity_.p2p_port,
               target_device,
               /*wait_timeout_ms=*/30000);
         }
@@ -108,9 +141,9 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     } else {
       transport_or = gs_client_->request_replica_transport(
           artifact_id,
-          /*source_node_id=*/"", // Local node info optional – left empty here
-          /*source_address=*/"",
-          /*source_port=*/0,
+          local_identity_.node_id,
+          local_identity_.node_address,
+          local_identity_.p2p_port,
           target_device,
           /*wait_timeout_ms=*/30000);
     }
@@ -120,52 +153,65 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     const auto& session = *transport_or;
     const auto& remote = session.remote_replica;
 
-    // Build P2PSource from server-selected remote replica
-    P2PSource p2p_src;
-    p2p_src.size_bytes = remote.memory_size;
-    p2p_src.ip = remote.node_address;
-    p2p_src.port = static_cast<uint16_t>(remote.node_port);
-    p2p_src.memory_keys = remote.remote_memory_keys;
-    p2p_src.buf_sizes = remote.buffer_sizes;
-    p2p_src.verification_json = remote.verification_json;
-    p2p_src.enable_checksum = true;
-    p2p_src.location.type = remote.memory_type;
-    p2p_src.location.device_id = remote.device_id;
-
-    // Build target description
-    ReplicaTarget target;
-    target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                                   : common::memory::MemoryLocation::CPU;
-    target.location.device_id = target_device.ordinal;
-
-    auto load_or = backend_->ingest_from_p2p(std::string(artifact_id), p2p_src, target, hints);
-    if (load_or.ok()) {
-      // Notify GS that transport finished
+    if (is_local_replica(remote, local_identity_)) {
+      LOG(WARNING) << "Global Store returned local replica for artifact_id=" << artifact_id
+                   << "; treating route as stale";
       absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
       if (!comp_status.ok()) {
-        LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
+        LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
       }
-      const auto& handle = *load_or;
-      absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
-      if (!reg_status.ok()) {
-        LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
+      last_p2p_status = stale_local_route_status(artifact_id);
+      if (hints.disk_path.empty()) {
+        return last_p2p_status;
       }
-
-      return load_or;
-    } // Loading via P2P failed – close transport and log
-    absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
-    if (!comp_status.ok()) {
-      LOG(WARNING) << "complete_replica_transport after failure returned error: " << comp_status;
-    }
-    last_p2p_status = load_or.status();
-    if (view_id.has_value()) {
-      LOG(WARNING) << "P2P load failed for view_id=" << *view_id << ": " << load_or.status();
     } else {
-      LOG(WARNING) << "P2P load failed: " << load_or.status();
-    }
+      // Build P2PSource from server-selected remote replica
+      P2PSource p2p_src;
+      p2p_src.size_bytes = remote.memory_size;
+      p2p_src.ip = remote.node_address;
+      p2p_src.port = static_cast<uint16_t>(remote.node_port);
+      p2p_src.memory_keys = remote.remote_memory_keys;
+      p2p_src.buf_sizes = remote.buffer_sizes;
+      p2p_src.verification_json = remote.verification_json;
+      p2p_src.enable_checksum = true;
+      p2p_src.location.type = remote.memory_type;
+      p2p_src.location.device_id = remote.device_id;
 
-    if (hints.disk_path.empty()) {
-      return load_or.status();
+      // Build target description
+      ReplicaTarget target;
+      target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                     : common::memory::MemoryLocation::CPU;
+      target.location.device_id = target_device.ordinal;
+
+      auto load_or = backend_->ingest_from_p2p(std::string(artifact_id), p2p_src, target, hints);
+      if (load_or.ok()) {
+        // Notify GS that transport finished
+        absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
+        if (!comp_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport returned error: " << comp_status;
+        }
+        const auto& handle = *load_or;
+        absl::Status reg_status = backend_->register_replica_with_global_store(handle.key(), {});
+        if (!reg_status.ok()) {
+          LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
+        }
+
+        return load_or;
+      } // Loading via P2P failed – close transport and log
+      absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
+      if (!comp_status.ok()) {
+        LOG(WARNING) << "complete_replica_transport after failure returned error: " << comp_status;
+      }
+      last_p2p_status = load_or.status();
+      if (view_id.has_value()) {
+        LOG(WARNING) << "P2P load failed for view_id=" << *view_id << ": " << load_or.status();
+      } else {
+        LOG(WARNING) << "P2P load failed: " << load_or.status();
+      }
+
+      if (hints.disk_path.empty()) {
+        return load_or.status();
+      }
     }
 
   } else {
