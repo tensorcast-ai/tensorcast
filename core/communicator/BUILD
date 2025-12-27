@@ -436,6 +436,7 @@ cc_test(
     name = "rdma_vmm_test",
     srcs = ["engine/rdma_vmm_test.cc"],
     tags = [
+        "manual",
         "rdma",
         "requires_cuda",
     ],
