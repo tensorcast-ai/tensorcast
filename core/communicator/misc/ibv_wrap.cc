@@ -78,6 +78,8 @@ struct ibv_symbols_t {
   struct ibv_pd* (*alloc_pd)(struct ibv_context* context) = NULL;
   int (*dealloc_pd)(struct ibv_pd* pd) = NULL;
   struct ibv_mr* (*reg_mr)(struct ibv_pd* pd, void* addr, size_t length, int access) = NULL;
+  struct ibv_mr* (
+      *reg_dmabuf_mr)(struct ibv_pd* pd, uint64_t offset, size_t length, uint64_t iova, int fd, int access) = NULL;
   int (*dereg_mr)(struct ibv_mr* mr) = NULL;
   struct ibv_cq* (*create_cq)(
       struct ibv_context* context,
@@ -127,6 +129,11 @@ result_t init_symbols() {
   LOAD_SYM("ibv_alloc_pd", alloc_pd);
   LOAD_SYM("ibv_dealloc_pd", dealloc_pd);
   LOAD_SYM("ibv_reg_mr", reg_mr);
+  dlerror();
+  if (void* dmabuf_sym = dlsym(ibvhandle, "ibv_reg_dmabuf_mr"); dmabuf_sym != nullptr) {
+    void** cast = reinterpret_cast<void**>(&g_symbols.reg_dmabuf_mr);
+    *cast = dmabuf_sym;
+  }
   LOAD_SYM("ibv_dereg_mr", dereg_mr);
   LOAD_SYM("ibv_create_cq", create_cq);
   LOAD_SYM("ibv_destroy_cq", destroy_cq);
@@ -233,12 +240,38 @@ result_t wrap_ibv_reg_mr(struct ibv_mr** ret, struct ibv_pd* pd, void* addr, siz
   IBV_PTR_CHECK_ERRNO(reg_mr, reg_mr(pd, addr, length, access), *ret, nullptr, "ibv_reg_mr");
 }
 
+result_t wrap_ibv_reg_dmabuf_mr(
+    struct ibv_mr** ret,
+    struct ibv_pd* pd,
+    uint64_t offset,
+    size_t length,
+    uint64_t iova,
+    int fd,
+    int access) {
+  IBV_PTR_CHECK_ERRNO(
+      reg_dmabuf_mr, reg_dmabuf_mr(pd, offset, length, iova, fd, access), *ret, nullptr, "ibv_reg_dmabuf_mr");
+}
+
 struct ibv_mr* wrap_direct_ibv_reg_mr(struct ibv_pd* pd, void* addr, size_t length, int access) {
   if (g_symbols.reg_mr == nullptr) {
     LOG(WARNING) << "lib wrapper not initialized.";
     return nullptr;
   }
   return g_symbols.reg_mr(pd, addr, length, access);
+}
+
+struct ibv_mr* wrap_direct_ibv_reg_dmabuf_mr(
+    struct ibv_pd* pd,
+    uint64_t offset,
+    size_t length,
+    uint64_t iova,
+    int fd,
+    int access) {
+  if (g_symbols.reg_dmabuf_mr == nullptr) {
+    LOG(WARNING) << "ibv_reg_dmabuf_mr not available in loaded libibverbs";
+    return nullptr;
+  }
+  return g_symbols.reg_dmabuf_mr(pd, offset, length, iova, fd, access);
 }
 
 result_t wrap_ibv_dereg_mr(struct ibv_mr* mr) {

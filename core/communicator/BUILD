@@ -433,6 +433,37 @@ cc_test(
 )
 
 cc_test(
+    name = "rdma_vmm_test",
+    srcs = ["engine/rdma_vmm_test.cc"],
+    tags = [
+        "rdma",
+        "requires_cuda",
+    ],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "rdma_vmm_ub_test",
+    srcs = ["engine/rdma_vmm_ub_test.cc"],
+    tags = [
+        "manual",
+        "rdma",
+        "requires_cuda",
+    ],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "//core/testing:test_helpers",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "staging_flow_controller_test",
     srcs = ["engine/staging_flow_controller_test.cc"],
     deps = [
