@@ -109,6 +109,13 @@ typedef struct cudaPointerAttributes {
 
 typedef int CUresult;
 
+typedef int CUdevice;
+
+typedef enum CUdevice_attribute_enum {
+  CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED = 1,
+  CU_DEVICE_ATTRIBUTE_HOST_ALLOC_DMA_BUF_SUPPORTED = 2,
+} CUdevice_attribute;
+
 typedef std::uintptr_t CUdeviceptr;
 typedef std::uint64_t CUmemGenericAllocationHandle;
 
@@ -155,6 +162,11 @@ typedef struct CUmemAccessDesc_st {
   CUmemLocation location;
   CUmemAccess_flags flags;
 } CUmemAccessDesc;
+
+// cuMemGetHandleForAddressRange types (subset).
+typedef enum CUmemRangeHandleType_enum {
+  CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD = 1,
+} CUmemRangeHandleType;
 #endif
 
 namespace tensorcast::cuda {
@@ -254,6 +266,8 @@ absl::Status memcpy_peer_async(
 // CUDA VMM (Driver API) wrappers.
 // ---------------------------------------------------------------------------
 absl::Status cu_init(unsigned int flags = 0);
+absl::Status cu_device_get(CUdevice* device, int ordinal);
+absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device);
 absl::Status cu_mem_get_allocation_granularity(
     size_t* granularity,
     const CUmemAllocationProp* prop,
@@ -274,6 +288,12 @@ absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDe
 absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size);
 absl::Status cu_mem_release(CUmemGenericAllocationHandle handle);
 absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size);
+absl::Status cu_mem_get_handle_for_address_range(
+    void* handle,
+    CUdeviceptr dptr,
+    size_t size,
+    CUmemRangeHandleType handle_type,
+    unsigned long long flags);
 
 // Helper macro for operations not supported by fake backend
 #ifdef USE_FAKE_CUDA
