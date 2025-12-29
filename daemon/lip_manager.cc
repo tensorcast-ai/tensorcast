@@ -210,6 +210,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     uint64_t base;
     uint64_t len;
     uint64_t dst;
+    uint64_t segment_base;
   };
 
   std::vector<Opened> opened;
@@ -236,7 +237,12 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
     opened.push_back(
         Opened{
-            .device_id = seg.device_id, .map = *map_or, .base = source_base, .len = seg.length, .dst = seg.dst_offset});
+            .device_id = seg.device_id,
+            .map = *map_or,
+            .base = source_base,
+            .len = seg.length,
+            .dst = seg.dst_offset,
+            .segment_base = seg.base_offset});
   }
   const size_t chunk_size = engine_->get_artifact_chunk_bytes();
   if (chunk_size == 0) {
@@ -245,11 +251,11 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
   for (const auto& o : opened) {
     const bool is_tail = (o.dst + o.len == total_size);
-    if (!is_aligned(o.dst) || !is_aligned(o.base) || (!is_aligned(o.len) && !is_tail)) {
+    if (!is_aligned(o.dst) || !is_aligned(o.segment_base) || (!is_aligned(o.len) && !is_tail)) {
       return absl::FailedPreconditionError(
           absl::StrCat(
               "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
-              o.base,
+              o.segment_base,
               ", dst_offset=",
               o.dst,
               ", length=",
@@ -350,6 +356,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     uint64_t base;
     uint64_t len;
     uint64_t dst;
+    uint64_t segment_base;
   };
 
   std::vector<OpenedSeg> opened;
@@ -396,7 +403,12 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
           return map_or.status();
         const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
         opened_seg = OpenedSeg{
-            .device_id = seg.device_id, .map = *map_or, .base = source_base, .len = seg.length, .dst = seg.dst_offset};
+            .device_id = seg.device_id,
+            .map = *map_or,
+            .base = source_base,
+            .len = seg.length,
+            .dst = seg.dst_offset,
+            .segment_base = seg.base_offset};
       }
     }
     if (!opened_seg.has_value()) {
@@ -409,7 +421,8 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
           .map = owned_maps.back().get(),
           .base = seg.base_offset,
           .len = seg.length,
-          .dst = seg.dst_offset};
+          .dst = seg.dst_offset,
+          .segment_base = seg.base_offset};
     }
     opened.push_back(std::move(*opened_seg));
   }
@@ -417,11 +430,11 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
   for (const auto& s : opened) {
     const bool is_tail = (s.dst + s.len == lip.total_size);
-    if (!is_aligned(s.dst) || !is_aligned(s.base) || (!is_aligned(s.len) && !is_tail)) {
+    if (!is_aligned(s.dst) || !is_aligned(s.segment_base) || (!is_aligned(s.len) && !is_tail)) {
       return absl::FailedPreconditionError(
           absl::StrCat(
               "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
-              s.base,
+              s.segment_base,
               ", dst_offset=",
               s.dst,
               ", length=",
