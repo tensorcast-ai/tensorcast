@@ -29,6 +29,14 @@ namespace {
 
 constexpr absl::string_view kMetricsScope = "tensorcast.daemon";
 
+int retention_rank(StableRetentionPolicy policy) {
+  return static_cast<int>(policy);
+}
+
+int overflow_rank(StableOverflowPolicy policy) {
+  return static_cast<int>(policy);
+}
+
 const char* retention_policy_label(StableRetentionPolicy policy) {
   switch (policy) {
     case StableRetentionPolicy::kPinned:
@@ -57,6 +65,72 @@ bool is_cpu_key(const loading::ReplicaKey& key) {
   return key.device.type == DeviceType::CPU;
 }
 
+struct UpgradedEntry {
+  StableDramCachePolicy policy;
+  std::optional<absl::Time> retention_deadline;
+  bool changed{false};
+};
+
+UpgradedEntry upgrade_entry_policy(
+    const StableDramCachePolicy& existing,
+    std::optional<absl::Time> existing_deadline,
+    const StableDramCachePolicy& requested,
+    absl::Time now) {
+  UpgradedEntry upgraded;
+  upgraded.policy = existing;
+
+  if (retention_rank(requested.retention_policy) > retention_rank(upgraded.policy.retention_policy)) {
+    upgraded.policy.retention_policy = requested.retention_policy;
+    upgraded.changed = true;
+  }
+  if (overflow_rank(requested.overflow_policy) > overflow_rank(upgraded.policy.overflow_policy)) {
+    upgraded.policy.overflow_policy = requested.overflow_policy;
+    upgraded.changed = true;
+  }
+  if (requested.required && !upgraded.policy.required) {
+    upgraded.policy.required = true;
+    upgraded.changed = true;
+  }
+  if (requested.require_shared_disk_for_spill && !upgraded.policy.require_shared_disk_for_spill) {
+    upgraded.policy.require_shared_disk_for_spill = true;
+    upgraded.changed = true;
+  }
+  if (requested.require_remote_stable_for_spill && !upgraded.policy.require_remote_stable_for_spill) {
+    upgraded.policy.require_remote_stable_for_spill = true;
+    upgraded.changed = true;
+  }
+
+  if (upgraded.policy.retention_policy == StableRetentionPolicy::kTtl) {
+    std::optional<std::chrono::milliseconds> ttl = upgraded.policy.retention_ttl;
+    if (requested.retention_ttl.has_value() && (!ttl.has_value() || *requested.retention_ttl > *ttl)) {
+      ttl = requested.retention_ttl;
+      upgraded.changed = true;
+    }
+    if (ttl.has_value()) {
+      upgraded.policy.retention_ttl = ttl;
+      const absl::Time requested_deadline = now + absl::FromChrono(*ttl);
+      if (existing_deadline.has_value()) {
+        upgraded.retention_deadline = std::max(*existing_deadline, requested_deadline);
+      } else {
+        upgraded.retention_deadline = requested_deadline;
+      }
+      if (!existing_deadline.has_value() || *upgraded.retention_deadline != *existing_deadline) {
+        upgraded.changed = true;
+      }
+    } else {
+      upgraded.retention_deadline = existing_deadline;
+    }
+  } else {
+    upgraded.policy.retention_ttl = std::nullopt;
+    upgraded.retention_deadline = std::nullopt;
+    if (existing_deadline.has_value()) {
+      upgraded.changed = true;
+    }
+  }
+
+  return upgraded;
+}
+
 } // namespace
 
 StableDramCacheManager::StableDramCacheManager(Config config)
@@ -83,8 +157,15 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
 
   {
     absl::MutexLock lock(&mu_);
-    if (entries_.contains(request.key)) {
+    auto it = entries_.find(request.key);
+    if (it != entries_.end()) {
       record_hit();
+      const auto upgraded =
+          upgrade_entry_policy(it->second.policy, it->second.retention_deadline, request.policy, absl::Now());
+      if (upgraded.changed) {
+        it->second.policy = upgraded.policy;
+        it->second.retention_deadline = upgraded.retention_deadline;
+      }
       result.admitted = true;
       return result;
     }
@@ -166,6 +247,18 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
       absl::Status st = uma->release_stable_lease(*entry.stable_lease);
       if (!st.ok()) {
         LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << request.key.artifact_id << " status=" << st;
+      }
+    }
+    {
+      absl::MutexLock lock(&mu_);
+      auto it = entries_.find(entry.key);
+      if (it != entries_.end()) {
+        const auto upgraded =
+            upgrade_entry_policy(it->second.policy, it->second.retention_deadline, request.policy, absl::Now());
+        if (upgraded.changed) {
+          it->second.policy = upgraded.policy;
+          it->second.retention_deadline = upgraded.retention_deadline;
+        }
       }
     }
     result.admitted = true;

@@ -90,6 +90,7 @@ class StorePolicyProfile(Enum):
     DURABLE = "durable"
     HA = "ha"
     COLD = "cold"
+    WARM = "warm"
     PINNED = "pinned"
 
     @staticmethod
@@ -102,7 +103,7 @@ class StorePolicyProfile(Enum):
                 return item
         raise ValueError(
             "Unknown policy profile "
-            f"'{value}'; expected cache, durable, ha, cold, or pinned."
+            f"'{value}'; expected cache, durable, ha, cold, warm, or pinned."
         )
 
 
@@ -302,6 +303,7 @@ def _policy_proto_maps() -> tuple[
             StorePolicyProfile.DURABLE: store_daemon_pb2.POLICY_PROFILE_DURABLE,
             StorePolicyProfile.HA: store_daemon_pb2.POLICY_PROFILE_HA,
             StorePolicyProfile.COLD: store_daemon_pb2.POLICY_PROFILE_COLD,
+            StorePolicyProfile.WARM: store_daemon_pb2.POLICY_PROFILE_WARM,
             StorePolicyProfile.PINNED: store_daemon_pb2.POLICY_PROFILE_PINNED,
         },
         {
@@ -485,6 +487,19 @@ class StorePolicy(BaseModel):
                     ),
                 ),
                 overflow_policy=OverflowPolicy.EVICT,
+                layout=PolicyLayout.AUTO,
+            )
+        if profile is StorePolicyProfile.WARM:
+            return StorePolicy(
+                profile=None,
+                should=(
+                    TierSpec(
+                        tier=PolicyTier.STABLE_DRAM,
+                        scope=PolicyScope.LOCAL,
+                        retention_policy=RetentionPolicy.BEST_EFFORT,
+                    ),
+                ),
+                overflow_policy=OverflowPolicy.REJECT,
                 layout=PolicyLayout.AUTO,
             )
         if profile is StorePolicyProfile.PINNED:

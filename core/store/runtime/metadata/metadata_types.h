@@ -74,6 +74,10 @@ struct ArtifactRegistration {
   bool enable_p2p{true};
   uint32_t ttl_ms{0};
   std::optional<std::string> client_artifact_id;
+  // When set, commit will reuse the provided canonical `mi2:` artifact id
+  // without recomputing index/data multihashes. Used by daemon-side local
+  // stable materialization paths.
+  std::optional<std::string> artifact_id_override;
   std::optional<ViewRegistration> view;
 };
 

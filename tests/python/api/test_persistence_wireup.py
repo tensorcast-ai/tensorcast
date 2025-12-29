@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+import torch
 
-from tensorcast.api._config import RegisterArtifactOptions
+from tensorcast.api._config import PlanType, RegisterArtifactOptions
 from tensorcast.api.store import Store
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -193,3 +194,20 @@ def test_query_persistence_status_maps_proto_fields() -> None:
     assert shard.target_nodes == ("node-a", "node-b")
     assert shard.lease_ids == ("lease-1", "")
     assert client.query_calls == [("task-11", None)]
+
+
+def test_attempt_registration_rejects_conflicting_policy_inputs() -> None:
+    client = _ClientStub()
+    pipeline = _pipeline(client)
+
+    with pytest.raises(ArtifactError) as excinfo:
+        pipeline._attempt_registration(
+            {"weights": torch.zeros(1)},
+            artifact_id=None,
+            key=None,
+            plan=PlanType.VRAM_LEASED,
+            policy_override="pinned",
+            options_override=RegisterArtifactOptions(policy="durable"),
+        )
+
+    assert excinfo.value.status_code == "INVALID_ARGUMENT"

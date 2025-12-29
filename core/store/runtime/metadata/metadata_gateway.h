@@ -66,6 +66,7 @@ class MetadataGateway {
   absl::StatusOr<RegistrationCommitResult> commit_registration(std::string_view registration_id);
   absl::Status abort_registration(std::string_view registration_id);
   absl::Status keep_alive_registration(std::string_view registration_id, uint32_t ttl_ms);
+  absl::StatusOr<uint64_t> get_registration_gpu_ptr(std::string_view registration_id) const;
   absl::Status ingest_view_chunk(
       std::string_view registration_id,
       uint64_t view_offset,

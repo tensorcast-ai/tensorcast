@@ -298,6 +298,13 @@ absl::Status MetadataGateway::keep_alive_registration(std::string_view registrat
   return registration_backend_->keep_alive(registration_id, ttl_ms);
 }
 
+absl::StatusOr<uint64_t> MetadataGateway::get_registration_gpu_ptr(std::string_view registration_id) const {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->get_registration_gpu_ptr(registration_id);
+}
+
 absl::Status MetadataGateway::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,

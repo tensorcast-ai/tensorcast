@@ -341,6 +341,10 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
 
 absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::resolve_source(
     std::string_view artifact_id) const {
+  auto stable_or = stable_source(artifact_id);
+  if (stable_or.ok()) {
+    return stable_or;
+  }
   if (lip_mgr_ != nullptr) {
     auto lease_opt = lip_mgr_->find_active_by_artifact_id(std::string(artifact_id));
     if (lease_opt.has_value()) {
@@ -350,11 +354,8 @@ absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::resolv
       return source;
     }
   }
-  auto stable_or = stable_source(artifact_id);
-  if (stable_or.ok()) {
-    return stable_or;
-  }
-  return absl::FailedPreconditionError("no active lease or stable DRAM replica for artifact");
+  return absl::FailedPreconditionError(
+      absl::StrCat("no stable DRAM replica or active lease for artifact: ", stable_or.status().message()));
 }
 
 absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::stable_source(

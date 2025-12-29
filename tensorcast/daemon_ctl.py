@@ -41,6 +41,7 @@ from tensorcast.types import (
     DeregisterArtifactOutcome,
     LeaseHandshake,
     LeaseSegment,
+    LocalStableTierResult,
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
@@ -1346,6 +1347,19 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
+            local_stable_tier = None
+            if resp.HasField("local_stable_tier"):
+                status = resp.local_stable_tier.status
+                if status == store_daemon_pb2.LOCAL_STABLE_TIER_STATUS_READY:
+                    status_text = "ready"
+                elif status == store_daemon_pb2.LOCAL_STABLE_TIER_STATUS_DEGRADED:
+                    status_text = "degraded"
+                else:
+                    status_text = "skipped"
+                local_stable_tier = LocalStableTierResult(
+                    status=status_text,
+                    message=resp.local_stable_tier.message or None,
+                )
             return CommitResult(
                 descriptor=ad,
                 existed=existed,
@@ -1354,6 +1368,7 @@ class DaemonCtl:
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
                 allow_partial=bool(resp.allow_partial),
+                local_stable_tier=local_stable_tier,
             )
 
     def abort_registered_artifact(

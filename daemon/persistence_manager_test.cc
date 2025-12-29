@@ -12,6 +12,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/testing/recording_global_store_client.h"
+#include "daemon/lip_manager.h"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -557,6 +558,47 @@ TEST_CASE("PersistenceManager starts from stable DRAM replica without LIP", "[da
   ResolvedStorePolicy policy;
   auto task_or = mgr.start_task(commit_or->artifact_id, policy);
   REQUIRE(task_or.ok());
+}
+
+TEST_CASE(
+    "PersistenceManager prefers stable DRAM source when both stable and LIP exist",
+    "[daemon][persistence][source]") {
+  const uint64_t stable_size_bytes = 64ull << 10;
+  const uint64_t lip_size_bytes = 96ull << 10;
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts());
+  tensorcast::store::StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = "cgid:stable-preferred";
+  reg.client_artifact_id = reg.artifact_id;
+  reg.device_id = 0;
+  reg.total_size_bytes = stable_size_bytes;
+  reg.plan = tensorcast::store::runtime::metadata::RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = true;
+  reg.stable_dram.release_gpu_on_commit = true;
+  reg.tensor_index_data = std::string("{}");
+  reg.schema_version = "v3";
+  reg.encoding = "json";
+
+  auto begin_or = engine->begin_register_artifact(reg);
+  REQUIRE(begin_or.ok());
+  auto commit_or = engine->commit_registered_artifact(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  tensorcast::daemon::LipManager lip_mgr(engine, /*regions=*/nullptr);
+  tensorcast::daemon::ArtifactDeviceKey lease_key{.artifact_id = commit_or->artifact_id, .device_id = 0};
+  tensorcast::daemon::LipLeaseEntry lease_entry;
+  lease_entry.registration_id = "reg:lip-source";
+  lease_entry.artifact_id = commit_or->artifact_id;
+  lease_entry.device_id = lease_key.device_id;
+  lease_entry.total_size = lip_size_bytes;
+  lip_mgr.put_lease(lease_entry.registration_id, lease_key, std::move(lease_entry));
+
+  PersistenceManager mgr(nullptr, &lip_mgr, engine.get(), engine->get_artifact_chunk_bytes());
+  ResolvedStorePolicy policy;
+  auto task_or = mgr.start_task(commit_or->artifact_id, policy);
+  REQUIRE(task_or.ok());
+  REQUIRE(task_or->shards.size() == 1);
+  REQUIRE(task_or->shards[0].byte_range_length == stable_size_bytes);
 }
 
 TEST_CASE("PersistenceManager fails when no persistence source is available", "[daemon][persistence][source]") {

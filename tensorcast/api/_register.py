@@ -59,6 +59,7 @@ from tensorcast.types import (
     Handshake,
     LeasePlan,
     LeaseSegment,
+    LocalStableTierResult,
     RegisterStorage,
     RegisterTensorAlias,
     StableDramHandshake,
@@ -91,6 +92,7 @@ class RegistrationResult:
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     allow_partial: bool = False
+    local_stable_tier: LocalStableTierResult | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -1244,6 +1246,7 @@ def _register_artifact_core(
                             canonical_ranges=commit_res.canonical_ranges
                             or view.canonical_ranges,
                             allow_partial=view.allow_partial,
+                            local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
                         with contextlib.suppress(Exception):
@@ -1299,6 +1302,7 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         allow_partial=commit_res.allow_partial,
+                        local_stable_tier=commit_res.local_stable_tier,
                     )
 
                 if isinstance(registrar, _LeaseUploader):
@@ -1341,6 +1345,7 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         allow_partial=commit_res.allow_partial,
+                        local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:
                 with contextlib.suppress(Exception):

@@ -183,6 +183,27 @@ def test_store_policy_ttl_requires_deadline() -> None:
         )
 
 
+def test_store_policy_profile_warm_expands_to_local_should() -> None:
+    policy = StorePolicy(profile="warm")
+    assert policy.profile is StorePolicyProfile.WARM
+
+    expanded = policy.expanded()
+    assert expanded.profile is None
+    assert expanded.overflow_policy is OverflowPolicy.REJECT
+    assert expanded.should == (
+        TierSpec(
+            tier=PolicyTier.STABLE_DRAM,
+            scope=PolicyScope.LOCAL,
+            retention_policy=RetentionPolicy.BEST_EFFORT,
+        ),
+    )
+
+    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+
+    proto = policy.to_proto()
+    assert proto.profile == store_daemon_pb2.POLICY_PROFILE_WARM
+
+
 def test_get_options_validate_prefer_values() -> None:
     valid = GetArtifactOptions(prefer="p2p")
     assert valid.prefer == "p2p"
