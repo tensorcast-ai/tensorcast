@@ -703,6 +703,7 @@ def test_register_function_delegates_to_session(
             *,
             artifact_id: str | None = None,
             key: str | None = None,
+            policy: store_mod.StorePolicy | str | None = None,
             options: RegisterArtifactOptions | None = None,
             ttl_ms: int | None = None,
         ) -> store_mod.RegisteredArtifact:
@@ -712,6 +713,7 @@ def test_register_function_delegates_to_session(
                     {
                         "artifact_id": artifact_id,
                         "key": key,
+                        "policy": policy,
                         "options": options,
                         "ttl_ms": ttl_ms,
                     },
@@ -746,6 +748,7 @@ def test_put_async_function_delegates_to_session(
             *,
             artifact_id: str | None = None,
             key: str | None = None,
+            policy: store_mod.StorePolicy | str | None = None,
             options: RegisterArtifactOptions | None = None,
             device: int | torch.device | None = None,
         ) -> object:
@@ -755,6 +758,7 @@ def test_put_async_function_delegates_to_session(
                     {
                         "artifact_id": artifact_id,
                         "key": key,
+                        "policy": policy,
                         "options": options,
                         "device": device,
                     },
@@ -892,6 +896,7 @@ def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) ->
             *,
             artifact_id: str | None = None,
             key: str | None = None,
+            policy: store_mod.StorePolicy | str | None = None,
             options: RegisterArtifactOptions | None = None,
             ttl_ms: int | None = None,
         ) -> DummyStore:
@@ -901,6 +906,7 @@ def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) ->
                     {
                         "artifact_id": artifact_id,
                         "key": key,
+                        "policy": policy,
                         "options": options,
                         "ttl_ms": ttl_ms,
                     },
