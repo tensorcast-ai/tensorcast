@@ -86,6 +86,7 @@ class RegistrationPipeline:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
     ) -> RegisteredArtifact:
@@ -94,6 +95,7 @@ class RegistrationPipeline:
             artifact_id=artifact_id,
             key=key,
             plan=PlanType.VRAM_LEASED,
+            policy_override=policy,
             options_override=options,
             ttl_override=ttl_ms,
         )
@@ -104,6 +106,7 @@ class RegistrationPipeline:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
@@ -122,6 +125,7 @@ class RegistrationPipeline:
                     artifact_id=artifact_id,
                     key=key,
                     plan=PlanType.VRAM_LEASED,
+                    policy_override=policy,
                     cancel_event=cancel_event,
                     on_begin=_on_begin,
                     options_override=options,
@@ -251,6 +255,7 @@ class RegistrationPipeline:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
@@ -260,6 +265,7 @@ class RegistrationPipeline:
             artifact_id=artifact_id,
             key=key,
             plan=PlanType.DRAM_STABLE,
+            policy_override=policy,
             options_override=options,
             device_override=device,
             cache_on_success=True,
@@ -272,6 +278,7 @@ class RegistrationPipeline:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
@@ -291,6 +298,7 @@ class RegistrationPipeline:
                     artifact_id=artifact_id,
                     key=key,
                     plan=PlanType.DRAM_STABLE,
+                    policy_override=policy,
                     cancel_event=cancel_event,
                     on_begin=_on_begin,
                     options_override=options,
@@ -325,6 +333,7 @@ class RegistrationPipeline:
         artifact_id: str | None,
         key: str | None,
         plan: PlanType,
+        policy_override: StorePolicy | str | None = None,
         cancel_event: threading.Event | None = None,
         on_begin: Callable[[_RegisterHandle], None] | None = None,
         options_override: RegisterArtifactOptions | None = None,
@@ -363,6 +372,28 @@ class RegistrationPipeline:
                 lease_in_place=plan is PlanType.VRAM_LEASED,
                 key=resolved_key,
             )
+        if policy_override is not None:
+            try:
+                normalized_override = StorePolicy.parse(policy_override)
+            except Exception as exc:  # noqa: BLE001
+                raise ArtifactError(
+                    f"Invalid policy: {exc}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                ) from exc
+            if normalized_override is not None:
+                normalized_options = StorePolicy.parse(options.policy)
+                if (
+                    normalized_options is not None
+                    and normalized_options.expanded() != normalized_override.expanded()
+                ):
+                    raise ArtifactError(
+                        "Conflicting policy arguments: "
+                        "`policy` does not match `options.policy` after normalization",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+                options = options.model_copy(update={"policy": normalized_override})
         normalized_artifact_id = artifact_id.strip() if artifact_id else None
         if normalized_artifact_id == "":
             normalized_artifact_id = None
@@ -485,6 +516,7 @@ class RegistrationPipeline:
             state_dict=result.state_dict,
             registration_result=result,
             persistence_task_id=persistence_task_id,
+            local_stable_tier=result.local_stable_tier,
         )
 
     @staticmethod
@@ -532,6 +564,7 @@ class RegistrationPipeline:
         artifact_id: str | None = None,
         key: str | None,
         plan: PlanType,
+        policy_override: StorePolicy | str | None = None,
         cancel_event: threading.Event | None = None,
         on_begin: Callable[[_RegisterHandle], None] | None = None,
         options_override: RegisterArtifactOptions | None = None,
@@ -612,6 +645,7 @@ class RegistrationPipeline:
                         artifact_id=artifact_id,
                         key=resolved_key,
                         plan=resolved_plan,
+                        policy_override=policy_override,
                         cancel_event=cancel_event,
                         on_begin=on_begin,
                         options_override=resolved_options,

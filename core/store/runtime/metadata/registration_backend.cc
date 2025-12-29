@@ -85,6 +85,24 @@ std::string make_registration_id() {
   return absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid(), "_", dis(gen));
 }
 
+absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
+  constexpr std::string_view kPrefix = "mi2:";
+  if (!artifact_id.starts_with(kPrefix)) {
+    return absl::InvalidArgumentError("artifact_id_override must start with \"mi2:\"");
+  }
+  const size_t index_begin = kPrefix.size();
+  const size_t sep = artifact_id.find(':', index_begin);
+  if (sep == std::string_view::npos) {
+    return absl::InvalidArgumentError("artifact_id_override must be of form mi2:<index_multihash>:<data_multihash>");
+  }
+  const std::string_view index_mh = artifact_id.substr(index_begin, sep - index_begin);
+  const std::string_view data_mh = artifact_id.substr(sep + 1);
+  if (index_mh.empty() || data_mh.empty()) {
+    return absl::InvalidArgumentError("artifact_id_override must include index and data multihash components");
+  }
+  return std::make_pair(std::string(index_mh), std::string(data_mh));
+}
+
 } // namespace
 
 struct RegistrationBackend::PendingRegistrationContext {
@@ -93,6 +111,7 @@ struct RegistrationBackend::PendingRegistrationContext {
   std::string registration_id;
   std::string artifact_id;
   std::string client_artifact_id;
+  std::optional<std::string> artifact_id_override;
   int device_id{0};
   uint64_t size_bytes{0};
   std::string tensor_index_key;
@@ -173,6 +192,18 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   }
   if (reg.tensor_index_key.empty() && !reg.tensor_index_data.has_value()) {
     return absl::InvalidArgumentError("tensor index key or data must be provided");
+  }
+  if (reg.client_artifact_id.has_value() && reg.artifact_id_override.has_value()) {
+    return absl::InvalidArgumentError("artifact_id_override cannot be set when client_artifact_id is provided");
+  }
+  if (reg.artifact_id_override.has_value()) {
+    if (reg.artifact_id_override->empty()) {
+      return absl::InvalidArgumentError("artifact_id_override must be non-empty when provided");
+    }
+    auto parsed_or = parse_mi2_multihashes(*reg.artifact_id_override);
+    if (!parsed_or.ok()) {
+      return parsed_or.status();
+    }
   }
 
   const uint64_t canonical_size = (reg.view.has_value() && reg.view->canonical_size_bytes != 0)
@@ -336,6 +367,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
     entry->client_artifact_id.clear();
     entry->id_kind = common::ArtifactIdKind::kMi2;
   }
+  entry->artifact_id_override = reg.artifact_id_override;
   entry->device_id = reg.device_id;
   entry->size_bytes = reg.total_size_bytes;
   entry->tensor_index_key = reg.tensor_index_key;
@@ -524,7 +556,21 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   std::vector<loader::SegmentPiece> segment_plan;
   bool segment_plan_ready = false;
 
-  if (entry->id_kind == common::ArtifactIdKind::kMi2 || entry->client_artifact_id.empty()) {
+  const bool has_artifact_id_override =
+      entry->artifact_id_override.has_value() && !entry->artifact_id_override->empty();
+  if (has_artifact_id_override) {
+    if (!entry->client_artifact_id.empty()) {
+      return absl::InvalidArgumentError("artifact_id_override cannot be set when client_artifact_id is present");
+    }
+    auto parsed_or = parse_mi2_multihashes(*entry->artifact_id_override);
+    if (!parsed_or.ok()) {
+      return parsed_or.status();
+    }
+    index_multihash = parsed_or->first;
+    data_multihash = parsed_or->second;
+    entry->artifact_id = *entry->artifact_id_override;
+    entry->id_kind = common::ArtifactIdKind::kMi2;
+  } else if (entry->id_kind == common::ArtifactIdKind::kMi2 || entry->client_artifact_id.empty()) {
     absl::StatusOr<std::string> index_mh_or =
         common::compute_index_multihash(entry->tensor_index_data, entry->tensor_index_key);
     if (!index_mh_or.ok()) {
@@ -943,6 +989,17 @@ absl::StatusOr<uint64_t> RegistrationBackend::get_view_ingested_bytes(std::strin
     return entry->view_state->executor->ingested_bytes();
   }
   return entry->view_state->expected_view_bytes;
+}
+
+absl::StatusOr<uint64_t> RegistrationBackend::get_registration_gpu_ptr(std::string_view registration_id) const {
+  auto entry = lookup_pending(registration_id);
+  if (!entry) {
+    return absl::NotFoundError("registration_id not found");
+  }
+  if (entry->gpu_ptr == nullptr) {
+    return absl::FailedPreconditionError("registration has no GPU pointer");
+  }
+  return reinterpret_cast<uint64_t>(entry->gpu_ptr);
 }
 
 absl::Status RegistrationBackend::abort(std::string_view registration_id) {

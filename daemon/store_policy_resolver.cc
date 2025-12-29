@@ -197,6 +197,11 @@ ResolvedStorePolicy profile_defaults(v1::PolicyProfile profile) {
       resolved.local_retention = store::components::StableRetentionPolicy::kTtl;
       resolved.local_ttl = std::chrono::milliseconds(kDefaultColdTtlMs);
       break;
+    case v1::POLICY_PROFILE_WARM:
+      resolved.local_requirement = RequirementLevel::kShould;
+      resolved.local_retention = store::components::StableRetentionPolicy::kBestEffort;
+      resolved.overflow_policy = store::components::StableOverflowPolicy::kReject;
+      break;
     case v1::POLICY_PROFILE_PINNED:
       resolved.local_requirement = RequirementLevel::kMust;
       resolved.local_retention = store::components::StableRetentionPolicy::kPinned;

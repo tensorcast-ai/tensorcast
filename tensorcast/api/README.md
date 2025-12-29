@@ -16,12 +16,14 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
-## Put Policy & Persistence (Design 0044)
+## Store Policy, Local Stable Tier, and Persistence (Design 0044/0045)
 
-- `RegisterArtifactOptions` exposes `policy` as the single durability/placement control; `Store.put`/`put_async` forward it unchanged to the daemon.
-- Policies can be simple profiles (`cache`, `durable`, `ha`, `cold`, `pinned`) or explicit `must`/`should`/`may` tier lists with `overflow_policy` and `layout` overrides.
+- `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch.
+- If both `policy` and `options.policy` are provided, the SDK rejects conflicts after normalization to avoid silent divergence.
+- Policies can be simple profiles (`cache`, `durable`, `ha`, `cold`, `pinned`, `warm`) or explicit `must`/`should`/`may` tier lists with `overflow_policy` and `layout` overrides.
 - Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.
-- The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact`.
+- `CommitRegisteredArtifact` returns a `local_stable_tier` result (`ready`/`degraded`/`skipped`) on `RegisteredArtifact` when the resolved policy requests `stable_dram(scope=local)`. `must` failures raise commit errors; `should` failures are surfaced as `degraded` while the commit remains successful.
+- The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact` (persistence prefers a daemon-owned local stable DRAM source when present).
 - Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
 
 ## Artifact Handles & Metadata Cache

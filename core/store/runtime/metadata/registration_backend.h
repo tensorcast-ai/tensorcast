@@ -40,6 +40,7 @@ class RegistrationBackend {
       uint64_t view_offset,
       absl::Span<const std::byte> data);
   absl::StatusOr<uint64_t> get_view_ingested_bytes(std::string_view registration_id) const;
+  absl::StatusOr<uint64_t> get_registration_gpu_ptr(std::string_view registration_id) const;
 
  private:
   struct PendingRegistrationContext;

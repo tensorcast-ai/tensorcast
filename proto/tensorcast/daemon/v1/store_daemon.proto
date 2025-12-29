@@ -135,6 +135,7 @@ enum PolicyProfile {
   POLICY_PROFILE_HA = 3;
   POLICY_PROFILE_COLD = 4;
   POLICY_PROFILE_PINNED = 5;
+  POLICY_PROFILE_WARM = 6;
 }
 
 enum PolicyTier {
@@ -649,6 +650,20 @@ message CommitRegisteredArtifactRequest {
   string registration_id = 1; // Registration ID from Begin
 }
 
+enum LocalStableTierStatus {
+  LOCAL_STABLE_TIER_STATUS_UNSPECIFIED = 0;
+  LOCAL_STABLE_TIER_STATUS_READY = 1;
+  // Requested as `should` but could not be satisfied.
+  LOCAL_STABLE_TIER_STATUS_DEGRADED = 2;
+  // Not requested by the resolved policy (or requested only as `may`).
+  LOCAL_STABLE_TIER_STATUS_SKIPPED = 3;
+}
+
+message LocalStableTierResult {
+  LocalStableTierStatus status = 1;
+  optional string message = 2;
+}
+
 // Artifact descriptor conveying content-addressed identity and related metadata
 // Commit registration response
 message CommitRegisteredArtifactResponse {
@@ -663,6 +678,8 @@ message CommitRegisteredArtifactResponse {
   string view_data_hash = 1003;
   repeated CanonicalRange canonical_ranges = 1004;
   bool allow_partial = 1005;
+
+  optional LocalStableTierResult local_stable_tier = 2000;
 }
 
 // Abort registration request

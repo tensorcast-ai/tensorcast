@@ -229,6 +229,49 @@ TEST_CASE("StableDramCacheManager honors TTL and pinned retention", "[stable_cac
   REQUIRE_FALSE(cache.is_evictable(pinned_key, now + absl::Hours(1)));
 }
 
+TEST_CASE("StableDramCacheManager upgrades retention on re-admit", "[stable_cache]") {
+  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 4, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "artifact-upgrade",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey key = replica->replica_key();
+  REQUIRE(registry.emplace(key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  StableDramCacheManager::AdmissionRequest request;
+  request.key = key;
+  request.replica = replica;
+  request.size_bytes = kChunkBytes;
+  request.policy = MakePolicy(StableRetentionPolicy::kBestEffort, StableOverflowPolicy::kEvict);
+  auto admit = cache.admit(request);
+  REQUIRE(admit.ok());
+  REQUIRE(admit->admitted);
+
+  const absl::Time now = absl::Now();
+  REQUIRE(cache.is_evictable(key, now));
+  const uint64_t bytes_before = cache.bytes_used();
+
+  StableDramCacheManager::AdmissionRequest upgrade = request;
+  upgrade.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit_upgrade = cache.admit(upgrade);
+  REQUIRE(admit_upgrade.ok());
+  REQUIRE(admit_upgrade->admitted);
+  REQUIRE_FALSE(cache.is_evictable(key, now + absl::Hours(1)));
+  REQUIRE(cache.bytes_used() == bytes_before);
+}
+
 TEST_CASE("StableDramCacheManager rejects admission when required pinned entries fill budget", "[stable_cache]") {
   auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();

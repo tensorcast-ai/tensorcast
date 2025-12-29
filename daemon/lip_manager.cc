@@ -106,7 +106,8 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     const std::string& canonical_index_json,
     uint64_t total_size,
     absl::Span<const LeaseSegMeta> segments,
-    absl::Span<const RegisterStorageMeta> storages) {
+    absl::Span<const RegisterStorageMeta> storages,
+    int owner_pid) {
   if (storages.empty()) {
     return absl::InvalidArgumentError("lip copy requires storage metadata");
   }
@@ -209,6 +210,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     uint64_t base;
     uint64_t len;
     uint64_t dst;
+    uint64_t segment_base;
   };
 
   std::vector<Opened> opened;
@@ -228,17 +230,19 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
       }
       storage = it->second;
     }
-    auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, 0);
+    auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, owner_pid);
     if (!map_or.ok()) {
       return map_or.status();
     }
+    const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
     opened.push_back(
         Opened{
             .device_id = seg.device_id,
             .map = *map_or,
-            .base = seg.base_offset,
+            .base = source_base,
             .len = seg.length,
-            .dst = seg.dst_offset});
+            .dst = seg.dst_offset,
+            .segment_base = seg.base_offset});
   }
   const size_t chunk_size = engine_->get_artifact_chunk_bytes();
   if (chunk_size == 0) {
@@ -247,11 +251,11 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
   for (const auto& o : opened) {
     const bool is_tail = (o.dst + o.len == total_size);
-    if (!is_aligned(o.dst) || !is_aligned(o.base) || (!is_aligned(o.len) && !is_tail)) {
+    if (!is_aligned(o.dst) || !is_aligned(o.segment_base) || (!is_aligned(o.len) && !is_tail)) {
       return absl::FailedPreconditionError(
           absl::StrCat(
               "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
-              o.base,
+              o.segment_base,
               ", dst_offset=",
               o.dst,
               ", length=",
@@ -308,23 +312,40 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   }
 
   if (!lip.storages.empty()) {
+    absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
     absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+    storage_by_id.reserve(lip.storages.size());
     storage_by_handle.reserve(lip.storages.size());
     for (const auto& storage : lip.storages) {
-      storage_by_handle.emplace(storage.handle_bytes, &storage);
+      storage_by_id.emplace(storage.storage_id, &storage);
+      if (storage.has_handle()) {
+        storage_by_handle.emplace(storage.handle_bytes, &storage);
+      }
     }
     for (const auto& seg : lip.segments) {
-      auto it = storage_by_handle.find(seg.handle_bytes);
-      if (it == storage_by_handle.end()) {
-        return absl::InvalidArgumentError("staged export missing storage metadata for a segment handle");
+      const RegisterStorageMeta* storage = nullptr;
+      if (!seg.storage_id.empty()) {
+        auto it = storage_by_id.find(seg.storage_id);
+        if (it == storage_by_id.end()) {
+          return absl::InvalidArgumentError("staged export missing storage metadata for segment storage_id");
+        }
+        storage = it->second;
+      } else if (!seg.handle_bytes.empty()) {
+        auto it = storage_by_handle.find(seg.handle_bytes);
+        if (it == storage_by_handle.end()) {
+          return absl::InvalidArgumentError("staged export missing storage metadata for segment handle");
+        }
+        storage = it->second;
+      } else {
+        return absl::InvalidArgumentError("staged export segment missing storage reference");
       }
-      if (seg.length != it->second->storage_length) {
+      if (seg.length != storage->storage_length) {
         return absl::InvalidArgumentError(
             absl::StrFormat(
                 "segment length (%llu) does not match storage_length (%llu) for storage_id=%s",
                 static_cast<uint64_t>(seg.length),
-                static_cast<uint64_t>(it->second->storage_length),
-                it->second->storage_id));
+                static_cast<uint64_t>(storage->storage_length),
+                storage->storage_id));
       }
     }
   }
@@ -335,6 +356,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     uint64_t base;
     uint64_t len;
     uint64_t dst;
+    uint64_t segment_base;
   };
 
   std::vector<OpenedSeg> opened;
@@ -379,12 +401,14 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
             GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, lip.owner_pid);
         if (!map_or.ok())
           return map_or.status();
+        const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
         opened_seg = OpenedSeg{
             .device_id = seg.device_id,
             .map = *map_or,
-            .base = seg.base_offset,
+            .base = source_base,
             .len = seg.length,
-            .dst = seg.dst_offset};
+            .dst = seg.dst_offset,
+            .segment_base = seg.base_offset};
       }
     }
     if (!opened_seg.has_value()) {
@@ -397,7 +421,8 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
           .map = owned_maps.back().get(),
           .base = seg.base_offset,
           .len = seg.length,
-          .dst = seg.dst_offset};
+          .dst = seg.dst_offset,
+          .segment_base = seg.base_offset};
     }
     opened.push_back(std::move(*opened_seg));
   }
@@ -405,11 +430,11 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
   auto is_aligned = [&](uint64_t v) { return (v % chunk_size) == 0; };
   for (const auto& s : opened) {
     const bool is_tail = (s.dst + s.len == lip.total_size);
-    if (!is_aligned(s.dst) || !is_aligned(s.base) || (!is_aligned(s.len) && !is_tail)) {
+    if (!is_aligned(s.dst) || !is_aligned(s.segment_base) || (!is_aligned(s.len) && !is_tail)) {
       return absl::FailedPreconditionError(
           absl::StrCat(
               "LIP segment not aligned to artifact_chunk_bytes: base_offset=",
-              s.base,
+              s.segment_base,
               ", dst_offset=",
               s.dst,
               ", length=",
@@ -762,28 +787,85 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     return absl::FailedPreconditionError("canonical index is required for LIP commit");
   }
 
-  // Build seekable source over LIP segments using RAII CUDA IPC mappings
+  // Build seekable source over LIP segments using RAII CUDA IPC mappings.
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping map;
+    CudaIpcMapping* map; // non-owning; lifetime held by mapping_cache or owned_maps
     uint64_t base;
     uint64_t len;
     uint64_t dst;
   };
 
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+  storage_by_id.reserve(storages.size());
+  storage_by_handle.reserve(storages.size());
+  for (const auto& s : storages) {
+    storage_by_id.emplace(s.storage_id, &s);
+    if (s.has_handle()) {
+      storage_by_handle.emplace(s.handle_bytes, &s);
+    }
+  }
+
+  RegionAcquireGuard region_guard(region_registry_);
+  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  std::vector<std::unique_ptr<CudaIpcMapping>> owned_maps;
+  mapping_cache.reserve(storages.size());
+
   std::vector<OpenedSeg> opened;
   opened.reserve(segments.size());
   for (const auto& seg : segments) {
-    auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
-    if (!map_or.ok())
-      return map_or.status();
-    opened.push_back(
-        OpenedSeg{
-            .device_id = seg.device_id,
-            .map = std::move(*map_or),
-            .base = seg.base_offset,
-            .len = seg.length,
-            .dst = seg.dst_offset});
+    std::optional<OpenedSeg> opened_seg;
+    if (!storages.empty()) {
+      const RegisterStorageMeta* storage = nullptr;
+      if (!seg.storage_id.empty()) {
+        auto it = storage_by_id.find(seg.storage_id);
+        if (it == storage_by_id.end()) {
+          return absl::InvalidArgumentError("segment references unknown storage_id");
+        }
+        storage = it->second;
+      } else if (!seg.handle_bytes.empty()) {
+        auto it = storage_by_handle.find(seg.handle_bytes);
+        if (it == storage_by_handle.end()) {
+          return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+        }
+        storage = it->second;
+      }
+      if (storage != nullptr) {
+        if (seg.length != storage->storage_length) {
+          return absl::InvalidArgumentError(
+              absl::StrFormat(
+                  "segment length (%llu) does not match storage_length (%llu) for storage_id=%s",
+                  static_cast<uint64_t>(seg.length),
+                  static_cast<uint64_t>(storage->storage_length),
+                  storage->storage_id));
+        }
+        auto map_or = GetOrOpenMappingForStorage(*storage, mapping_cache, region_guard, region_registry_, owner_pid);
+        if (!map_or.ok()) {
+          return map_or.status();
+        }
+        const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
+        opened_seg = OpenedSeg{
+            .device_id = seg.device_id, .map = *map_or, .base = source_base, .len = seg.length, .dst = seg.dst_offset};
+      }
+    }
+    if (!opened_seg.has_value()) {
+      if (seg.handle_bytes.empty()) {
+        return absl::InvalidArgumentError("lease segment missing cuda_ipc_handle bytes");
+      }
+      auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+      if (!map_or.ok()) {
+        return map_or.status();
+      }
+      owned_maps.push_back(std::make_unique<CudaIpcMapping>(std::move(*map_or)));
+      opened_seg = OpenedSeg{
+          .device_id = seg.device_id,
+          .map = owned_maps.back().get(),
+          .base = seg.base_offset,
+          .len = seg.length,
+          .dst = seg.dst_offset};
+    }
+    opened.push_back(std::move(*opened_seg));
   }
 
   class LipSeekableSource final : public store::loader::SeekableSource {
@@ -836,7 +918,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
         if (auto st = cuda::set_device(seg->device_id); !st.ok())
           return st;
         auto st = cuda::memcpy(
-            out, static_cast<uint8_t*>(seg->map.get()) + (seg->base + local), take, cudaMemcpyDeviceToHost);
+            out, static_cast<uint8_t*>(seg->map->get()) + (seg->base + local), take, cudaMemcpyDeviceToHost);
         if (!st.ok())
           return st;
         if (auto sync = cuda::device_synchronize(); !sync.ok())

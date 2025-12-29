@@ -15,6 +15,7 @@
 #include "absl/status/status.h"
 #include "absl/synchronization/mutex.h"
 #include "core/store/store_engine.h"
+#include "daemon/store_policy_resolver.h"
 #include "daemon/types.h"
 
 namespace tensorcast::daemon {
@@ -53,6 +54,7 @@ class RegistrationManager {
     // Lease ID for TTL UseLease created on commit when joining existing GPU replica.
     uint64_t use_lease_id{0};
     absl::flat_hash_map<std::string, uint32_t> region_refcounts;
+    std::optional<ResolvedStorePolicy> resolved_policy;
   };
 
   RegistrationManager() = default;

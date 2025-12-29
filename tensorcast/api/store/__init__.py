@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 import torch
 
 from tensorcast._c_ext import get_cuda_memory_handle
-from tensorcast.api._config import RegisterArtifactOptions
+from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
 from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
@@ -128,6 +128,7 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
     ) -> RegisteredArtifact:
@@ -135,6 +136,7 @@ class Store:
             tensors,
             artifact_id=artifact_id,
             key=key,
+            policy=policy,
             options=options,
             ttl_ms=ttl_ms,
         )
@@ -145,6 +147,7 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         ttl_ms: int | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
@@ -152,6 +155,7 @@ class Store:
             tensors,
             artifact_id=artifact_id,
             key=key,
+            policy=policy,
             options=options,
             ttl_ms=ttl_ms,
         )
@@ -190,6 +194,7 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
@@ -197,6 +202,7 @@ class Store:
             tensors,
             artifact_id=artifact_id,
             key=key,
+            policy=policy,
             options=options,
             device=device,
         )
@@ -207,6 +213,7 @@ class Store:
         *,
         artifact_id: str | None = None,
         key: str | None = None,
+        policy: StorePolicy | str | None = None,
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
@@ -214,6 +221,7 @@ class Store:
             tensors,
             artifact_id=artifact_id,
             key=key,
+            policy=policy,
             options=options,
             device=device,
         )
@@ -489,6 +497,7 @@ def register(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
+    policy: StorePolicy | str | None = None,
     options: RegisterArtifactOptions | None = None,
     ttl_ms: int | None = None,
 ) -> RegisteredArtifact:
@@ -496,6 +505,7 @@ def register(
         tensors,
         artifact_id=artifact_id,
         key=key,
+        policy=policy,
         options=options,
         ttl_ms=ttl_ms,
     )
@@ -506,6 +516,7 @@ def register_async(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
+    policy: StorePolicy | str | None = None,
     options: RegisterArtifactOptions | None = None,
     ttl_ms: int | None = None,
 ) -> ArtifactFuture[RegisteredArtifact]:
@@ -513,6 +524,7 @@ def register_async(
         tensors,
         artifact_id=artifact_id,
         key=key,
+        policy=policy,
         options=options,
         ttl_ms=ttl_ms,
     )
@@ -588,6 +600,7 @@ def put(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
+    policy: StorePolicy | str | None = None,
     options: RegisterArtifactOptions | None = None,
     device: int | torch.device | None = None,
 ) -> RegisteredArtifact:
@@ -595,6 +608,7 @@ def put(
         tensors,
         artifact_id=artifact_id,
         key=key,
+        policy=policy,
         options=options,
         device=device,
     )
@@ -605,6 +619,7 @@ def put_async(
     *,
     artifact_id: str | None = None,
     key: str | None = None,
+    policy: StorePolicy | str | None = None,
     options: RegisterArtifactOptions | None = None,
     device: int | torch.device | None = None,
 ) -> ArtifactFuture[RegisteredArtifact]:
@@ -612,6 +627,7 @@ def put_async(
         tensors,
         artifact_id=artifact_id,
         key=key,
+        policy=policy,
         options=options,
         device=device,
     )

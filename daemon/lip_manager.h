@@ -33,7 +33,8 @@ class LipManager {
       const std::string& canonical_index_json,
       uint64_t total_size,
       absl::Span<const LeaseSegMeta> segments,
-      absl::Span<const RegisterStorageMeta> storages);
+      absl::Span<const RegisterStorageMeta> storages,
+      int owner_pid = 0);
 
   // Register staged export for the given LIP lease over specified chunk indices.
   // Returns an opaque lock token which can be used to release the export via

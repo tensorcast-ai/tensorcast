@@ -124,6 +124,11 @@ class StoreEngine {
    */
   absl::StatusOr<RegistrationBeginResult> begin_register_artifact(const ArtifactRegistration& reg);
 
+  // Return the in-process GPU pointer for a pending registration's staging buffer.
+  // This is intended for daemon-internal copy paths; external clients must use
+  // the CUDA IPC handle returned by begin_register_artifact().
+  absl::StatusOr<uint64_t> get_registration_gpu_ptr(std::string_view registration_id) const;
+
   // CPU registration path removed
 
   /**
@@ -180,6 +185,18 @@ class StoreEngine {
 
   void set_stable_cache_spill_evictable(
       std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback);
+
+  struct StableCacheAdmissionResult {
+    bool admitted{false};
+    bool skipped{false};
+  };
+
+  // Apply/upgrade stable-DRAM cache policy for an existing CPU replica.
+  // Returns {admitted=true} when the replica is tracked (including upgrades),
+  // {skipped=true} when admission was best-effort and could not be satisfied.
+  [[nodiscard]] absl::StatusOr<StableCacheAdmissionResult> admit_stable_cache_policy(
+      const loading::ReplicaKey& key,
+      const components::StableDramCachePolicy& policy);
 
   /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
