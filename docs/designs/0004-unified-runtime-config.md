@@ -43,7 +43,7 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `lifecycle`: eviction toggles and intervals, PID scanning, sweeper intervals, TTLs, VRAM fraction.
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
-  - `engine`: `*_bytes`, streaming and CPU VS sizing, `pinned_allocation_timeout`, `p2p_fallback_disk_dir`.
+  - `engine`: `*_bytes`, streaming and CPU VS sizing, `pinned_allocation_timeout`.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
   - `compatibility`: targeted compatibility switches (e.g., `confirm_requires_disk_path`, `verification_timeout_status`).
   - `checkpoint.streaming`: `num_buffers`, `io_chunk_bytes`, `pinned_pool_bytes`.
@@ -123,7 +123,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 # Compatibility & Migration
 
 - Communicator: integrate RFC‑0013 outcomes by embedding `tensorcast.communicator.v1.CommunicatorConfig` under `DaemonConfig.communicator`; remove `--comm_config_path` and related flags/ENV.
-- Flags/ENV mapping: legacy flags and environment variables are mapped into explicit fields (e.g., daemon lifecycle intervals, VRAM fraction, OTel/logging, checkpoint streaming, P2P fallback dir). After migration they are ignored by processes.
+- Flags/ENV mapping: legacy flags and environment variables are mapped into explicit fields (e.g., daemon lifecycle intervals, VRAM fraction, OTel/logging, checkpoint streaming). After migration they are ignored by processes.
 - Restart boundary: all fields are startup‑only; changes require a process restart. No partial runtime mutation is supported.
 - Schema discipline: new runtime behavior enters via `.proto` first; code reads from Protobuf messages only. Deprecated fields are removed with `reserved` guards.
 

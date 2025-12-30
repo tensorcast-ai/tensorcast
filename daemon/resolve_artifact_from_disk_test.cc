@@ -44,6 +44,11 @@ std::filesystem::path test_tmpdir() {
   return std::filesystem::temp_directory_path() / "tensorcast_daemon_resolve_disk_test";
 }
 
+std::filesystem::path ensure_dir(std::filesystem::path path) {
+  std::filesystem::create_directories(path);
+  return path;
+}
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
@@ -82,7 +87,7 @@ struct ResolveFixture {
   std::atomic<bool> shutting_down{false};
   MaterializationController controller;
 
-  explicit ResolveFixture(std::vector<std::filesystem::path> whitelist = {})
+  explicit ResolveFixture(std::filesystem::path storage_root = test_tmpdir())
       : engine(std::make_shared<tensorcast::store::StoreEngine>(make_opts())),
         regions(tensorcast::daemon::IpcRegionRegistry::Options{}),
         lip_mgr(engine, &regions),
@@ -99,9 +104,10 @@ struct ResolveFixture {
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
                 .devices = devices,
+                .regions = regions,
                 .is_shutting_down = shutting_down,
                 .lifecycle = nullptr,
-                .disk_path_whitelist = std::move(whitelist),
+                .storage_path = ensure_dir(std::move(storage_root)),
             })) {}
 };
 
@@ -132,11 +138,11 @@ TEST_CASE(
   REQUIRE_FALSE(resp.canonical_index_bytes().empty());
 }
 
-TEST_CASE("ResolveArtifactFromDisk enforces whitelist and missing paths", "[daemon][disk][resolve]") {
+TEST_CASE("ResolveArtifactFromDisk enforces shared root and missing paths", "[daemon][disk][resolve]") {
   const auto artifact_dir = test_tmpdir() / "artifact_denied";
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
-  ResolveFixture denied_fix({artifact_dir.parent_path() / "unrelated"});
+  ResolveFixture denied_fix(artifact_dir.parent_path() / "unrelated_root");
   grpc::ServerContext ctx;
   tensorcast::daemon::RpcContext denied_rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
   ResolveArtifactFromDiskRequest req;
@@ -146,7 +152,7 @@ TEST_CASE("ResolveArtifactFromDisk enforces whitelist and missing paths", "[daem
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 
-  ResolveFixture ok_fix({artifact_dir.parent_path()});
+  ResolveFixture ok_fix(artifact_dir.parent_path());
   tensorcast::daemon::RpcContext ok_rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
   ResolveArtifactFromDiskResponse missing_resp;
   auto missing_status = ok_fix.controller.resolve_artifact_from_disk(ok_rctx, req, missing_resp);

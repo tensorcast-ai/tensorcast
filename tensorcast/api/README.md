@@ -16,10 +16,14 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
-## Placement & Persistence Options (Design 0041)
+## Store Policy, Local Stable Tier, and Persistence (Design 0044/0045)
 
-- `RegisterArtifactOptions` now exposes `placement_policy` (`local_only` default, `replicated`, `sharded`) and `persist` (default `False`). Calls to `Store.put`/`put_async` forward these values unchanged.
-- When `persist=True`, the registration pipeline invokes daemon RPC `StartPersistence` after commit and records the returned `persistence_task_id` on `RegisteredArtifact`.
+- `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch.
+- If both `policy` and `options.policy` are provided, the SDK rejects conflicts after normalization to avoid silent divergence.
+- Policies can be simple profiles (`cache`, `durable`, `ha`, `cold`, `pinned`, `warm`) or explicit `must`/`should`/`may` tier lists with `overflow_policy` and `layout` overrides.
+- Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.
+- `CommitRegisteredArtifact` returns a `local_stable_tier` result (`ready`/`degraded`/`skipped`) on `RegisteredArtifact` when the resolved policy requests `stable_dram(scope=local)`. `must` failures raise commit errors; `should` failures are surfaced as `degraded` while the commit remains successful.
+- The registration pipeline invokes daemon RPC `StartPersistence` only when the resolved policy requires shared disk or remote stable DRAM, and records the returned `persistence_task_id` on `RegisteredArtifact` (persistence prefers a daemon-owned local stable DRAM source when present).
 - Use `Store.query_persistence_status` (or module helper `tensorcast.api.store.query_persistence_status`) with a `task_id` or `artifact_id` to fetch daemon-side task state; the SDK does not poll automatically.
 
 ## Artifact Handles & Metadata Cache
@@ -46,6 +50,27 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 - Selective fetch (`tensor_names`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
 - Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePreference=PREFER_DISK` (including the `verify_checksums` hint) so all disk reads stay in the daemon data path.
+
+## Region-backed get_into
+
+`tensor_dict_into` / `tensor_into` / `get_into` can stream bytes directly into
+caller-owned CUDA regions via the v2 `MaterializeIntoTarget` RPC. The SDK
+computes a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`,
+`index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`)
+from the target tensors, validates
+dtype/shape/stride against the canonical index, and requests the daemon to
+materialize into the mapped region. The daemon does not allocate VRAM, and the
+SDK does not call `UnloadReplica` for this path.
+
+The `region_backed_mode` default in the unified runtime config controls the
+behavior:
+
+- `auto`: try region-backed first; fall back to the legacy replica path on
+  validation failures.
+- `require`: enforce region-backed and surface errors.
+
+`get` / `get_view` always use the daemon-owned replica path and ignore
+`region_backed_mode`.
 
 ## Device requirements
 

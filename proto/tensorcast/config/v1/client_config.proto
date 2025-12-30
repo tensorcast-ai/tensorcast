@@ -16,6 +16,14 @@ message ClientDefaults {
   google.protobuf.Duration pinned_allocation_timeout = 1;
   bool enable_verification = 2;
   bool wait_for_completion = 3;
+  RegionBackedMode region_backed_mode = 4;
+}
+
+enum RegionBackedMode {
+  REGION_BACKED_MODE_UNSPECIFIED = 0;
+  REGION_BACKED_MODE_AUTO = 1;
+  REGION_BACKED_MODE_REQUIRE = 2;
+  REGION_BACKED_MODE_DISABLED = 3;
 }
 
 message ClientStorage {

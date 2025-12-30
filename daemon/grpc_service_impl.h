@@ -66,13 +66,14 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
     // Persistence
     std::filesystem::path persistence_log_path{"/tmp/tensorcast_persistence.log"};
 
+    // Shared storage root for disk paths (required).
+    std::filesystem::path storage_path;
+
     // API behavior flags
     // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
     // ordering (artifact_id, device_id). If false (default), uses numeric
     // index tokens.
     bool use_cursor_pagination{false};
-
-    std::vector<std::filesystem::path> disk_path_whitelist;
   };
 
   explicit StoreDaemonServiceImpl(std::shared_ptr<store::StoreEngine> engine)
@@ -98,14 +99,32 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         verif_tracker_(gsl::not_null<std::unique_ptr<VerificationTracker>>(std::make_unique<VerificationTracker>())),
         reg_mgr_(gsl::not_null<std::unique_ptr<RegistrationManager>>(std::make_unique<RegistrationManager>())),
         opts_(opts) {
+    if (!opts_.storage_path.empty()) {
+      std::error_code ec;
+      auto canonical = std::filesystem::weakly_canonical(opts_.storage_path, ec);
+      if (ec) {
+        ec.clear();
+        canonical = opts_.storage_path.lexically_normal();
+      }
+      opts_.storage_path = std::move(canonical);
+    }
+
     verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
     start_sweepers();
     persistence_mgr_ = std::make_unique<PersistenceManager>(
         scheduler_.get(),
         lip_mgr_.get().get(),
+        engine_.get().get(),
         engine_->get_artifact_chunk_bytes(),
         std::chrono::milliseconds(500),
         opts_.persistence_log_path);
+    engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
+      if (!persistence_mgr_) {
+        return false;
+      }
+      return persistence_mgr_->is_spill_evictable(
+          key.artifact_id, policy.require_shared_disk_for_spill, policy.require_remote_stable_for_spill);
+    });
     // Wire helper services and controllers (post-scheduler construction)
     sessions_svc_ = std::make_unique<SessionsService>(
         sessions_, *verif_tracker_, scheduler_.get(), lifecycle_mgr_.get(), absl::Seconds(opts_.sessions_ttl.count()));
@@ -116,9 +135,10 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
         .sessions = *sessions_svc_,
         .lip = *lip_bridge_,
         .devices = devices_,
+        .regions = *region_registry_,
         .is_shutting_down = is_shutting_down_,
         .lifecycle = lifecycle_mgr_.get(),
-        .disk_path_whitelist = opts_.disk_path_whitelist};
+        .storage_path = opts_.storage_path};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
         .engine = *engine_,
@@ -420,6 +440,11 @@ class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::MaterializeReplicaRequest* req,
       v2::MaterializeReplicaResponse* resp) override;
+
+  grpc::Status MaterializeIntoTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
 
   grpc::Status MaterializeByKey(
       grpc::ServerContext* ctx,

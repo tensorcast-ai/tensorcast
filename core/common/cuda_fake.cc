@@ -1156,6 +1156,23 @@ absl::Status cu_init(unsigned int flags) {
   return absl::OkStatus();
 }
 
+absl::Status cu_device_get(CUdevice* device, int ordinal) {
+  static_cast<void>(ordinal);
+  if (device == nullptr) {
+    return absl::InvalidArgumentError("device pointer is null");
+  }
+  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGet);
+}
+
+absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device) {
+  static_cast<void>(attribute);
+  static_cast<void>(device);
+  if (value == nullptr) {
+    return absl::InvalidArgumentError("value pointer is null");
+  }
+  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGetAttribute);
+}
+
 absl::Status cu_mem_get_allocation_granularity(
     size_t* granularity,
     const CUmemAllocationProp* prop,
@@ -1326,6 +1343,20 @@ absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
     return absl::ErrnoToStatus(errno, "munmap failed in fake cu_mem_address_free");
   }
   return absl::OkStatus();
+}
+
+absl::Status cu_mem_get_handle_for_address_range(
+    void* handle,
+    CUdeviceptr dptr,
+    size_t size,
+    CUmemRangeHandleType handle_type,
+    unsigned long long flags) {
+  static_cast<void>(handle);
+  static_cast<void>(dptr);
+  static_cast<void>(size);
+  static_cast<void>(handle_type);
+  static_cast<void>(flags);
+  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuMemGetHandleForAddressRange);
 }
 
 } // namespace tensorcast::cuda

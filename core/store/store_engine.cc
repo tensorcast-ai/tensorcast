@@ -18,6 +18,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/communicator/misc/common.h"
+#include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
@@ -180,6 +181,48 @@ void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components
   if (metadata_gateway_) {
     metadata_gateway_->set_client_override(std::move(client));
   }
+}
+
+void StoreEngine::set_stable_cache_spill_evictable(
+    std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback) {
+  auto cache_manager = runtime_env_->runtime_context().stable_cache_manager();
+  if (!cache_manager) {
+    return;
+  }
+  cache_manager->set_spill_evictable_callback(std::move(callback));
+}
+
+absl::StatusOr<StoreEngine::StableCacheAdmissionResult> StoreEngine::admit_stable_cache_policy(
+    const loading::ReplicaKey& key,
+    const components::StableDramCachePolicy& policy) {
+  if (key.device.type != DeviceType::CPU) {
+    return absl::FailedPreconditionError("stable cache admission requires CPU ReplicaKey");
+  }
+  auto cache_manager = runtime_env_->runtime_context().stable_cache_manager();
+  if (!cache_manager) {
+    return absl::FailedPreconditionError("stable cache manager unavailable");
+  }
+  auto replica_or = runtime_env_->runtime_context().replica_registry().find(key);
+  if (!replica_or.ok()) {
+    return replica_or.status();
+  }
+  auto size_or = get_replica_size(key);
+  if (!size_or.ok()) {
+    return size_or.status();
+  }
+  components::StableDramCacheManager::AdmissionRequest request;
+  request.key = key;
+  request.replica = *replica_or;
+  request.size_bytes = *size_or;
+  request.policy = policy;
+  auto admit_or = cache_manager->admit(request);
+  if (!admit_or.ok()) {
+    return admit_or.status();
+  }
+  StableCacheAdmissionResult result;
+  result.admitted = admit_or->admitted;
+  result.skipped = admit_or->skipped;
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -464,6 +507,17 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
   return ingestion_runtime_->materialize_replica(target_device, mode, hints);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_into_target(
+    const DeviceKey& target_device,
+    gsl::not_null<void*> target_ptr,
+    uint64_t total_size,
+    std::string_view canonical_index_json,
+    uint64_t generation,
+    const loading::MaterializeHints& hints) {
+  return ingestion_runtime_->materialize_into_target(
+      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Global Store registration helper for already-loaded replicas
 // ═══════════════════════════════════════════════════════════════════════════
@@ -509,6 +563,10 @@ absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
 absl::StatusOr<StoreEngine::RegistrationBeginResult> StoreEngine::begin_register_artifact(
     const ArtifactRegistration& reg) {
   return metadata_gateway_->begin_registration(reg);
+}
+
+absl::StatusOr<uint64_t> StoreEngine::get_registration_gpu_ptr(std::string_view registration_id) const {
+  return metadata_gateway_->get_registration_gpu_ptr(registration_id);
 }
 
 absl::StatusOr<StoreEngine::RegistrationCommitResult> StoreEngine::commit_registered_artifact(

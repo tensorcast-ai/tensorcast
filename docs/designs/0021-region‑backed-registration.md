@@ -166,6 +166,7 @@ None. Existing Global Store tables and daemon metadata structures accommodate th
 
 - A region is owned by exactly one session (enforced by owner PID). Attempts to reuse by a different PID fail.
 - `region_base_offset + segment_length <= size_bytes` must hold; violations raise `FAILED_PRECONDITION`.
+- LIP segment alignment checks use logical segment base offsets and destination offsets; `region_base_offset` is bounds-validated only and may be unaligned.
 - Deregistration may only complete when:
   - No active transport locks exist.
   - All referenced regions have decremented to zero refcount.

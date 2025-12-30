@@ -66,9 +66,11 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::register_
   rec.desc.session_id = params.session_id;
   rec.desc.region_name = params.region_name;
   rec.desc.expires_at = absl::Now() + absl::Milliseconds(ttl_ms);
+  rec.desc.poisoned = false;
   rec.handle_bytes = params.handle_bytes;
   rec.refcount = 0;
   rec.inserted_at = absl::Now();
+  rec.poisoned = false;
 
   auto [it, inserted] = regions_.emplace(rec.desc.region_id, std::move(rec));
   if (!inserted) {
@@ -99,7 +101,9 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::describe(
   if (it == regions_.end()) {
     return absl::NotFoundError("region_id not found");
   }
-  return it->second.desc;
+  RegionDescriptor desc = it->second.desc;
+  desc.poisoned = it->second.poisoned;
+  return desc;
 }
 
 bool IpcRegionRegistry::refresh_ttl(const std::string& region_id, uint32_t ttl_ms) {
@@ -158,11 +162,15 @@ absl::StatusOr<IpcRegionRegistry::RegionDescriptor> IpcRegionRegistry::acquire(
   if (it == regions_.end()) {
     return absl::NotFoundError("region_id not found");
   }
+  if (it->second.poisoned) {
+    return absl::FailedPreconditionError("region is poisoned");
+  }
   if (owner_pid != 0 && owner_pid != it->second.desc.owner_pid) {
     return absl::PermissionDeniedError("owner_pid mismatch");
   }
   ++it->second.refcount;
   it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
+  it->second.desc.poisoned = it->second.poisoned;
   return it->second.desc;
 }
 
@@ -180,6 +188,26 @@ absl::Status IpcRegionRegistry::release(const std::string& region_id) {
     it->second.desc.expires_at = absl::Now() + absl::Milliseconds(it->second.desc.ttl_ms);
   }
   return absl::OkStatus();
+}
+
+absl::Status IpcRegionRegistry::mark_poisoned(const std::string& region_id) {
+  absl::MutexLock lock(&mu_);
+  auto it = regions_.find(region_id);
+  if (it == regions_.end()) {
+    return absl::NotFoundError("region_id not found");
+  }
+  it->second.poisoned = true;
+  it->second.desc.poisoned = true;
+  return absl::OkStatus();
+}
+
+bool IpcRegionRegistry::is_poisoned(const std::string& region_id) const {
+  absl::MutexLock lock(&mu_);
+  auto it = regions_.find(region_id);
+  if (it == regions_.end()) {
+    return false;
+  }
+  return it->second.poisoned;
 }
 
 std::string IpcRegionRegistry::mint_region_id_locked() {

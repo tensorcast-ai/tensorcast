@@ -256,6 +256,7 @@ sc_cc_library(
         "@folly//folly/executors:serial_executor",
         "@folly//folly/futures:core",
         "@folly//folly/io/async:request_context",
+        "@glog",
         "@opentelemetry-cpp//api:api",
     ],
 )

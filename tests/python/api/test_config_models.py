@@ -9,9 +9,15 @@ from pydantic import ValidationError
 
 from tensorcast.api._config import (
     GetArtifactOptions,
-    PlacementPolicy,
     PlanType,
+    PolicyScope,
+    PolicyTier,
     RegisterArtifactOptions,
+    RetentionPolicy,
+    StorePolicy,
+    StorePolicyProfile,
+    TierSpec,
+    OverflowPolicy,
 )
 from tensorcast.api._errors import InvalidPlan
 from tensorcast.api.store.types import FallbackOptions, StoreOptions
@@ -37,15 +43,165 @@ def test_register_options_are_frozen() -> None:
         opts.plan = PlanType.VRAM_LEASED
 
 
-def test_register_options_placement_policy_parsing() -> None:
+def test_register_options_policy_parsing() -> None:
     default_opts = RegisterArtifactOptions()
-    assert default_opts.placement_policy is PlacementPolicy.LOCAL_ONLY
+    assert default_opts.policy is None
 
-    replicated = RegisterArtifactOptions(placement_policy="replicated")
-    assert replicated.placement_policy is PlacementPolicy.REPLICATED
+    durable = RegisterArtifactOptions(policy="durable")
+    assert durable.policy is not None
+    assert durable.policy.profile is StorePolicyProfile.DURABLE
 
     with pytest.raises(InvalidPlan):
-        RegisterArtifactOptions(placement_policy="unknown")
+        RegisterArtifactOptions(policy="unknown")
+
+
+def test_store_policy_rejects_profile_with_tiers() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            profile=StorePolicyProfile.CACHE,
+            must=(TierSpec(tier=PolicyTier.SHARED_DISK),),
+        )
+
+
+def test_store_policy_requires_shared_disk_for_spill() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(overflow_policy=OverflowPolicy.SPILL)
+
+
+def test_store_policy_shared_disk_constraints() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.SHARED_DISK,
+                    scope=PolicyScope.LOCAL,
+                ),
+            )
+        )
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.SHARED_DISK,
+                    min_replicas=2,
+                ),
+            )
+        )
+
+
+def test_store_policy_shared_disk_rejects_retention() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.SHARED_DISK,
+                    retention_policy=RetentionPolicy.PINNED,
+                ),
+            )
+        )
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.SHARED_DISK,
+                    retention_policy=RetentionPolicy.TTL,
+                    retention_ttl_ms=5000,
+                ),
+            )
+        )
+
+
+def test_store_policy_stable_dram_rejects_remote_retention() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.STABLE_DRAM,
+                    scope=PolicyScope.REMOTE,
+                    retention_policy=RetentionPolicy.PINNED,
+                ),
+            )
+        )
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.STABLE_DRAM,
+                    scope=PolicyScope.REMOTE,
+                    retention_policy=RetentionPolicy.TTL,
+                    retention_ttl_ms=5000,
+                ),
+            )
+        )
+
+
+def test_store_policy_stable_dram_requires_single_replica() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.STABLE_DRAM,
+                    scope=PolicyScope.LOCAL,
+                    min_replicas=2,
+                ),
+            )
+        )
+
+
+def test_store_policy_must_local_stable_requires_pinned() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.STABLE_DRAM,
+                    scope=PolicyScope.LOCAL,
+                    retention_policy=RetentionPolicy.BEST_EFFORT,
+                ),
+            )
+        )
+    StorePolicy(
+        must=(
+            TierSpec(
+                tier=PolicyTier.STABLE_DRAM,
+                scope=PolicyScope.LOCAL,
+                retention_policy=RetentionPolicy.PINNED,
+            ),
+        )
+    )
+
+
+def test_store_policy_ttl_requires_deadline() -> None:
+    with pytest.raises(ValueError):
+        StorePolicy(
+            must=(
+                TierSpec(
+                    tier=PolicyTier.STABLE_DRAM,
+                    scope=PolicyScope.LOCAL,
+                    retention_policy=RetentionPolicy.TTL,
+                ),
+            )
+        )
+
+
+def test_store_policy_profile_warm_expands_to_local_should() -> None:
+    policy = StorePolicy(profile="warm")
+    assert policy.profile is StorePolicyProfile.WARM
+
+    expanded = policy.expanded()
+    assert expanded.profile is None
+    assert expanded.overflow_policy is OverflowPolicy.REJECT
+    assert expanded.should == (
+        TierSpec(
+            tier=PolicyTier.STABLE_DRAM,
+            scope=PolicyScope.LOCAL,
+            retention_policy=RetentionPolicy.BEST_EFFORT,
+        ),
+    )
+
+    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+
+    proto = policy.to_proto()
+    assert proto.profile == store_daemon_pb2.POLICY_PROFILE_WARM
 
 
 def test_get_options_validate_prefer_values() -> None:

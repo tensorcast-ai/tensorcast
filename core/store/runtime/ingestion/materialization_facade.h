@@ -18,6 +18,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/control/materialization_backend.h"
+#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion/ingestion_event_hub.h"
@@ -88,6 +89,14 @@ class MaterializationFacade : public materialization::control::MaterializationBa
   absl::StatusOr<loading::ReplicaHandle> materialize_replica(
       const DeviceKey& target_device,
       loading::MaterializeMode mode,
+      const loading::MaterializeHints& hints);
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
+      const DeviceKey& target_device,
+      gsl::not_null<void*> target_ptr,
+      uint64_t total_size,
+      std::string_view canonical_index_json,
+      uint64_t generation,
       const loading::MaterializeHints& hints);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
@@ -180,6 +189,9 @@ class MaterializationFacade : public materialization::control::MaterializationBa
   std::unique_ptr<MaterializationService> materialization_service_;
   ingestion::IngestionEventHub* ingestion_event_hub_;
   std::atomic<uint64_t> request_counter_{1};
+  mutable absl::Mutex segment_plan_mu_;
+  absl::flat_hash_map<std::string, std::shared_ptr<std::vector<loader::SegmentPiece>>> segment_plan_cache_
+      ABSL_GUARDED_BY(segment_plan_mu_);
   mutable absl::Mutex publish_context_mu_;
   absl::flat_hash_map<loading::ReplicaKey, std::string, loading::ReplicaKeyHash> publish_context_by_replica_
       ABSL_GUARDED_BY(publish_context_mu_);

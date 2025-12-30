@@ -37,6 +37,7 @@ sc_cc_library(
         "//core/common:memory_location_lib",
         "//core/store:device_types",
         "//core/store:global_store_client",
+        "//core/store:worker_identity",
         "//core/store/materialization/contracts:loading_spec",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -13,7 +14,9 @@ import torch
 from opentelemetry.trace import Status, StatusCode
 
 from tensorcast.api import _metrics as store_metrics
-from tensorcast.api._config import GetArtifactOptions
+from tensorcast.api import _region_cache as region_cache
+from tensorcast.api._config import GetArtifactOptions, RegionBackedMode
+from tensorcast.api._device import device_uuid_for
 from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
@@ -34,6 +37,7 @@ from tensorcast.api.store.retry import (
 from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.types import (
     ArtifactError,
+    CanonicalIndex,
     FallbackOptions,
     SpanAttributeValue,
 )
@@ -43,6 +47,7 @@ from tensorcast.api.store.views import (
     ViewOrchestrator,
 )
 from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -348,6 +353,45 @@ class MaterializationPipeline:
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
     ) -> None:
+        options = self._apply_client_defaults(
+            self._build_get_options(fallback, options)
+        )
+        start_time = time.monotonic()
+        try:
+            if self._maybe_region_backed_into(
+                target=target,
+                artifact_id=artifact_id,
+                key=key,
+                device_id=self._resolve_device_selector(device, fallback),
+                fallback=fallback,
+                options=options,
+                tensor_names=tensor_names,
+                view=view_spec,
+                view_id=None,
+            ):
+                store_metrics.observe_latency(
+                    "get_into",
+                    self._runtime.daemon_endpoint,
+                    "OK",
+                    time.monotonic() - start_time,
+                    selection="region_backed",
+                )
+                return
+        except ArtifactError as exc:
+            store_metrics.observe_latency(
+                "get_into",
+                self._runtime.daemon_endpoint,
+                exc.status_code,
+                time.monotonic() - start_time,
+                selection="region_backed",
+            )
+            store_metrics.increment_error(
+                "get_into",
+                self._runtime.daemon_endpoint,
+                exc.status_code,
+                selection="region_backed",
+            )
+            raise
         payload, device_id = self._perform_get_with_retry(
             artifact_id=artifact_id,
             key=key,
@@ -389,13 +433,60 @@ class MaterializationPipeline:
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
     ) -> ArtifactFuture[None]:
+        options = self._apply_client_defaults(
+            self._build_get_options(fallback, options)
+        )
         cancel_event = threading.Event()
         mat_lock = threading.Lock()
         mat_ref: dict[str, MaterializationPayload | None] = {"value": None}
+        region_backed_lock = threading.Lock()
+        region_backed_state: dict[str, bool] = {"started": False}
+
+        def _mark_region_backed_started() -> None:
+            with region_backed_lock:
+                region_backed_state["started"] = True
 
         def _task() -> None:
             materialized: MaterializationPayload | None = None
             try:
+                if not cancel_event.is_set():
+                    start_time = time.monotonic()
+                    try:
+                        if self._maybe_region_backed_into(
+                            target=target,
+                            artifact_id=artifact_id,
+                            key=key,
+                            device_id=self._resolve_device_selector(device, fallback),
+                            fallback=fallback,
+                            options=options,
+                            tensor_names=tensor_names,
+                            view=None,
+                            view_id=None,
+                            mark_started=_mark_region_backed_started,
+                        ):
+                            store_metrics.observe_latency(
+                                "get_into",
+                                self._runtime.daemon_endpoint,
+                                "OK",
+                                time.monotonic() - start_time,
+                                selection="region_backed",
+                            )
+                            return
+                    except ArtifactError as exc:
+                        store_metrics.observe_latency(
+                            "get_into",
+                            self._runtime.daemon_endpoint,
+                            exc.status_code,
+                            time.monotonic() - start_time,
+                            selection="region_backed",
+                        )
+                        store_metrics.increment_error(
+                            "get_into",
+                            self._runtime.daemon_endpoint,
+                            exc.status_code,
+                            selection="region_backed",
+                        )
+                        raise
                 materialized, device_id = self._perform_get_with_retry(
                     artifact_id=artifact_id,
                     key=key,
@@ -458,6 +549,9 @@ class MaterializationPipeline:
         def _cancel() -> bool:
             if cancel_event.is_set():
                 return False
+            with region_backed_lock:
+                if region_backed_state["started"]:
+                    return False
             cancel_event.set()
             with mat_lock:
                 materialized = mat_ref["value"]
@@ -686,6 +780,358 @@ class MaterializationPipeline:
         options_override: GetArtifactOptions | None,
     ) -> GetArtifactOptions:
         return options_override or GetArtifactOptions()
+
+    def _apply_client_defaults(self, options: GetArtifactOptions) -> GetArtifactOptions:
+        from tensorcast.api._runtime import apply_client_load_defaults_if_present
+
+        (
+            pinned_ms,
+            enable_ver,
+            wait_for_completion,
+            region_backed_mode,
+        ) = apply_client_load_defaults_if_present(
+            options.pinned_allocation_timeout_ms,
+            options.enable_verification,
+            options.wait_for_completion,
+            options.region_backed_mode,
+            runtime_address=self._runtime.daemon_endpoint,
+        )
+        return options.model_copy(
+            update={
+                "pinned_allocation_timeout_ms": pinned_ms,
+                "enable_verification": enable_ver,
+                "wait_for_completion": wait_for_completion,
+                "region_backed_mode": region_backed_mode,
+            }
+        )
+
+    def _build_region_backed_layout(
+        self,
+        *,
+        canonical_index: CanonicalIndex,
+        canonical_index_bytes: bytes,
+        target: Mapping[str, torch.Tensor],
+        device_id: int,
+    ) -> tuple[store_daemon_v2_pb2.TargetLayout, str, int]:
+        entries_by_name = {entry.name: entry for entry in canonical_index.entries}
+        if not entries_by_name:
+            raise ArtifactError(
+                "Canonical index is empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if set(entries_by_name.keys()) != set(target.keys()):
+            raise ArtifactError(
+                "Target tensors must include every canonical entry for region-backed get_into",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        storage_base_ptr: int | None = None
+        logical_total_size = 0
+        offsets: list[store_daemon_v2_pb2.TargetTensorOffset] = []
+        for entry in canonical_index.entries:
+            tensor = target.get(entry.name)
+            if tensor is None:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' missing",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if (tensor.device.index or 0) != device_id:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' on cuda:{tensor.device.index or 0}, expected cuda:{device_id}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_contiguous():
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' is not contiguous",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if tensor.dtype != entry.dtype:
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' dtype {tensor.dtype} != {entry.dtype}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tuple(tensor.shape) != tuple(entry.shape):
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' shape {tuple(tensor.shape)} != {entry.shape}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if tuple(tensor.stride()) != tuple(entry.stride):
+                raise ArtifactError(
+                    f"Target tensor '{entry.name}' stride {tuple(tensor.stride())} != {entry.stride}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if entry.segment_offset != entry.storage_offset:
+                raise ArtifactError(
+                    "Canonical layout is not COALESCED; region-backed get_into requires coalesced offsets",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            logical_offset = int(entry.segment_offset)
+            logical_total_size = max(
+                logical_total_size, logical_offset + int(entry.size_bytes)
+            )
+            base_ptr = int(tensor.data_ptr()) - logical_offset
+            if storage_base_ptr is None:
+                storage_base_ptr = base_ptr
+            elif storage_base_ptr != base_ptr:
+                raise ArtifactError(
+                    "Target tensors do not share a coalesced base pointer",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            offsets.append(
+                store_daemon_v2_pb2.TargetTensorOffset(
+                    name=entry.name,
+                    storage_id="",
+                    storage_offset=logical_offset,
+                    logical_length=int(entry.size_bytes),
+                )
+            )
+        if storage_base_ptr is None:
+            raise ArtifactError(
+                "Target tensors missing base pointer",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        region = region_cache.find_region_for(
+            device_id, storage_base_ptr, logical_total_size
+        )
+        if region is None:
+            raise ArtifactError(
+                "No registered region covers the target tensors",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        region_base_offset = int(storage_base_ptr) - int(region.base_ptr)
+        storage_id = f"storage:{device_id}:{storage_base_ptr:x}:{logical_total_size}"
+        for offset_entry in offsets:
+            offset_entry.storage_id = storage_id
+        layout = store_daemon_v2_pb2.TargetLayout(
+            layout_kind=store_daemon_v2_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
+            index_kind=store_daemon_v2_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
+            tensor_spec_kind=store_daemon_v2_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
+        )
+        layout.storages.add(
+            storage_id=storage_id,
+            device_id=int(device_id),
+            storage_length=int(logical_total_size),
+            vram_region_id=region.region_id,
+            region_base_offset=int(region_base_offset),
+        )
+        layout.offsets.extend(offsets)
+        digest = hashlib.sha256()
+        digest.update(canonical_index_bytes)
+        digest.update(b"|canonical")
+        layout.logical_layout_hash = digest.digest()
+        return layout, region.region_id, logical_total_size
+
+    def _materialize_into_target(
+        self,
+        *,
+        target: dict[str, torch.Tensor],
+        artifact_id: str,
+        device_id: int,
+        fallback: FallbackOptions | None,
+        options: GetArtifactOptions,
+        span=None,
+    ) -> None:
+        if not artifact_id:
+            raise ArtifactError(
+                "artifact_id is required for region-backed get_into",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        cached_entry = self._runtime.get_artifact_index_cached(artifact_id)
+        if cached_entry is not None:
+            canonical_bytes = cached_entry.canonical_index_bytes
+            canonical_index = cached_entry.parsed_index
+        else:
+            client = self._runtime.ensure_client()
+            canonical_bytes = client.get_artifact_index_by_id(artifact_id)
+            canonical_index = canonical_index_from_bytes(canonical_bytes)
+            cache_entry = ArtifactCacheEntry(
+                artifact_id=artifact_id,
+                canonical_index_bytes=canonical_bytes,
+                parsed_index=canonical_index,
+                generation=None,
+                disk_path=None,
+                expires_at=time.monotonic(),
+            )
+            self._runtime.cache_artifact_index(cache_entry)
+
+        layout, region_id, _ = self._build_region_backed_layout(
+            canonical_index=canonical_index,
+            canonical_index_bytes=canonical_bytes,
+            target=target,
+            device_id=device_id,
+        )
+
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        disk_path: str | None = None
+        if fallback is not None:
+            if fallback.prefer == "p2p":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+                )
+            elif fallback.prefer == "disk":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+                )
+            disk_path = fallback.disk_path
+        if (
+            disk_path
+            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        ):
+            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+
+        client = self._runtime.ensure_client()
+        try:
+            response = client.materialize_into_target_v2(
+                artifact_id=artifact_id,
+                target_layout=layout,
+                device_uuid=device_uuid_for(device_id),
+                preference=preference,
+                disk_path=disk_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            error = map_materialization_error(exc)
+            if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+                region_cache.unregister_region(region_id)
+            raise ArtifactError(
+                str(error),
+                status_code=error.status_code,
+                retryable=False,
+            ) from exc
+        if (
+            response.status
+            != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+        ):
+            region_cache.unregister_region(region_id)
+            raise ArtifactError(
+                "MaterializeIntoTarget returned non-success status",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        store_metrics.record_region_backed_verification_skipped(
+            self._runtime.daemon_endpoint
+        )
+        return None
+
+    def _maybe_region_backed_into(
+        self,
+        *,
+        target: dict[str, torch.Tensor],
+        artifact_id: str | None,
+        key: str | None,
+        device_id: int,
+        fallback: FallbackOptions | None,
+        options: GetArtifactOptions,
+        tensor_names: Sequence[str] | None,
+        view: store_daemon_pb2.ViewSpec | None,
+        view_id: str | None,
+        span=None,
+        mark_started: Callable[[], None] | None = None,
+    ) -> bool:
+        mode = options.region_backed_mode
+        if mode is RegionBackedMode.DISABLE:
+            return False
+        capabilities = self._runtime.capabilities
+        if not capabilities or not capabilities.supports_region_backed_get_into:
+            if mode is RegionBackedMode.REQUIRE:
+                raise ArtifactError(
+                    "Store daemon does not support region-backed get_into",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_fallback(
+                self._runtime.daemon_endpoint, "capability_missing"
+            )
+            return False
+        if key is not None:
+            if mode is RegionBackedMode.REQUIRE:
+                raise ArtifactError(
+                    "region_backed_mode requires artifact_id (key not supported)",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_fallback(
+                self._runtime.daemon_endpoint, "key_not_supported"
+            )
+            return False
+        if not artifact_id:
+            if mode is RegionBackedMode.REQUIRE:
+                raise ArtifactError(
+                    "region_backed_mode requires artifact_id",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_fallback(
+                self._runtime.daemon_endpoint, "missing_artifact_id"
+            )
+            return False
+        if view is not None or view_id is not None:
+            if mode is RegionBackedMode.REQUIRE:
+                raise ArtifactError(
+                    "region_backed_mode does not support view/view_id",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_fallback(
+                self._runtime.daemon_endpoint, "view_not_supported"
+            )
+            return False
+        if tensor_names is not None:
+            cached = self._runtime.get_artifact_index_cached(artifact_id)
+            if cached is not None:
+                canonical_names = {entry.name for entry in cached.parsed_index.entries}
+                if set(tensor_names) != canonical_names:
+                    if mode is RegionBackedMode.REQUIRE:
+                        raise ArtifactError(
+                            "region_backed_mode requires full tensor layout",
+                            status_code="INVALID_ARGUMENT",
+                            retryable=False,
+                        )
+                    store_metrics.record_region_backed_fallback(
+                        self._runtime.daemon_endpoint, "subset_not_supported"
+                    )
+                    return False
+        try:
+            if mark_started is not None:
+                mark_started()
+            self._materialize_into_target(
+                target=target,
+                artifact_id=artifact_id,
+                device_id=device_id,
+                fallback=fallback,
+                options=options,
+                span=span,
+            )
+        except ArtifactError:
+            if mode is RegionBackedMode.REQUIRE:
+                raise
+            store_metrics.record_region_backed_fallback(
+                self._runtime.daemon_endpoint, "layout_mismatch"
+            )
+            if span is not None:
+                span.add_event(
+                    "store.region_backed.fallback",
+                    {"tc.store.reason": "layout_mismatch"},
+                )
+            return False
+        return True
 
     def _materialize(
         self,

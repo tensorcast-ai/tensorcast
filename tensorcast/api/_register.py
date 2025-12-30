@@ -30,7 +30,7 @@ from tensorcast.api._tensor_graph import TensorStorageGraph, build_tensor_storag
 if TYPE_CHECKING:  # for static type checkers only
     from tensorcast.daemon_ctl import DaemonCtl
 
-from tensorcast.api._config import PlanType, RegisterArtifactOptions
+from tensorcast.api._config import PlanType, RegisterArtifactOptions, StorePolicy
 from tensorcast.api._device import resolve_device
 from tensorcast.api._errors import (
     DeviceMismatch,
@@ -59,6 +59,7 @@ from tensorcast.types import (
     Handshake,
     LeasePlan,
     LeaseSegment,
+    LocalStableTierResult,
     RegisterStorage,
     RegisterTensorAlias,
     StableDramHandshake,
@@ -91,6 +92,7 @@ class RegistrationResult:
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     allow_partial: bool = False
+    local_stable_tier: LocalStableTierResult | None = None
 
 
 logger = logging.getLogger(__name__)
@@ -1177,6 +1179,7 @@ def _register_artifact_core(
         span.set_attribute("tc.artifact.identity_kind", identity_kind.value)
         if normalized_artifact_id:
             span.set_attribute("tc.artifact.client_artifact_id", normalized_artifact_id)
+        policy = StorePolicy.parse(options.policy)
         begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
             total_size_bytes=layout.total_size,
@@ -1186,6 +1189,7 @@ def _register_artifact_core(
             schema_version="v3",
             client_artifact_id=normalized_artifact_id,
             plan=plan_model,
+            policy=policy,
             view=view.view_options if view is not None else None,
             timeout_s=60.0,
         )
@@ -1242,6 +1246,7 @@ def _register_artifact_core(
                             canonical_ranges=commit_res.canonical_ranges
                             or view.canonical_ranges,
                             allow_partial=view.allow_partial,
+                            local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
                         with contextlib.suppress(Exception):
@@ -1297,6 +1302,7 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         allow_partial=commit_res.allow_partial,
+                        local_stable_tier=commit_res.local_stable_tier,
                     )
 
                 if isinstance(registrar, _LeaseUploader):
@@ -1339,6 +1345,7 @@ def _register_artifact_core(
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
                         allow_partial=commit_res.allow_partial,
+                        local_stable_tier=commit_res.local_stable_tier,
                     )
             except CancelledError:
                 with contextlib.suppress(Exception):

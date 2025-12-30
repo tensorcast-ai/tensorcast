@@ -4,8 +4,14 @@
 
 #include "daemon/service/controllers/registration_controller.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cstddef>
+#include <functional>
+#include <map>
+#include <optional>
 #include <string>
+#include <string_view>
 
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -14,8 +20,14 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
+#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "daemon/cuda_ipc_raii.h"
 #include "daemon/status_utils.h"
+#include "daemon/store_policy_resolver.h"
+#include "opentelemetry/common/attribute_value.h"
+#include "opentelemetry/common/key_value_iterable_view.h"
+#include "opentelemetry/context/context.h"
 #include "opentelemetry/metrics/provider.h"
 #include "tensorcast/common/v1/common.pb.h"
 
@@ -80,6 +92,81 @@ tensorcast::common::v1::ArtifactIdKind ToProtoKind(tensorcast::common::ArtifactI
   }
 }
 
+const char* requirement_level_label(RequirementLevel level) {
+  switch (level) {
+    case RequirementLevel::kNone:
+      return "none";
+    case RequirementLevel::kMay:
+      return "may";
+    case RequirementLevel::kShould:
+      return "should";
+    case RequirementLevel::kMust:
+      return "must";
+    default:
+      return "unknown";
+  }
+}
+
+const char* local_stable_op_label(RegistrationManager::RegPlan plan) {
+  return plan == RegistrationManager::RegPlan::STABLE_DRAM ? "put" : "register";
+}
+
+const char* stable_retention_label(store::components::StableRetentionPolicy policy) {
+  switch (policy) {
+    case store::components::StableRetentionPolicy::kPinned:
+      return "pinned";
+    case store::components::StableRetentionPolicy::kTtl:
+      return "ttl";
+    case store::components::StableRetentionPolicy::kBestEffort:
+    default:
+      return "best_effort";
+  }
+}
+
+const char* stable_overflow_label(store::components::StableOverflowPolicy policy) {
+  switch (policy) {
+    case store::components::StableOverflowPolicy::kEvict:
+      return "evict";
+    case store::components::StableOverflowPolicy::kSpill:
+      return "spill";
+    case store::components::StableOverflowPolicy::kReject:
+    default:
+      return "reject";
+  }
+}
+
+void record_local_stable_tier_metrics(
+    const char* op,
+    const char* status,
+    const char* requirement,
+    std::optional<double> seconds) {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_local_stable_tier_total");
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("op", opentelemetry::common::AttributeValue(std::string(op)));
+    attrs.emplace("status", opentelemetry::common::AttributeValue(std::string(status)));
+    attrs.emplace("requirement", opentelemetry::common::AttributeValue(std::string(requirement)));
+    counter->Add(1.0, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+  } catch (...) {
+    // Metrics must not affect control flow.
+  }
+
+  if (!seconds.has_value()) {
+    return;
+  }
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto hist = meter->CreateDoubleHistogram("tc_local_stable_tier_seconds");
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("op", opentelemetry::common::AttributeValue(std::string(op)));
+    attrs.emplace("status", opentelemetry::common::AttributeValue(std::string(status)));
+    hist->Record(*seconds, opentelemetry::common::KeyValueIterableView(attrs), opentelemetry::context::Context{});
+  } catch (...) {
+    // Metrics must not affect control flow.
+  }
+}
+
 absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
@@ -139,6 +226,475 @@ void record_view_partial_metric() {
   }
 }
 
+struct RegistrationAbortGuard {
+  store::StoreEngine* engine{nullptr};
+  std::string registration_id;
+  bool active{true};
+
+  ~RegistrationAbortGuard() {
+    if (!active || engine == nullptr || registration_id.empty()) {
+      return;
+    }
+    absl::Status st = engine->abort_registered_artifact(registration_id);
+    if (!st.ok()) {
+      LOG(WARNING) << "RegistrationAbortGuard: abort_registered_artifact failed for id=" << registration_id << ": "
+                   << st;
+    }
+  }
+
+  void release() {
+    active = false;
+  }
+};
+
+absl::Status copy_to_staging_from_coalesced_gpu(
+    int device_id,
+    gsl::not_null<void*> dst_dev,
+    gsl::not_null<void*> src_dev,
+    absl::Span<const store::loader::SegmentPiece> plan,
+    uint64_t total_size) {
+  if (auto st = cuda::set_device(device_id); !st.ok()) {
+    return st;
+  }
+  if (plan.empty()) {
+    return cuda::memcpy(dst_dev, src_dev, static_cast<size_t>(total_size), cudaMemcpyDeviceToDevice);
+  }
+  for (const auto& p : plan) {
+    if (p.length == 0) {
+      continue;
+    }
+    if (p.kind == store::loader::SegmentPiece::PAD) {
+      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset, 0, static_cast<size_t>(p.length));
+      if (!st.ok()) {
+        return st;
+      }
+      continue;
+    }
+    auto st = cuda::memcpy(
+        static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset,
+        static_cast<const uint8_t*>(src_dev.get()) + p.src_offset,
+        static_cast<size_t>(p.length),
+        cudaMemcpyDeviceToDevice);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
+    const RegisterStorageMeta& storage,
+    absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>>& cache,
+    RegionPinGuard& region_pin,
+    IpcRegionRegistry& regions,
+    int owner_pid) {
+  auto it = cache.find(storage.storage_id);
+  if (it != cache.end()) {
+    return it->second.get();
+  }
+
+  std::unique_ptr<CudaIpcMapping> mapping;
+  if (storage.has_handle()) {
+    auto map_or = CudaIpcMapping::open(storage.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+  } else if (storage.has_region()) {
+    auto acq_or = regions.acquire(storage.region_id, owner_pid);
+    if (!acq_or.ok()) {
+      return acq_or.status();
+    }
+    region_pin.add(storage.region_id);
+    auto handle_or = regions.get_handle_bytes(storage.region_id);
+    if (!handle_or.ok()) {
+      return handle_or.status();
+    }
+    auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+  } else {
+    return absl::InvalidArgumentError("storage entry missing source handle or region");
+  }
+
+  auto [insert_it, _] = cache.emplace(storage.storage_id, std::move(mapping));
+  return insert_it->second.get();
+}
+
+absl::Status copy_to_staging_from_lip_sources(
+    int device_id,
+    gsl::not_null<void*> dst_dev,
+    absl::Span<const store::loader::SegmentPiece> plan,
+    uint64_t total_size,
+    absl::Span<const LeaseSegMeta> segments,
+    absl::Span<const RegisterStorageMeta> storages,
+    IpcRegionRegistry& regions,
+    int owner_pid) {
+  if (auto st = cuda::set_device(device_id); !st.ok()) {
+    return st;
+  }
+  if (plan.empty()) {
+    return absl::InvalidArgumentError("LIP local-stable copy requires a canonical segment plan");
+  }
+
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
+  storage_by_id.reserve(storages.size());
+  storage_by_handle.reserve(storages.size());
+  for (const auto& s : storages) {
+    storage_by_id.emplace(s.storage_id, &s);
+    if (s.has_handle()) {
+      storage_by_handle.emplace(s.handle_bytes, &s);
+    }
+  }
+
+  struct OpenedSeg {
+    int device_id;
+    CudaIpcMapping* map;
+    uint64_t base;
+    uint64_t len;
+    uint64_t dst;
+  };
+
+  RegionPinGuard pin_guard(regions);
+  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  std::vector<std::unique_ptr<CudaIpcMapping>> owned_maps;
+  mapping_cache.reserve(storages.size());
+
+  std::vector<OpenedSeg> opened;
+  opened.reserve(segments.size());
+  for (const auto& seg : segments) {
+    std::optional<OpenedSeg> opened_seg;
+    if (!storages.empty()) {
+      const RegisterStorageMeta* storage = nullptr;
+      if (!seg.storage_id.empty()) {
+        auto it = storage_by_id.find(seg.storage_id);
+        if (it == storage_by_id.end()) {
+          return absl::InvalidArgumentError("segment references unknown storage_id");
+        }
+        storage = it->second;
+      } else if (!seg.handle_bytes.empty()) {
+        auto it = storage_by_handle.find(seg.handle_bytes);
+        if (it == storage_by_handle.end()) {
+          return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
+        }
+        storage = it->second;
+      }
+      if (storage != nullptr) {
+        if (seg.length != storage->storage_length) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("segment length does not match storage_length for storage_id=", storage->storage_id));
+        }
+        auto map_or = get_or_open_mapping_for_storage(*storage, mapping_cache, pin_guard, regions, owner_pid);
+        if (!map_or.ok()) {
+          return map_or.status();
+        }
+        const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
+        opened_seg = OpenedSeg{
+            .device_id = seg.device_id, .map = *map_or, .base = source_base, .len = seg.length, .dst = seg.dst_offset};
+      }
+    }
+    if (!opened_seg.has_value()) {
+      if (seg.handle_bytes.empty()) {
+        return absl::InvalidArgumentError("lease segment missing cuda_ipc_handle bytes");
+      }
+      auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+      if (!map_or.ok()) {
+        return map_or.status();
+      }
+      owned_maps.push_back(std::make_unique<CudaIpcMapping>(std::move(*map_or)));
+      opened_seg = OpenedSeg{
+          .device_id = seg.device_id,
+          .map = owned_maps.back().get(),
+          .base = seg.base_offset,
+          .len = seg.length,
+          .dst = seg.dst_offset};
+    }
+    if (opened_seg->device_id != device_id) {
+      return absl::UnimplementedError("multi-device lease sources are not supported for local stable materialization");
+    }
+    opened.push_back(*opened_seg);
+  }
+  std::sort(opened.begin(), opened.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
+
+  auto find_covering = [&](uint64_t off) -> const OpenedSeg* {
+    for (const auto& s : opened) {
+      if (off >= s.dst && off < (s.dst + s.len)) {
+        return &s;
+      }
+      if (off < s.dst) {
+        break;
+      }
+    }
+    return nullptr;
+  };
+
+  for (const auto& p : plan) {
+    if (p.length == 0) {
+      continue;
+    }
+    if (p.dst_offset > total_size || p.length > total_size || (p.dst_offset + p.length) > total_size) {
+      return absl::OutOfRangeError("segment plan dst range out of bounds");
+    }
+    if (p.kind == store::loader::SegmentPiece::PAD) {
+      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset, 0, static_cast<size_t>(p.length));
+      if (!st.ok()) {
+        return st;
+      }
+      continue;
+    }
+    uint64_t remaining = p.length;
+    uint64_t src_off = p.src_offset;
+    uint64_t dst_off = p.dst_offset;
+    while (remaining > 0) {
+      const OpenedSeg* seg = find_covering(src_off);
+      if (seg == nullptr) {
+        return absl::FailedPreconditionError("segment plan references source offsets not covered by lease segments");
+      }
+      const uint64_t seg_end = seg->dst + seg->len;
+      const uint64_t avail = seg_end - src_off;
+      const uint64_t take64 = std::min<uint64_t>(remaining, avail);
+      auto st = cuda::memcpy(
+          static_cast<uint8_t*>(dst_dev.get()) + dst_off,
+          static_cast<uint8_t*>(seg->map->get()) + seg->base + (src_off - seg->dst),
+          static_cast<size_t>(take64),
+          cudaMemcpyDeviceToDevice);
+      if (!st.ok()) {
+        return st;
+      }
+      src_off += take64;
+      dst_off += take64;
+      remaining -= take64;
+    }
+  }
+  return absl::OkStatus();
+}
+
+template <typename CopyFn>
+absl::StatusOr<store::StoreEngine::RegistrationCommitResult> run_stable_dram_registration(
+    store::StoreEngine& engine,
+    int staging_device_id,
+    uint64_t total_size,
+    std::string_view canonical_index_json,
+    std::string_view index_key_hex,
+    std::string_view artifact_id,
+    tensorcast::common::ArtifactIdKind id_kind,
+    std::optional<store::components::StableDramCachePolicy> stable_cache_policy,
+    CopyFn&& copy_fn) {
+  store::StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = absl::StrCat("local_stable:", absl::ToUnixNanos(absl::Now()), ":", getpid());
+  reg.plan = store::runtime::metadata::RegistrationPlan::kStableDram;
+  reg.device_id = staging_device_id;
+  reg.total_size_bytes = total_size;
+  reg.enable_p2p = true;
+  reg.schema_version = "v3";
+  reg.encoding = "json";
+  if (!index_key_hex.empty()) {
+    reg.tensor_index_key = std::string(index_key_hex);
+  }
+  if (!canonical_index_json.empty()) {
+    reg.tensor_index_data = std::string(canonical_index_json);
+  }
+  if (id_kind == tensorcast::common::ArtifactIdKind::kMi2) {
+    reg.artifact_id_override = std::string(artifact_id);
+  } else if (id_kind == tensorcast::common::ArtifactIdKind::kCgid) {
+    reg.client_artifact_id = std::string(artifact_id);
+  } else {
+    return absl::InvalidArgumentError("unsupported artifact_id kind for stable registration");
+  }
+  if (stable_cache_policy.has_value()) {
+    reg.stable_cache_policy = *stable_cache_policy;
+  }
+  reg.stable_dram.stage_on_gpu = true;
+  reg.stable_dram.release_gpu_on_commit = true;
+
+  auto begin_or = engine.begin_register_artifact(reg);
+  if (!begin_or.ok()) {
+    return begin_or.status();
+  }
+  const auto& begin = *begin_or;
+  RegistrationAbortGuard abort_guard{.engine = &engine, .registration_id = begin.registration_id};
+
+  auto dst_ptr_or = engine.get_registration_gpu_ptr(begin.registration_id);
+  if (!dst_ptr_or.ok()) {
+    return dst_ptr_or.status();
+  }
+  auto* dst_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(*dst_ptr_or));
+  if (dst_ptr == nullptr) {
+    return absl::FailedPreconditionError("stable registration staging pointer is null");
+  }
+  absl::Status copy_status = copy_fn(gsl::not_null<void*>{dst_ptr});
+  if (!copy_status.ok()) {
+    return copy_status;
+  }
+  if (auto sync = cuda::device_synchronize(); !sync.ok()) {
+    return sync;
+  }
+  auto commit_or = engine.commit_registered_artifact(begin.registration_id);
+  if (!commit_or.ok()) {
+    return commit_or.status();
+  }
+  abort_guard.release();
+  return *commit_or;
+}
+
+absl::StatusOr<store::loading::ReplicaKey> find_loaded_cpu_replica(store::StoreEngine& engine, std::string_view id) {
+  const auto devices = engine.get_resident_devices(id);
+  for (const auto& device : devices) {
+    if (device.type != DeviceType::CPU) {
+      continue;
+    }
+    store::loading::ReplicaKey key;
+    key.artifact_id = std::string(id);
+    key.device = device;
+    key.replica = 0;
+    if (engine.get_replica_state(key, DeviceType::CPU) != store::replica::MemoryState::LOADED) {
+      return absl::FailedPreconditionError("stable DRAM replica is not loaded");
+    }
+    return key;
+  }
+  return absl::NotFoundError("stable DRAM replica not found");
+}
+
+std::optional<store::loading::ReplicaKey> find_loaded_gpu_replica(store::StoreEngine& engine, std::string_view id) {
+  const auto devices = engine.get_resident_devices(id);
+  for (const auto& device : devices) {
+    if (device.type != DeviceType::GPU) {
+      continue;
+    }
+    store::loading::ReplicaKey key;
+    key.artifact_id = std::string(id);
+    key.device = device;
+    key.replica = 0;
+    if (engine.get_replica_state(key, DeviceType::GPU) != store::replica::MemoryState::LOADED) {
+      continue;
+    }
+    return key;
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stable_admission(
+    store::StoreEngine& engine,
+    LipManager& lip_mgr,
+    IpcRegionRegistry& regions,
+    const ResolvedStorePolicy& policy,
+    std::string_view artifact_id,
+    tensorcast::common::ArtifactIdKind id_kind,
+    uint64_t total_size,
+    int owner_pid,
+    std::string_view canonical_index_json,
+    std::string_view index_key_hex) {
+  auto stable_policy_opt = stable_cache_policy_from_resolved(policy);
+  if (!stable_policy_opt.has_value()) {
+    return absl::FailedPreconditionError("stable cache policy missing for local stable tier");
+  }
+
+  auto cpu_key_or = find_loaded_cpu_replica(engine, artifact_id);
+  if (cpu_key_or.ok()) {
+    auto admit_or = engine.admit_stable_cache_policy(*cpu_key_or, *stable_policy_opt);
+    if (!admit_or.ok()) {
+      return admit_or.status();
+    }
+    return *admit_or;
+  }
+  if (!absl::IsNotFound(cpu_key_or.status())) {
+    return cpu_key_or.status();
+  }
+
+  if (auto gpu_key_opt = find_loaded_gpu_replica(engine, artifact_id); gpu_key_opt.has_value()) {
+    const int device_id = gpu_key_opt->device.ordinal;
+    auto ptr_or = engine.get_replica_gpu_ptr(*gpu_key_opt);
+    if (!ptr_or.ok()) {
+      return ptr_or.status();
+    }
+    auto* src_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(*ptr_or));
+    if (src_ptr == nullptr) {
+      return absl::FailedPreconditionError("GPU source pointer is null for local stable materialization");
+    }
+    std::vector<store::loader::SegmentPiece> plan;
+    if (!canonical_index_json.empty()) {
+      auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(
+          canonical_index_json, total_size, /*align_bytes=*/8);
+      if (!plan_or.ok()) {
+        return plan_or.status();
+      }
+      plan = std::move(*plan_or);
+    }
+    const std::optional<store::components::StableDramCachePolicy> required_policy =
+        policy.local_requirement == RequirementLevel::kMust ? stable_policy_opt : std::nullopt;
+    auto commit_or = run_stable_dram_registration(
+        engine,
+        device_id,
+        total_size,
+        canonical_index_json,
+        index_key_hex,
+        artifact_id,
+        id_kind,
+        required_policy,
+        [&](gsl::not_null<void*> dst_dev) -> absl::Status {
+          return copy_to_staging_from_coalesced_gpu(
+              device_id, dst_dev, gsl::not_null<void*>{src_ptr}, absl::MakeSpan(plan), total_size);
+        });
+    if (!commit_or.ok()) {
+      return commit_or.status();
+    }
+  } else {
+    auto lip_opt = lip_mgr.find_active_by_artifact_id(std::string(artifact_id));
+    if (!lip_opt.has_value()) {
+      return absl::FailedPreconditionError("no eligible source found for local stable materialization");
+    }
+    const auto& lip = *lip_opt;
+    const std::string_view index_json = !canonical_index_json.empty() ? canonical_index_json : lip.index_data;
+    if (index_json.empty()) {
+      return absl::FailedPreconditionError("canonical index JSON required for local stable materialization from LIP");
+    }
+    auto plan_or =
+        store::loader::build_segment_plan_from_canonical_index_json(index_json, total_size, /*align_bytes=*/8);
+    if (!plan_or.ok()) {
+      return plan_or.status();
+    }
+    const std::optional<store::components::StableDramCachePolicy> required_policy =
+        policy.local_requirement == RequirementLevel::kMust ? stable_policy_opt : std::nullopt;
+    const int device_id = lip.device_id;
+    auto commit_or = run_stable_dram_registration(
+        engine,
+        device_id,
+        total_size,
+        index_json,
+        std::string_view(),
+        artifact_id,
+        id_kind,
+        required_policy,
+        [&](gsl::not_null<void*> dst_dev) -> absl::Status {
+          return copy_to_staging_from_lip_sources(
+              device_id,
+              dst_dev,
+              absl::MakeSpan(*plan_or),
+              total_size,
+              absl::MakeSpan(lip.segments),
+              absl::MakeSpan(lip.storages),
+              regions,
+              owner_pid);
+        });
+    if (!commit_or.ok()) {
+      return commit_or.status();
+    }
+  }
+
+  auto cpu_key_or2 = find_loaded_cpu_replica(engine, artifact_id);
+  if (!cpu_key_or2.ok()) {
+    return cpu_key_or2.status();
+  }
+  auto admit_or = engine.admit_stable_cache_policy(*cpu_key_or2, *stable_policy_opt);
+  if (!admit_or.ok()) {
+    return admit_or.status();
+  }
+  return *admit_or;
+}
+
 } // namespace
 
 grpc::Status RegistrationController::begin(
@@ -169,6 +725,16 @@ grpc::Status RegistrationController::begin(
   meta.total_size = req.total_size();
   meta.device_id = req.device_id();
   meta.owner_pid = req.owner_pid();
+  {
+    auto policy_or = resolve_store_policy(req.has_policy() ? &req.policy() : nullptr);
+    if (!policy_or.ok()) {
+      return to_grpc_status(policy_or.status());
+    }
+    meta.resolved_policy = *policy_or;
+    if (plan == RegistrationManager::RegPlan::STABLE_DRAM && policy_or->local_requirement == RequirementLevel::kMust) {
+      reg.stable_cache_policy = stable_cache_policy_from_resolved(*policy_or);
+    }
+  }
   if (!req.client_artifact_id().empty()) {
     auto id_status = common::validate_client_generated_id(req.client_artifact_id());
     if (!id_status.ok()) {
@@ -766,6 +1332,78 @@ grpc::Status RegistrationController::commit(
     desc->set_encoding(out.encoding);
     desc->set_total_size(out.total_size);
     desc->set_id_kind(ToProtoKind(out.id_kind));
+
+    ResolvedStorePolicy resolved;
+    if (meta.resolved_policy.has_value()) {
+      resolved = *meta.resolved_policy;
+    } else {
+      auto default_or = resolve_store_policy(nullptr);
+      if (!default_or.ok()) {
+        return to_grpc_status(default_or.status());
+      }
+      resolved = *default_or;
+    }
+    auto* local_stable = resp.mutable_local_stable_tier();
+    const char* op_label = local_stable_op_label(meta.plan);
+    const char* requirement = requirement_level_label(resolved.local_requirement);
+    if (meta.view_registration) {
+      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_message("view registrations do not satisfy the local stable tier");
+      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
+      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    } else {
+      const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
+      const auto local_stable_start = std::chrono::steady_clock::now();
+      auto admit_or = ensure_local_stable_admission(
+          d_.engine,
+          d_.lip,
+          d_.regions,
+          resolved,
+          out.artifact_id,
+          out.id_kind,
+          out.total_size,
+          meta.owner_pid,
+          meta.index_data,
+          meta.index_key_hex);
+      const double local_stable_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - local_stable_start).count();
+      if (!admit_or.ok() || admit_or->skipped) {
+        const std::string message = admit_or.ok()
+            ? "local stable tier admission skipped"
+            : std::string(admit_or.status().message().data(), admit_or.status().message().size());
+        const char* retention =
+            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+        const char* overflow =
+            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+        const char* outcome = resolved.local_requirement == RequirementLevel::kMust ? "failed" : "degraded";
+        LOG(WARNING) << "local_stable_tier." << outcome << ": artifact_id=" << out.artifact_id << " op=" << op_label
+                     << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+                     << " seconds=" << local_stable_seconds << " message=\"" << message << "\"";
+        if (resolved.local_requirement == RequirementLevel::kMust) {
+          record_local_stable_tier_metrics(op_label, "failed", requirement, local_stable_seconds);
+          (void)d_.lip.revoke_by_registration_id(req.registration_id());
+          auto refs = d_.reg.erase_all_for(req.registration_id());
+          ReleaseRegionRefs(d_.regions, refs);
+          return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
+        }
+        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_message(message);
+        record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
+      } else {
+        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        const char* retention =
+            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+        const char* overflow =
+            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+        LOG(INFO) << "local_stable_tier.ready: artifact_id=" << out.artifact_id << " op=" << op_label
+                  << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+                  << " seconds=" << local_stable_seconds;
+        record_local_stable_tier_metrics(op_label, "ready", requirement, local_stable_seconds);
+      }
+    }
+
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
       static auto counter = meter->CreateDoubleCounter("tc_register_commit_lip_total");
@@ -846,6 +1484,86 @@ grpc::Status RegistrationController::commit(
                 << " ingested_view_bytes=" << meta.view_ingested_bytes;
       }
     }
+
+    ResolvedStorePolicy resolved;
+    if (meta.resolved_policy.has_value()) {
+      resolved = *meta.resolved_policy;
+    } else {
+      auto default_or = resolve_store_policy(nullptr);
+      if (!default_or.ok()) {
+        return to_grpc_status(default_or.status());
+      }
+      resolved = *default_or;
+    }
+    auto* local_stable = resp.mutable_local_stable_tier();
+    const char* op_label = local_stable_op_label(meta.plan);
+    const char* requirement = requirement_level_label(resolved.local_requirement);
+    if (meta.view_registration) {
+      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_message("view registrations do not satisfy the local stable tier");
+      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
+      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    } else {
+      const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
+      const auto local_stable_start = std::chrono::steady_clock::now();
+      auto admit_or = ensure_local_stable_admission(
+          d_.engine,
+          d_.lip,
+          d_.regions,
+          resolved,
+          out.artifact_id,
+          out.id_kind,
+          out.size_bytes,
+          meta.owner_pid,
+          meta.index_data,
+          meta.index_key_hex);
+      const double local_stable_seconds =
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - local_stable_start).count();
+      if (!admit_or.ok() || admit_or->skipped) {
+        const std::string message = admit_or.ok()
+            ? "local stable tier admission skipped"
+            : std::string(admit_or.status().message().data(), admit_or.status().message().size());
+        const char* retention =
+            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+        const char* overflow =
+            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+        const char* outcome = resolved.local_requirement == RequirementLevel::kMust ? "failed" : "degraded";
+        LOG(WARNING) << "local_stable_tier." << outcome << ": artifact_id=" << out.artifact_id << " op=" << op_label
+                     << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+                     << " seconds=" << local_stable_seconds << " message=\"" << message << "\"";
+        if (resolved.local_requirement == RequirementLevel::kMust) {
+          record_local_stable_tier_metrics(op_label, "failed", requirement, local_stable_seconds);
+          if (!out.existed) {
+            store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
+            (void)d_.engine.unload_replica(base_key);
+            auto unreg_status = d_.engine.unregister_replica_from_global_store(out.artifact_id, out.device.ordinal);
+            if (!unreg_status.ok()) {
+              LOG(WARNING)
+                  << "unregister_replica_from_global_store failed after must local stable failure: artifact_id="
+                  << out.artifact_id << " dev=" << out.device.ordinal << ": " << unreg_status;
+            }
+          }
+          d_.reg.erase_meta(req.registration_id());
+          return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
+        }
+        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_message(message);
+        record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
+      } else {
+        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        const char* retention =
+            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+        const char* overflow =
+            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+        LOG(INFO) << "local_stable_tier.ready: artifact_id=" << out.artifact_id << " op=" << op_label
+                  << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+                  << " seconds=" << local_stable_seconds;
+        record_local_stable_tier_metrics(op_label, "ready", requirement, local_stable_seconds);
+      }
+    }
+
     if (out.existed) {
       store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
       d_.refs.add_ref(key, meta.owner_pid);

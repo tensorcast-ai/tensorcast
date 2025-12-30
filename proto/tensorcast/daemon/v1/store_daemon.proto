@@ -128,6 +128,50 @@ enum PlacementPolicy {
   PLACEMENT_POLICY_SHARDED = 3;
 }
 
+enum PolicyProfile {
+  POLICY_PROFILE_UNSPECIFIED = 0;
+  POLICY_PROFILE_CACHE = 1;
+  POLICY_PROFILE_DURABLE = 2;
+  POLICY_PROFILE_HA = 3;
+  POLICY_PROFILE_COLD = 4;
+  POLICY_PROFILE_PINNED = 5;
+  POLICY_PROFILE_WARM = 6;
+}
+
+enum PolicyTier {
+  POLICY_TIER_UNSPECIFIED = 0;
+  POLICY_TIER_STABLE_DRAM = 1;
+  POLICY_TIER_SHARED_DISK = 2;
+}
+
+enum PolicyScope {
+  POLICY_SCOPE_UNSPECIFIED = 0;
+  POLICY_SCOPE_LOCAL = 1;
+  POLICY_SCOPE_REMOTE = 2;
+  POLICY_SCOPE_ANY = 3;
+}
+
+enum RetentionPolicy {
+  RETENTION_POLICY_UNSPECIFIED = 0;
+  RETENTION_POLICY_BEST_EFFORT = 1;
+  RETENTION_POLICY_TTL = 2;
+  RETENTION_POLICY_PINNED = 3;
+}
+
+enum OverflowPolicy {
+  OVERFLOW_POLICY_UNSPECIFIED = 0;
+  OVERFLOW_POLICY_EVICT = 1;
+  OVERFLOW_POLICY_SPILL = 2;
+  OVERFLOW_POLICY_REJECT = 3;
+}
+
+enum PolicyLayout {
+  POLICY_LAYOUT_UNSPECIFIED = 0;
+  POLICY_LAYOUT_AUTO = 1;
+  POLICY_LAYOUT_UNSHARDED = 2;
+  POLICY_LAYOUT_SHARDED = 3;
+}
+
 enum PersistenceState {
   PERSISTENCE_STATE_UNSPECIFIED = 0;
   PERSISTENCE_STATE_PENDING = 1;
@@ -170,6 +214,23 @@ message ViewSpec {
 message CanonicalRange {
   uint64 offset = 1;
   uint64 length = 2;
+}
+
+message TierSpec {
+  PolicyTier tier = 1;
+  PolicyScope scope = 2;
+  uint32 min_replicas = 3;
+  RetentionPolicy retention_policy = 4;
+  optional uint64 retention_ttl_ms = 5;
+}
+
+message StorePolicy {
+  PolicyProfile profile = 1;
+  repeated TierSpec must = 2;
+  repeated TierSpec should = 3;
+  repeated TierSpec may = 4;
+  OverflowPolicy overflow_policy = 5;
+  PolicyLayout layout = 6;
 }
 
 message ViewRegistrationOptions {
@@ -466,6 +527,8 @@ message BeginRegisterArtifactRequest {
     StableDramOptions stable_dram = 13;
   }
 
+  StorePolicy policy = 14;
+
   ViewRegistrationOptions view = 1001;
 }
 
@@ -587,6 +650,20 @@ message CommitRegisteredArtifactRequest {
   string registration_id = 1; // Registration ID from Begin
 }
 
+enum LocalStableTierStatus {
+  LOCAL_STABLE_TIER_STATUS_UNSPECIFIED = 0;
+  LOCAL_STABLE_TIER_STATUS_READY = 1;
+  // Requested as `should` but could not be satisfied.
+  LOCAL_STABLE_TIER_STATUS_DEGRADED = 2;
+  // Not requested by the resolved policy (or requested only as `may`).
+  LOCAL_STABLE_TIER_STATUS_SKIPPED = 3;
+}
+
+message LocalStableTierResult {
+  LocalStableTierStatus status = 1;
+  optional string message = 2;
+}
+
 // Artifact descriptor conveying content-addressed identity and related metadata
 // Commit registration response
 message CommitRegisteredArtifactResponse {
@@ -601,6 +678,8 @@ message CommitRegisteredArtifactResponse {
   string view_data_hash = 1003;
   repeated CanonicalRange canonical_ranges = 1004;
   bool allow_partial = 1005;
+
+  optional LocalStableTierResult local_stable_tier = 2000;
 }
 
 // Abort registration request
@@ -731,9 +810,9 @@ message PersistenceShardStatus {
 
 message StartPersistenceRequest {
   string artifact_id = 1;
-  PlacementPolicy placement_policy = 2;
-  // Enable shared-disk persistence alongside remote replicas.
-  bool persist_to_shared_disk = 3;
+  StorePolicy policy = 2;
+  reserved 3;
+  reserved "placement_policy", "persist_to_shared_disk";
 }
 
 message StartPersistenceResponse {

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Tuple
 
 from tensorcast import startup
+from tensorcast.api._config import RegionBackedMode
 from tensorcast.api._runtime_handle import RuntimeHandle
 from tensorcast.daemon_ctl import DaemonCtl
 
@@ -26,13 +27,14 @@ def apply_client_load_defaults_if_present(
     pinned_allocation_timeout_ms: int,
     enable_verification: bool,
     wait_for_completion: bool,
+    region_backed_mode: "RegionBackedMode",
     *,
     runtime_address: str,
-) -> Tuple[int, bool, bool]:
-    from tensorcast.api._config import DEFAULT_PINNED_TIMEOUT_MS
+) -> Tuple[int, bool, bool, "RegionBackedMode"]:
+    from tensorcast.api._config import DEFAULT_PINNED_TIMEOUT_MS, RegionBackedMode
     from tensorcast.client_runtime import client_defaults, daemon_target_default
 
-    cfg_timeout_ms, cfg_enable_ver, cfg_wait = client_defaults()
+    cfg_timeout_ms, cfg_enable_ver, cfg_wait, cfg_region_mode = client_defaults()
     cfg_target = daemon_target_default()
     if cfg_target and cfg_target != runtime_address:
         raise RuntimeError(
@@ -49,8 +51,19 @@ def apply_client_load_defaults_if_present(
         enable_verification = bool(cfg_enable_ver)
     if wait_for_completion is True and cfg_wait is not None:
         wait_for_completion = bool(cfg_wait)
+    if (
+        isinstance(region_backed_mode, RegionBackedMode)
+        and region_backed_mode is RegionBackedMode.AUTO
+        and cfg_region_mode is not None
+    ):
+        region_backed_mode = cfg_region_mode
 
-    return pinned_allocation_timeout_ms, enable_verification, wait_for_completion
+    return (
+        pinned_allocation_timeout_ms,
+        enable_verification,
+        wait_for_completion,
+        region_backed_mode,
+    )
 
 
 __all__ = [

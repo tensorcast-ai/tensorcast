@@ -14,7 +14,7 @@ import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast.api._config import PlacementPolicy
+from tensorcast.api._config import StorePolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -41,6 +41,7 @@ from tensorcast.types import (
     DeregisterArtifactOutcome,
     LeaseHandshake,
     LeaseSegment,
+    LocalStableTierResult,
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
@@ -124,11 +125,6 @@ def get_host_pid() -> int:
 
 # This is a singleton class that manages the checkpoint
 class DaemonCtl:
-    _PLACEMENT_POLICY_TO_PROTO: dict[str, store_daemon_pb2.PlacementPolicy] = {
-        "local_only": store_daemon_pb2.PLACEMENT_POLICY_LOCAL_ONLY,
-        "replicated": store_daemon_pb2.PLACEMENT_POLICY_REPLICATED,
-        "sharded": store_daemon_pb2.PLACEMENT_POLICY_SHARDED,
-    }
     _PERSISTENCE_STATE_FROM_PROTO = {
         store_daemon_pb2.PERSISTENCE_STATE_PENDING: "pending",
         store_daemon_pb2.PERSISTENCE_STATE_RUNNING: "running",
@@ -539,8 +535,66 @@ class DaemonCtl:
                 if e.code() == grpc.StatusCode.UNIMPLEMENTED:
                     return store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse(
                         supports_view_subset_hash=False,
+                        supports_region_backed_get_into=False,
                     )
                 raise RuntimeError("GetMaterializeCapabilities failed") from e
+        return response
+
+    def materialize_into_target_v2(
+        self,
+        *,
+        artifact_id: str,
+        target_layout: store_daemon_v2_pb2.TargetLayout,
+        device_uuid: str,
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        disk_path: str | None = None,
+        pid: int | None = None,
+        return_response: bool = True,
+    ) -> store_daemon_v2_pb2.MaterializeIntoTargetResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/MaterializeIntoTarget") as span:
+            request = store_daemon_v2_pb2.MaterializeIntoTargetRequest(
+                artifact_id=artifact_id,
+                target_layout=target_layout,
+                device_uuid=device_uuid,
+                pid=pid_value,
+                preference=preference
+                if preference is not None
+                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+            )
+            if disk_path:
+                request.disk_fallback.disk_path = disk_path
+                request.disk_fallback.verify_checksums = True
+            try:
+                response: store_daemon_v2_pb2.MaterializeIntoTargetResponse = (
+                    self._unary_call(
+                        self.stub_v2.MaterializeIntoTarget,
+                        request,
+                        timeout=60,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise RuntimeError(
+                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                    ) from e
+                raise RuntimeError(f"Error: {e}") from e
+        if not return_response:
+            raise RuntimeError(
+                "materialize_into_target_v2 requires return_response=True"
+            )
         return response
 
     def query_replica_status(
@@ -1112,6 +1166,7 @@ class DaemonCtl:
         schema_version: str = "v3",
         client_artifact_id: str | None = None,
         plan: Plan | None = None,
+        policy: StorePolicy | dict[str, object] | str | None = None,
         timeout_s: float = 30.0,
         view: store_daemon_pb2.ViewRegistrationOptions | None = None,
     ) -> BeginRegisterArtifactResult:
@@ -1167,6 +1222,9 @@ class DaemonCtl:
             plan = _DefaultPlan()
         kind = plan.kind
         plan.apply_to_begin_request(req)
+        policy_proto = self._policy_to_proto(policy)
+        if policy_proto is not None:
+            req.policy.CopyFrom(policy_proto)
         if view is not None:
             req.view.CopyFrom(view)
 
@@ -1289,6 +1347,19 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
+            local_stable_tier = None
+            if resp.HasField("local_stable_tier"):
+                status = resp.local_stable_tier.status
+                if status == store_daemon_pb2.LOCAL_STABLE_TIER_STATUS_READY:
+                    status_text = "ready"
+                elif status == store_daemon_pb2.LOCAL_STABLE_TIER_STATUS_DEGRADED:
+                    status_text = "degraded"
+                else:
+                    status_text = "skipped"
+                local_stable_tier = LocalStableTierResult(
+                    status=status_text,
+                    message=resp.local_stable_tier.message or None,
+                )
             return CommitResult(
                 descriptor=ad,
                 existed=existed,
@@ -1297,6 +1368,7 @@ class DaemonCtl:
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
                 allow_partial=bool(resp.allow_partial),
+                local_stable_tier=local_stable_tier,
             )
 
     def abort_registered_artifact(
@@ -1795,19 +1867,15 @@ class DaemonCtl:
             return resp.tensor_index_data
 
     @classmethod
-    def _placement_policy_to_proto(
-        cls, placement_policy: str | PlacementPolicy
-    ) -> store_daemon_pb2.PlacementPolicy:
-        key = (
-            placement_policy.value
-            if isinstance(placement_policy, PlacementPolicy)
-            else str(placement_policy).strip().lower()
-        )
-        if key not in cls._PLACEMENT_POLICY_TO_PROTO:
-            raise ValueError(
-                "placement_policy must be one of: local_only, replicated, sharded"
-            )
-        return cls._PLACEMENT_POLICY_TO_PROTO[key]
+    def _policy_to_proto(
+        cls, policy: StorePolicy | dict[str, object] | str | None
+    ) -> store_daemon_pb2.StorePolicy | None:
+        if policy is None:
+            return None
+        resolved = StorePolicy.parse(policy)
+        if resolved is None:
+            return None
+        return resolved.to_proto()
 
     @classmethod
     def _persistence_state_from_proto(
@@ -1819,18 +1887,15 @@ class DaemonCtl:
         self,
         *,
         artifact_id: str,
-        placement_policy: str | PlacementPolicy = "local_only",
-        persist_to_shared_disk: bool = True,
+        policy: StorePolicy | dict[str, object] | str | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartPersistenceResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
-        policy_proto = self._placement_policy_to_proto(placement_policy)
-        req = store_daemon_pb2.StartPersistenceRequest(
-            artifact_id=artifact_id,
-            placement_policy=policy_proto,
-            persist_to_shared_disk=bool(persist_to_shared_disk),
-        )
+        req = store_daemon_pb2.StartPersistenceRequest(artifact_id=artifact_id)
+        policy_proto = self._policy_to_proto(policy)
+        if policy_proto is not None:
+            req.policy.CopyFrom(policy_proto)
         with self._client_span("Client/StartPersistence") as span:
             return self._unary_call(
                 self.stub.StartPersistence, req, timeout=timeout_s, span=span, retries=0

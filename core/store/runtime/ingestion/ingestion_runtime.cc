@@ -37,6 +37,17 @@ absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::materialize_replica(
   return materialization_facade_->materialize_replica(target_device, mode, hints);
 }
 
+absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_into_target(
+    const DeviceKey& target_device,
+    gsl::not_null<void*> target_ptr,
+    uint64_t total_size,
+    std::string_view canonical_index_json,
+    uint64_t generation,
+    const loading::MaterializeHints& hints) {
+  return materialization_facade_->materialize_into_target(
+      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+}
+
 absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_from_disk(
     const std::string& artifact_identifier,
     const loading::DiskSource& source,

@@ -19,9 +19,15 @@ static tensorcast::store::StoreEngineOptions make_opts_basic() {
   return opts;
 }
 
+static StoreDaemonServiceImpl::Options make_service_opts() {
+  StoreDaemonServiceImpl::Options opts;
+  opts.storage_path = std::filesystem::temp_directory_path();
+  return opts;
+}
+
 TEST_CASE("DISK unload is idempotent success", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  StoreDaemonServiceImpl svc(engine);
+  StoreDaemonServiceImpl svc(engine, make_service_opts());
 
   tensorcast::daemon::v1::UnloadReplicaRequest req;
   req.set_disk_path("/tmp/does-not-matter");
@@ -35,7 +41,7 @@ TEST_CASE("DISK unload is idempotent success", "[daemon][parity]") {
 
 TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  StoreDaemonServiceImpl svc(engine);
+  StoreDaemonServiceImpl svc(engine, make_service_opts());
   svc.begin_shutdown();
 
   tensorcast::daemon::v1::MaterializeReplicaRequest req;
@@ -50,7 +56,7 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
 
 TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  StoreDaemonServiceImpl svc(engine);
+  StoreDaemonServiceImpl svc(engine, make_service_opts());
 
   // Both missing -> INVALID_ARGUMENT
   {
@@ -64,8 +70,9 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
 
   // Both present are accepted (may still fail deeper in the stack, but not on input validation)
   {
+    const auto storage_root = std::filesystem::temp_directory_path();
     tensorcast::daemon::v1::MaterializeReplicaRequest req;
-    req.set_disk_path("/tmp/x");
+    req.set_disk_path((storage_root / "x").string());
     req.set_artifact_id("mi2:abc:def");
     req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
     tensorcast::daemon::v1::MaterializeReplicaResponse resp;
@@ -75,14 +82,14 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
   }
 }
 
-TEST_CASE("MaterializeReplica enforces disk whitelist", "[daemon][parity]") {
+TEST_CASE("MaterializeReplica enforces shared storage root", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  StoreDaemonServiceImpl::Options opts;
-  opts.disk_path_whitelist = {std::filesystem::path("/allowed")};
+  StoreDaemonServiceImpl::Options opts = make_service_opts();
+  opts.storage_path = std::filesystem::temp_directory_path();
   StoreDaemonServiceImpl svc(engine, opts);
 
   tensorcast::daemon::v1::MaterializeReplicaRequest req;
-  req.set_disk_path("/denied/path");
+  req.set_disk_path("/var/denied/path");
   req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
   tensorcast::daemon::v1::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
@@ -92,7 +99,7 @@ TEST_CASE("MaterializeReplica enforces disk whitelist", "[daemon][parity]") {
 
 TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  StoreDaemonServiceImpl svc(engine);
+  StoreDaemonServiceImpl svc(engine, make_service_opts());
 
   tensorcast::daemon::v1::WaitReplicaVerificationRequest req;
   req.set_artifact_id("nonexistent");

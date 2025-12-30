@@ -47,12 +47,13 @@ def test_shared_storage_roundtrip(tmp_path):
         "indep2": indep2,
     }
 
-    save_path = tmp_path / "artifact"
+    storage_root = tmp_path / "daemon-storage"
+    save_path = storage_root / "artifact"
     # Save using the unified writer
     descriptor = save_dict(state_dict, str(save_path))
 
     listen = f"127.0.0.1:{get_free_port()}"
-    daemon_proc = start_daemon_binary(listen, tmp_path / "daemon-storage")
+    daemon_proc = start_daemon_binary(listen, storage_root)
     try:
         startup.init(mode="connect", address=listen)
         try:

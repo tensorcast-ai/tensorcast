@@ -50,7 +50,10 @@ TEST_CASE(
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
-  StoreDaemonServiceImpl svc(engine);
+  StoreDaemonServiceImpl::Options svc_opts;
+  svc_opts.storage_path = test_tmpdir();
+  std::filesystem::create_directories(svc_opts.storage_path);
+  StoreDaemonServiceImpl svc(engine, svc_opts);
 
   tensorcast::daemon::v1::MaterializeReplicaRequest req;
   req.set_disk_path(artifact_dir.string());

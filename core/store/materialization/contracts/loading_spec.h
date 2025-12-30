@@ -34,6 +34,10 @@ enum class SourcePreference : uint8_t { kUnspecified, kAuto, kPreferP2P, kPrefer
 
 enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalReplica };
 
+struct MaterializeIntoTargetResult {
+  MaterializationSource source{MaterializationSource::kUnspecified};
+};
+
 struct DiskSource {
   std::filesystem::path path;
   std::optional<uint64_t> expected_size;

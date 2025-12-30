@@ -129,6 +129,16 @@ class CanonicalRange(BaseModel):
     length: int
 
 
+LocalStableTierStatus = Literal["ready", "degraded", "skipped"]
+
+
+class LocalStableTierResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    status: LocalStableTierStatus
+    message: str | None = None
+
+
 class CommitResult(BaseModel):
     """Commit result with descriptor and idempotency flag."""
 
@@ -141,6 +151,7 @@ class CommitResult(BaseModel):
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
     allow_partial: bool = False
+    local_stable_tier: LocalStableTierResult | None = None
 
 
 # ------------------------------ Plan models --------------------------------

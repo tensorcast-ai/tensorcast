@@ -6,14 +6,20 @@
 #include <unistd.h>
 #include <cstdint>
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
 #include "daemon/status_utils.h"
+#include "daemon/store_policy_resolver.h"
 #include "daemon/sweep_tasks.h"
 #include "daemon/types.h"
 #include "opentelemetry/metrics/provider.h"
@@ -23,6 +29,56 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
+
+namespace {
+
+bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::path& prefix) {
+  auto path_it = path.begin();
+  for (auto prefix_it = prefix.begin(); prefix_it != prefix.end(); ++prefix_it, ++path_it) {
+    if (path_it == path.end() || *path_it != *prefix_it) {
+      return false;
+    }
+  }
+  return true;
+}
+
+absl::StatusOr<std::filesystem::path> normalize_disk_path(
+    std::string_view disk_path,
+    const std::filesystem::path& storage_root) {
+  if (storage_root.empty()) {
+    return absl::InvalidArgumentError("storage_path is required for disk materialization");
+  }
+  std::error_code ec;
+  std::filesystem::path candidate(disk_path);
+  if (!candidate.is_absolute()) {
+    candidate = storage_root / candidate;
+  }
+  auto normalized = std::filesystem::weakly_canonical(candidate, ec);
+  if (!ec) {
+    if (!path_has_prefix(normalized, storage_root)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "disk_path must resolve under storage_path: ",
+              normalized.string(),
+              " (root=",
+              storage_root.string(),
+              ")"));
+    }
+    return normalized;
+  }
+  normalized = candidate.lexically_normal();
+  if (normalized.empty()) {
+    return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
+  }
+  if (!path_has_prefix(normalized, storage_root)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));
+  }
+  return normalized;
+}
+
+} // namespace
 
 absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coalesced_int(
     int target_device_id,
@@ -74,8 +130,17 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  std::string normalized_disk_path;
+  if (!req->disk_path().empty()) {
+    auto normalized_or = normalize_disk_path(req->disk_path(), opts_.storage_path);
+    if (!normalized_or.ok()) {
+      return to_grpc_status(normalized_or.status());
+    }
+    normalized_disk_path = normalized_or->string();
+  }
+
   // Use engine's configured Global Store client for upsert.
-  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), req->disk_path());
+  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), normalized_disk_path);
   if (!up.ok()) {
     // For conflicts, return OK with ok=false for idempotency.
     if (absl::IsAlreadyExists(up)) {
@@ -133,17 +198,17 @@ Status StoreDaemonServiceImpl::StartPersistence(
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
-  if (req->placement_policy() == v1::PLACEMENT_POLICY_UNSPECIFIED) {
-    return {StatusCode::INVALID_ARGUMENT, "placement_policy is required"};
-  }
   if (is_shutting_down_.load()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
   if (!persistence_mgr_) {
     return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
   }
-  auto task_or =
-      persistence_mgr_->start_task(req->artifact_id(), req->placement_policy(), req->persist_to_shared_disk());
+  auto policy_or = resolve_store_policy(req->has_policy() ? &req->policy() : nullptr);
+  if (!policy_or.ok()) {
+    return to_grpc_status(policy_or.status());
+  }
+  auto task_or = persistence_mgr_->start_task(req->artifact_id(), *policy_or);
   if (!task_or.ok()) {
     return to_grpc_status(task_or.status());
   }
@@ -251,6 +316,7 @@ Status StoreDaemonServiceImpl::GetServerConfig(
 // Destructor: stop sweepers
 StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
   stop_sweepers();
+  engine_->set_stable_cache_spill_evictable({});
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -275,6 +341,14 @@ Status StoreDaemonServiceV2Impl::MaterializeReplica(
   return materialization_controller_.materialize_replica_v2(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceV2Impl::MaterializeIntoTarget(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeIntoTargetRequest* req,
+    v2::MaterializeIntoTargetResponse* resp) {
+  RpcContext rctx{"MaterializeIntoTarget", *ctx, allow_high_card_attrs_};
+  return materialization_controller_.materialize_into_target(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceV2Impl::MaterializeByKey(
     grpc::ServerContext* ctx,
     const v2::MaterializeByKeyRequest* req,
@@ -297,6 +371,7 @@ Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
     v2::GetMaterializeCapabilitiesResponse* resp) {
   RpcContext rctx{"GetMaterializeCapabilities", *ctx, allow_high_card_attrs_};
   resp->set_supports_view_subset_hash(true);
+  resp->set_supports_region_backed_get_into(true);
   rctx.mark_success();
   return Status::OK;
 }

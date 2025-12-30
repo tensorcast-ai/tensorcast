@@ -298,6 +298,13 @@ absl::Status MetadataGateway::keep_alive_registration(std::string_view registrat
   return registration_backend_->keep_alive(registration_id, ttl_ms);
 }
 
+absl::StatusOr<uint64_t> MetadataGateway::get_registration_gpu_ptr(std::string_view registration_id) const {
+  if (!registration_backend_) {
+    return absl::FailedPreconditionError("registration backend is not initialized");
+  }
+  return registration_backend_->get_registration_gpu_ptr(registration_id);
+}
+
 absl::Status MetadataGateway::ingest_view_chunk(
     std::string_view registration_id,
     uint64_t view_offset,
@@ -361,6 +368,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .memory_pool =
           gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{runtime_context_->pinned_buffer_pool()},
       .communication_manager = runtime_context_->communication_manager(),
+      .stable_cache_manager = runtime_context_->stable_cache_manager(),
       .async_runtime = runtime_context_->async_runtime(),
       .memory_tier_budget = runtime_context_->memory_tier_budget(),
       .memory_tier_config = runtime_context_->options().memory_tier_config,

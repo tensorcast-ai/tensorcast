@@ -25,6 +25,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_budget.h"
@@ -32,6 +33,10 @@
 #include "core/store/replica/replica.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
+
+namespace tensorcast::store::components {
+class StableDramCacheManager;
+} // namespace tensorcast::store::components
 
 namespace tensorcast::store::runtime::metadata {
 
@@ -63,11 +68,16 @@ struct ArtifactRegistration {
   std::string encoding{"json"};
   RegistrationPlan plan{RegistrationPlan::kCoalesced};
   StableDramOptions stable_dram;
+  std::optional<components::StableDramCachePolicy> stable_cache_policy;
   int device_id{0};
   uint64_t total_size_bytes{0};
   bool enable_p2p{true};
   uint32_t ttl_ms{0};
   std::optional<std::string> client_artifact_id;
+  // When set, commit will reuse the provided canonical `mi2:` artifact id
+  // without recomputing index/data multihashes. Used by daemon-side local
+  // stable materialization paths.
+  std::optional<std::string> artifact_id_override;
   std::optional<ViewRegistration> view;
 };
 
@@ -103,6 +113,7 @@ struct RegistrationResources {
   gsl::not_null<components::MetricsCollector*> metrics_collector;
   gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> memory_pool;
   std::shared_ptr<components::CommunicationManager> communication_manager;
+  std::shared_ptr<components::StableDramCacheManager> stable_cache_manager;
   std::shared_ptr<common::AsyncRuntime> async_runtime;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;

@@ -29,9 +29,12 @@ constexpr const char* kCudaDriverLibraryNames[] = {"libcuda.so.1", "libcuda.so"}
 // NOLINTBEGIN(readability-identifier-naming)
 struct CudaDriverVmmSymbols {
   decltype(&::cuInit) cuInit = nullptr;
+  decltype(&::cuDeviceGet) cuDeviceGet = nullptr;
+  decltype(&::cuDeviceGetAttribute) cuDeviceGetAttribute = nullptr;
   decltype(&::cuGetErrorName) cuGetErrorName = nullptr;
   decltype(&::cuGetErrorString) cuGetErrorString = nullptr;
   decltype(&::cuMemGetAllocationGranularity) cuMemGetAllocationGranularity = nullptr;
+  decltype(&::cuMemGetHandleForAddressRange) cuMemGetHandleForAddressRange = nullptr;
   decltype(&::cuMemAddressReserve) cuMemAddressReserve = nullptr;
   decltype(&::cuMemCreate) cuMemCreate = nullptr;
   decltype(&::cuMemMap) cuMemMap = nullptr;
@@ -104,6 +107,14 @@ absl::Status ensure_cuda_driver_loaded() {
       load_status = status;
       return;
     }
+    if (auto status = load_or(symbols.cuDeviceGet, "cuDeviceGet"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuDeviceGetAttribute, "cuDeviceGetAttribute"); !status.ok()) {
+      load_status = status;
+      return;
+    }
     if (auto status = load_or(symbols.cuGetErrorName, "cuGetErrorName"); !status.ok()) {
       load_status = status;
       return;
@@ -113,6 +124,10 @@ absl::Status ensure_cuda_driver_loaded() {
       return;
     }
     if (auto status = load_or(symbols.cuMemGetAllocationGranularity, "cuMemGetAllocationGranularity"); !status.ok()) {
+      load_status = status;
+      return;
+    }
+    if (auto status = load_or(symbols.cuMemGetHandleForAddressRange, "cuMemGetHandleForAddressRange"); !status.ok()) {
       load_status = status;
       return;
     }
@@ -619,6 +634,30 @@ absl::Status cu_init(unsigned int flags) {
   return cu_result_as_status(symbols.cuInit(flags), "cuInit");
 }
 
+absl::Status cu_device_get(CUdevice* device, int ordinal) {
+  if (device == nullptr) {
+    return absl::InvalidArgumentError("device pointer is null");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuDeviceGet(device, ordinal), "cuDeviceGet");
+}
+
+absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device) {
+  if (value == nullptr) {
+    return absl::InvalidArgumentError("value pointer is null");
+  }
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(symbols.cuDeviceGetAttribute(value, attribute, device), "cuDeviceGetAttribute");
+}
+
 absl::Status cu_mem_get_allocation_granularity(
     size_t* granularity,
     const CUmemAllocationProp* prop,
@@ -720,6 +759,28 @@ absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
   }
   const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
   return cu_result_as_status(symbols.cuMemAddressFree(ptr, size), "cuMemAddressFree");
+}
+
+absl::Status cu_mem_get_handle_for_address_range(
+    void* handle,
+    CUdeviceptr dptr,
+    size_t size,
+    CUmemRangeHandleType handle_type,
+    unsigned long long flags) {
+  if (handle == nullptr) {
+    return absl::InvalidArgumentError("handle is null");
+  }
+  if (dptr == 0 || size == 0) {
+    return absl::InvalidArgumentError("dptr/size invalid");
+  }
+
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  return cu_result_as_status(
+      symbols.cuMemGetHandleForAddressRange(handle, dptr, size, handle_type, flags), "cuMemGetHandleForAddressRange");
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {

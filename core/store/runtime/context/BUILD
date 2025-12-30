@@ -32,6 +32,7 @@ sc_cc_library(
         "//core/store:global_store_client",
         "//core/store:metrics_collector",
         "//core/store:replica_registry",
+        "//core/store:stable_dram_cache_manager",
         "//core/store:store_engine_options",
         "//core/store:worker_identity",
         "//core/store/materialization/common:view_hash_utils",

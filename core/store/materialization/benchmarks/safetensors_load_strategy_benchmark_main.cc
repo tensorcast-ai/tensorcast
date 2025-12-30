@@ -33,6 +33,7 @@
 #include "absl/strings/str_split.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/common/async_runtime.h"
 #include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/cuda_memory.h"
@@ -71,6 +72,14 @@ namespace {
     }                                  \
     (lhs) = std::move(_or).value();    \
   } while (0)
+
+common::AsyncRuntime& pump_benchmark_runtime() {
+  static common::AsyncRuntime runtime(
+      common::AsyncRuntime::Options{
+          .thread_name_prefix = "tensorcast-pump-bench",
+      });
+  return runtime;
+}
 
 enum class BenchMode : uint8_t {
   kLoader = 0,
@@ -1599,7 +1608,8 @@ absl::StatusOr<RunResult> run_strategy_a_baseline(
   r.bytes.h2d_bytes = total_payload_bytes;
   r.res.gpu_alloc_bytes = total_payload_bytes;
 
-  TC_RETURN_IF_ERROR(loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   r.t.open_copy = seconds_since(t_copy);
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
@@ -1700,7 +1710,8 @@ absl::StatusOr<std::pair<RunResult, StrategyAState>> run_strategy_a_baseline_wit
   r.bytes.h2d_bytes = s.total_payload_bytes;
   r.res.gpu_alloc_bytes = s.total_payload_bytes;
 
-  TC_RETURN_IF_ERROR(loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   r.t.open_copy = seconds_since(t_copy);
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
@@ -1867,7 +1878,9 @@ absl::StatusOr<MultiRankStrategyACollectivesResult> run_strategy_a_collectives_s
       r.bytes.disk_read_bytes = ctx.owned_total_bytes;
       r.bytes.h2d_bytes = ctx.owned_total_bytes;
 
-      TC_RETURN_IF_ERROR(loader::pump_ranges(src, sink, *pool_ptr, ranges_out, io_threads));
+      TC_RETURN_IF_ERROR(
+          loader::pump_ranges(
+              src, sink, *pool_ptr, ranges_out, io_threads, pump_benchmark_runtime().blocking_executor()));
       TC_RETURN_IF_ERROR(sink.close());
     } else {
       r.planned_ranges = 0;
@@ -2227,7 +2240,8 @@ absl::StatusOr<std::pair<RunResult, StrategyBState>> run_strategy_b_with_state(
   r.bytes.h2d_bytes = total_requested_bytes;
   (void)total_payload_bytes;
 
-  TC_RETURN_IF_ERROR(loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   r.t.commit = seconds_since(t_commit);
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
@@ -2392,7 +2406,8 @@ absl::Status run_safetensors_disk_baseline(const LoaderConfig& cfg, const std::v
   const auto sched_before = loader::get_gpu_scheduler_stats(cfg.device_id);
   const auto t0 = absl::Now();
   auto ranges = split_even_ranges(/*base=*/0, total_payload_bytes, io_threads);
-  TC_RETURN_IF_ERROR(loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(src, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
   const auto sched_waits = ((sched_after.waits >= sched_before.waits) ? (sched_after.waits - sched_before.waits) : 0);
@@ -2693,7 +2708,8 @@ absl::Status run_disk_baseline(const LoaderConfig& cfg) {
           .end_offset = cfg.disk_bench_bytes,
       }});
   auto ranges = split_even_ranges(/*base=*/0, cfg.disk_bench_bytes, io_threads);
-  TC_RETURN_IF_ERROR(loader::pump_ranges(remapped, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(remapped, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
   const uint64_t sched_waits =
@@ -2794,7 +2810,8 @@ absl::Status run_disk_fragmentation(const LoaderConfig& cfg) {
 
   const auto t0 = absl::Now();
   const auto sched_before = loader::get_gpu_scheduler_stats(cfg.device_id);
-  TC_RETURN_IF_ERROR(loader::pump_ranges(remapped, sink, *pool_ptr, ranges, io_threads));
+  TC_RETURN_IF_ERROR(
+      loader::pump_ranges(remapped, sink, *pool_ptr, ranges, io_threads, pump_benchmark_runtime().blocking_executor()));
   TC_RETURN_IF_ERROR(sink.close());
   const auto sched_after = loader::get_gpu_scheduler_stats(cfg.device_id);
   const uint64_t sched_waits =

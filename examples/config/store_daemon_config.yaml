@@ -27,7 +27,7 @@ server:
     host: 0.0.0.0
     # P2P port; must be non-zero when high_availability.enabled is true.
     port: 65090
-  # Root directory for daemon-owned artifacts; disk materialization and fallback paths derive from here.
+  # Shared root directory for daemon-owned artifacts; all disk_path values must resolve under this root.
   storage_path: /data/models
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
@@ -79,10 +79,6 @@ engine:
   streaming_buffer_max_concurrent_sessions: 1
   # Wait time for pinned buffer allocation under pressure; raise if large transfers outlive the default.
   pinned_allocation_timeout: 30s
-  # Optional disk fallback directory for P2P loads; invalid paths are ignored with a warning.
-  p2p_fallback_disk_dir: ""
-  # Allowlist for daemon-side disk materialization; empty list permits all paths (use with care).
-  disk_path_whitelist: []
 
 # Global Store registration and heartbeat coordination.
 high_availability:

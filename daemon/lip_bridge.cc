@@ -32,7 +32,8 @@ absl::StatusOr<bool> LipBridge::try_satisfy_from_lip(
       lip_src->index_data,
       lip_src->total_size,
       absl::MakeSpan(lip_src->segments),
-      absl::MakeSpan(lip_src->storages));
+      absl::MakeSpan(lip_src->storages),
+      lip_src->owner_pid);
   if (!hbytes_or.ok())
     return hbytes_or.status();
 

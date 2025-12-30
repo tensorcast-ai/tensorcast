@@ -40,6 +40,7 @@ sc_header_only_library(
         "//core/store/replica:memory_state",
         "@abseil-cpp//absl/hash",
         "@folly//folly/futures:core",
+        "@glog",
     ],
 )
 

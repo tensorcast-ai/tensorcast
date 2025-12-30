@@ -95,6 +95,41 @@ absl::Status RuntimeContext::start() {
     }
     memory_tier_budget_ = std::make_shared<MemoryTierBudget>(std::move(*budget_or));
   }
+  auto spill_guard = [weak_client = std::weak_ptr<components::IGlobalStoreClient>(global_store_client_),
+                      storage_path = options_.storage_path](const auto& key) -> absl::Status {
+    if (storage_path.empty()) {
+      return absl::FailedPreconditionError("storage_path is required for shared disk spill");
+    }
+    auto client = weak_client.lock();
+    if (!client || !client->is_connected()) {
+      return absl::FailedPreconditionError("global store unavailable for shared disk spill");
+    }
+    (void)key;
+    return absl::OkStatus();
+  };
+  stable_cache_manager_ =
+      std::make_shared<components::StableDramCacheManager>(components::StableDramCacheManager::Config{
+          .registry = gsl::not_null<components::ReplicaRegistry*>{replica_registry_.get()},
+          .memory_tier_budget = memory_tier_budget_,
+          .spill_guard = std::move(spill_guard),
+      });
+  if (events_) {
+    stable_cache_subscription_ = events_->subscribe([weak_mgr = std::weak_ptr<components::StableDramCacheManager>(
+                                                         stable_cache_manager_)](const RuntimeEvent& event) {
+      if (event.type != RuntimeEventType::kReplicaEvicted) {
+        return;
+      }
+      const auto* payload = std::get_if<ReplicaLifecycleEvent>(&event.payload);
+      if (payload == nullptr) {
+        return;
+      }
+      auto mgr = weak_mgr.lock();
+      if (!mgr) {
+        return;
+      }
+      mgr->on_replica_evicted(payload->key, "runtime_evicted");
+    });
+  }
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
   started_ = true;
   return absl::OkStatus();
@@ -116,6 +151,8 @@ void RuntimeContext::shutdown() {
   if (events_) {
     events_->drain();
   }
+  stable_cache_subscription_.reset();
+  stable_cache_manager_.reset();
   replica_registry_->clear_all();
   global_store_client_.reset();
   comm_manager_.reset();

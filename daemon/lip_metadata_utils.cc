@@ -22,10 +22,23 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
     return std::string{};
   }
 
+  absl::flat_hash_map<std::string, uint64_t> storage_to_dst;
+  storage_to_dst.reserve(segments.size());
   absl::flat_hash_map<std::string, uint64_t> handle_to_dst;
   handle_to_dst.reserve(segments.size());
   for (const auto& seg : segments) {
-    handle_to_dst.emplace(seg.handle_bytes, seg.dst_offset);
+    if (!seg.storage_id.empty()) {
+      auto [it, inserted] = storage_to_dst.emplace(seg.storage_id, seg.dst_offset);
+      if (!inserted && it->second != seg.dst_offset) {
+        return absl::InvalidArgumentError(absl::StrCat("conflicting dst_offset for storage_id=", seg.storage_id));
+      }
+    }
+    if (!seg.handle_bytes.empty()) {
+      auto [it, inserted] = handle_to_dst.emplace(seg.handle_bytes, seg.dst_offset);
+      if (!inserted && it->second != seg.dst_offset) {
+        return absl::InvalidArgumentError("conflicting dst_offset for handle_bytes segment");
+      }
+    }
   }
 
   absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
@@ -58,12 +71,17 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
       return absl::InvalidArgumentError(absl::StrCat("missing storage entry for alias storage_id=", alias.storage_id));
     }
     const RegisterStorageMeta* storage_meta = storage_it->second;
-    auto dst_it = handle_to_dst.find(storage_meta->handle_bytes);
-    if (dst_it == handle_to_dst.end()) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("missing segment entry for storage handle (id=", alias.storage_id, ")"));
+    std::optional<uint64_t> base_dst;
+    if (auto dst_it = storage_to_dst.find(alias.storage_id); dst_it != storage_to_dst.end()) {
+      base_dst = dst_it->second;
+    } else if (storage_meta->has_handle()) {
+      if (auto dst_it = handle_to_dst.find(storage_meta->handle_bytes); dst_it != handle_to_dst.end()) {
+        base_dst = dst_it->second;
+      }
     }
-    const uint64_t base_dst = dst_it->second;
+    if (!base_dst.has_value()) {
+      return absl::InvalidArgumentError(absl::StrCat("missing segment entry for storage_id=", alias.storage_id));
+    }
     if (alias.storage_offset + alias.logical_length > storage_meta->storage_length) {
       return absl::OutOfRangeError(
           absl::StrCat(
@@ -81,7 +99,7 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
     ordered_names.push_back(name);
     // Emit storage-level destination offset for every alias to keep canonical
     // index bytes stable across LIP and disk registrations.
-    offsets.emplace(name, base_dst);
+    offsets.emplace(name, *base_dst);
     storage_sizes.emplace(name, storage_meta->storage_length);
     store::loader::CanonicalTensorMeta meta;
     meta.shape = alias.shape;
