@@ -105,7 +105,7 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
   return materialization_controller_->confirm(rctx, *req, *resp);
 }
 
-// RFC-0014: Materialize by key using Global Store mapping
+// Key-based materialization via Global Store mapping.
 Status StoreDaemonServiceImpl::MaterializeByKey(
     grpc::ServerContext* ctx,
     const v1::MaterializeByKeyRequest* req,
@@ -114,7 +114,7 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
   return materialization_controller_->materialize_by_key(rctx, *req, *resp);
 }
 
-// RFC-0014: Publish key mapping – lightweight wrapper to Global Store
+// Publish key mapping via Global Store.
 Status StoreDaemonServiceImpl::PublishReplicaKey(
     grpc::ServerContext* ctx,
     const v1::PublishReplicaKeyRequest* req,

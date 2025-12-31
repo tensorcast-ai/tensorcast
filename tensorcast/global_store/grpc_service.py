@@ -1227,7 +1227,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
-    # ========== RFC-0014: Key Mapping ==========
+    # ========== Key Mapping ==========
 
     def UpsertKeyMapping(
         self,

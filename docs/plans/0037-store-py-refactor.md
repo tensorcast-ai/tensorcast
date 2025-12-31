@@ -21,7 +21,7 @@ Deliver the modular split proposed in Design 0037 so that `tensorcast/api/store.
 - Lease tracking and session-record writes are intertwined with executor bookkeeping and `_ensure_client` (e.g., `_track_future`, `_persist_session_record_locked`), making correctness hard to isolate in tests.
 - Fallback and view handling span multiple helpers (`_resolve_key_mapping_cached`, `_resolve_disk_path`, `_materialize`, `_resolve_view_inputs`), with implicit invariants about placement defaults and disk compatibility.
 - Async flows (`register_async`, `put_async`, `get_async`, `get_into_async`) each manage their own cancellation hooks, risking drift from the sync code paths.
-- Recent designs (0014, 0033, 0035, 0036) expect clearer runtime boundaries and typed view orchestration than the current monolith provides.
+- Recent designs ([api-design](../architecture/api/api-design.md), 0033, 0035, 0036) expect clearer runtime boundaries and typed view orchestration than the current monolith provides.
 
 # Phases & Milestones
 

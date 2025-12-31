@@ -193,7 +193,7 @@ prefetched.tensor_dict(device="cuda:0")
 
 For advanced scenarios (async verbs, fine-grained inspection, or direct access to diagnostics) use
 `tc.store()` to obtain the underlying `Store` session object. That object exposes the complete
-surface described in [docs/designs/0014-store-session-api-modernization.md](docs/designs/0014-store-session-api-modernization.md),
+surface described in [docs/architecture/api/api-design.md#store-and-entry-points](docs/architecture/api/api-design.md#store-and-entry-points),
 including async futures, retry telemetry, and session metadata.
 For test doubles or advanced embeddings, you can inject custom registration/materialization
 handlers via `Store(..., register_fn=..., materialize_fn=...)` or swap them on an existing

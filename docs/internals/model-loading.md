@@ -15,7 +15,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
-- **LocalStoreDaemon**: C++ gRPC service (RFC‑0011, RFC‑0014)
+- **LocalStoreDaemon**: C++ gRPC service (see `../architecture/api/api-design.md`)
   - Binary: `daemon/tensorcast_daemon`
   - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/ConfirmReplica/UnloadReplica；兼容保留 MaterializeReplica)
 
@@ -47,7 +47,7 @@ sequenceDiagram
     Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
     InferenceInstance->>LocalStoreDaemon: 1. MaterializeByKey (alloc + async load)
-    Note left of LocalStoreDaemon: RPC: MaterializeByKey (RFC‑0014)
+    Note left of LocalStoreDaemon: RPC: MaterializeByKey
 
     LocalStoreDaemon->>GlobalStore: 2. Resolve Key → Artifact ID + disk hint
     Note left of GlobalStore: RPC: ResolveKeyMapping
@@ -116,7 +116,7 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 7. **Registration & Publish**: Once ingestion completes, `MaterializationFacade` marks the Global Store transport session finished, registers or refreshes the replica metadata, and publishes `ingestion_completed` events with the original `publish_context_id` so ReplicaRuntime and MetadataGateway stay in lock-step.
 8. **Cleanup**: When inference exits or releases the tensors, it calls `UnloadReplica`. The daemon drops the PID reference, releases the associated `UseLease`, and only tears down the GPU allocation once no active references remain, ensuring shared replicas survive across overlapping consumers.
 
-## In-Memory Registration (RFC-0014)
+## In-Memory Registration (Store API)
 
 - Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:

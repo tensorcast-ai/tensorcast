@@ -14,6 +14,7 @@ This section contains comprehensive guides for developers working on or extendin
 Understand how TensorCast works:
 
 - **[Component Interactions](architecture/README.md)** - How components work together
+- **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
 
 ## 🔧 Component Development

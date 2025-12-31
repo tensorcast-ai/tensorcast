@@ -58,11 +58,11 @@ service GlobalStoreService {
   // Update chunk states (called by StoreDaemon periodically)
   rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
 
-  // ========== Placement & Persistence (Design-0041) ==========
+  // ========== Placement & Persistence ==========
   rpc PlanPlacement(PlanPlacementRequest) returns (PlanPlacementResponse) {}
   rpc ReportPersistenceStatus(ReportPersistenceStatusRequest) returns (ReportPersistenceStatusResponse) {}
 
-  // ========== Key Mapping (RFC-0014) ==========
+  // ========== Key Mapping ==========
   // Map a human-readable key to a single artifact_id, with optional replica hints
   rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
   // Resolve a key to its artifact_id and optional hints
@@ -516,7 +516,8 @@ message ListReplicasV2Response {
   tensorcast.common.v1.PageInfo page_info = 2;
 }
 
-// ========== Placement & Persistence (Design-0041) ==========
+// ========== Placement & Persistence ==========
+// See docs/architecture/api/policy-persistence.md for policy and task flow.
 enum PlacementPolicy {
   PLACEMENT_POLICY_UNSPECIFIED = 0;
   PLACEMENT_POLICY_LOCAL_ONLY = 1;
@@ -605,7 +606,8 @@ message ReportPersistenceStatusResponse {
   Status status = 1;
 }
 
-// ========== RFC-0014 Key Mapping Messages ==========
+// ========== Key Mapping Messages ==========
+// See docs/architecture/api/materialization-flow.md for key mapping usage.
 // Upsert/resolve a mapping from a human-friendly key to a content-addressed artifact_id.
 // The mapping is unique: one key must point to exactly one artifact_id.
 // Optional fields provide hints (e.g., a known disk_path) for client fallbacks.

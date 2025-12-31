@@ -204,7 +204,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 
 ### PlacementService
 
-**Purpose:** Plan shard placement and ingest persistence status (Design 0041).
+**Purpose:** Plan shard placement and ingest persistence status. See `../../docs/architecture/api/policy-persistence.md`.
 
 **Key behaviors:**
 - Generates placement plans that always include the source node and attempt a stable-DRAM remote target when policy is `replicated` or `sharded`; degrades to local-only when no remote capacity is available.

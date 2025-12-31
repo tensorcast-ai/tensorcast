@@ -223,7 +223,7 @@ CREATE INDEX IF NOT EXISTS idx_chunk_directory_state ON chunk_directory(chunk_st
 CREATE INDEX IF NOT EXISTS idx_chunk_directory_update_time ON chunk_directory(last_update_time);
 CREATE INDEX IF NOT EXISTS idx_chunk_directory_source_selection ON chunk_directory(artifact_id, chunk_idx, chunk_state, node_load_ratio);
 
--- Persistence placement plans (Design-0041)
+-- Persistence placement plans (docs/architecture/api/policy-persistence.md)
 CREATE TABLE IF NOT EXISTS artifact_placements (
     plan_id TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL,
@@ -275,7 +275,7 @@ CREATE TABLE IF NOT EXISTS artifact_persistence_status (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_persistence_status_artifact_state ON artifact_persistence_status(artifact_id, state);
 
--- RFC-0014: Human key → artifact_id mapping with optional routing hints
+-- Key mapping: Human key -> artifact_id with optional routing hints
 CREATE TABLE IF NOT EXISTS key_mappings (
     key TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL,

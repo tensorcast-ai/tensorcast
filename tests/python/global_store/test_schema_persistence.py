@@ -2,7 +2,7 @@
 
 # Copyright (c) 2025, TensorCast Team.
 
-"""Schema smoke tests for persistence placement tables (Design-0041)."""
+"""Schema smoke tests for persistence placement tables (docs/architecture/api/policy-persistence.md)."""
 
 from __future__ import annotations
 

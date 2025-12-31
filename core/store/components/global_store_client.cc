@@ -1319,7 +1319,7 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
   return std::make_pair(response.new_state_version(), response.new_state_checksum());
 }
 
-// ========== RFC-0014: Key Mapping ==========
+// ========== Key Mapping ==========
 
 absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_view key) {
   global_store::ResolveKeyMappingRequest request;

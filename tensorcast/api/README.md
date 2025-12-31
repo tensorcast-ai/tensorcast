@@ -16,9 +16,9 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
-## Store Policy, Local Stable Tier, and Persistence (Design 0044/0045)
+## Store Policy, Local Stable Tier, and Persistence
 
-- `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch.
+- `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch. See `../../docs/architecture/api/policy-persistence.md`.
 - If both `policy` and `options.policy` are provided, the SDK rejects conflicts after normalization to avoid silent divergence.
 - Policies can be simple profiles (`cache`, `durable`, `ha`, `cold`, `pinned`, `warm`) or explicit `must`/`should`/`may` tier lists with `overflow_policy` and `layout` overrides.
 - Tier constraints are enforced: `shared_disk` forbids retention fields, `stable_dram` supports only `min_replicas=1`, remote-only stable tiers disallow retention settings, and `must` local stable tiers require `pinned` retention.

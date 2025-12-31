@@ -12,7 +12,7 @@ This document explains High Availability (HA) as implemented in code: startup re
 
 ## TODO
 
-- Add persistence-task durability/resume plan for distributed persistence (daemon-local journal + recovery flow) once design 0041 lands.
+- Add persistence-task durability/resume plan for distributed persistence (daemon-local journal + recovery flow). See `docs/architecture/api/policy-persistence.md` for the current model.
 
 ## Key Components (sources)
 

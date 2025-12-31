@@ -87,7 +87,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - Single-process Store: all functional helpers delegate to the process Store (singleton); initialization flows through `StoreRuntimeContext` with `get_daemon_client`.
 - View composition: uses `ViewSpecComposer` and `ViewMetadataCache`; derived handles keep parent hints and share caches.
 - Prefetch: returns `(handle_clone, PrefetchTicket)`; the clone carries `replica_uuid` via `FallbackOptions` while the original handle stays untouched. Tickets expose `wait()`/`cancel()` for staged replicas.
-- Region-backed registration: unchanged semantics per 0021; clearly scoped as an advanced lifecycle path.
+- Region-backed registration: unchanged semantics per [region-backed](../architecture/api/region-backed.md); clearly scoped as an advanced lifecycle path.
 - Error surfaces: constructing an `Artifact` handle never raises `NOT_FOUND`; `ArtifactError` is raised on materialization (`tensor*`, `tensor_dict*`, `tensor_dict_into`, `tensor_into`) or explicit checks (`exists()`) when identity/metadata resolution fails.
 
 ## Naming Compliance (Python)
@@ -129,9 +129,9 @@ None. No persistent schema or proto schema changes are required; reuse existing 
 
 # References
 
-- 0014-store-session-api-modernization.md
+- [api-design](../architecture/api/api-design.md)
 - 0016-artifact-view-v1.md
-- 0021-region‑backed-registration.md
+- [region-backed](../architecture/api/region-backed.md)
 - 0036-02-artifact-handle-core.md
 - 0036-03-lazy-artifact-handle.md
 - 0036-04-disk-artifact-variant.md

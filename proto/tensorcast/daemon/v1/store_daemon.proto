@@ -54,7 +54,8 @@ service StoreDaemonService {
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
 
-  // ========== RFC-0014: Key-based materialization and publish ==========
+  // ========== Key-based materialization and publish ==========
+  // See docs/architecture/api/materialization-flow.md for semantics.
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
@@ -62,7 +63,8 @@ service StoreDaemonService {
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
 
-  // ========== Persistence (Design-0041) ==========
+  // ========== Persistence ==========
+  // See docs/architecture/api/policy-persistence.md for policy and task flow.
   rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
   rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
 }
@@ -751,13 +753,13 @@ message DeregisterArtifactResponse {
   optional string message = 4;
 }
 
-// RFC-0014
+// Key-based materialization request.
 message MaterializeByKeyRequest {
   string key = 1;
   int32 device_id = 2;
   int32 pinned_allocation_timeout_ms = 3;
   int32 pid = 4;
-  string replica_uuid = 5; // RFC-0014: track session for Confirm/Verification
+  string replica_uuid = 5; // Track session for Confirm/Verification.
 }
 message MaterializeByKeyResponse {
   optional MemCopyHandle mem_handle = 1;
@@ -780,7 +782,7 @@ message PublishReplicaKeyResponse {
   string conflict_reason = 2;
 }
 
-// RFC-0014 helpers exposed via daemon to keep API clients decoupled from Global Store.
+// Key mapping helpers exposed via daemon to keep API clients decoupled from Global Store.
 message ResolveKeyMappingRequest {
   string key = 1;
 }
@@ -796,7 +798,7 @@ message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
 }
 
-// ========== Persistence (Design-0041) ==========
+// ========== Persistence ==========
 message PersistenceShardStatus {
   string shard_id = 1;
   uint32 shard_idx = 2;

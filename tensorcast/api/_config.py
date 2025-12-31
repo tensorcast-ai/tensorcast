@@ -599,7 +599,7 @@ class RegisterArtifactOptions(BaseModel):
     min_tensor_bytes: int = 64 * 1024
     max_tensor_count: int = 8192
     lease_bytes_limit: int = 0
-    # Lease/LIP specific: opt-in in-place mode per RFC-0014
+    # Lease/LIP specific: opt-in in-place mode for LIP flows.
     lease_in_place: bool = False
     # Stable DRAM options
     stage_on_gpu: bool = True

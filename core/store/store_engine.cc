@@ -533,7 +533,7 @@ absl::Status StoreEngine::unregister_replica_from_global_store(std::string_view 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// RFC-0014: Key-mapping wrappers
+// Key-mapping wrappers
 // ═══════════════════════════════════════════════════════════════════════════
 
 absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::string_view key) {

@@ -6,7 +6,7 @@ links:
 areas: ["core", "daemon", "sdk", "proto"]
 related_code:
   - docs/internals/tensor_dict_into_dataflow.md
-  - docs/designs/0021-region‑backed-registration.md
+  - docs/architecture/api/region-backed.md
   - docs/designs/0004-unified-runtime-config.md
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/config/v1/client_config.proto
@@ -583,7 +583,7 @@ Proposed API and type names follow repository conventions:
 
 # References
 
-- `docs/designs/0021-region‑backed-registration.md`
+- `docs/architecture/api/region-backed.md`
 - `docs/internals/tensor_dict_into_dataflow.md`
 - `core/store/materialization/dataplane/runtime/pump.h`
 - `daemon/service/controllers/materialization_controller.cc`

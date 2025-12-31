@@ -170,7 +170,7 @@ CREATE INDEX idx_chunk_directory_source_selection ON chunk_directory(
     artifact_id, chunk_idx, chunk_state, node_load_ratio
 );
 
--- ========== Persistence placement plans (Design-0041) ==========
+-- ========== Persistence placement plans (docs/architecture/api/policy-persistence.md) ==========
 CREATE TABLE IF NOT EXISTS artifact_placements (
     plan_id TEXT PRIMARY KEY,
     artifact_id TEXT NOT NULL,
@@ -222,7 +222,7 @@ CREATE TABLE IF NOT EXISTS artifact_persistence_status (
 );
 CREATE INDEX IF NOT EXISTS idx_artifact_persistence_status_artifact_state ON artifact_persistence_status(artifact_id, state);
 
--- ========== RFC-0014: Key → Artifact Mapping ==========
+-- ========== Key Mapping ==========
 -- Maps a human-friendly key to a single content-addressed artifact_id.
 -- Optional hints allow clients to fall back to a disk path when P2P fails.
 

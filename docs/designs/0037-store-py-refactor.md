@@ -8,7 +8,7 @@ related_code:
   - tensorcast/api/_register.py
   - tensorcast/api/_view_ops.py
 links:
-  prior_design: ./0014-store-session-api-modernization.md
+  prior_design: ../architecture/api/api-design.md
   runtime_unification: ./0033-store-runtime-unification.md
 ---
 
@@ -134,6 +134,6 @@ None.
 # References
 
 - Current implementation: `tensorcast/api/store.py` (session lifecycle, retry/metering, fallback, view handling).
-- Design 0014: Store Session API Modernization.
+- Store session API details: [api-design](../architecture/api/api-design.md#store-and-entry-points).
 - Design 0033: Store Runtime Unification.
 - Design 0035/Plan 0035: ViewSpec Builder Refactor (shared view orchestration patterns).

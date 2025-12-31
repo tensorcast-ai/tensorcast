@@ -164,7 +164,7 @@ Variant-aware requests carry `hints.variant.view_id`; the daemon attempts a view
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
 
-## VRAM Leased-In-Place (RFC‑0014)
+## VRAM Leased-In-Place
 
 LIP adds a replica mode where a producer process exposes its existing GPU memory to the daemon with a time‑bounded lease, avoiding copies into daemon‑owned VRAM at Commit.
 

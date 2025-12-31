@@ -313,7 +313,7 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
       const v1::RevokeRegisteredArtifactRequest* req,
       v1::RevokeRegisteredArtifactResponse* resp) override;
 
-  // RFC-0014
+  // Key-based materialization and key mapping.
   grpc::Status MaterializeByKey(
       grpc::ServerContext* ctx,
       const v1::MaterializeByKeyRequest* req,

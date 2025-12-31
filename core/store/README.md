@@ -123,7 +123,7 @@ graph TB
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
-  Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
+  Note: In the key-based client flow, the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 
 - In-memory registration (RFC-0006/0007):
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`

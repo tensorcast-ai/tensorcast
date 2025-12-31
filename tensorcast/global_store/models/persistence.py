@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-"""Placement and persistence domain models (Design-0041)."""
+"""Placement and persistence domain models."""
 
 from __future__ import annotations
 

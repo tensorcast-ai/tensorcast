@@ -1010,7 +1010,7 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: bool = False,
     ):
-        """Materialize a replica by RFC-0014 key via daemon.
+        """Materialize a replica by key via daemon.
 
         Returns
             If wait_for_completion=True: (cuda_ipc_handle_bytes, used_disk_path, artifact_id)
@@ -1170,10 +1170,10 @@ class DaemonCtl:
         timeout_s: float = 30.0,
         view: store_daemon_pb2.ViewRegistrationOptions | None = None,
     ) -> BeginRegisterArtifactResult:
-        """Begin unified artifact registration (RFC-0014).
+        """Begin unified artifact registration.
 
         Args:
-            device_id: target device ordinal (single-GPU invariant per RFC-0014).
+            device_id: target device ordinal (single-GPU invariant).
             total_size_bytes: AVBS total size (8B aligned).
             ttl_ms: optional TTL used by Lease/UMA/VS plans.
             tensor_index_key: optional hex key of canonical index.
@@ -1770,7 +1770,7 @@ class DaemonCtl:
                 return None
 
     # ------------------------------------------------------------------
-    # RFC-0014: Key mapping publish via daemon
+    # Key mapping publish via daemon
     # ------------------------------------------------------------------
 
     def publish_replica_key(
@@ -1824,7 +1824,7 @@ class DaemonCtl:
                 raise
 
     # ------------------------------------------------------------------
-    # RFC-0014 helpers to keep API layer decoupled from Global Store
+    # Key mapping helpers to keep API layer decoupled from Global Store
     # ------------------------------------------------------------------
 
     def resolve_key_mapping(
