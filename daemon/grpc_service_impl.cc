@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -363,17 +363,6 @@ Status StoreDaemonServiceV2Impl::ResolveArtifactFromDisk(
     v2::ResolveArtifactFromDiskResponse* resp) {
   RpcContext rctx{"ResolveArtifactFromDisk", *ctx, allow_high_card_attrs_};
   return materialization_controller_.resolve_artifact_from_disk(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceV2Impl::GetMaterializeCapabilities(
-    grpc::ServerContext* ctx,
-    const v2::GetMaterializeCapabilitiesRequest* /*req*/,
-    v2::GetMaterializeCapabilitiesResponse* resp) {
-  RpcContext rctx{"GetMaterializeCapabilities", *ctx, allow_high_card_attrs_};
-  resp->set_supports_view_subset_hash(true);
-  resp->set_supports_region_backed_get_into(true);
-  rctx.mark_success();
-  return Status::OK;
 }
 
 Status StoreDaemonServiceImpl::LockTransportChunks(

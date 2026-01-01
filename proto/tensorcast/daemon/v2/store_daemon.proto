@@ -11,7 +11,6 @@ service StoreDaemonService {
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
-  rpc GetMaterializeCapabilities(GetMaterializeCapabilitiesRequest) returns (GetMaterializeCapabilitiesResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
 }
@@ -193,13 +192,6 @@ message ResolveArtifactFromDiskResponse {
   string disk_path = 2;
   bytes canonical_index_bytes = 3;
   uint64 generation = 4;
-}
-
-message GetMaterializeCapabilitiesRequest {}
-
-message GetMaterializeCapabilitiesResponse {
-  bool supports_view_subset_hash = 1;
-  bool supports_region_backed_get_into = 2;
 }
 
 message QueryReplicaStatusResponse {

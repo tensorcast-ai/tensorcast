@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -126,9 +126,6 @@ class _DummyRuntime:
             mem_pool_bytes=0,
             tx_slice_bytes=0,
             artifact_chunk_bytes=0,
-            supports_coalesced=False,
-            supports_lease=False,
-            supports_region_backed_get_into=False,
             server_config=None,
         )
 

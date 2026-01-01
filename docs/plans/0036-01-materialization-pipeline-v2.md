@@ -19,7 +19,7 @@ Deliver the streaming `MaterializationPipeline` described in the design by (1) r
 
 - `MaterializationPipeline` now streams `MaterializationPayload` from the daemon v2 surface by default. Public `get*` methods accept `tensor_names` and filter payloads; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.
 - `materialize_artifact_v2` calls the v2 gRPC RPCs, builds descriptors from daemon responses, and yields tensors lazily off the CUDA IPC handle. Canonical/view index bytes are trimmed to requested tensors; lifetimes remain guarded via `_release_materialized`.
-- The v2 gRPC service is always registered with a `GetMaterializeCapabilities` probe. Descriptor construction now uses UMA view plans for view requests, falling back to canonical/view index JSON for non-view paths.
+- The v2 gRPC service is always registered; descriptor construction uses UMA view plans for view requests, falling back to canonical/view index JSON for non-view paths.
 - Disk fallback now travels through `DiskFallbackHint` + `SourcePreference` and no longer invokes SDK disk helpers; daemon disk descriptor parity tests and docs remain outstanding.
 - Added `tests/python/api/test_materialization_pipeline_v2.py` covering selective fetch, iterator cancellation, and copy semantics for streaming payloads.
 
@@ -28,7 +28,7 @@ Deliver the streaming `MaterializationPipeline` described in the design by (1) r
 - [x] **Phase 1: Proto + Daemon Surface Rev**
   - [x] Add `proto/tensorcast/daemon/v2/store_daemon.proto` with `MaterializeReplicaRequest/Response` v2, `MaterializeByKeyRequest/Response` v2, `TensorPayloadDescriptor`, `DiskFallbackHint`, and `ViewSubset`. Update `MODULE.bazel`, `buf.gen.yaml`, and Bazel BUILD rules so Buf + Bazel generate the new package.
 - [x] Extend the daemon’s `StoreDaemonServiceImpl` (under `daemon/materialization/`) to populate descriptor arrays using UMA metadata (`core/store/materialization/dataplane/view/view_plan_source.h`). V2 services are always registered alongside v1 for legacy compatibility.
-  - [x] Wire capability probing (`MaterializeCapabilities` or similar) so SDKs can detect whether the daemon exposes v2.
+  - [x] Remove materialize capability probing from SDK handshakes.
 
 - [x] **Phase 2: Python Streaming Payloads**
   - [x] Introduce `MaterializationPayload` + `materialize_artifact_v2()` in `tensorcast/api/_materialize.py`. Reuse `get_cuda_memory_ptr` but return a lazy iterator that yields `(TensorPayloadDescriptor, memoryview)`; wrap lifetimes with `contextlib.ExitStack` so `_release_materialized` semantics carry over.
@@ -56,7 +56,7 @@ Deliver the streaming `MaterializationPipeline` described in the design by (1) r
 
 - `materialize_artifact_v2` now calls the daemon v2 RPCs, streams descriptors off CUDA IPC handles, and trims descriptors/canonical index bytes when `tensor_names` are supplied. SDK always uses the v2 path; the v1 helper has been removed from exports.
 - `MaterializationPipeline` uses streaming payloads for all `get*` paths; `get_into*` copies consume iterators directly and async flows still unload replicas on completion/cancel.
-- The v2 gRPC service is always registered in `server_main` with a `GetMaterializeCapabilities` RPC. Descriptor construction now uses UMA view plans when a view is requested, falling back to canonical/view index JSON for non-view calls.
+- The v2 gRPC service is always registered in `server_main`. Descriptor construction now uses UMA view plans when a view is requested, falling back to canonical/view index JSON for non-view calls.
 - Disk fallbacks are routed through `DiskFallbackHint`/`SourcePreference`; SDK disk helpers are no longer used in the v2 path. Daemon disk descriptor tests are still pending; docs were refreshed to reflect the daemon-only invariant and checksum hint.
 - Per-descriptor telemetry is attached to the client span/metrics, including tensor counts/bytes and a subset/full selector.
 - Buf format/regeneration has been run (`bash tools/build_proto_python.sh`); Python stubs for `tensorcast.proto.daemon.v2` are generated. New suite `tests/python/api/test_materialization_pipeline_v2.py` is passing under `uv run pytest`.

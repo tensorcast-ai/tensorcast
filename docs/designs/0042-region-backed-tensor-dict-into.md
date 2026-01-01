@@ -165,8 +165,8 @@ daemon-side write. It builds a `TargetLayout` only when all of the following are
 - Phase 1 rejects view requests (`view` / `view_id`) for region-backed targets.
 - `device_uuid` is required and treated as authoritative for device identity; `device_id`
   is carried only as a local ordinal and must match the daemon-resolved UUID.
-- The daemon advertises `supports_region_backed_get_into`; otherwise the SDK falls back
-  or errors based on `region_backed_mode`.
+- The SDK assumes region-backed `MaterializeIntoTarget` support; fallback is still
+  controlled by `region_backed_mode`.
 
 **Construction steps**
 1. Resolve artifact identity and fetch canonical index bytes (already cached).
@@ -224,9 +224,6 @@ cannot build a canonical layout, the SDK falls back or errors based on
 ### Capabilities and Config Integration
 - Extend `ClientConfig.defaults` with `region_backed_mode` so the default path is
   driven by the unified runtime config system.
-- Extend `StoreCapabilities` with `supports_region_backed_get_into` and populate it
-  by calling `GetMaterializeCapabilities` during session initialization (in addition
-  to `GetServerConfig`).
 - `region_backed_mode` defaults to the configured value and can be overridden per call,
   but into paths are the only consumers until `GetIntoOptions` is introduced.
 
@@ -275,10 +272,6 @@ message MaterializeIntoTargetResponse {
   uint64 generation = 7;
 }
 
-message GetMaterializeCapabilitiesResponse {
-  bool supports_view_subset_hash = 1;
-  bool supports_region_backed_get_into = 2;
-}
 ```
 
 When `MaterializeIntoTarget` is used:
@@ -555,15 +548,13 @@ updates are acceptable in this pre-launch phase.
 - Region-backed writes use `MaterializeIntoTarget`; existing get/get_into paths remain
   available but are not extended with `target_layout`.
 - `region_backed_mode` affects only into paths; `get` / `get_view` remain unchanged.
-- SDKs still gate the feature on `supports_region_backed_get_into` to allow mixed
-  daemon/client deployments during rollout.
 
 ## Acceptance Criteria
 - Daemon VRAM usage does not exceed target region size during `tensor_dict_into`.
 - IPC handle count per `tensor_dict_into` is limited to region handles only.
 - Phase 1 skips external-target verification and reports the skip via metrics.
 - Observability: new counters for region-backed get-into success/failure and fallback
-  reasons (no region, non-contiguous, capability missing, layout mismatch).
+  reasons (no region, non-contiguous, layout mismatch).
 - Region-backed transfers are non-cancelable once started; failures mark the region
   poisoned and return `DATA_LOSS`/`FAILED_PRECONDITION` (non-retryable).
 - Key-based requests or `INDEX_KIND_VIEW` return `INVALID_ARGUMENT` in Phase 1.

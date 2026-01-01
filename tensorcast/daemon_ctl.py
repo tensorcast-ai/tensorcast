@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 
 import atexit
@@ -516,29 +516,6 @@ class DaemonCtl:
 
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
-
-    def get_materialize_capabilities(self):
-        with self._client_span("Client/GetMaterializeCapabilities") as span:
-            request = store_daemon_v2_pb2.GetMaterializeCapabilitiesRequest()
-            try:
-                response: store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse = (
-                    self._unary_call(
-                        self.stub_v2.GetMaterializeCapabilities,
-                        request,
-                        timeout=5.0,
-                        span=span,
-                        retries=1,
-                    )
-                )
-            except grpc.RpcError as e:  # noqa: BLE001
-                span.record_exception(e)
-                if e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    return store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse(
-                        supports_view_subset_hash=False,
-                        supports_region_backed_get_into=False,
-                    )
-                raise RuntimeError("GetMaterializeCapabilities failed") from e
-        return response
 
     def materialize_into_target_v2(
         self,

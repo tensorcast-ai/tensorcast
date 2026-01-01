@@ -22,7 +22,6 @@ device_uuid mismatch, poison paths, SDK tests) are still pending.
 - [x] Define `logical_layout_hash` as a logical-only optional field in `TargetLayout`;
       document `selection_hash` as Phase 5 (view/subset) only
 - [x] Wire `MaterializeIntoTarget` in `daemon/grpc_service_impl.h/.cc`
-- [x] Add `supports_region_backed_get_into` to materialize capabilities
 - [x] Document Phase 1 constraints: `artifact_id` required, `disk_fallback` hint-only,
       `tensor_names` / `view_subset_hash` reserved (no subset support)
 - [x] Regenerate stubs with `bash tools/build_proto_python.sh`
@@ -73,9 +72,6 @@ device_uuid mismatch, poison paths, SDK tests) are still pending.
 - [x] Extend `apply_client_load_defaults_if_present` in `tensorcast/api/_runtime.py` and
       `GetArtifactOptions` in `tensorcast/api/_config.py` to respect config defaults
 - [x] Regenerate stubs after config proto updates (`bash tools/build_proto_python.sh`)
-- [x] Gate on `supports_region_backed_get_into` capability
-- [x] Extend `StoreCapabilities` in `tensorcast/api/store/types.py` and session init in
-      `tensorcast/api/store/runtime.py` to call `GetMaterializeCapabilities`
 - [x] Add SDK counters for fallback reasons and verification skips in
       `tensorcast/api/_metrics.py` and emit them from `tensorcast/api/store/materialization.py`
 

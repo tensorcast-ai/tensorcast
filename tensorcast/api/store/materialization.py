@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -1047,18 +1047,6 @@ class MaterializationPipeline:
     ) -> bool:
         mode = options.region_backed_mode
         if mode is RegionBackedMode.DISABLE:
-            return False
-        capabilities = self._runtime.capabilities
-        if not capabilities or not capabilities.supports_region_backed_get_into:
-            if mode is RegionBackedMode.REQUIRE:
-                raise ArtifactError(
-                    "Store daemon does not support region-backed get_into",
-                    status_code="FAILED_PRECONDITION",
-                    retryable=False,
-                )
-            store_metrics.record_region_backed_fallback(
-                self._runtime.daemon_endpoint, "capability_missing"
-            )
             return False
         if key is not None:
             if mode is RegionBackedMode.REQUIRE:

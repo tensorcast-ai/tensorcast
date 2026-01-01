@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ import uuid
 import weakref
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import replace
 from typing import Iterator, Mapping
 
 from opentelemetry import trace
@@ -136,9 +135,6 @@ class StoreRuntimeContext:
             mem_pool_bytes=0,
             tx_slice_bytes=0,
             artifact_chunk_bytes=0,
-            supports_coalesced=False,
-            supports_lease=False,
-            supports_region_backed_get_into=False,
             server_config=None,
         )
 
@@ -146,15 +142,10 @@ class StoreRuntimeContext:
         mem_pool = int(getattr(config, "mem_pool_size", 0))
         tx_slice = int(getattr(config, "tx_slice_bytes", 0))
         artifact_chunk = int(getattr(config, "artifact_chunk_bytes", 0))
-        supports_coalesced = mem_pool > 0
-        supports_lease = True
         return StoreCapabilities(
             mem_pool_bytes=mem_pool,
             tx_slice_bytes=tx_slice,
             artifact_chunk_bytes=artifact_chunk,
-            supports_coalesced=supports_coalesced,
-            supports_lease=supports_lease,
-            supports_region_backed_get_into=False,
             server_config=config if isinstance(config, ServerConfig) else None,
         )
 
@@ -214,11 +205,6 @@ class StoreRuntimeContext:
             "mem_pool_bytes": int(capabilities.mem_pool_bytes),
             "tx_slice_bytes": int(capabilities.tx_slice_bytes),
             "artifact_chunk_bytes": int(capabilities.artifact_chunk_bytes),
-            "supports_coalesced": bool(capabilities.supports_coalesced),
-            "supports_lease": bool(capabilities.supports_lease),
-            "supports_region_backed_get_into": bool(
-                capabilities.supports_region_backed_get_into
-            ),
         }
         if capabilities.server_config is not None:
             try:
@@ -352,8 +338,6 @@ class StoreRuntimeContext:
             "tc.store.mem_pool_bytes": int(capabilities.mem_pool_bytes),
             "tc.store.tx_slice_bytes": int(capabilities.tx_slice_bytes),
             "tc.store.artifact_chunk_bytes": int(capabilities.artifact_chunk_bytes),
-            "tc.store.supports_coalesced": bool(capabilities.supports_coalesced),
-            "tc.store.supports_lease": bool(capabilities.supports_lease),
         }
         with self._tracer.start_as_current_span("Store/Init", kind=SpanKind.INTERNAL):
             set_span_attributes(attributes)
@@ -366,16 +350,8 @@ class StoreRuntimeContext:
                     "mem_pool_bytes": capabilities.mem_pool_bytes,
                     "tx_slice_bytes": capabilities.tx_slice_bytes,
                     "artifact_chunk_bytes": capabilities.artifact_chunk_bytes,
-                    "supports_coalesced": capabilities.supports_coalesced,
-                    "supports_lease": capabilities.supports_lease,
                 },
             },
-        )
-        self._session_labels.update(
-            {
-                "supports_coalesced": str(capabilities.supports_coalesced),
-                "supports_lease": str(capabilities.supports_lease),
-            }
         )
 
     def _initialize_session_metadata(self, client: DaemonCtl) -> None:
@@ -393,24 +369,6 @@ class StoreRuntimeContext:
             )
         else:
             capabilities = self._capabilities_from_config(config)
-        try:
-            mat_caps = client.get_materialize_capabilities()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "store.materialize_capabilities_fetch_failed",
-                extra={
-                    "tc.store.daemon": self._daemon_endpoint,
-                    "tc.store.session_id": self._session_id,
-                },
-                exc_info=exc,
-            )
-        else:
-            capabilities = replace(
-                capabilities,
-                supports_region_backed_get_into=bool(
-                    getattr(mat_caps, "supports_region_backed_get_into", False)
-                ),
-            )
         self._capabilities = capabilities
         self._update_session_record(capabilities=capabilities, activity=True)
         self._record_session_start(capabilities)
@@ -418,11 +376,6 @@ class StoreRuntimeContext:
             {
                 "mem_pool_bytes": str(capabilities.mem_pool_bytes),
                 "tx_slice_bytes": str(capabilities.tx_slice_bytes),
-                "supports_coalesced": str(capabilities.supports_coalesced),
-                "supports_lease": str(capabilities.supports_lease),
-                "supports_region_backed_get_into": str(
-                    capabilities.supports_region_backed_get_into
-                ),
             }
         )
 

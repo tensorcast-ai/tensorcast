@@ -209,8 +209,6 @@ Session ID: 20251001-abcd
   Capabilities:
     mem_pool_bytes: 4294967296
     tx_slice_bytes: 67108864
-    supports_coalesced: True
-    supports_lease: True
 ```
 
 Operators can prune stale entries manually or rely on the CLI output to identify orphaned sessions before triggering lease revocation from the daemon.
