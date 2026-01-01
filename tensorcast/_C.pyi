@@ -34,15 +34,6 @@ def save_tensors(
     path: _PathLike,
 ) -> Dict[str, _Offset]: ...
 
-
-def save_tensors_streaming(
-    tensor_names: Sequence[str],
-    tensor_data: MutableMapping[str, Tuple[_Ptr, _Size]],
-    path: _PathLike,
-    config: Optional[Mapping[str, Union[int, bool]]] = None,
-) -> Dict[str, _Offset]: ...
-
-
 def save_model_to_disk(
     tensor_names: Sequence[str],
     tensor_data: MutableMapping[str, Tuple[_Ptr, _Size]],

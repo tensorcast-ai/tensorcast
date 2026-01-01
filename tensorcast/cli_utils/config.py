@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Shared configuration helpers for CLI/SDK orchestration.
 
@@ -181,9 +181,6 @@ def build_embedded_daemon_config(
 
     cfg.high_availability.enabled = False
     cfg.communicator.enable_rdma = False
-    cfg.checkpoint.streaming.num_buffers = 2
-    cfg.checkpoint.streaming.io_chunk_bytes = 128 * 1024 * 1024
-    cfg.checkpoint.streaming.pinned_pool_bytes = 512 * 1024 * 1024
     cfg.observability.logging.level = common_pb.Observability.LogLevel.LOG_LEVEL_INFO
     cfg.meta.description = "embedded-daemon-config"
     return cfg

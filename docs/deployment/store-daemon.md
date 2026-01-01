@@ -32,8 +32,7 @@ loopback config (port=0, storage under `~/.tensorcast`). Set listen/advertise
 addresses through the config file instead of CLI flags.
 You can also override config values inline with `--set KEY=VALUE` (repeatable).
 Example: `--set engine.memory_tiers.stable_bytes=4GB`.
-Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`,
-`--enable-rdma`, `--log-level`.
+Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--enable-rdma`, `--log-level`.
 
 The CLI locates the binary from the wheel or development path automatically
 and extends ``LD_LIBRARY_PATH`` with the TensorCast shared library bundle as
