@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "common.h"
 #include <getopt.h>
@@ -32,7 +32,7 @@ static void printHelp(char* program_name) {
       "[-p,--port  <tcp count>\n\t"
       "[-c,--count <data count>] \n\t"
       "[-g,--gpu <gpu count>] \n\t"
-      "[-r,--rdma <tcp or rdma>] \n\t"
+      "[-r,--rdma] \n\t"
       "[-h,--help]\n",
       program_name);
 }
@@ -48,7 +48,7 @@ uint32_t g_rdma = 0;
 int parse_options(int argc, char* argv[]) {
   int opt = -1;
   int longIndex = 0;
-  while (-1 != (opt = getopt_long(argc, argv, "a:i:p:g:k:c:ht", longOpts, &longIndex))) {
+  while (-1 != (opt = getopt_long(argc, argv, "a:i:p:g:k:c:hr", longOpts, &longIndex))) {
     switch (opt) {
       case 'a':
         g_actor = std::string(optarg);
@@ -68,7 +68,7 @@ int parse_options(int argc, char* argv[]) {
       case 'k':
         g_chunk = atoi(optarg);
         break;
-      case 't':
+      case 'r':
         g_rdma = 1;
         break;
       case 'h':

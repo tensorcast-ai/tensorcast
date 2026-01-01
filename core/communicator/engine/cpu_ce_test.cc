@@ -1,10 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <sstream>
+#include <thread>
 
-#include "common.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/utils.h"
+#include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 
 using tensorcast::testing::g_actor;
@@ -13,6 +14,7 @@ using tensorcast::testing::g_count;
 using tensorcast::testing::g_gpu;
 using tensorcast::testing::g_ip;
 using tensorcast::testing::g_port;
+using tensorcast::testing::g_rdma;
 using tensorcast::testing::parse_options;
 
 int run_server() {

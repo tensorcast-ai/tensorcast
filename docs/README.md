@@ -75,6 +75,10 @@ bazel build //tests/cpp:replica_p2p_registration_test --compilation_mode=dbg
 bazel build //tests/cpp:replica_p2p_transfer_test --compilation_mode=dbg
 ```
 
+### Testing
+
+- **[Testing Guide](development/testing.md)** - Python, C++, P2P, and multi-machine tests
+
 ## Development Topics by Area
 
 | Area                | Key Documents                                                                                                                |

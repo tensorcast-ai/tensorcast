@@ -196,6 +196,40 @@ transport:
 
 Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`. `pool_size_bytes` and `chunk_bytes` accept humanized sizes like `8GB`/`64MB` when embedded in the daemon config.
 
+## RDMA Environment Variables
+
+These are optional and only affect RDMA device selection. Runtime parameters
+still live in the unified config file.
+
+### TENSORCAST_IB_HCA
+
+Specifies InfiniBand HCA device names to use for RDMA. Multiple values are
+comma-separated. Any `=` characters in the value are stripped.
+
+```bash
+export TENSORCAST_IB_HCA="mlx5_bond0"
+export TENSORCAST_IB_HCA="mlx5_bond0,mlx5_bond1"
+```
+
+If unset, TensorCast auto-discovers available devices.
+
+### TENSORCAST_LLDP_FILE_NAME
+
+Path to an LLDP-style mapping file for rail ID selection in multi-rail
+configurations. Each non-comment line maps a network interface to PCI path,
+mlx5 device name, and rail ID.
+
+```
+eth1=0000:19:00.0,mlx5_bond100,1
+```
+
+```bash
+export TENSORCAST_LLDP_FILE_NAME="/path/to/lldp_config.txt"
+```
+
+Lines starting with `#` and blank lines are ignored. If unset, rail IDs are
+derived from the mlx5 device name (for example `mlx5_0` -> rail 0).
+
 ## Launch Example (Unified Config)
 
 ```

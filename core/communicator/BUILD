@@ -1,4 +1,5 @@
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Config for using fake CUDA backend
@@ -142,6 +143,29 @@ cc_test(
         ":mtcp_transport_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
+    ],
+)
+
+cc_binary(
+    name = "cpu_ce_test_binary",
+    srcs = ["engine/cpu_ce_test.cc"],
+    deps = [
+        ":engine_lib",
+        ":utils_lib",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+    ],
+)
+
+cc_binary(
+    name = "gpu_ce_test_binary",
+    srcs = ["engine/gpu_ce_test.cc"],
+    deps = [
+        ":engine_lib",
+        ":utils_lib",
+        "//core/common:cuda_api_lib",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
     ],
 )
 
