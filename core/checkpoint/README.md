@@ -84,15 +84,15 @@ SC_CHECK_OK(writer.finalize());
 Python users can call the same functionality via the binding:
 
 ```python
-import tensorcast.store as scs
+from tensorcast.api import save_dict
 
-# tensor_names, tensor_data prepared as before
+# state_dict is a mapping: name -> torch.Tensor
 cfg = {
     "num_buffers": 4,
     "buffer_size_mb": 256,
     "enable_async_write": True,
 }
-offsets = scs.save_tensors_streaming(tensor_names, tensor_data, "/path/to/replica", cfg)
+save_dict(state_dict, "/path/to/replica", streaming_config=cfg)
 ```
 
 ### Async Copy Manager (ACM) Usage

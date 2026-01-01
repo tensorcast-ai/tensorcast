@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -74,8 +74,6 @@ def test_daemon_start_passes_options(monkeypatch):
             "4GB",
             "--mem-pool-size-bytes",
             "8GB",
-            "--pinned-pool-bytes",
-            "2GB",
             "--enable-rdma",
             "--log-level",
             "warn",
@@ -93,7 +91,6 @@ def test_daemon_start_passes_options(monkeypatch):
     assert set(captured["config_overrides"]) == {
         "engine.memory_tiers.stable_bytes=4GB",
         "engine.mem_pool_size_bytes=8GB",
-        "checkpoint.streaming.pinned_pool_bytes=2GB",
         "communicator.enable_rdma=true",
         "observability.logging.level=warn",
         "engine.tx_slice_bytes=64MB",

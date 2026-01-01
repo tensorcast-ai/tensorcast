@@ -91,12 +91,6 @@ message Engine {
   MemoryTiers memory_tiers = 10;
 }
 
-message CheckpointStreaming {
-  uint32 num_buffers = 1;
-  uint64 io_chunk_bytes = 2; // Renamed to avoid confusion with engine.chunk_bytes
-  uint64 pinned_pool_bytes = 3; // Clarify this is a streaming pinned pool
-}
-
 message DaemonConfig {
   DaemonServer server = 1;
   Lifecycle lifecycle = 2;
@@ -114,10 +108,8 @@ message DaemonConfig {
   }
   Compatibility compatibility = 7;
 
-  message Checkpoint {
-    CheckpointStreaming streaming = 1;
-  }
-  Checkpoint checkpoint = 8;
+  reserved 8;
+  reserved "checkpoint";
 
   message Debug {
     message Cuda {

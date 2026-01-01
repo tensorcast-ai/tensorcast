@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/config/daemon_config_io.h"
 
@@ -231,17 +231,6 @@ void normalize_size_fields(nlohmann::json& root) {
         to_bytes(pool["pool_size_bytes"]);
       if (pool.contains("chunk_bytes"))
         to_bytes(pool["chunk_bytes"]);
-    }
-  }
-  // checkpoint.streaming.* bytes
-  if (root.contains("checkpoint") && root["checkpoint"].is_object()) {
-    auto& cp = root["checkpoint"];
-    if (cp.contains("streaming") && cp["streaming"].is_object()) {
-      auto& st = cp["streaming"];
-      if (st.contains("io_chunk_bytes"))
-        to_bytes(st["io_chunk_bytes"]);
-      if (st.contains("pinned_pool_bytes"))
-        to_bytes(st["pinned_pool_bytes"]);
     }
   }
 }

@@ -58,20 +58,6 @@ sc_cc_library(
     }),
 )
 
-# Checkpoint streaming functionality
-sc_cc_library(
-    name = "checkpoint_streaming_lib",
-    srcs = ["checkpoint_streaming.cc"],
-    hdrs = ["checkpoint_streaming.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":progress_bar_lib",
-        ":streaming_tensor_writer_lib",
-        "//core/common:cuda_api_lib",
-        "@abseil-cpp//absl/log:check",
-    ],
-)
-
 # Main checkpoint library
 sc_cc_library(
     name = "checkpoint_lib",
@@ -80,7 +66,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":aligned_buffer_lib",
-        ":checkpoint_streaming_lib",
         ":tensor_writer_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",
@@ -104,7 +89,6 @@ sc_cc_library(
     deps = [
         ":aligned_buffer_lib",
         ":checkpoint_lib",
-        ":checkpoint_streaming_lib",
         ":streaming_tensor_writer_lib",
         ":tensor_writer_lib",
     ],

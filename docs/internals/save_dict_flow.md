@@ -31,7 +31,6 @@ The unified writer path (`save_model_to_disk`) is used for all saves. There is n
 |-------|----------|------|
 | Python API | `save_dict` | `tensorcast/api/_io_disk.py` |
 | PyBind11 wrapper | `save_model_to_disk_wrapper` | `tensorcast/csrc/checkpoint_py.cc` |
-| C++ Checkpoint API | `save_tensors_streaming` | `core/checkpoint/checkpoint_streaming.h` |
 | Streaming writer | `StreamingTensorWriter::write_tensor` | `core/checkpoint/streaming_tensor_writer.h` |
 | Low-level I/O | `AlignedBuffer::write_data` | `core/checkpoint/aligned_buffer.h` |
 | Tensor alignment | `TensorWriter::aligned_size` | `core/checkpoint/tensor_writer.h` |
@@ -45,25 +44,22 @@ sequenceDiagram
     autonumber
     participant U as "User code"
     participant PY as "save_dict()\ntensorcast/api/_io_disk.py"
-    participant CPP as "save_tensors_streaming_wrapper\ncheckpoint_py.cc"
-    participant API as "save_tensors_streaming\ncheckpoint.h"
+    participant CPP as "save_model_to_disk_wrapper\ncheckpoint_py.cc"
     participant TW as "StreamingTensorWriter"
     participant FS as "File System"
 
     U->>PY: call save_dict(state_dict, disk_path)
     PY->>PY: Collect tensor_names & data_ptr/size
     PY->>CPP: save_model_to_disk(...)
-    CPP->>API: forward call
-    API->>TW: write_tensor(data, size)
+    CPP->>TW: write_tensor(data, size)
     loop For each chunk
         TW->>FS: pwrite() 10 GB partitions
     end
-    TW-->>API: tensor_offsets
-    API-->>CPP: tensor_offsets
-    CPP-->>PY: tensor_offsets
-    PY->>PY: write tensor_index.json
-    PY->>PY: optionally generate verification.json
-    PY-->>U: return (None)
+    TW-->>CPP: tensor_offsets
+    CPP->>FS: write tensor_index.json / tensor_index.cbor
+    CPP->>FS: write artifact_descriptor.json
+    CPP-->>PY: return descriptor
+    PY-->>U: return descriptor
 ```
 
 ---

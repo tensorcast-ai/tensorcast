@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <torch/extension.h>
 #include "tensorcast/csrc/logging.h"
@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <ranges>
 
 #include <pybind11/stl.h>
@@ -14,10 +15,12 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/checkpoint/checkpoint.h"
-#include "core/checkpoint/checkpoint_streaming.h"
+#include "core/checkpoint/streaming_tensor_writer.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/const/granularity.h"
+#include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
+#include "core/common/memory/pinned_buffer_pool.h"
 
 #include <filesystem>
 #include <fstream>
@@ -42,7 +45,6 @@ namespace py = pybind11;
 using tensorcast::checkpoint::close_cuda_memory_handle;
 using tensorcast::checkpoint::generate_verification_info_from_disk;
 using tensorcast::checkpoint::get_cuda_memory_ptr;
-using tensorcast::checkpoint::save_tensors_streaming;
 using tensorcast::checkpoint::StreamingTensorWriter;
 using tensorcast::common::ArtifactVerificationInfo;
 using tensorcast::common::ArtifactVerifier;
@@ -120,6 +122,106 @@ ArtifactVerificationInfo dict_to_verification_info(const py::dict& dict) {
   }
 
   return info;
+}
+
+static absl::StatusOr<std::unordered_map<std::string, uint64_t>> write_tensor_data_partitions(
+    const std::vector<std::string>& tensor_names,
+    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>& tensor_data,
+    const std::string& path,
+    const StreamingTensorWriter::Config& config) {
+  std::filesystem::create_directories(path);
+  const auto tensor_filename = (std::filesystem::path(path) / "tensor.data").string();
+
+  const size_t pool_size_bytes = config.pool_size_gb * (static_cast<size_t>(1) << 30);
+  const size_t chunk_size_bytes = config.buffer_size_mb * (static_cast<size_t>(1) << 20);
+  auto pinned_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(pool_size_bytes, chunk_size_bytes);
+
+  StreamingTensorWriter writer(tensor_filename, config, pinned_pool);
+  absl::Status init_status = writer.initialize();
+  if (!init_status.ok()) {
+    return init_status;
+  }
+
+  struct StorageMeta {
+    uint64_t max_size{0};
+  };
+
+  std::unordered_map<const void*, StorageMeta> storage_meta;
+  storage_meta.reserve(tensor_names.size());
+  for (const auto& name : tensor_names) {
+    const auto it = tensor_data.find(name);
+    if (it == tensor_data.end()) {
+      return absl::InvalidArgumentError(std::string("tensor_data missing tensor: ") + name);
+    }
+    const auto& [base, size] = it->second;
+    const void* ptr = reinterpret_cast<const void*>(base);
+    auto& meta = storage_meta[ptr];
+    if (size > meta.max_size) {
+      meta.max_size = size;
+    }
+  }
+
+  std::unordered_map<const void*, uint64_t> storage_offsets;
+  storage_offsets.reserve(storage_meta.size());
+
+  cudaStream_t stream = nullptr;
+  absl::Status stream_status = tensorcast::cuda::stream_create(&stream);
+  if (!stream_status.ok()) {
+    stream = nullptr;
+  }
+
+  std::unordered_map<std::string, uint64_t> tensor_offsets;
+  tensor_offsets.reserve(tensor_names.size());
+
+  for (const auto& name : tensor_names) {
+    const uint64_t base = tensor_data.at(name).first;
+    const void* ptr = reinterpret_cast<const void*>(base);
+
+    const auto off_it = storage_offsets.find(ptr);
+    if (off_it != storage_offsets.end()) {
+      tensor_offsets[name] = off_it->second;
+      continue;
+    }
+
+    cudaPointerAttributes attr;
+    const absl::Status attr_status = tensorcast::cuda::pointer_get_attributes_full(ptr, &attr);
+    if (!attr_status.ok()) {
+      if (stream) {
+        (void)tensorcast::cuda::stream_destroy(stream);
+      }
+      (void)writer.finalize();
+      return attr_status;
+    }
+    const bool is_device_ptr = (attr.type == cudaMemoryTypeDevice);
+
+    const uint64_t size_to_write = storage_meta.at(ptr).max_size;
+    absl::StatusOr<uint64_t> offset_or = writer.write_tensor(ptr, size_to_write, is_device_ptr, stream);
+    if (!offset_or.ok()) {
+      if (stream) {
+        (void)tensorcast::cuda::stream_destroy(stream);
+      }
+      (void)writer.finalize();
+      return offset_or.status();
+    }
+
+    storage_offsets.emplace(ptr, offset_or.value());
+    tensor_offsets[name] = offset_or.value();
+  }
+
+  if (stream) {
+    absl::Status destroy_status = tensorcast::cuda::stream_destroy(stream);
+    if (!destroy_status.ok()) {
+      (void)writer.finalize();
+      return destroy_status;
+    }
+  }
+
+  absl::Status finalize_status = writer.finalize();
+  if (!finalize_status.ok()) {
+    return finalize_status;
+  }
+
+  return tensor_offsets;
 }
 
 namespace {
@@ -310,28 +412,6 @@ bool verify_artifact_data_from_gpu_wrapper(
   }
 }
 
-// Wrapper for save_tensors_streaming with optional config
-std::unordered_map<std::string, uint64_t> save_tensors_streaming_wrapper(
-    const std::vector<std::string>& tensor_names,
-    std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>& tensor_data,
-    const std::string& path,
-    const py::dict& config = py::dict()) {
-  StreamingTensorWriter::Config writer_config;
-
-  // Parse config from Python dict
-  if (config.contains("num_buffers")) {
-    writer_config.num_buffers = config["num_buffers"].cast<size_t>();
-  }
-  if (config.contains("buffer_size_mb")) {
-    writer_config.buffer_size_mb = config["buffer_size_mb"].cast<size_t>();
-  }
-  if (config.contains("enable_async_write")) {
-    writer_config.enable_async_write = config["enable_async_write"].cast<bool>();
-  }
-
-  return save_tensors_streaming(tensor_names, tensor_data, path, writer_config);
-}
-
 // Helper wrapper to get CUDA memory pointer with proper error handling
 static uint64_t get_cuda_memory_ptr_wrapper(int device_id, const py::bytes& cuda_ipc_handle_py) {
   // Convert Python bytes to std::string handle
@@ -376,7 +456,12 @@ static py::dict save_model_to_disk_wrapper(
     writer_config.enable_async_write = config["enable_async_write"].cast<bool>();
   }
 
-  const auto offsets = save_tensors_streaming(tensor_names, tensor_data, path, writer_config);
+  absl::StatusOr<std::unordered_map<std::string, uint64_t>> offsets_or =
+      write_tensor_data_partitions(tensor_names, tensor_data, path, writer_config);
+  if (!offsets_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, offsets_or.status().ToString());
+  }
+  const auto& offsets = offsets_or.value();
 
   // Compute canonical storage size per offset (max over aliases)
   std::unordered_map<uint64_t, uint64_t> offset_max_size;
@@ -849,14 +934,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       "Returns True if this extension was built with the fake CUDA backend");
 
   m.def("save_tensors", &tensorcast::checkpoint::save_tensors, "Save a state dict")
-      .def(
-          "save_tensors_streaming",
-          &save_tensors_streaming_wrapper,
-          "Save a state dict using streaming approach",
-          py::arg("tensor_names"),
-          py::arg("tensor_data"),
-          py::arg("path"),
-          py::arg("config") = py::dict())
       .def(
           "save_model_to_disk",
           &save_model_to_disk_wrapper,
