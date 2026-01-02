@@ -655,9 +655,11 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       auto load_status = std::move(load_future).get();
       CAPTURE(load_status.message());
       REQUIRE_FALSE(load_status.ok());
+      REQUIRE(load_status.code() == absl::StatusCode::kResourceExhausted);
       const absl::string_view status_str = load_status.message();
       if (status_str.find("PinnedBufferPool out of memory") == absl::string_view::npos &&
-          status_str.find("Failed to allocate chunks from pinned memory pool") == absl::string_view::npos) {
+          status_str.find("Failed to allocate chunks from pinned memory pool") == absl::string_view::npos &&
+          status_str.find("Failed to allocate pinned slices from pool") == absl::string_view::npos) {
         FAIL_CHECK("Expected pinned buffer pool OOM message, got: " << status_str);
       }
 
