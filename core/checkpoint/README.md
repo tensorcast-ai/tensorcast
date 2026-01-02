@@ -15,6 +15,7 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **Efficient I/O**: Uses 4K-aligned buffers for optimal disk performance
 - **Partitioned Storage**: Automatically splits large models into manageable chunks (10GB per partition)
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
+- **Fake CUDA test mode**: When `TENSORCAST_CUDA_BACKEND=fake` is active in tests, device restores use shared-memory mappings and `device_id` restores fall back to CPU tensors.
 - **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)
 - **Python Bindings**: First-class PyTorch integration via `tensorcast.csrc.checkpoint_py` (zero-copy where possible), packaged through the Bazel target `//core:libcheckpoint_ext.so`

@@ -1,19 +1,11 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # type: ignore
 """
 TensorCast Setup Script
 
-Supports building with fake CUDA backend for development without GPU:
-  - Environment variable: USE_FAKE_CUDA=1
-  - Command line flag: --use-fake-cuda
-
-Examples:
-  # Build with fake CUDA using environment variable
-  BUILD_CORE=1 BUILD_EXTENSION=1 USE_FAKE_CUDA=1 python setup.py develop
-
-  # Build with fake CUDA using command line flag
-  BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop --use-fake-cuda
+Runtime CUDA backend selection is handled via TENSORCAST_CUDA_BACKEND
+(see AGENTS.md and docs) and is not a build-time toggle.
 """
 
 import glob
@@ -123,7 +115,6 @@ PRE_CXX11_ABI = True
 RELEASE = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
-USE_FAKE_CUDA = False
 USE_REMOTE = False
 
 if os.environ.get("RELEASE") == "1":
@@ -141,18 +132,9 @@ if os.environ.get("BUILD_CORE") == "1":
     BUILD_CORE = True
     print("BUILD_CORE is set to True")
 
-if os.environ.get("USE_FAKE_CUDA") == "1":
-    USE_FAKE_CUDA = True
-    print("USE_FAKE_CUDA is set to True")
-
 if "--force-build-extension" in sys.argv:
     BUILD_EXTENSION = True
     sys.argv.remove("--force-build-extension")
-
-if "--use-fake-cuda" in sys.argv:
-    USE_FAKE_CUDA = True
-    print("Using fake CUDA backend")
-    sys.argv.remove("--use-fake-cuda")
 
 if os.environ.get("USE_REMOTE") == "1":
     USE_REMOTE = True
@@ -199,7 +181,7 @@ def get_torch_version_suffix() -> str:
     return torch_suffix
 
 
-# Get torch version suffix after USE_FAKE_CUDA is defined
+# Get torch version suffix after configuration is defined
 torch_suffix = get_torch_version_suffix()
 
 if RELEASE:
@@ -257,7 +239,6 @@ def ensure_external_symlink() -> None:
 
 def build_checkpoint_runtime_and_daemon(
     develop: bool = True,
-    use_fake_cuda: bool = False,
     use_remote: bool = False,
     use_dist_dir: bool = False,
 ):
@@ -287,10 +268,6 @@ def build_checkpoint_runtime_and_daemon(
 
     if use_dist_dir:
         cmd.append("--distdir=third_party/dist_dir")
-
-    if use_fake_cuda:
-        cmd += ["--define", "use_fake_cuda=true"]
-        print("Building with fake CUDA backend")
 
     if use_remote:
         api_key = os.environ.get("BUILDBUDDY_API_KEY")
@@ -448,10 +425,9 @@ class DevelopCommand(develop):
         develop.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -470,10 +446,9 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -493,10 +468,9 @@ class InstallCommand(install):
         install.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -517,10 +491,9 @@ class BdistCommand(bdist_wheel):
         bdist_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -541,10 +514,9 @@ class EditableWheelCommand(editable_wheel):
         editable_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         gen_version_file()
@@ -725,11 +697,6 @@ if BUILD_EXTENSION:
                         "-Wno-macro-redefined",
                         "-Wno-pragmas",
                     ]
-                    + (
-                        ["-DUSE_FAKE_CUDA"]
-                        if USE_FAKE_CUDA
-                        else []
-                    )
                     + [
                         '-DGLOG_DEPRECATED=__attribute__((deprecated))',
                         '-DGLOG_EXPORT=__attribute__((visibility("default")))',

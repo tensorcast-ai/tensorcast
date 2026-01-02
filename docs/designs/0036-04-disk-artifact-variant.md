@@ -263,7 +263,7 @@ stateDiagram-v2
 2. **Selective loading test**: `tc.from_disk(path).tensor_dict(names=["a"])` only loads tensor "a".
 3. **View composition test**: `tc.from_disk(path).view(slices={...})` works with Phase 3 view APIs.
 4. **Error handling test**: Invalid disk path raises `ArtifactError(status_code="NOT_FOUND")`.
-5. **Daemon RPC test**: `bazel test //daemon:resolve_artifact_from_disk_test --define=use_fake_cuda=true`.
+5. **Daemon RPC test**: `bazel test //daemon:resolve_artifact_from_disk_test --test_env=TENSORCAST_CUDA_BACKEND=fake`.
 6. **Metadata caching test**: Repeated `from_disk(path)` calls reuse cached metadata.
 7. **Type identity test**: `isinstance(tc.from_disk(path), Artifact)` returns `True` (no subclass).
 

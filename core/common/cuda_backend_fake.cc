@@ -1,6 +1,6 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_api.h"
+#include "core/common/cuda_backend.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -30,7 +30,7 @@
 
 // NOLINTBEGIN
 
-namespace tensorcast::cuda {
+namespace tensorcast::cuda::fake_backend {
 namespace {
 
 struct StreamTask {
@@ -729,11 +729,6 @@ absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes*
   attrs->hostPointer = const_cast<void*>(ptr);
   attrs->device = it->second.device_id;
   attrs->type = cudaMemoryTypeDevice;
-#ifdef USE_FAKE_CUDA
-  // These legacy fields are only present in the fake CUDA runtime we define
-  attrs->memoryType = cudaMemoryTypeDevice;
-  attrs->isManaged = 0;
-#endif
 
   return absl::OkStatus();
 }
@@ -1161,7 +1156,7 @@ absl::Status cu_device_get(CUdevice* device, int ordinal) {
   if (device == nullptr) {
     return absl::InvalidArgumentError("device pointer is null");
   }
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGet);
+  return absl::UnimplementedError("cuDeviceGet not supported in FakeCuda");
 }
 
 absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device) {
@@ -1170,7 +1165,7 @@ absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, C
   if (value == nullptr) {
     return absl::InvalidArgumentError("value pointer is null");
   }
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGetAttribute);
+  return absl::UnimplementedError("cuDeviceGetAttribute not supported in FakeCuda");
 }
 
 absl::Status cu_mem_get_allocation_granularity(
@@ -1356,8 +1351,21 @@ absl::Status cu_mem_get_handle_for_address_range(
   static_cast<void>(size);
   static_cast<void>(handle_type);
   static_cast<void>(flags);
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuMemGetHandleForAddressRange);
+  return absl::UnimplementedError("cuMemGetHandleForAddressRange not supported in FakeCuda");
 }
+
+} // namespace tensorcast::cuda::fake_backend
+
+namespace tensorcast::cuda {
+
+#define TENSORCAST_DEFINE_FAKE_BACKEND(return_type, name, args, ...) \
+  return_type FakeCudaBackend::name args {                           \
+    return fake_backend::name(__VA_ARGS__);                          \
+  }
+
+TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DEFINE_FAKE_BACKEND)
+
+#undef TENSORCAST_DEFINE_FAKE_BACKEND
 
 } // namespace tensorcast::cuda
 

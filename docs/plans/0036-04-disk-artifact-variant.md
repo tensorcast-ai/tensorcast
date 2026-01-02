@@ -46,18 +46,18 @@ Ship the disk-backed `Artifact` variant (`tc.from_disk`) defined in the design s
 - Update proto/service definitions if new fields are required (e.g., `view_index_bytes` hint) and regenerate artifacts via `bash tools/build_proto_python.sh`; adjust Bazel deps for any new includes.
 - Strengthen `Artifact` disk-path resolution: debounce repeated RPCs, hydrate `ArtifactCache` with generation/disk_path, reconcile cache entries when disk path differs from the hint, and ensure serialization (`to_dict`) preserves disk hints.
 - Ensure `MaterializationPipeline`/`FallbackResolver` prefer disk automatically when `_disk_path_hint` is set, propagate `verify_checksums`, and pass disk_path to replica unload paths to keep daemon cleanup deterministic.
-- Expand Python tests under `tests/python/api/` for disk flows (resolution, selective materialization, view, release/unload, cache TTL/LRU, checksum flag) and add a Bazel daemon test for `ResolveArtifactFromDisk`; keep tests GPU-free using fake CUDA.
+- Expand Python tests under `tests/python/api/` for disk flows (resolution, selective materialization, view, release/unload, cache TTL/LRU, checksum flag) and add a Bazel daemon test for `ResolveArtifactFromDisk`; keep tests GPU-free by setting `TENSORCAST_CUDA_BACKEND=fake`.
 - Document behavior and operational knobs (env flags, whitelist expectations, metrics) and outline rollout/backout steps for enabling disk-path materialization in production.
 
 # Acceptance Checks
-- [x] `ResolveArtifactFromDisk` returns canonical index bytes + generation in v2 format, respects whitelist/checksum flags, and is covered by `bazel test //daemon:resolve_artifact_from_disk_test --define=use_fake_cuda=true`.
+- [x] `ResolveArtifactFromDisk` returns canonical index bytes + generation in v2 format, respects whitelist/checksum flags, and is covered by `bazel test //daemon:resolve_artifact_from_disk_test --test_env=TENSORCAST_CUDA_BACKEND=fake`.
 - [x] `tc.from_disk(path)` resolves once, seeds `ArtifactCache` with `{artifact_id, canonical_index_bytes, generation, disk_path}`, and subsequent `tensor_dict(names=...)` calls use `SourcePreference=DISK` with correct unload calls (validated via Python tests).
 - [x] View/batch/prefetch flows operate identically for disk-backed artifacts (tensor subset, view index hints) without extra daemon index RPCs; cache invalidation triggers on NOT_FOUND/FAILED_PRECONDITION for disk paths.
 - [x] Docs updated and linked (store README, architecture overview, design), and rollout/backout instructions captured; metrics/telemetry validated for disk-path usage.
 - [x] Test suite passes: `uv run pytest tests/python/api/test_artifact_handle.py -k disk`, `uv run pytest tests/python/api/test_materialization_pipeline_v2.py`, and relevant new cases; proto/stub regeneration executed if definitions change.
 
 # Test / Rollout / Backout
-- **Unit/Integration**: `uv run pytest tests/python/api/test_artifact_handle.py -k disk`, `uv run pytest tests/python/api/test_materialization_pipeline_v2.py`, plus new disk/view/batch prefetched cases. For daemon RPC coverage run `bazel test //daemon:resolve_artifact_from_disk_test --define=use_fake_cuda=true`. Regenerate protos with `bash tools/build_proto_python.sh` if proto files change.
+- **Unit/Integration**: `uv run pytest tests/python/api/test_artifact_handle.py -k disk`, `uv run pytest tests/python/api/test_materialization_pipeline_v2.py`, plus new disk/view/batch prefetched cases. For daemon RPC coverage run `bazel test //daemon:resolve_artifact_from_disk_test --test_env=TENSORCAST_CUDA_BACKEND=fake`. Regenerate protos with `bash tools/build_proto_python.sh` if proto files change.
 - **Rollout**: Keep `tc.from_disk` behind default enablement but validate in staging with disk whitelist configured; monitor disk resolution/materialization metrics and cache hit/miss counters before enabling broadly.
 - **Backout**: Disable disk-path materialization by removing disk_path hints (force standard artifact_id/key flows) or tightening whitelist entries; invalidate `ArtifactCache` entries for disk artifacts to avoid stale metadata, and fall back to P2P/local replicas.
 

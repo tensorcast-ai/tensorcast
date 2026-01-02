@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -459,54 +459,55 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const std::unordered_map<int, std::uint64_t>& memory_base_address,
     const std::unordered_map<int, std::unordered_map<std::string, uint64_t>>& tensor_device_offsets,
     const bool from_ipc_shm) {
-#ifdef USE_FAKE_CUDA
-  // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
-  std::unordered_map<std::string, torch::Tensor> state_dict;
-  std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
+  if (cuda::is_fake()) {
+    // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
+    std::unordered_map<std::string, torch::Tensor> state_dict;
+    std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
 
-  for (const auto& [device, tensor_offset] : tensor_device_offsets) {
-    for (const auto& p : tensor_offset) {
-      const std::string name = p.first;
-      const uint64_t offset = p.second;
+    for (const auto& [device, tensor_offset] : tensor_device_offsets) {
+      for (const auto& p : tensor_offset) {
+        const std::string name = p.first;
+        const uint64_t offset = p.second;
 
-      if (memory_base_address.find(device) == memory_base_address.end()) {
-        continue;
+        if (memory_base_address.find(device) == memory_base_address.end()) {
+          continue;
+        }
+        std::uint64_t base_address = memory_base_address.at(device);
+        auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
+        at::ScalarType dtype = string_to_scalar_type(type_str);
+
+        const size_t element_size = c10::elementSize(dtype);
+        const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
+        const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
+
+        torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
+
+        std::shared_ptr<void> owner;
+        auto it = owners.find(base_address);
+        if (it == owners.end()) {
+          owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm](void* ptr) {
+            absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+            if (!status.ok()) {
+              LOG(WARNING) << "fake restore_tensors: release failed: " << status;
+            }
+          });
+          owners.emplace(base_address, owner);
+        } else {
+          owner = it->second;
+        }
+
+        torch::Tensor tensor = torch::from_blob(
+            reinterpret_cast<void*>(data_address),
+            torch::IntArrayRef(sizes),
+            torch::IntArrayRef(strides),
+            [owner](void*) mutable { owner.reset(); },
+            options);
+        state_dict[name] = tensor;
       }
-      std::uint64_t base_address = memory_base_address.at(device);
-      auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
-      at::ScalarType dtype = string_to_scalar_type(type_str);
-
-      const size_t element_size = c10::elementSize(dtype);
-      const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
-      const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
-
-      torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
-
-      std::shared_ptr<void> owner;
-      auto it = owners.find(base_address);
-      if (it == owners.end()) {
-        owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm](void* ptr) {
-          absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
-          if (!status.ok()) {
-            LOG(WARNING) << "fake restore_tensors: release failed: " << status;
-          }
-        });
-        owners.emplace(base_address, owner);
-      } else {
-        owner = it->second;
-      }
-
-      torch::Tensor tensor = torch::from_blob(
-          reinterpret_cast<void*>(data_address),
-          torch::IntArrayRef(sizes),
-          torch::IntArrayRef(strides),
-          [owner](void*) mutable { owner.reset(); },
-          options);
-      state_dict[name] = tensor;
     }
+    return state_dict;
   }
-  return state_dict;
-#else
+
   std::unordered_map<std::string, torch::Tensor> state_dict;
   std::unordered_set<std::uint64_t> handled_memory;
   for (const auto& [device, tensor_offset] : tensor_device_offsets) {
@@ -564,7 +565,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
     }
   }
   return state_dict;
-#endif
 }
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
@@ -574,7 +574,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     const std::string& disk_path,
     const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
     int device_id) {
-  // USE_FAKE_CUDA: CPU restore path enforced below; GPU path is compiled out.
   std::vector<std::filesystem::path> partition_paths;
   std::vector<uint64_t> partition_sizes;
   uint64_t total_artifact_size = 0;
@@ -620,8 +619,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
   // ------------------------------------------------------------------
   // GPU PATH (device_id >= 0)
   // ------------------------------------------------------------------
-#ifndef USE_FAKE_CUDA
-  if (device_id >= 0) {
+  if (!cuda::is_fake() && device_id >= 0) {
     // Use fixed defaults for streaming restore (no environment variables)
     const size_t buffer_size_mb = 256; // 256MB
     const size_t num_buffers = 4;
@@ -707,11 +705,9 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     // Reuse restore_tensors to build actual torch::Tensors on GPU
     return restore_tensors(meta_state_dict, memory_base_address, device_offsets_map, /*from_ipc_shm=*/false);
   }
-#else
-  if (device_id >= 0) {
-    LOG(WARNING) << "USE_FAKE_CUDA enabled; forcing CPU restore; ignoring device_id=" << device_id;
+  if (cuda::is_fake() && device_id >= 0) {
+    LOG(WARNING) << "Fake CUDA backend active; forcing CPU restore; ignoring device_id=" << device_id;
   }
-#endif
 
   // ------------------------------------------------------------------
   // CPU PATH (device_id < 0) - original implementation continues below

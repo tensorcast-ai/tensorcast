@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Build configuration validation for tensorcast.
 
@@ -21,8 +21,8 @@ class BuildConfigMismatchError(RuntimeError):
 def validate_cuda_backend_consistency() -> None:
     """Validate that the CUDA backend configuration is consistent.
 
-    This function checks if the tensorcast._C extension was built with the fake
-    CUDA backend but PyTorch has real CUDA available. This mismatch causes
+    This function checks if the runtime is configured to use the fake CUDA
+    backend but PyTorch has real CUDA available. This mismatch causes
     subtle runtime failures (e.g., "Pointer not found in allocations") because
     the fake backend doesn't track allocations made by PyTorch's real CUDA allocator.
 
@@ -54,7 +54,7 @@ def validate_cuda_backend_consistency() -> None:
             "TENSORCAST BUILD CONFIGURATION MISMATCH DETECTED\n"
             "=" * 72 + "\n"
             "\n"
-            "The tensorcast._C extension was built with USE_FAKE_CUDA=1,\n"
+            "The runtime is configured to use the Fake CUDA backend,\n"
             "but PyTorch has real CUDA available.\n"
             "\n"
             "This will cause runtime failures when using CUDA tensors because:\n"
@@ -62,9 +62,9 @@ def validate_cuda_backend_consistency() -> None:
             "  - PyTorch CUDA tensors are allocated by the real CUDA runtime\n"
             "  - IPC handle operations will fail with 'Pointer not found'\n"
             "\n"
-            "To fix this, rebuild the extension with real CUDA:\n"
+            "To fix this, unset the fake backend override and run with real CUDA:\n"
             "\n"
-            "    BUILD_CORE=1 BUILD_EXTENSION=1 uv run setup.py build_ext\n"
+            "    unset TENSORCAST_CUDA_BACKEND\n"
             "\n"
             "Or, if you intentionally want to use fake CUDA (CPU-only testing),\n"
             "set TENSORCAST_SKIP_CUDA_VALIDATION=1 to suppress this error.\n"

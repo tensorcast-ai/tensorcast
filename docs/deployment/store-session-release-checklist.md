@@ -21,7 +21,7 @@ Use this checklist when promoting the Store-centric session API to any environme
   - `uv run pytest tests/python/test_register_lease_in_place_helper.py`
   - `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`
   - `uv run pytest tests/python/test_store_session_api.py`
-  - `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`
+  - `bazel test //daemon:session_lifecycle_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
 - Execute smoke benchmarks or representative workloads and record latency deltas versus the Phase 0 baseline.
 - Exercise the CLI:
   - `uv run tensorcast daemon status` shows Store sessions with reasonable lease/future counts.

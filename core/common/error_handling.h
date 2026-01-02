@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -34,36 +34,12 @@ namespace tensorcast::common {
 
 // Return a human-readable CUDA error name.
 static inline const char* cuda_error_name(cudaError_t err) {
-#ifdef USE_FAKE_CUDA
-  switch (err) {
-    case cudaSuccess:
-      return "cudaSuccess";
-    case cudaErrorInvalidValue:
-      return "cudaErrorInvalidValue";
-    case cudaErrorMemoryAllocation:
-      return "cudaErrorMemoryAllocation";
-    case cudaErrorInitializationError:
-      return "cudaErrorInitializationError";
-    case cudaErrorLaunchFailure:
-      return "cudaErrorLaunchFailure";
-    case cudaErrorInvalidConfiguration:
-      return "cudaErrorInvalidConfiguration";
-    default:
-      return "cudaErrorUnknown";
-  }
-#else // Real CUDA runtime
   return cudaGetErrorName(err);
-#endif
 }
 
 // Return a descriptive CUDA error string.
 static inline const char* cuda_error_string(cudaError_t err) {
-#ifdef USE_FAKE_CUDA
-  // Fake backend has no additional description beyond the name.
-  return cuda_error_name(err);
-#else
   return cudaGetErrorString(err);
-#endif
 }
 
 // ---------------------------------------------------------------------------

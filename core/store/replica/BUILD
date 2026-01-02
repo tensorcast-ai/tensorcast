@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 sc_header_only_library(
     name = "memory_state",
     hdrs = ["memory_state.h"],
@@ -248,13 +242,6 @@ cc_test(
 cc_test(
     name = "replica_p2p_registration_test",
     srcs = ["replica_p2p_registration_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "-lcuda",
-            "-lrt",
-        ],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common",

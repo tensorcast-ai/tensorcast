@@ -711,7 +711,7 @@ RDMA completions call `ReadRequest::invoke_ack_action_once()`, which sends `ENGI
 ### 7.5 Cross-Transport Soak Validation
 
 - Bazel target `//core/communicator:cross_transport_soak_test` drives simultaneous RDMA and MTCP reads against a 128 MiB staged tensor, exercising the shared `FlowCreditLedger`/`StageLeaseRegistry` under mixed transport load.
-- Run with `--define=use_fake_cuda=true` during local development; the test auto-skips once it detects that RDMA devices are unavailable, allowing CI hosts without verbs support to pass while still validating MTCP staging.
+- Run with `--test_env=TENSORCAST_CUDA_BACKEND=fake` during local development; the test auto-skips once it detects that RDMA devices are unavailable, allowing CI hosts without verbs support to pass while still validating MTCP staging.
 - To execute the full soak, run the same target on a node with active RDMA interfaces. Use `--test_output=all` and tail `[staging_credit]` entries in the test log to confirm window grants/releases cycle cleanly across transports.
 
 ### 7.6 Multi-Host Smoke Tests

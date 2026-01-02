@@ -19,7 +19,7 @@ _PathLike = Union[str, os.PathLike[str]]
 
 
 def is_fake_cuda() -> bool:
-    """Returns True if this extension was built with the fake CUDA backend."""
+    """Returns True if the runtime Fake CUDA backend is active."""
     ...
 
 

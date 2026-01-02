@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <atomic>
@@ -10,9 +10,14 @@
 TEST_CASE("CUDA API abstraction layer", "[cuda]") {
   namespace cuda = tensorcast::cuda;
 
+  const bool cuda_available = cuda::is_available();
+  if (!cuda_available) {
+    WARN("CUDA not available; skipping CUDA API tests.");
+    return;
+  }
+
   SECTION("Basic device operations") {
     // Check if CUDA is available
-    bool cuda_available = cuda::is_available();
     REQUIRE(cuda_available == true);
 
     // Check if using fake backend

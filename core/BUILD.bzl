@@ -80,20 +80,3 @@ def sc_cc_library(
         alwayslink = alwayslink,
         **kwargs
     )
-
-def cuda_conditional_deps(fake_cuda_deps = None, real_cuda_deps = None):
-    """Helper to create conditional CUDA dependencies.
-
-    Reduces repetition of select() statements for CUDA dependencies.
-
-    Args:
-        fake_cuda_deps: Dependencies when using fake CUDA
-        real_cuda_deps: Dependencies when using real CUDA
-
-    Returns:
-        A select() expression for conditional dependencies
-    """
-    return select({
-        ":use_fake_cuda": fake_cuda_deps or [],
-        "//conditions:default": real_cuda_deps or [],
-    })

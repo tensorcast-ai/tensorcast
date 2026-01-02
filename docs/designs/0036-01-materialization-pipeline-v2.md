@@ -206,8 +206,8 @@ All newly introduced Python names follow the SDK naming rules in `AGENTS.md`. Pr
    - `FallbackOptions.for_disk(path)` with `tensor_names=["a"]` returns only tensor "a"
    - View-based slicing on disk artifacts works identically to P2P artifacts
    - Results match canonical disk artifacts for full loads
-3. **Daemon DiskLoader tests**: `bazel test //daemon:disk_loader_materialization_test --define=use_fake_cuda=true` confirms daemon correctly uses `DiskLoader` + `SelectionPlan` for disk-backed materialization.
-4. **Daemon soak**: Run `bazel test //daemon:materialization_v2_test --define=use_fake_cuda=true` to validate the new RPC struct.
+3. **Daemon DiskLoader tests**: `bazel test //daemon:disk_loader_materialization_test --test_env=TENSORCAST_CUDA_BACKEND=fake` confirms daemon correctly uses `DiskLoader` + `SelectionPlan` for disk-backed materialization.
+4. **Daemon soak**: Run `bazel test //daemon:materialization_v2_test --test_env=TENSORCAST_CUDA_BACKEND=fake` to validate the new RPC struct.
 5. **Tracing verification**: Observability smoke test ensures the new span attributes are emitted (checked via OTLP fixture).
 6. **Rollout sequencing**: Documented runbook that lands daemon/proto first, then SDK toggle, then removal of v1 RPC usage.
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 
@@ -55,13 +55,10 @@ torch::TensorOptions create_tensor_options_for_location(
     at::ScalarType scalar_type,
     common::memory::MemoryLocation location,
     int device_id) {
-#ifdef USE_FAKE_CUDA
-  (void)device_id;
   if (location == common::memory::MemoryLocation::GPU) {
-    return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
-  }
-#endif
-  if (location == common::memory::MemoryLocation::GPU) {
+    if (cuda::is_fake()) {
+      return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
+    }
     return torch::TensorOptions().device(torch::kCUDA, device_id).dtype(scalar_type);
   }
   return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
@@ -79,14 +76,9 @@ absl::Status execute_inverse_transform(
     return absl::InvalidArgumentError("execute_inverse_transform requires non-null base pointer");
   }
   const bool is_gpu = (location == common::memory::MemoryLocation::GPU);
-#ifndef USE_FAKE_CUDA
-  if (is_gpu && device_id < 0) {
+  if (is_gpu && !cuda::is_fake() && device_id < 0) {
     return absl::InvalidArgumentError("execute_inverse_transform (GPU) requires a valid CUDA device id");
   }
-#else
-  (void)device_id;
-  (void)is_gpu;
-#endif
 
   torch::NoGradGuard no_grad;
   auto* byte_base = static_cast<std::uint8_t*>(base_ptr);
@@ -191,11 +183,9 @@ absl::Status ViewIngestExecutor::ingest_chunk(
     return absl::OkStatus();
   }
   if (location == common::memory::MemoryLocation::GPU) {
-#ifndef USE_FAKE_CUDA
-    if (device_id < 0) {
+    if (!cuda::is_fake() && device_id < 0) {
       return absl::InvalidArgumentError("device_id must be >= 0 for GPU ingestion");
     }
-#endif
     auto set_status = cuda::set_device(device_id);
     if (!set_status.ok()) {
       return set_status;
@@ -279,11 +269,9 @@ absl::Status ViewIngestExecutor::finalize(
     return absl::InvalidArgumentError("canonical_base_ptr must not be null");
   }
   if (location == common::memory::MemoryLocation::GPU) {
-#ifndef USE_FAKE_CUDA
-    if (device_id < 0) {
+    if (!cuda::is_fake() && device_id < 0) {
       return absl::InvalidArgumentError("device_id must be >= 0 for GPU ingestion");
     }
-#endif
     auto set_status = cuda::set_device(device_id);
     if (!set_status.ok()) {
       return set_status;

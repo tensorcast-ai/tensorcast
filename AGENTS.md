@@ -138,26 +138,26 @@ bazel build //daemon:tensorcast_daemon \
 
 # Run tests with minimal output: only show failure details, reduce general logging
 bazel test //daemon:session_lifecycle_test \
-  --define=use_fake_cuda=true \
+  --test_env=TENSORCAST_CUDA_BACKEND=fake \
   --test_output=errors \
   --noshow_progress --noshow_loading_progress \
   --ui_event_filters=warning,error
 ```
 
 #### Fake CUDA Backend (Development Without GPU)
-Use `nvidia-smi` to check if you have GPU available. The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
+Use `nvidia-smi` to check if you have GPU available. The project supports a fake CUDA backend for development and testing without GPU hardware. The backend is selected at runtime via `TENSORCAST_CUDA_BACKEND` and is test-only (it fails fast outside test environments).
 
 ```bash
-# Build Python extension with fake CUDA
-USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+# Build Python extension (single binary supports real/fake at runtime)
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
 # Run C++ tests with fake CUDA backend
-# Most tests already run with fake CUDA by default. You can also select explicitly with a single define:
-bazel test //core/store:store_engine_test --define=use_fake_cuda=true
-bazel test //core/communicator/engine:gpu_ce_test --define=use_fake_cuda=true
+# Select fake explicitly via test env:
+bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake
+bazel test //core/communicator/engine:gpu_ce_test --test_env=TENSORCAST_CUDA_BACKEND=fake
 
-# To run with real CUDA instead of the default fake backend, pass:
-bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=false
+# To run with real CUDA, leave the env unset (or set TENSORCAST_CUDA_BACKEND=real):
+bazel test //daemon:grpc_service_impl_registration_test
 ```
 
 **Fake CUDA Mode Features:**
