@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -14,14 +14,8 @@ from tensorcast.proto.communicator.v1 import communicator_config_pb2 as pb
 
 def _normalize_defaults(cfg: pb.CommunicatorConfig) -> None:
     # Stager
-    if cfg.stager.stage_chunk_mb_cpu <= 0:
-        cfg.stager.stage_chunk_mb_cpu = 4
-    if cfg.stager.stage_chunk_mb_gpu <= 0:
-        cfg.stager.stage_chunk_mb_gpu = 16
     if cfg.stager.buffers_per_flow <= 0:
         cfg.stager.buffers_per_flow = 4
-    if cfg.stager.direct_chunk_mb <= 0:
-        cfg.stager.direct_chunk_mb = cfg.stager.stage_chunk_mb_gpu
 
     # RDMA
     if cfg.rdma.outstanding_wr <= 0:
@@ -34,12 +28,6 @@ def _normalize_defaults(cfg: pb.CommunicatorConfig) -> None:
         cfg.rdma.qp_timeout = 20
     if cfg.rdma.qp_retry <= 0:
         cfg.rdma.qp_retry = 7
-
-    # Pool
-    if cfg.pool.pool_size_bytes == 0:
-        cfg.pool.pool_size_bytes = 8 * 1024 * 1024 * 1024
-    if cfg.pool.chunk_bytes == 0:
-        cfg.pool.chunk_bytes = 64 * 1024 * 1024
 
     # Transport
     if cfg.transport.tcp_conn_count <= 0:
@@ -67,8 +55,6 @@ def from_yaml(path: str | Path) -> pb.CommunicatorConfig:
     # Normalize boolean defaults that depend on presence
     st = data.setdefault("stager", {})
     st.setdefault("stage_cpu_for_rdma", True)
-    pl = data.setdefault("pool", {})
-    pl.setdefault("preregister_mr", True)
 
     msg = pb.CommunicatorConfig()
     json_format.Parse(json.dumps(data), msg)

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/ingestion/materialization_facade.h"
 
@@ -163,6 +163,7 @@ MaterializationFacade::MaterializationFacade(Config config)
   deps.async_runtime = config_.runtime_context->async_runtime();
   deps.artifact_chunk_bytes = config_.artifact_chunk_bytes;
   deps.pinned_memory_timeout = config_.pinned_memory_timeout;
+  deps.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
   deps.num_threads = config_.num_threads;
   deps.view_hash_computer = config_.runtime_context->view_hash_computer();
   deps.ingest_from_disk = [this](
@@ -271,8 +272,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
       return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
     }
+    const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
     auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-        /*num_chunks=*/16, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+        /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
     const std::chrono::milliseconds timeout =
         hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
     auto init_spb_status = session_spb->initialize(timeout);

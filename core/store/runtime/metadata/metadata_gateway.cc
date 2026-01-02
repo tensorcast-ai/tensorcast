@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/metadata/metadata_gateway.h"
 
@@ -108,6 +108,7 @@ MetadataGateway::MetadataGateway(Config config)
       replica_factory_,
       artifact_chunk_bytes_,
       pinned_memory_timeout_,
+      std::max<size_t>(1, runtime_context_->options().streaming_buffer_chunks),
       registration_publisher_.get());
   if (runtime_context_->ingestion_event_hub() != nullptr) {
     ingestion_event_subscription_ = runtime_context_->ingestion_event_hub()->subscribe_completed(

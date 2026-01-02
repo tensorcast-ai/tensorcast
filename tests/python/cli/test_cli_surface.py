@@ -72,13 +72,11 @@ def test_daemon_start_passes_options(monkeypatch):
             "sess-x",
             "--stable-bytes",
             "4GB",
-            "--mem-pool-size-bytes",
-            "8GB",
             "--enable-rdma",
             "--log-level",
             "warn",
             "--set",
-            "engine.tx_slice_bytes=64MB",
+            "engine.streaming_buffer_chunks=32",
             "--json",
         ],
     )
@@ -90,10 +88,9 @@ def test_daemon_start_passes_options(monkeypatch):
     assert captured["fate_share"] is False
     assert set(captured["config_overrides"]) == {
         "engine.memory_tiers.stable_bytes=4GB",
-        "engine.mem_pool_size_bytes=8GB",
         "communicator.enable_rdma=true",
         "observability.logging.level=warn",
-        "engine.tx_slice_bytes=64MB",
+        "engine.streaming_buffer_chunks=32",
     }
     assert "wait" not in captured
     assert "timeout" not in captured

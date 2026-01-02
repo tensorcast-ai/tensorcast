@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -66,6 +66,7 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       size_t artifact_chunk_bytes,
       size_t max_buffer_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
+      size_t streaming_buffer_chunks,
       uint64_t artifact_size,
       std::optional<std::string> view_id = std::nullopt,
       std::optional<MemoryTierConfig> memory_tier_config = std::nullopt);
@@ -439,6 +440,7 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
 
   // Pinned memory allocation timeout
   const std::chrono::milliseconds pinned_memory_timeout_;
+  const size_t streaming_buffer_chunks_;
 
   const size_t artifact_chunk_bytes_;
 

@@ -7,10 +7,9 @@ sidebar_position: 2
 # `save_dict` Workflow
 
 This document explains how **tensorcast** persists a PyTorch `state_dict` using the Python helper
-`save_dict` and the underlying C++ Checkpoint subsystem. Registration into the distributed Store is
-handled by the session API (surfaced as `tensorcast.put` / `tensorcast.register`); `save_dict` remains the path for
-materialising disk checkpoints that the Store can subsequently ingest when disk fallback is
-requested.
+`tensorcast.testing.io_disk.save_dict` (test-only) and the underlying C++ Checkpoint subsystem.
+Registration into the distributed Store is handled by the daemon APIs (surfaced as
+`tensorcast.put` / `tensorcast.register`); production flows should not rely on local disk helpers.
 
 ---
 
@@ -29,7 +28,8 @@ The unified writer path (`save_model_to_disk`) is used for all saves. There is n
 
 | Layer | Function | File |
 |-------|----------|------|
-| Python API | `save_dict` | `tensorcast/api/_io_disk.py` |
+| Python test helper | `save_dict` | `tensorcast/testing/io_disk.py` |
+| Internal (guarded) | `tensorcast.api._io_disk.save_dict` | `tensorcast/api/_io_disk.py` |
 | PyBind11 wrapper | `save_model_to_disk_wrapper` | `tensorcast/csrc/checkpoint_py.cc` |
 | Streaming writer | `StreamingTensorWriter::write_tensor` | `core/checkpoint/streaming_tensor_writer.h` |
 | Low-level I/O | `AlignedBuffer::write_data` | `core/checkpoint/aligned_buffer.h` |
@@ -43,7 +43,7 @@ The unified writer path (`save_model_to_disk`) is used for all saves. There is n
 sequenceDiagram
     autonumber
     participant U as "User code"
-    participant PY as "save_dict()\ntensorcast/api/_io_disk.py"
+    participant PY as "save_dict()\ntensorcast/testing/io_disk.py"
     participant CPP as "save_model_to_disk_wrapper\ncheckpoint_py.cc"
     participant TW as "StreamingTensorWriter"
     participant FS as "File System"

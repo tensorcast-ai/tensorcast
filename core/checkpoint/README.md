@@ -84,7 +84,7 @@ SC_CHECK_OK(writer.finalize());
 Python users can call the same functionality via the binding:
 
 ```python
-from tensorcast.api import save_dict
+from tensorcast.testing.io_disk import save_dict  # test-only helper
 
 # state_dict is a mapping: name -> torch.Tensor
 cfg = {

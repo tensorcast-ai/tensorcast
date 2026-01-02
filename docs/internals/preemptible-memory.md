@@ -35,7 +35,7 @@ areas: ["core", "daemon"]
 - **Stable Lease**：即将在稳定/可抢占双池方案中引入的“稳定驻留”租约。它是账本/容量概念，表示 chunk 不能被标记为可抢占，与 OS `mlock` 无关。
 - **Preemptible Mark**：当前本文描述的可抢占状态；仅意味着可以被 `madvise`/回收，不代表容量。
 - **Pin Lease / Export Pin**：导出或直接写期间持有的 `mlock`/pin keepalive，只保护导出窗口，不等价于 Stable Lease。两者可以共存：稳定租约保障不被预抢占，pin 租约保障导出时不会被 swap。
-- **Pinned Pool**：数据面专用的 pinned host buffer（`engine.mem_pool_size_bytes`），与 UMA 池和 Stable/Preemptible 概念独立。
+- **Pinned Pool**：daemon 侧统一的 pinned host buffer（`DaemonConfig.pinned_memory`，主要是 `engine` / `comm_*` classes），与 UMA 池和 Stable/Preemptible 概念独立。
 
 后续文档、代码与指标命名需遵守：Stable 仅用于驻留/租约，Pin 仅用于导出/OS 级 pin，避免出现“preemptible_lease”“stable_pin”等混合术语。
 
@@ -49,7 +49,7 @@ areas: ["core", "daemon"]
 - **ACK 入参约束**：gRPC 层会拒绝缺少 `chunk_ids` 的 acquire/release ACK，避免租约审计被清空或生成不可重放的记录。
 - **MemoryTier Telemetry/指标**：`MemoryTierStatus` 上报仅写入 `memory_tier_snapshots`，由 `node_memory_tier_latest` 视图在查询时联结 `workers` 以返回最新的稳定/可抢占容量及配置；同时通过 Prometheus 指标暴露 `tensorcast_memory_tier_stable_bytes{state=total|used}`、`tensorcast_memory_tier_preemptible_bytes{state=total|marked}`、`tensorcast_memory_tier_faults_per_sec`、`tensorcast_memory_tier_rehydrate_p99_ns` 和 `tensorcast_memory_tier_enable_preemptible`。
 - **加载触发点**：`core/store/materialization/planning/chunk_aware_strategy.cc` 在 CPU 侧加载完成后固定调用 `mark_cpu_preemptible(0.5F)`，而当 GPU 目标加载完成且 `is_gpu_loading_complete()` 返回真时，再调用 `mark_cpu_preemptible(1.0F)`。GPU 全量物化后，`ReplicaLoadController::finalize_copy_state_`（H2D copy 路径）、`ReplicaLoadController::load_async_from_source`（磁盘/P2P pipeline）以及 `ReplicaLoadController::copy_from_peer` 都会调用 `UnifiedMemoryAuthority::post_gpu_load_policy`：默认保持 `EvictCPU`（兼容旧行为）；当配置显式关闭可抢占时改用 `Keep` 并保持 CPU `MemoryState` 为 `LOADED`。
-- **稳定开关**：当 daemon 配置 `engine.memory_tiers.enable_preemptible=false` 时，`ChunkAwareLoadingStrategy` 和 `ReplicaLoadController::mark_cpu_preemptible` 会跳过可抢占标记，GPU 完成后的 `post_gpu_load_policy` 也会改为 `Keep`，以稳定模式运行；启动阶段如果配置的 `stable_bytes` 大于 `(cgroup.memory.max|MemTotal) - mem_pool_size_bytes` 会直接报错。
+- **稳定开关**：当 daemon 配置 `engine.memory_tiers.enable_preemptible=false` 时，`ChunkAwareLoadingStrategy` 和 `ReplicaLoadController::mark_cpu_preemptible` 会跳过可抢占标记，GPU 完成后的 `post_gpu_load_policy` 也会改为 `Keep`，以稳定模式运行；启动阶段如果配置的 `stable_bytes` 大于 `(cgroup.memory.max|MemTotal) - sum(pinned_memory.classes[].pool_bytes)` 会直接报错。
 - **GPU 回收策略选项**：`UnifiedMemoryAuthority::post_gpu_load_policy` 已实现 `EvictCPU`、`MarkPreemptible` 与 `Keep` 三个分支：`EvictCPU` 继续通过 `CpuArena::evict_tail_bytes` 对尾部 chunk 逐段调用 `madvise(MADV_PAGEOUT/MADV_DONTNEED)`，`MarkPreemptible` 会把全部 chunk 重新走 `mark_preemptible` 流程，而 `Keep` 则完全跳过回收。当前 `ReplicaLoadController` 仍统一传入 `EvictCPU`，但接口已经允许后续按副本切换策略。
 - **UMA 标记逻辑**：`ReplicaLoadController::mark_cpu_preemptible` 只检查 ratio 与分配是否存在，随后调用 `UnifiedMemoryAuthority::mark_cpu_chunks_preemptible`。UMA 将 `floor(ratio * total_chunks)` 的 **前缀 chunk** 打包成索引数组，交给 `CpuArena::mark_preemptible` 发出 `madvise`，最后把相应 `chunk_records[idx].cpu` 置为 `PREEMPTIBLE` 并递增版本。
 - **Arena 调用**：`CpuArena::mark_preemptible` 在 UMA 全局互斥保护下遍历所有被选中的 chunk，先检查 `chunk_records[idx].pin_refcnt` 并跳过正在被 pin 的条目，再忽略 CPU 状态为 `LOCKED_TX` 或 `EVICTED` 的 chunk；其余条目无论当前是 `HOT/COLD/COPIED_GPU` 还是已经 `PREEMPTIBLE`，都会再次执行 `madvise(MADV_FREE)`，若返回 `EINVAL` 或平台禁用了 `MADV_FREE` 则立即退化到 `MADV_DONTNEED`。该调用只发出内核 hint，不在此处修改 ledger；`UnifiedMemoryAuthority::mark_cpu_chunks_preemptible` 会在随后把 `chunk_records[idx].cpu` 置为 `PREEMPTIBLE` 并递增版本号。

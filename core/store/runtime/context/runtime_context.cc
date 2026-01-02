@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/context/runtime_context.h"
 
@@ -31,7 +31,9 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
           options.artifact_chunk_bytes == 0 ? tensorcast::common::consts::kArtifactChunkDefault
                                             : options.artifact_chunk_bytes),
       memory_pool_(
-          std::make_shared<common::memory::PinnedBufferPool>(options.memory_pool_size, options.tx_slice_bytes)),
+          options.pinned_buffer_pool_override
+              ? options.pinned_buffer_pool_override
+              : std::make_shared<common::memory::PinnedBufferPool>(options.memory_pool_size, options.tx_slice_bytes)),
       device_manager_(std::make_unique<components::DeviceManager>()),
       replica_registry_(std::make_unique<components::ReplicaRegistry>()),
       metrics_collector_(std::make_unique<components::MetricsCollector>()),
@@ -88,8 +90,9 @@ absl::Status RuntimeContext::start() {
     if (!host_cap_or.ok()) {
       return host_cap_or.status();
     }
-    auto budget_or =
-        MemoryTierBudget::from_config(*options_.memory_tier_config, *host_cap_or, options_.memory_pool_size);
+    const uint64_t pinned_reservation =
+        options_.pinned_total_bytes != 0 ? options_.pinned_total_bytes : options_.memory_pool_size;
+    auto budget_or = MemoryTierBudget::from_config(*options_.memory_tier_config, *host_cap_or, pinned_reservation);
     if (!budget_or.ok()) {
       return budget_or.status();
     }
@@ -131,6 +134,9 @@ absl::Status RuntimeContext::start() {
     });
   }
   metrics_collector_->update_all_metrics(*memory_pool_, *replica_registry_, *device_manager_);
+  if (options_.pinned_memory_authority) {
+    metrics_collector_->update_pinned_authority_metrics(*options_.pinned_memory_authority);
+  }
   started_ = true;
   return absl::OkStatus();
 }
@@ -224,13 +230,16 @@ const ingestion::IngestionEventHub* RuntimeContext::ingestion_event_hub() const 
 }
 
 absl::Status RuntimeContext::validate_options() const {
-  if (options_.tx_slice_bytes == 0) {
-    return absl::InvalidArgumentError("Pinned buffer slice size must be non-zero");
+  const size_t pool_block = memory_pool_ ? memory_pool_->slice_bytes() : 0;
+  if (pool_block == 0) {
+    return absl::InvalidArgumentError("Pinned buffer pool slice size must be non-zero");
   }
-  if (artifact_chunk_bytes_ % options_.tx_slice_bytes != 0) {
-    return absl::InvalidArgumentError("artifact_chunk_bytes must be a multiple of tx_slice_bytes");
+  if (options_.tx_slice_bytes != 0 && options_.tx_slice_bytes != pool_block) {
+    return absl::InvalidArgumentError("Pinned buffer pool slice_bytes must match options.tx_slice_bytes");
   }
-  const size_t pool_block = memory_pool_->slice_bytes();
+  if (artifact_chunk_bytes_ % pool_block != 0) {
+    return absl::InvalidArgumentError("artifact_chunk_bytes must be a multiple of pinned slice_bytes");
+  }
   if (pool_block % common::memory::PinnedBufferPool::kDirectIOAlignment != 0) {
     return absl::InvalidArgumentError("Pinned buffer block size must be aligned to DIRECT_IO");
   }
@@ -251,7 +260,8 @@ absl::Status RuntimeContext::validate_options() const {
       return host_capacity_or.status();
     }
     const uint64_t host_bytes = *host_capacity_or;
-    const uint64_t pinned_pool_bytes = options_.memory_pool_size;
+    const uint64_t pinned_pool_bytes =
+        options_.pinned_total_bytes != 0 ? options_.pinned_total_bytes : options_.memory_pool_size;
     const uint64_t uma_capacity = (host_bytes > pinned_pool_bytes) ? (host_bytes - pinned_pool_bytes) : 0;
     if (tiers.stable_bytes > uma_capacity) {
       return absl::InvalidArgumentError(

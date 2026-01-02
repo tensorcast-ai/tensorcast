@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/memory/streaming_pinned_buffer.h"
 
@@ -48,11 +48,22 @@ absl::Status StreamingPinnedBuffer::initialize(const std::chrono::milliseconds& 
   int result = pool_->allocate(total_size, chunk_buffers_, timeout);
   if (result != 0) {
     if (result > 0 && timeout.count() > 0) {
+      const std::string_view pool_name = pool_ ? pool_->name() : std::string_view();
       return absl::DeadlineExceededError(
           absl::StrCat(
-              "Timeout waiting for ", result, " chunks from pinned memory pool after ", timeout.count(), "ms"));
+              "Timeout waiting for ",
+              result,
+              " pinned slices from pool",
+              (pool_name.empty() ? "" : absl::StrCat("[name=", pool_name, "]")),
+              " after ",
+              timeout.count(),
+              "ms"));
     }
-    return absl::ResourceExhaustedError("Failed to allocate chunks from pinned memory pool");
+    const std::string_view pool_name = pool_ ? pool_->name() : std::string_view();
+    return absl::ResourceExhaustedError(
+        absl::StrCat(
+            "Failed to allocate pinned slices from pool",
+            (pool_name.empty() ? "" : absl::StrCat("[name=", pool_name, "]"))));
   }
 
   if (chunk_buffers_.size() != num_chunks_) {
@@ -92,13 +103,24 @@ absl::Status StreamingPinnedBuffer::release() {
     LOG(WARNING) << "Waiting for " << (num_chunks_ - free_queue_.size()) << " chunks to be returned before release";
 
     if (!mutex_.AwaitWithTimeout(absl::Condition(this, &StreamingPinnedBuffer::all_chunks_returned), timeout)) {
-      // Timeout occurred - this is a fatal error
-      LOG(FATAL) << "FATAL: StreamingPinnedBuffer::release() timed out after " << absl::FormatDuration(timeout) << ". "
-                 << (num_chunks_ - free_queue_.size()) << " chunks were not returned. "
-                 << "This indicates a resource leak - buffers obtained via get_free_chunk() "
-                 << "were not returned via return_chunk(). "
-                 << "Total chunks: " << num_chunks_ << ", Free chunks: " << free_queue_.size()
-                 << ", Chunks produced: " << chunks_produced_ << ", Chunks consumed: " << chunks_consumed_;
+      const size_t missing = num_chunks_ - free_queue_.size();
+      LOG(ERROR) << "StreamingPinnedBuffer::release() timed out after " << absl::FormatDuration(timeout)
+                 << " missing_chunks=" << missing << " total_chunks=" << num_chunks_
+                 << " free_chunks=" << free_queue_.size() << " chunks_produced=" << chunks_produced_
+                 << " chunks_consumed=" << chunks_consumed_
+                 << " (refusing to deallocate buffers while chunks are still in use)";
+      return absl::DeadlineExceededError(
+          absl::StrCat(
+              "StreamingPinnedBuffer::release timed out: missing_chunks=",
+              missing,
+              " total_chunks=",
+              num_chunks_,
+              " free_chunks=",
+              free_queue_.size(),
+              " chunks_produced=",
+              chunks_produced_,
+              " chunks_consumed=",
+              chunks_consumed_));
     }
   }
 

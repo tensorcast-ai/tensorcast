@@ -1,11 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "communication_manager.h"
 
 #include <cctype>
 #include <cstdlib>
+#include <utility>
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
+
+#include "core/communicator/config_io.h"
 
 namespace tensorcast::store::components {
 
@@ -22,10 +25,25 @@ absl::Status CommunicationManager::initialize(const std::string& listen_addr, ui
   communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(enable_rdma);
   auto* stager = cfg.mutable_stager();
-  stager->set_stage_chunk_mb_gpu(16);
-  stager->set_stage_chunk_mb_cpu(4);
   stager->set_buffers_per_flow(4);
-  comm_engine_ = std::make_shared<communicator::engine::Communicator>(cfg);
+  tensorcast::communicator::normalize_defaults(&cfg);
+  constexpr size_t kDefaultGpuSliceBytes = 16ULL * 1024 * 1024;
+  constexpr size_t kDefaultCpuSliceBytes = 4ULL * 1024 * 1024;
+  const size_t num_buffers = static_cast<size_t>(stager->buffers_per_flow());
+  const size_t recv_buffers = num_buffers * static_cast<size_t>(cfg.transport().tcp_conn_count());
+  const size_t gpu_pool_slices = num_buffers + recv_buffers;
+  const size_t gpu_pool_bytes = gpu_pool_slices * kDefaultGpuSliceBytes;
+  auto gpu_pool = std::make_shared<common::memory::PinnedBufferPool>(gpu_pool_bytes, kDefaultGpuSliceBytes);
+  auto cpu_pool =
+      std::make_shared<common::memory::PinnedBufferPool>(num_buffers * kDefaultCpuSliceBytes, kDefaultCpuSliceBytes);
+
+  communicator::engine::Communicator::PinnedStagingPools pools{
+      .gpu_pool = std::move(gpu_pool),
+      .cpu_pool = std::move(cpu_pool),
+      .preregister_gpu = enable_rdma,
+      .preregister_cpu = enable_rdma,
+  };
+  comm_engine_ = std::make_shared<communicator::engine::Communicator>(cfg, std::move(pools));
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -45,7 +63,28 @@ absl::Status CommunicationManager::initialize_with_config(
     const std::string& listen_addr,
     uint16_t listen_port,
     const communicator::v1::CommunicatorConfig& config) {
-  comm_engine_ = std::make_shared<communicator::engine::Communicator>(config);
+  // Standalone initialization path (not daemon): provide conservative defaults
+  // for pinned pools since the authoritative sizing is handled by the daemon's
+  // pinned_memory configuration.
+  communicator::v1::CommunicatorConfig normalized = config;
+  tensorcast::communicator::normalize_defaults(&normalized);
+  constexpr size_t kDefaultGpuSliceBytes = 16ULL * 1024 * 1024;
+  constexpr size_t kDefaultCpuSliceBytes = 4ULL * 1024 * 1024;
+  const size_t num_buffers = static_cast<size_t>(std::max(1, normalized.stager().buffers_per_flow()));
+  const size_t tcp_conn = static_cast<size_t>(normalized.transport().tcp_conn_count());
+  const size_t gpu_pool_slices = num_buffers + (num_buffers * tcp_conn);
+  const size_t gpu_pool_bytes = gpu_pool_slices * kDefaultGpuSliceBytes;
+  auto gpu_pool = std::make_shared<common::memory::PinnedBufferPool>(gpu_pool_bytes, kDefaultGpuSliceBytes);
+  auto cpu_pool =
+      std::make_shared<common::memory::PinnedBufferPool>(num_buffers * kDefaultCpuSliceBytes, kDefaultCpuSliceBytes);
+
+  communicator::engine::Communicator::PinnedStagingPools pools{
+      .gpu_pool = std::move(gpu_pool),
+      .cpu_pool = std::move(cpu_pool),
+      .preregister_gpu = normalized.enable_rdma(),
+      .preregister_cpu = normalized.enable_rdma(),
+  };
+  comm_engine_ = std::make_shared<communicator::engine::Communicator>(normalized, std::move(pools));
 
   auto status = comm_engine_->init(listen_addr, listen_port);
   if (!status.ok()) {
@@ -58,6 +97,26 @@ absl::Status CommunicationManager::initialize_with_config(
   listen_port_ = comm_engine_->listening_port();
   // DRAM stager uses default no-op lease provider; UMA export keepalive holds leases.
   LOG(INFO) << "Communication engine (config) initialized on " << listen_addr << ":" << listen_port_;
+  return absl::OkStatus();
+}
+
+absl::Status CommunicationManager::initialize_with_config_and_pools(
+    const std::string& listen_addr,
+    uint16_t listen_port,
+    const communicator::v1::CommunicatorConfig& config,
+    communicator::engine::Communicator::PinnedStagingPools pools) {
+  comm_engine_ = std::make_shared<communicator::engine::Communicator>(config, std::move(pools));
+
+  auto status = comm_engine_->init(listen_addr, listen_port);
+  if (!status.ok()) {
+    LOG(ERROR) << "Failed to initialize communication engine (config+pools): " << status.message();
+    comm_engine_.reset();
+    return status;
+  }
+
+  enabled_ = true;
+  listen_port_ = comm_engine_->listening_port();
+  LOG(INFO) << "Communication engine (config+pools) initialized on " << listen_addr << ":" << listen_port_;
   return absl::OkStatus();
 }
 

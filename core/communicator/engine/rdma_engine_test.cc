@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <arpa/inet.h>
 #include <catch2/catch_test_macros.hpp>
@@ -66,10 +66,22 @@ struct RdmaTestFixture {
 
   RdmaTestFixture() {
     auto srv_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
-    server_ = new communicator::engine::Communicator(srv_cfg, 30);
+    auto srv_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        srv_cfg.stager().buffers_per_flow(),
+        srv_cfg.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/true);
+    server_ = new communicator::engine::Communicator(srv_cfg, std::move(srv_pools), 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     auto cli_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
-    client_ = new communicator::engine::Communicator(cli_cfg, 30);
+    auto cli_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cli_cfg.stager().buffers_per_flow(),
+        cli_cfg.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/true);
+    client_ = new communicator::engine::Communicator(cli_cfg, std::move(cli_pools), 30);
     client_init_status_ = client_->init("127.0.0.1", 60001, 8);
 
     for (uint32_t i = 0; i < BUF_SIZE; i++) {
@@ -311,7 +323,13 @@ TEST_CASE("RDMA read defers until handshake completes", "[rdma][communicator][ha
   using tensorcast::communicator::misc::SUCCESS;
 
   auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
-  Communicator client(cfg, /*channel_expire_sec=*/0);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);
@@ -447,7 +465,13 @@ TEST_CASE("RDMA handshake failure surfaces retryable error", "[rdma][communicato
   using tensorcast::communicator::misc::STRNCPY;
 
   auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
-  Communicator client(cfg, /*channel_expire_sec=*/0);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/true);
+  Communicator client(cfg, std::move(pools), /*channel_expire_sec=*/0);
 
   auto& rdma_ctx = CommunicatorTestPeer::rdma_context(client);
   auto net_dev = rdma_ctx->get_best_dev(/*gpu_id=*/0);

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -26,6 +26,7 @@ class RegistrationBackend {
       ReplicaFactory replica_factory,
       size_t artifact_chunk_bytes,
       std::chrono::milliseconds pinned_memory_timeout,
+      size_t streaming_buffer_chunks,
       RegistrationPublisher* publisher);
 
   RegistrationBackend(const RegistrationBackend&) = delete;
@@ -67,6 +68,7 @@ class RegistrationBackend {
   ReplicaFactory replica_factory_;
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};
+  size_t streaming_buffer_chunks_{16};
   RegistrationPublisher* publisher_;
 
   mutable std::mutex pending_mutex_;

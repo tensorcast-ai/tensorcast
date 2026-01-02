@@ -136,11 +136,11 @@ All interfaces and fields must keep these prefixes. Avoid ambiguous names such a
 
 ## Differences between UMA, mem_pool, and pinned memory
 
-- `StoreEngineOptions::memory_pool_size` (wired through `DaemonConfig.engine.mem_pool_size_bytes`) refers **only** to the PinnedBufferPool capacity used by P2P and disk streaming. `ReplicaRuntime::get_available_memory()` and `WorkerHeartbeat.mem_pool_available_size` also refer strictly to the pinned pool and have nothing to do with UMA CPU chunks.
+- `StoreEngineOptions::memory_pool_size` (daemon: pinned class `engine` capacity) refers **only** to the PinnedBufferPool capacity used by P2P and disk streaming. `ReplicaRuntime::get_available_memory()` and `WorkerHeartbeat.mem_pool_available_size` also refer strictly to the pinned pool and have nothing to do with UMA CPU chunks.
 - The pinned pool calls `mlock`/`cudaHostAlloc` during initialization and remains resident. Those bytes must be deducted from the host DRAM budget and cannot be reused by the stable pool.
 - The new `MemoryTierBudget` therefore needs a separate "CPU DRAM available to UMA" calculation:
   1. Read node `MemTotal` (or cgroup `memory.max` when inside a container) to get `host_dram_bytes`.
-  2. Read `pinned_pool_bytes = engine.get_mem_pool_size()`.
+  2. Read `pinned_pool_bytes = sum(DaemonConfig.pinned_memory.classes[].pool_bytes)` (or `StoreEngineOptions::pinned_total_bytes`).
   3. Compute `uma_cpu_capacity_bytes = max(host_dram_bytes - pinned_pool_bytes, 0)`.
   4. Set `stable_capacity_bytes = min(config.stable_bytes, uma_cpu_capacity_bytes)`.
 - In other words, `mem_pool_size` is **not** the stable pool capacity and **not** the UMA VS size. Docs, gRPC APIs, and metrics must clearly differentiate between the pinned pool and UMA tiers.

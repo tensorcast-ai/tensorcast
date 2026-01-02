@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -141,14 +141,21 @@ TEST_CASE("UB repro: cuMemUnmap/cuMemRelease while MR alive (manual)", "[rdma][v
   const size_t tensor_bytes = *granularity_or;
   const auto prop = make_vmm_prop(kGpuId);
 
-  auto cfg = tensorcast::testing::make_tcp_communicator_config(
-      /*enable_rdma=*/true,
-      /*gpu_chunk_mb=*/1,
-      /*cpu_chunk_mb=*/1,
-      /*buffers_per_flow=*/2);
-
-  tensorcast::communicator::engine::Communicator server(cfg, /*channel_expire_sec=*/5);
-  tensorcast::communicator::engine::Communicator client(cfg, /*channel_expire_sec=*/5);
+  auto cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true, /*buffers_per_flow=*/2);
+  auto server_pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(1ULL << 20),
+      /*cpu_slice_bytes=*/(1ULL << 20),
+      /*enable_rdma=*/true);
+  auto client_pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(1ULL << 20),
+      /*cpu_slice_bytes=*/(1ULL << 20),
+      /*enable_rdma=*/true);
+  tensorcast::communicator::engine::Communicator server(cfg, std::move(server_pools), /*channel_expire_sec=*/5);
+  tensorcast::communicator::engine::Communicator client(cfg, std::move(client_pools), /*channel_expire_sec=*/5);
 
   const int server_port = tensorcast::testing::find_available_port(61000);
   const int client_port = tensorcast::testing::find_available_port(61100);

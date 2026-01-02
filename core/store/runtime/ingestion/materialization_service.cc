@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/ingestion/materialization_service.h"
 
@@ -33,8 +33,6 @@ using common::memory::MemoryLocation;
 using loading::InlineBufferSource;
 using loading::TransformPlacement;
 using replica::MemoryState;
-
-constexpr size_t kLocalCopyStreamingChunks = 16;
 
 absl::Status validate_mi2_descriptor_matches_request(const loading::MaterializationRequest& request) {
   if (!absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
@@ -185,6 +183,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
         .view_plan = src_replica->view_plan(),
         .memory_tier_config = src_replica->get_memory_manager().memory_tier_config()};
     cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
+    cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
     cfg.view_id = request.requested_view_id();
     cfg.transform_placement =
         request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
@@ -214,12 +213,9 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
         return absl::FailedPreconditionError("Pinned buffer pool slice size is zero");
       }
       const size_t needed_chunks = (total_bytes + slice_bytes - 1) / slice_bytes;
-      size_t pool_capacity = deps_.memory_pool->capacity_slices();
-      if (pool_capacity == 0) {
-        pool_capacity = kLocalCopyStreamingChunks;
-      }
-      const size_t num_chunks =
-          std::max<size_t>(1, std::min({needed_chunks, kLocalCopyStreamingChunks, pool_capacity}));
+      const size_t pool_capacity = deps_.memory_pool->capacity_slices();
+      const size_t max_chunks = std::max<size_t>(1, deps_.streaming_buffer_chunks);
+      const size_t num_chunks = std::max<size_t>(1, std::min({needed_chunks, max_chunks, pool_capacity}));
       auto streaming_buf =
           std::make_shared<common::memory::StreamingPinnedBuffer>(num_chunks, slice_bytes, deps_.memory_pool);
       auto init_status = streaming_buf->initialize(deps_.pinned_memory_timeout);
@@ -320,6 +316,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
         .view_plan = src_replica->view_plan(),
         .memory_tier_config = std::nullopt};
     cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
+    cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
     cfg.view_id = request.requested_view_id();
     cfg.transform_placement =
         request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;

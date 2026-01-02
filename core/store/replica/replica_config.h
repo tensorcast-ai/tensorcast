@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -57,6 +57,9 @@ struct ReplicaConfig {
 
   // Timeout for pinned memory allocation operations
   std::chrono::milliseconds pinned_memory_timeout = std::chrono::milliseconds::zero();
+
+  // Default depth for StreamingPinnedBuffer instances created by this replica.
+  size_t streaming_buffer_chunks{16};
 
   // Whether to enable P2P communication for this replica
   bool p2p_comm_enabled = false;

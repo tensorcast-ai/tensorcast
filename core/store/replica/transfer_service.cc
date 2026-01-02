@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/replica/transfer_service.h"
 
@@ -149,7 +149,7 @@ TransferService::TransferService(
       cfg_(cfg),
       spb_(
           std::make_shared<common::memory::StreamingPinnedBuffer>(
-              /*num_chunks=*/16,
+              /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks),
               pinned_pool_->slice_bytes(),
               pinned_pool_)) {}
 
@@ -175,7 +175,7 @@ absl::Status TransferService::copy_cpu_to_gpu_streaming(
   // Create a per-session streaming buffer backed by the shared pinned pool
   const size_t slice_bytes = get_pool_chunk_size();
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/16, slice_bytes, pinned_pool_);
+      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
   if (!init_status.ok()) {
     return init_status;
@@ -367,7 +367,7 @@ absl::Status TransferService::load_from_source(
             layout_chunk_size));
   }
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/16, slice_bytes, pinned_pool_);
+      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
   if (!init_status.ok()) {
     return init_status;
@@ -465,7 +465,7 @@ absl::Status TransferService::execute(
             layout_chunk_size));
   }
   auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-      /*num_chunks=*/16, slice_bytes, pinned_pool_);
+      /*num_chunks=*/std::max<size_t>(1, cfg_.streaming_buffer_chunks), slice_bytes, pinned_pool_);
   auto init_status = session_spb->initialize(cfg_.pinned_memory_timeout);
   if (!init_status.ok()) {
     return init_status;

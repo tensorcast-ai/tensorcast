@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
 #include <cstring>
@@ -72,7 +72,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Set up source engine with GPU tensor
     auto cfg1 = make_tcp_communicator_config();
-    auto source_engine = std::make_shared<Communicator>(cfg1);
+    auto source_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg1.stager().buffers_per_flow(),
+        cfg1.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto source_engine = std::make_shared<Communicator>(cfg1, std::move(source_pools));
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t artifact_size = 16 * 1024 * 1024; // 16MB
@@ -100,7 +106,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Create target engine for loader
     auto cfg2 = make_tcp_communicator_config();
-    auto target_engine = std::make_shared<Communicator>(cfg2);
+    auto target_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg2.stager().buffers_per_flow(),
+        cfg2.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto target_engine = std::make_shared<Communicator>(cfg2, std::move(target_pools));
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     // Create P2PLoader with GPU source configuration (updated API)
@@ -131,6 +143,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
+        /*streaming_buffer_chunks=*/16,
         artifact_size);
 
     // Load asynchronously
@@ -170,7 +183,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
 
     // Similar test but with CPU target
     auto cfg3 = make_tcp_communicator_config();
-    auto source_engine = std::make_shared<Communicator>(cfg3);
+    auto source_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg3.stager().buffers_per_flow(),
+        cfg3.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto source_engine = std::make_shared<Communicator>(cfg3, std::move(source_pools));
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
@@ -202,7 +221,13 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     REQUIRE(register_status.ok());
 
     auto cfg4 = make_tcp_communicator_config();
-    auto target_engine = std::make_shared<Communicator>(cfg4);
+    auto target_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg4.stager().buffers_per_flow(),
+        cfg4.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto target_engine = std::make_shared<Communicator>(cfg4, std::move(target_pools));
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());
@@ -235,6 +260,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         kArtifactChunkBytes,
         1024 * 1024 * 1024, // max_buffer_bytes (1GB)
         std::chrono::milliseconds::zero(),
+        /*streaming_buffer_chunks=*/16,
         artifact_size);
 
     // Allocate CPU memory before loading
@@ -275,26 +301,36 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     int target_port = find_available_port(randomized_port_hint(gpu_gpu_subchunk_base + 1));
     REQUIRE(target_port > 0);
 
-    auto src_cfg = make_tcp_communicator_config(
-        /*enable_rdma=*/false,
-        /*gpu_chunk_mb=*/16,
-        /*cpu_chunk_mb=*/4,
-        /*buffers_per_flow=*/4);
+    auto src_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/4);
     src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-    src_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
-    src_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
-    auto source_engine = std::make_shared<Communicator>(src_cfg);
+    auto src_gpu_pool =
+        std::make_shared<tensorcast::common::memory::PinnedBufferPool>(4ull * 1024 * 1024 * 1024, pool_chunk_size);
+    auto src_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(src_cfg.stager().buffers_per_flow()),
+        /*chunk_size=*/(4ull * 1024 * 1024));
+    Communicator::PinnedStagingPools src_pools{
+        .gpu_pool = std::move(src_gpu_pool),
+        .cpu_pool = std::move(src_cpu_pool),
+        .preregister_gpu = false,
+        .preregister_cpu = false,
+    };
+    auto source_engine = std::make_shared<Communicator>(src_cfg, std::move(src_pools));
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
-    auto dst_cfg = make_tcp_communicator_config(
-        /*enable_rdma=*/false,
-        /*gpu_chunk_mb=*/16,
-        /*cpu_chunk_mb=*/4,
-        /*buffers_per_flow=*/4);
+    auto dst_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/4);
     dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-    dst_cfg.mutable_pool()->set_pool_size_bytes(4ull * 1024 * 1024 * 1024);
-    dst_cfg.mutable_pool()->set_chunk_bytes(pool_chunk_size);
-    auto target_engine = std::make_shared<Communicator>(dst_cfg);
+    auto dst_gpu_pool =
+        std::make_shared<tensorcast::common::memory::PinnedBufferPool>(4ull * 1024 * 1024 * 1024, pool_chunk_size);
+    auto dst_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(dst_cfg.stager().buffers_per_flow()),
+        /*chunk_size=*/(4ull * 1024 * 1024));
+    Communicator::PinnedStagingPools dst_pools{
+        .gpu_pool = std::move(dst_gpu_pool),
+        .cpu_pool = std::move(dst_cpu_pool),
+        .preregister_gpu = false,
+        .preregister_cpu = false,
+    };
+    auto target_engine = std::make_shared<Communicator>(dst_cfg, std::move(dst_pools));
     REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
     void* source_gpu_ptr = nullptr;
@@ -361,6 +397,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
         kArtifactChunkBytes,
         pool_size,
         std::chrono::milliseconds::zero(),
+        /*streaming_buffer_chunks=*/16,
         artifact_size);
 
     auto src_or = loader->open_source();
@@ -391,7 +428,6 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
     SECTION("Remote GPU to Local GPU via TCP with limited staging credit") {
       const int tcp_conn_count = 8;
       const std::size_t stage_chunk_bytes = 16ull * 1024 * 1024; // 16 MiB
-      const uint32_t stage_chunk_mb = static_cast<uint32_t>(stage_chunk_bytes / (1024 * 1024));
       const std::size_t artifact_size = stage_chunk_bytes * 6; // Requires >1 window when buffers_per_flow=2
 
       const int credit_base = randomized_port_hint(50500);
@@ -400,15 +436,20 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       int target_port = find_available_port(randomized_port_hint(credit_base + 1));
       REQUIRE(target_port > 0);
 
-      auto src_cfg = make_tcp_communicator_config(
-          /*enable_rdma=*/false,
-          /*gpu_chunk_mb=*/stage_chunk_mb,
-          /*cpu_chunk_mb=*/4,
-          /*buffers_per_flow=*/2);
+      auto src_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
       src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      src_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
-      src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
-      auto source_engine = std::make_shared<Communicator>(src_cfg);
+      auto src_gpu_pool =
+          std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2ull * 1024 * 1024 * 1024, stage_chunk_bytes);
+      auto src_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+          /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(src_cfg.stager().buffers_per_flow()),
+          /*chunk_size=*/(4ull * 1024 * 1024));
+      Communicator::PinnedStagingPools src_pools{
+          .gpu_pool = std::move(src_gpu_pool),
+          .cpu_pool = std::move(src_cpu_pool),
+          .preregister_gpu = false,
+          .preregister_cpu = false,
+      };
+      auto source_engine = std::make_shared<Communicator>(src_cfg, std::move(src_pools));
       REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
       void* source_gpu_ptr = nullptr;
@@ -435,15 +476,20 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       CAPTURE(reg_status.message());
       REQUIRE(reg_status.ok());
 
-      auto dst_cfg = make_tcp_communicator_config(
-          /*enable_rdma=*/false,
-          /*gpu_chunk_mb=*/stage_chunk_mb,
-          /*cpu_chunk_mb=*/4,
-          /*buffers_per_flow=*/2);
+      auto dst_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
       dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      dst_cfg.mutable_pool()->set_pool_size_bytes(2ull * 1024 * 1024 * 1024);
-      dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
-      auto target_engine = std::make_shared<Communicator>(dst_cfg);
+      auto dst_gpu_pool =
+          std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2ull * 1024 * 1024 * 1024, stage_chunk_bytes);
+      auto dst_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+          /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(dst_cfg.stager().buffers_per_flow()),
+          /*chunk_size=*/(4ull * 1024 * 1024));
+      Communicator::PinnedStagingPools dst_pools{
+          .gpu_pool = std::move(dst_gpu_pool),
+          .cpu_pool = std::move(dst_cpu_pool),
+          .preregister_gpu = false,
+          .preregister_cpu = false,
+      };
+      auto target_engine = std::make_shared<Communicator>(dst_cfg, std::move(dst_pools));
       auto init_status = target_engine->init("127.0.0.1", target_port);
       CAPTURE(init_status.message());
       REQUIRE(init_status.ok());
@@ -476,6 +522,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
           kArtifactChunkBytes,
           1024 * 1024 * 1024,
           std::chrono::milliseconds::zero(),
+          /*streaming_buffer_chunks=*/16,
           artifact_size);
 
       auto src_or = loader->open_source();
@@ -513,15 +560,20 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
       int target_port = find_available_port(randomized_port_hint(small_pool_base + 1));
       REQUIRE(target_port > 0);
 
-      auto src_cfg = make_tcp_communicator_config(
-          /*enable_rdma=*/false,
-          /*gpu_chunk_mb=*/16,
-          /*cpu_chunk_mb=*/4,
-          /*buffers_per_flow=*/buffers_per_flow);
+      auto src_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/buffers_per_flow);
       src_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      src_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
-      src_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
-      auto source_engine = std::make_shared<Communicator>(src_cfg);
+      auto src_gpu_pool =
+          std::make_shared<tensorcast::common::memory::PinnedBufferPool>(communicator_pool_bytes, stage_chunk_bytes);
+      auto src_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+          /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(src_cfg.stager().buffers_per_flow()),
+          /*chunk_size=*/(4ull * 1024 * 1024));
+      Communicator::PinnedStagingPools src_pools{
+          .gpu_pool = std::move(src_gpu_pool),
+          .cpu_pool = std::move(src_cpu_pool),
+          .preregister_gpu = false,
+          .preregister_cpu = false,
+      };
+      auto source_engine = std::make_shared<Communicator>(src_cfg, std::move(src_pools));
       REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
       void* source_gpu_ptr = nullptr;
@@ -554,15 +606,20 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
                       reg_opts)
                   .ok());
 
-      auto dst_cfg = make_tcp_communicator_config(
-          /*enable_rdma=*/false,
-          /*gpu_chunk_mb=*/16,
-          /*cpu_chunk_mb=*/4,
-          /*buffers_per_flow=*/buffers_per_flow);
+      auto dst_cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/buffers_per_flow);
       dst_cfg.mutable_transport()->set_tcp_conn_count(tcp_conn_count);
-      dst_cfg.mutable_pool()->set_pool_size_bytes(communicator_pool_bytes);
-      dst_cfg.mutable_pool()->set_chunk_bytes(stage_chunk_bytes);
-      auto target_engine = std::make_shared<Communicator>(dst_cfg);
+      auto dst_gpu_pool =
+          std::make_shared<tensorcast::common::memory::PinnedBufferPool>(communicator_pool_bytes, stage_chunk_bytes);
+      auto dst_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+          /*total_size=*/(4ull * 1024 * 1024) * static_cast<size_t>(dst_cfg.stager().buffers_per_flow()),
+          /*chunk_size=*/(4ull * 1024 * 1024));
+      Communicator::PinnedStagingPools dst_pools{
+          .gpu_pool = std::move(dst_gpu_pool),
+          .cpu_pool = std::move(dst_cpu_pool),
+          .preregister_gpu = false,
+          .preregister_cpu = false,
+      };
+      auto target_engine = std::make_shared<Communicator>(dst_cfg, std::move(dst_pools));
       REQUIRE(target_engine->init("127.0.0.1", target_port).ok());
 
       P2PSource p2p_src;
@@ -589,6 +646,7 @@ TEST_CASE("P2PLoader TCP Mode GPU Support", "[communicator][tcp][gpu][p2p_loader
           kArtifactChunkBytes,
           stage_chunk_bytes * 2,
           std::chrono::milliseconds::zero(),
+          /*streaming_buffer_chunks=*/16,
           artifact_size);
 
       auto src_or = loader->open_source();

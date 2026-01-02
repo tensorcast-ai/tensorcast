@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/testing/test_helpers.h"
 
@@ -202,30 +202,47 @@ int find_available_port(int base_port, int max_attempts) {
   return -1;
 }
 
-void configure_tcp_stager_defaults(
-    tensorcast::communicator::v1::CommunicatorConfig* cfg,
-    uint32_t gpu_chunk_mb,
-    uint32_t cpu_chunk_mb,
-    uint32_t buffers_per_flow) {
+void configure_tcp_stager_defaults(tensorcast::communicator::v1::CommunicatorConfig* cfg, uint32_t buffers_per_flow) {
   if (cfg == nullptr) {
     return;
   }
   auto* st = cfg->mutable_stager();
-  st->set_stage_chunk_mb_gpu(gpu_chunk_mb);
-  st->set_stage_chunk_mb_cpu(cpu_chunk_mb);
+  st->set_stage_cpu_for_rdma(true);
   st->set_buffers_per_flow(buffers_per_flow);
   cfg->mutable_transport()->set_so_reuseport(false);
 }
 
 tensorcast::communicator::v1::CommunicatorConfig make_tcp_communicator_config(
     bool enable_rdma,
-    uint32_t gpu_chunk_mb,
-    uint32_t cpu_chunk_mb,
     uint32_t buffers_per_flow) {
   tensorcast::communicator::v1::CommunicatorConfig cfg;
   cfg.set_enable_rdma(enable_rdma);
-  configure_tcp_stager_defaults(&cfg, gpu_chunk_mb, cpu_chunk_mb, buffers_per_flow);
+  configure_tcp_stager_defaults(&cfg, buffers_per_flow);
+  // Keep tests small and deterministic.
+  cfg.mutable_transport()->set_tcp_conn_count(2);
   return cfg;
+}
+
+tensorcast::communicator::engine::Communicator::PinnedStagingPools make_test_pinned_staging_pools(
+    uint32_t buffers_per_flow,
+    int tcp_conn_count,
+    size_t gpu_slice_bytes,
+    size_t cpu_slice_bytes,
+    bool enable_rdma) {
+  const size_t num_buffers = static_cast<size_t>(std::max<uint32_t>(1, buffers_per_flow));
+  const size_t conn_count = static_cast<size_t>(std::max(2, tcp_conn_count));
+  const size_t required_gpu_slices = num_buffers + (num_buffers * conn_count);
+  const size_t required_cpu_slices = num_buffers;
+  auto gpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+      required_gpu_slices * gpu_slice_bytes, gpu_slice_bytes);
+  auto cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+      required_cpu_slices * cpu_slice_bytes, cpu_slice_bytes);
+  return tensorcast::communicator::engine::Communicator::PinnedStagingPools{
+      .gpu_pool = std::move(gpu_pool),
+      .cpu_pool = std::move(cpu_pool),
+      .preregister_gpu = enable_rdma,
+      .preregister_cpu = enable_rdma,
+  };
 }
 
 } // namespace tensorcast::testing

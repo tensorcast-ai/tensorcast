@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <array>
 #include <chrono>
@@ -98,7 +98,13 @@ struct RegistrationBackendHarness {
       }
       return std::shared_ptr<tensorcast::store::replica::Replica>(std::move(created_or.value()));
     };
-    return RegistrationBackend(resources, std::move(factory), 1ULL << 20, std::chrono::milliseconds(10), &publisher);
+    return RegistrationBackend(
+        resources,
+        std::move(factory),
+        1ULL << 20,
+        std::chrono::milliseconds(10),
+        /*streaming_buffer_chunks=*/16,
+        &publisher);
   }
 };
 

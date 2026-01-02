@@ -146,6 +146,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
+        "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
@@ -176,6 +177,7 @@ sc_cc_library(
         ":replica_registry",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:pinned_memory_authority_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",

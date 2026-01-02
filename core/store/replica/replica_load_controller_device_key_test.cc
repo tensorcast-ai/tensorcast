@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -32,6 +32,7 @@ TEST_CASE("ReplicaLoadController binds UMA allocation to canonical device key", 
       tensorcast::common::consts::kArtifactChunkDefault,
       /*max_buffer_bytes=*/256 * 1024,
       std::chrono::milliseconds::zero(),
+      /*streaming_buffer_chunks=*/16,
       artifact_size);
 
   const auto key = controller->replica_key();

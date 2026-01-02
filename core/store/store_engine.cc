@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "store_engine.h"
 
@@ -162,6 +162,9 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
 
   context.metrics_collector().update_all_metrics(
       *context.pinned_buffer_pool(), replica_runtime_->registry(), context.device_manager());
+  if (context.options().pinned_memory_authority) {
+    context.metrics_collector().update_pinned_authority_metrics(*context.options().pinned_memory_authority);
+  }
 }
 
 StoreEngine::~StoreEngine() {

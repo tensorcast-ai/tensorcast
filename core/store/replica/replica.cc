@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/replica/replica.h"
 
@@ -144,6 +144,7 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.artifact_chunk_bytes,
       config.max_buffer_bytes,
       config.pinned_memory_timeout,
+      config.streaming_buffer_chunks,
       effective_size,
       view_id,
       config.memory_tier_config);

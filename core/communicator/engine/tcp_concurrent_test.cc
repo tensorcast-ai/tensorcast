@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <atomic>
 #include <future>
@@ -113,12 +113,14 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
-    auto cfg = make_tcp_communicator_config(
-        /*enable_rdma=*/false,
-        /*gpu_chunk_mb=*/16,
-        /*cpu_chunk_mb=*/4,
-        /*buffers_per_flow=*/2);
-    auto source_engine = std::make_shared<Communicator>(cfg);
+    auto cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
+    auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg.stager().buffers_per_flow(),
+        cfg.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/(16ULL << 20),
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto source_engine = std::make_shared<Communicator>(cfg, std::move(pools));
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 128 * 1024; // 128KB - large to ensure slow transfer
@@ -560,17 +562,25 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const int num_cycles = 10;
 
-    communicator::v1::CommunicatorConfig cfg;
-    cfg.set_enable_rdma(false); /* disable RDMA */
-
-    configure_tcp_stager_defaults(&cfg);
-    cfg.mutable_stager()->set_buffers_per_flow(2);
+    auto cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
     cfg.mutable_stager()->set_expected_gpu_channels(num_cycles);
-    const size_t chunk_bytes =
-        (cfg.stager().stage_chunk_mb_gpu() > 0 ? cfg.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
-    const size_t required_slices = static_cast<size_t>(cfg.stager().buffers_per_flow()) * (num_cycles + 1);
-    cfg.mutable_pool()->set_pool_size_bytes(required_slices * chunk_bytes);
-    auto source_engine = std::make_shared<Communicator>(cfg);
+    cfg.mutable_transport()->set_tcp_conn_count(2);
+
+    constexpr size_t kGpuSliceBytes = 16ULL * 1024 * 1024;
+    constexpr size_t kCpuSliceBytes = 4ULL * 1024 * 1024;
+    const size_t buffers_per_flow = static_cast<size_t>(cfg.stager().buffers_per_flow());
+    const size_t required_slices = buffers_per_flow * static_cast<size_t>(num_cycles + 1);
+    auto gpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        required_slices * kGpuSliceBytes, kGpuSliceBytes);
+    auto cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        buffers_per_flow * kCpuSliceBytes, kCpuSliceBytes);
+    Communicator::PinnedStagingPools pools{
+        .gpu_pool = std::move(gpu_pool),
+        .cpu_pool = std::move(cpu_pool),
+        .preregister_gpu = false,
+        .preregister_cpu = false,
+    };
+    auto source_engine = std::make_shared<Communicator>(cfg, std::move(pools));
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 16 * 1024; // 16KB
@@ -609,14 +619,20 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
         }
 
         // Create new engine for each cycle
-        communicator::v1::CommunicatorConfig cfg;
-        cfg.set_enable_rdma(false); /* disable RDMA */
-
-        configure_tcp_stager_defaults(&cfg);
-        cfg.mutable_stager()->set_buffers_per_flow(2); /* keep per-flow staging buffers bounded */
+        auto cfg = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
+        cfg.mutable_transport()->set_tcp_conn_count(2);
         cfg.mutable_stager()->set_expected_gpu_channels(num_cycles); /* share same limit as source */
-        cfg.mutable_pool()->set_pool_size_bytes(required_slices * chunk_bytes);
-        auto engine = std::make_shared<Communicator>(cfg);
+        auto gpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+            required_slices * kGpuSliceBytes, kGpuSliceBytes);
+        auto cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+            buffers_per_flow * kCpuSliceBytes, kCpuSliceBytes);
+        Communicator::PinnedStagingPools pools{
+            .gpu_pool = std::move(gpu_pool),
+            .cpu_pool = std::move(cpu_pool),
+            .preregister_gpu = false,
+            .preregister_cpu = false,
+        };
+        auto engine = std::make_shared<Communicator>(cfg, std::move(pools));
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for cycle " << i << ": " << init_status;
@@ -1534,17 +1550,23 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
 
     const int num_iterations = 10;
 
-    communicator::v1::CommunicatorConfig cfg15;
-    cfg15.set_enable_rdma(false); /* disable RDMA */
-
-    configure_tcp_stager_defaults(&cfg15);
-    cfg15.mutable_stager()->set_buffers_per_flow(2);
+    auto cfg15 = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
     cfg15.mutable_stager()->set_expected_gpu_channels(num_iterations);
-    const size_t raii_chunk_bytes =
-        (cfg15.stager().stage_chunk_mb_gpu() > 0 ? cfg15.stager().stage_chunk_mb_gpu() : 16) * 1024ULL * 1024ULL;
+    cfg15.mutable_transport()->set_tcp_conn_count(2);
+    constexpr size_t kRaiiGpuSliceBytes = 16ULL * 1024 * 1024;
+    constexpr size_t kRaiiCpuSliceBytes = 4ULL * 1024 * 1024;
     const size_t raii_required_slices = static_cast<size_t>(cfg15.stager().buffers_per_flow()) * (num_iterations + 1);
-    cfg15.mutable_pool()->set_pool_size_bytes(raii_required_slices * raii_chunk_bytes);
-    auto source_engine = std::make_shared<Communicator>(cfg15);
+    auto cfg15_gpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        raii_required_slices * kRaiiGpuSliceBytes, kRaiiGpuSliceBytes);
+    auto cfg15_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+        static_cast<size_t>(cfg15.stager().buffers_per_flow()) * kRaiiCpuSliceBytes, kRaiiCpuSliceBytes);
+    Communicator::PinnedStagingPools cfg15_pools{
+        .gpu_pool = std::move(cfg15_gpu_pool),
+        .cpu_pool = std::move(cfg15_cpu_pool),
+        .preregister_gpu = false,
+        .preregister_cpu = false,
+    };
+    auto source_engine = std::make_shared<Communicator>(cfg15, std::move(cfg15_pools));
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
     const std::size_t tensor_size = 32 * 1024; // 32KB
@@ -1584,14 +1606,20 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
           return;
         }
 
-        communicator::v1::CommunicatorConfig cfg16;
-        cfg16.set_enable_rdma(false); /* disable RDMA */
-
-        configure_tcp_stager_defaults(&cfg16);
-        cfg16.mutable_stager()->set_buffers_per_flow(2);
+        auto cfg16 = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/2);
         cfg16.mutable_stager()->set_expected_gpu_channels(num_iterations);
-        cfg16.mutable_pool()->set_pool_size_bytes(raii_required_slices * raii_chunk_bytes);
-        auto engine = std::make_shared<Communicator>(cfg16);
+        cfg16.mutable_transport()->set_tcp_conn_count(2);
+        auto cfg16_gpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+            raii_required_slices * kRaiiGpuSliceBytes, kRaiiGpuSliceBytes);
+        auto cfg16_cpu_pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(
+            static_cast<size_t>(cfg16.stager().buffers_per_flow()) * kRaiiCpuSliceBytes, kRaiiCpuSliceBytes);
+        Communicator::PinnedStagingPools cfg16_pools{
+            .gpu_pool = std::move(cfg16_gpu_pool),
+            .cpu_pool = std::move(cfg16_cpu_pool),
+            .preregister_gpu = false,
+            .preregister_cpu = false,
+        };
+        auto engine = std::make_shared<Communicator>(cfg16, std::move(cfg16_pools));
         auto init_status = engine->init("127.0.0.1", target_port);
         if (!init_status.ok()) {
           LOG(ERROR) << "Engine init failed for iteration " << i << ": " << init_status;

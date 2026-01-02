@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -38,6 +38,7 @@ struct MaterializationDeps {
   std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
   size_t artifact_chunk_bytes = 0;
   std::chrono::milliseconds pinned_memory_timeout{0};
+  size_t streaming_buffer_chunks{16};
   int num_threads = 0;
   std::function<absl::StatusOr<ReplicaHandle>(const MaterializationRequest& request)> run_auto;
   std::function<absl::StatusOr<ReplicaHandle>(

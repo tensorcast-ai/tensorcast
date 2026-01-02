@@ -1,8 +1,9 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <map>
 #include <memory>
@@ -158,7 +159,16 @@ StagingWindow::StageFn MakeStageFunction(
 
     gsl::not_null<void*> host_ptr_nn{host_ptr};
     if (mr_cache) {
-      staged_mr = mr_cache->get_or_register(dev->get_pd(), host_ptr_nn, bytes, kAccess);
+      gsl::not_null<void*> mr_base = host_ptr_nn;
+      size_t mr_bytes = bytes;
+      if (auto dram = std::dynamic_pointer_cast<DRAMStager>(fallback_stager)) {
+        if (auto slab = dram->pinned_pool()->slab_for_ptr(host_ptr_nn); slab.has_value()) {
+          mr_base = slab->base.get();
+          mr_bytes = slab->bytes;
+        }
+      }
+
+      staged_mr = mr_cache->get_or_register(dev->get_pd(), mr_base, mr_bytes, kAccess);
       if (staged_mr == nullptr) {
         auto release_status = fallback_stager->release_staged_buffer(host_ptr_nn);
         if (!release_status.ok()) {
@@ -193,10 +203,15 @@ opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_bytes_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_fallback_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_rdma_direct_window_bytes_hist;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_pinned_rdma_prereg_failures_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_pinned_rdma_prereg_latency_ms_hist;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_pinned_rdma_prereg_bytes_gauge;
+std::atomic<double> g_pinned_rdma_prereg_bytes_last{0.0};
 
 absl::once_flag g_comm_meter_once;
 absl::once_flag g_rdma_direct_window_metrics_once;
 absl::once_flag g_rdma_direct_fallback_metric_once;
+absl::once_flag g_pinned_rdma_prereg_metrics_once;
 
 inline void ensure_communicator_meter() {
   absl::call_once(g_comm_meter_once, []() {
@@ -217,6 +232,26 @@ inline void ensure_rdma_direct_fallback_metric() {
   ensure_communicator_meter();
   absl::call_once(g_rdma_direct_fallback_metric_once, []() {
     g_rdma_direct_fallback_total = g_comm_meter->CreateDoubleCounter("tc_rdma_direct_fallback_total");
+  });
+}
+
+void pinned_rdma_prereg_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  obs->Observe(g_pinned_rdma_prereg_bytes_last.load());
+}
+
+inline void ensure_pinned_rdma_prereg_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_pinned_rdma_prereg_metrics_once, []() {
+    g_pinned_rdma_prereg_failures_total = g_comm_meter->CreateDoubleCounter("tc_pinned_rdma_prereg_failures_total");
+    g_pinned_rdma_prereg_latency_ms_hist = g_comm_meter->CreateDoubleHistogram("tc_pinned_rdma_prereg_latency_ms");
+    g_pinned_rdma_prereg_bytes_gauge = g_comm_meter->CreateDoubleObservableGauge("tc_pinned_rdma_prereg_bytes");
+    g_pinned_rdma_prereg_bytes_gauge->AddCallback(&pinned_rdma_prereg_bytes_callback, nullptr);
   });
 }
 
@@ -408,6 +443,30 @@ void log_handshake_transition(
 } // namespace
 
 Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channel_expire_sec)
+    : Communicator(
+          config,
+          [&config]() {
+            constexpr size_t kDefaultGpuSliceBytes = 16ULL * 1024 * 1024;
+            constexpr size_t kDefaultCpuSliceBytes = 4ULL * 1024 * 1024;
+            PinnedStagingPools pools;
+            const size_t num_buffers = static_cast<size_t>(std::max(1, config.stager().buffers_per_flow()));
+            int conn = config.transport().tcp_conn_count();
+            if (conn <= 0) {
+              conn = base::kMTcpConnCount;
+            }
+            const size_t conn_count = static_cast<size_t>(std::max(2, conn));
+            const size_t required_gpu_slices = num_buffers + (num_buffers * conn_count);
+            pools.gpu_pool = std::make_shared<common::memory::PinnedBufferPool>(
+                required_gpu_slices * kDefaultGpuSliceBytes, kDefaultGpuSliceBytes);
+            pools.cpu_pool = std::make_shared<common::memory::PinnedBufferPool>(
+                num_buffers * kDefaultCpuSliceBytes, kDefaultCpuSliceBytes);
+            pools.preregister_gpu = config.enable_rdma();
+            pools.preregister_cpu = config.enable_rdma();
+            return pools;
+          }(),
+          channel_expire_sec) {}
+
+Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPools pools, uint32_t channel_expire_sec)
     : stop_(false),
       inited_(false),
       server_context_(new transport::TcpContext()),
@@ -432,26 +491,35 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
   // No default residency provider required; staging policy no longer consults UMA bridges.
 
-  // Staging resources sized from config (strict: no legacy defaults)
-  if (config_.stager().stage_chunk_mb_gpu() <= 0) {
-    LOG(FATAL) << "stager.stage_chunk_mb_gpu must be > 0 (MB)";
+  // Staging resources are sized from the pinned-memory authority. The communicator config
+  // controls fan-out and transport behavior only.
+  if (!pools.gpu_pool) {
+    LOG(FATAL) << "Communicator requires a non-null pinned gpu_pool";
   }
-  if (config_.stager().stage_chunk_mb_cpu() <= 0) {
-    LOG(FATAL) << "stager.stage_chunk_mb_cpu must be > 0 (MB)";
+  gpu_memory_pool_ = std::move(pools.gpu_pool);
+  cpu_memory_pool_ = pools.cpu_pool ? std::move(pools.cpu_pool) : gpu_memory_pool_;
+  preregister_gpu_pool_ = pools.preregister_gpu;
+  preregister_cpu_pool_ = pools.preregister_cpu;
+  staging_wait_timeout_ = pools.staging_wait_timeout;
+  if (staging_wait_timeout_ <= absl::ZeroDuration()) {
+    LOG(WARNING) << "Communicator staging_wait_timeout is <= 0; defaulting to 30s";
+    staging_wait_timeout_ = absl::Seconds(30);
   }
+
   if (config_.stager().buffers_per_flow() <= 0) {
     LOG(FATAL) << "stager.buffers_per_flow must be > 0";
   }
-  const size_t gpu_chunk_size = static_cast<size_t>(config_.stager().stage_chunk_mb_gpu()) * 1024ULL * 1024ULL;
-  const size_t cpu_chunk_size = static_cast<size_t>(config_.stager().stage_chunk_mb_cpu()) * 1024ULL * 1024ULL;
+  const size_t gpu_chunk_size = gpu_memory_pool_->slice_bytes();
+  const size_t cpu_chunk_size = cpu_memory_pool_->slice_bytes();
+  if (gpu_chunk_size == 0 || cpu_chunk_size == 0) {
+    LOG(FATAL) << "Pinned staging pool slice_bytes must be > 0";
+  }
+
   const size_t num_buffers = static_cast<size_t>(config_.stager().buffers_per_flow());
   buffers_per_flow_ = static_cast<int>(num_buffers);
   direct_rdma_chunk_bytes_ = gpu_chunk_size;
-  if (config_.stager().direct_chunk_mb() > 0) {
-    direct_rdma_chunk_bytes_ = static_cast<uint64_t>(config_.stager().direct_chunk_mb()) * 1024ULL * 1024ULL;
-  }
   if (direct_rdma_chunk_bytes_ == 0) {
-    LOG(FATAL) << "stager.direct_chunk_mb must be > 0 (MB)";
+    LOG(FATAL) << "direct_rdma_chunk_bytes must be > 0";
   }
   const uint32_t configured_max_window = config_.stager().max_window_segments();
   if (configured_max_window == 0) {
@@ -472,24 +540,17 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
   const auto mtcp_conn_budget = static_cast<size_t>(configured_conn);
   const size_t recv_num_buffers = num_buffers * mtcp_conn_budget;
   const size_t computed_pool_buffers = num_buffers + recv_num_buffers;
-  const size_t computed_pool_size = gpu_chunk_size * computed_pool_buffers;
-
-  size_t total_pool_size = computed_pool_size;
-  if (config_.pool().pool_size_bytes() > 0) {
-    total_pool_size = config_.pool().pool_size_bytes();
-    if (total_pool_size < computed_pool_size) {
-      LOG(FATAL) << "Configured pinned pool size (" << total_pool_size << ") is smaller than required staging budget ("
-                 << computed_pool_size << ") for buffers_per_flow=" << num_buffers
-                 << " and tcp_conn_count=" << config_.transport().tcp_conn_count()
-                 << ". Increase pool.pool_size_bytes or reduce staging fan-out.";
-    }
+  const size_t required_gpu_slices = computed_pool_buffers;
+  const size_t capacity_gpu_slices = gpu_memory_pool_->capacity_slices();
+  if (capacity_gpu_slices < required_gpu_slices) {
+    LOG(FATAL) << "Pinned staging pool (comm_gpu) too small: capacity_slices=" << capacity_gpu_slices
+               << " required_slices=" << required_gpu_slices << " slice_bytes=" << gpu_chunk_size
+               << " (buffers_per_flow=" << num_buffers << " tcp_conn_count=" << config_.transport().tcp_conn_count()
+               << ")";
   }
-
-  // GPU staging pool and stager
-  gpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
   gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
 
-  const size_t total_gpu_slices = gpu_memory_pool_->capacity_slices();
+  const size_t total_gpu_slices = capacity_gpu_slices;
   if (total_gpu_slices == 0) {
     LOG(FATAL) << "GPU pinned buffer pool initialized with zero slices";
   }
@@ -509,7 +570,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
       LOG(FATAL) << "expected_gpu_channels=" << configured_gpu_channels
                  << " exceeds staging capacity. gpu_pool_slices=" << total_gpu_slices << " reserve=" << stager_reserve
                  << " buffers_per_flow=" << buffers_per_flow_ << " computed_limit=" << computed_gpu_channel_limit
-                 << ". Increase pool.pool_size_bytes or reduce expected_gpu_channels.";
+                 << ". Increase pinned_memory.classes[name=comm_gpu].pool_bytes or reduce expected_gpu_channels.";
     }
     max_gpu_channels_ = static_cast<int>(configured_gpu_channels);
     enforce_gpu_channel_limit_ = max_gpu_channels_ > 0;
@@ -526,10 +587,14 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
                  << " concurrent GPU reads may block waiting for staging buffers.";
   }
 
-  // CPU staging pool honors CPU chunk size; size conservatively for one flow
-  if (cpu_chunk_size != gpu_chunk_size) {
-    const size_t cpu_pool_size = cpu_chunk_size * num_buffers; // minimal to honor buffers_per_flow
-    cpu_memory_pool_ = std::make_shared<common::memory::PinnedBufferPool>(cpu_pool_size, cpu_chunk_size);
+  const size_t required_cpu_slices = num_buffers;
+  if (cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
+    const size_t available_cpu_slices = cpu_memory_pool_->capacity_slices();
+    if (available_cpu_slices < required_cpu_slices) {
+      LOG(FATAL) << "Pinned staging pool (comm_cpu) too small: capacity_slices=" << available_cpu_slices
+                 << " required_slices=" << required_cpu_slices << " slice_bytes=" << cpu_chunk_size
+                 << " (buffers_per_flow=" << num_buffers << ")";
+    }
   }
   auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
   memory_stager_ = std::make_shared<DRAMStager>(
@@ -547,14 +612,13 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
 
     if (config_.simple_numa().enable()) {
       for (const auto& node : config_.simple_numa().nodes()) {
-        auto pool = std::make_shared<common::memory::PinnedBufferPool>(total_pool_size, gpu_chunk_size);
-        numa_pools_.push_back(pool);
         auto cpu_stager = std::make_shared<DRAMStager>(
-            gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{pool}, /*num_buffers_hint=*/num_buffers);
+            gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{dram_pool},
+            /*num_buffers_hint=*/num_buffers);
         if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
           ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
         }
-        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, pool);
+        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
         // Map GPU ids
         for (int gid : node.gpus()) {
           gpu_mem_stagers_[gid] = gpu_mem_stager;
@@ -566,25 +630,51 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, uint32_t channe
       }
     }
 
-    // Preregister MRs for all pools
+    // Preregister MRs for selected pools (slab-level).
+    ensure_pinned_rdma_prereg_metrics();
+    const auto prereg_start = std::chrono::steady_clock::now();
     int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
     std::vector<std::shared_ptr<common::memory::PinnedBufferPool>> pools;
-    pools.push_back(gpu_memory_pool_);
-    if (cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
+    if (preregister_gpu_pool_) {
+      pools.push_back(gpu_memory_pool_);
+    }
+    if (preregister_cpu_pool_ && cpu_memory_pool_ && cpu_memory_pool_.get() != gpu_memory_pool_.get()) {
       pools.push_back(cpu_memory_pool_);
     }
-    for (auto& p : numa_pools_)
-      pools.push_back(p);
+    uint64_t prereg_bytes = 0;
+    for (const auto& pool : pools) {
+      for (const auto& slab : pool->list_slabs()) {
+        prereg_bytes += slab.bytes;
+      }
+    }
+    g_pinned_rdma_prereg_bytes_last.store(static_cast<double>(prereg_bytes));
+
+    uint64_t failures = 0;
     for (const auto& dev : rdma_context_->list_devs()) {
       for (auto& pool : pools) {
-        auto buffers = pool->list_buffers();
-        for (auto ptr : buffers) {
-          auto* mr = meta_mr_cache_->get_or_register(dev->get_pd(), ptr.get(), pool->slice_bytes(), access);
+        for (const auto& slab : pool->list_slabs()) {
+          auto* mr = meta_mr_cache_->get_or_register(dev->get_pd(), slab.base.get(), slab.bytes, access);
           if (mr == nullptr) {
-            LOG(WARNING) << "Failed to preregister MR for buffer " << static_cast<void*>(ptr.get()) << " on PD";
+            ++failures;
+            LOG(WARNING) << "Failed to preregister MR for slab " << static_cast<void*>(slab.base.get())
+                         << " bytes=" << slab.bytes << " on PD";
           }
         }
       }
+    }
+    const auto prereg_end = std::chrono::steady_clock::now();
+    const double prereg_ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(prereg_end - prereg_start).count();
+    if (g_pinned_rdma_prereg_latency_ms_hist) {
+      std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+      auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+      g_pinned_rdma_prereg_latency_ms_hist->Record(prereg_ms, attr_view, opentelemetry::context::Context{});
+    }
+    if (failures > 0 && g_pinned_rdma_prereg_failures_total) {
+      std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+      auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+      g_pinned_rdma_prereg_failures_total->Add(
+          static_cast<double>(failures), attr_view, opentelemetry::context::Context{});
     }
 
     handshake_retry_thread_ = std::thread([this]() { this->handshake_retry_loop(); });
@@ -753,7 +843,9 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   const uint64_t chunk_size = stager->get_chunk_size() > 0 ? stager->get_chunk_size() : total_bytes;
 
   auto stage_fn = [&](uint64_t offset, uint32_t bytes, uint32_t segment_idx) -> absl::StatusOr<StageLease> {
-    auto staged_or = stager->stage(task.tensor, offset, bytes, MemoryStager::StageMode::kBlocking);
+    // Do not block inside stage(); bounded waiting and retry is handled by the
+    // MTCP staging loop via backoff + retry_deadline.
+    auto staged_or = stager->stage(task.tensor, offset, bytes, MemoryStager::StageMode::kTry);
     if (!staged_or.ok()) {
       return staged_or.status();
     }
@@ -772,7 +864,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   StagingWindow window(
       flow_state->ledger, stage_fn, total_bytes, chunk_size, start_offset, flow_state->max_window_segments);
 
-  absl::Time retry_deadline = absl::Now() + absl::Seconds(30);
+  absl::Time retry_deadline = absl::Now() + staging_wait_timeout_;
   absl::Duration backoff = absl::Milliseconds(1);
   constexpr absl::Duration kMaxBackoff = absl::Milliseconds(50);
   absl::Time last_warning = absl::InfinitePast();

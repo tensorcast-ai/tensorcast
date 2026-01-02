@@ -10,7 +10,6 @@ related_code:
   - core/store/replica/transfer_service.*
   - core/store/runtime/ingestion/materialization_service.cc
   - core/communicator/engine/engine.cc
-  - core/checkpoint/checkpoint_streaming.cc
   - proto/tensorcast/config/v1/daemon_config.proto
   - proto/tensorcast/communicator/v1/communicator_config.proto
 links:
@@ -27,7 +26,8 @@ Unify all daemon-side pinned memory usage behind a single Pinned Memory Authorit
 # Problem Statement
 
 - Pinned memory is split across multiple component-owned pools, which causes oversubscription, uneven backpressure, and no true reuse between subsystems.
-- Configuration is fragmented across `engine.*`, `communicator.pool.*`, and `checkpoint.streaming.*`, which leads to tuning drift and unclear ownership.
+- Configuration is fragmented across `engine.*` and `communicator.pool.*`, which leads to tuning drift and unclear ownership.
+- The SDK's local disk save/load helpers historically allocated pinned memory via per-call configuration rather than daemon runtime config, which made it easy to misinterpret pinned budgeting and ownership.
 - RDMA preregistration scales with per-slice registration today, which is expensive and opaque to operators.
 - Allocation timeouts and logging are inconsistent, making stalls hard to diagnose and recover from.
 
@@ -44,6 +44,7 @@ Unify all daemon-side pinned memory usage behind a single Pinned Memory Authorit
 ## Non-Goals
 
 - Cross-process pinned pool sharing. Full sharing is achieved by moving streaming into the daemon.
+- Making test-only local disk helpers participate in daemon pinned budgeting. Test helpers may allocate pinned memory independently.
 - Hot reload or dynamic schema merges beyond the single config file.
 - Changing UMA chunk semantics or RDMA transport protocol details.
 - NUMA-aware pinned pool routing beyond today's communicator `simple_numa` behavior. (Kept as a follow-up once the single authority is stable.)
@@ -53,28 +54,24 @@ Unify all daemon-side pinned memory usage behind a single Pinned Memory Authorit
 ```mermaid
 flowchart LR
   PMA["PinnedMemoryAuthority<br>Global budget + policy"]
-  ENGPOOL["PinnedClassPool<br>engine"]
-  CGPU["PinnedClassPool<br>comm_gpu"]
-  CCPU["PinnedClassPool<br>comm_cpu"]
-  CKPTPOOL["PinnedClassPool<br>checkpoint"]
+  ENGPOOL["PinnedBufferPool<br>engine"]
+  CGPU["PinnedBufferPool<br>comm_gpu"]
+  CCPU["PinnedBufferPool<br>comm_cpu"]
   SE["StoreEngine<br>Transfer and materialization"]
   COMM["Communicator<br>MTCP and RDMA staging"]
-  CKPT["Checkpoint streaming<br>Daemon owned"]
 
   PMA --> ENGPOOL --> SE
   PMA --> CGPU --> COMM
   PMA --> CCPU --> COMM
-  PMA --> CKPTPOOL --> CKPT
 ```
 
 ## Core Components
 
-- **PinnedMemoryAuthority**: owns the global pinned budget and manages named class pools.
-- **PinnedClassPool**: per-class slice allocator for a fixed `slice_bytes` and class budget.
-- **PinnedLease**: RAII wrapper for leased slices (release returns slices to the class pool).
-- **StreamingPinnedBuffer**: streaming ring backed by a `PinnedClassPool` instead of a private pool.
+- **PinnedMemoryAuthority**: validates pinned config and exposes named per-class pinned pools.
+- **PinnedBufferPool (per class)**: fixed, preallocated slice pool sized to `pool_bytes` with `slice_bytes` slices.
+- **StreamingPinnedBuffer**: streaming ring backed by a shared pinned pool (daemon: typically the `engine` class pool).
 
-### PinnedMemoryAuthority API sketch
+### PinnedMemoryAuthority API (Phase 1: fixed preallocated pools)
 
 ```cpp
 class PinnedMemoryAuthority {
@@ -82,8 +79,7 @@ class PinnedMemoryAuthority {
   struct ClassConfig {
     std::string name;
     size_t slice_bytes;
-    size_t min_bytes;
-    size_t max_bytes; // 0 means no cap
+    size_t pool_bytes;
     bool rdma_preregister;
   };
 
@@ -93,20 +89,11 @@ class PinnedMemoryAuthority {
     std::vector<ClassConfig> classes;
   };
 
-  class PinnedClassPool {
-   public:
-    size_t slice_bytes() const;
-    size_t capacity_slices() const;
-    // Must not block on cpu_executor()/serial_executor(); see "Backpressure and deadlock avoidance".
-    folly::SemiFuture<PinnedLease> acquire_slices(size_t count, absl::Time deadline);
-    absl::Status release_slices(std::vector<gsl::not_null<char*>> slices);
-    std::vector<gsl::not_null<char*>> list_buffers() const;
-  };
-
-  static absl::StatusOr<std::shared_ptr<PinnedMemoryAuthority>> create(const Config& cfg);
-  // Returns InvalidArgument if class_name is unknown. Daemon startup is expected
-  // to validate all required class names upfront.
-  absl::StatusOr<std::shared_ptr<PinnedClassPool>> get_class_pool(std::string_view class_name);
+  static absl::StatusOr<std::shared_ptr<PinnedMemoryAuthority>> create(Config cfg);
+  // Returns InvalidArgument if class_name is unknown. Daemon startup validates
+  // all required class names upfront.
+  absl::StatusOr<std::shared_ptr<PinnedBufferPool>> get_class_pool(std::string_view class_name) const;
+  absl::StatusOr<ClassConfig> get_class_config(std::string_view class_name) const;
 };
 ```
 
@@ -115,8 +102,8 @@ class PinnedMemoryAuthority {
 ```cpp
 class StreamingPinnedBuffer {
  public:
-  StreamingPinnedBuffer(size_t num_chunks, std::shared_ptr<PinnedMemoryAuthority::PinnedClassPool> pool);
-  absl::Status initialize(absl::Time deadline);
+  StreamingPinnedBuffer(size_t num_chunks, size_t chunk_size, std::shared_ptr<PinnedBufferPool> pool);
+  absl::Status initialize(std::chrono::milliseconds timeout);
   absl::Status release();
 };
 ```
@@ -125,17 +112,18 @@ class StreamingPinnedBuffer {
 
 This design chooses the simplest model: **Option B (per-class pools)**.
 
-- PMA enforces a global pinned budget `pinned_memory.total_bytes` and owns a set of named class pools.
-- Each class pool pre-allocates pinned memory up to `min_bytes`, in one or more contiguous slabs (not per-slice `aligned_alloc`).
+- PMA enforces a global pinned budget derived as `sum(pinned_memory.classes[].pool_bytes)` and owns a set of named class pools.
+- Each class pool pre-allocates pinned memory up to `pool_bytes`, in one or more contiguous slabs (not per-slice `aligned_alloc`).
   - Each slab is registered once with CUDA (host pin) for its full length.
   - Slices are addressed as `slab_base + i * slice_bytes` and returned as pointers to slice bases.
-- A class may grow above `min_bytes` (borrowing from the global remainder) until either `max_bytes` (if set) or `pinned_memory.total_bytes` is reached.
-- Allocation uses a deadline; if slices are unavailable by the deadline, return `absl::ResourceExhausted` with diagnostics.
+- Phase 1: class pools are fixed-size and do not grow above `pool_bytes`.
+- Allocation uses a bounded wait (timeout); if slices are unavailable by the deadline, return `absl::DeadlineExceeded`
+  or `absl::ResourceExhausted` with diagnostics.
 - **RDMA preregistration** is only applied to pinned pools that are used for RDMA and only for classes with `rdma_preregister=true`.
   - RDMA preregistration is only meaningful when `communicator.enable_rdma=true`. When RDMA is disabled, `rdma_preregister` is ignored.
   - RDMA preregistration applies to staged RDMA only (host-pinned staging buffers). Direct RDMA reads use device memory MRs and do not consume pinned staging pools.
   - For prereg classes, each slab is registered once per NIC/PD (not once per slice) so RDMA can use `base_ptr + offset` within the slab.
-  - To keep preregistration stable and predictable in the initial cut, classes with `rdma_preregister=true` must not grow dynamically at runtime (set `max_bytes == min_bytes`), and the full `min_bytes` reservation is allocated and preregistered at startup.
+  - To keep preregistration stable and predictable in the initial cut, classes with `rdma_preregister=true` preregister the full `pool_bytes` reservation at startup.
 
 ## Configuration Model
 
@@ -148,7 +136,8 @@ Introduce a single pinned memory section with a small number of well-known class
 
 ```proto
 message PinnedMemory {
-  uint64 total_bytes = 1;
+  reserved 1;
+  reserved "total_bytes";
   google.protobuf.Duration allocation_timeout = 2;
   repeated PinnedClass classes = 3;
 }
@@ -156,8 +145,9 @@ message PinnedMemory {
 message PinnedClass {
   string name = 1;
   uint64 slice_bytes = 2;
-  uint64 min_bytes = 3;
-  uint64 max_bytes = 4; // 0 means no cap
+  uint64 pool_bytes = 3;
+  reserved 4;
+  reserved "min_bytes", "max_bytes";
   bool rdma_preregister = 5;
 }
 ```
@@ -171,7 +161,6 @@ The daemon validates that these well-known classes exist and are used consistent
 | `engine` | StoreEngine transfer + pump | Pinned transfer slices (`tx_slice_bytes`) used by streaming loads/copies | No |
 | `comm_gpu` | Communicator staging | Host-pinned staging buffers backing MTCP and staged RDMA (GPU-side flows) | Optional (`rdma_preregister=true` only when `communicator.enable_rdma=true`) |
 | `comm_cpu` | Communicator staging | Host-pinned staging buffers for CPU-side staging (and RDMA staging when applicable) | Optional (`rdma_preregister=true` only when `communicator.enable_rdma=true`) |
-| `checkpoint` | Daemon-owned checkpoint streaming | Host-pinned IO buffers for streaming checkpoint save/restore | No |
 
 ### Derived sizing and validation (normative)
 
@@ -186,20 +175,20 @@ The daemon must validate that pinned classes have enough capacity for the config
   - When MTCP is enabled for GPU flows, Communicator requires a minimum number of GPU staging slices to cover:
     - one in-flight window per flow (`buffers_per_flow`)
     - plus receive-side buffers proportional to `transport.tcp_conn_count`
-  - The implementation must fail fast at startup if `comm_gpu.min_bytes` cannot satisfy the computed minimum slices, rather than blocking indefinitely on staging buffers.
+  - The implementation must fail fast at startup if `comm_gpu.pool_bytes` cannot satisfy the computed minimum slices, rather than blocking indefinitely on staging buffers.
 - **Direct RDMA window chunking**:
   - Direct RDMA does not use pinned staging pools, but it still uses a chunk size for window segmentation (`direct_rdma_chunk_bytes` today).
   - To avoid reintroducing per-component chunk knobs, the initial cut sets `direct_rdma_chunk_bytes = comm_gpu.slice_bytes`. If a future tuning need emerges, add a separate pinned class (e.g., `comm_direct`) rather than reintroducing ad-hoc `direct_chunk_mb` fields.
 
 ### Startup validation checklist (normative)
 
-- Required classes exist: `engine`, `comm_gpu`, `comm_cpu`, `checkpoint`.
-- `pinned_memory.total_bytes >= sum(classes[].min_bytes)`.
+- Required classes exist: `engine`, `comm_gpu`, `comm_cpu`.
+- **Fixed-allocation mode (Phase 1):** all pinned pools are fully preallocated at daemon startup (no runtime growth).
+  - Total pinned bytes is derived as `sum(classes[].pool_bytes)`.
 - `classes[].slice_bytes % 4096 == 0` (page aligned; implies 512 B O_DIRECT alignment).
-- If `rdma_preregister=true`, require `max_bytes == min_bytes`.
 - `engine.artifact_chunk_bytes % engine.slice_bytes == 0`.
 - `communicator.enable_rdma=false` ignores `rdma_preregister` (no preregistration performed).
-- `comm_gpu.min_bytes` and `comm_cpu.min_bytes` cover minimum staging slices derived from `buffers_per_flow` and `transport.tcp_conn_count`.
+- `comm_gpu.pool_bytes` and `comm_cpu.pool_bytes` cover minimum staging slices derived from `buffers_per_flow` and `transport.tcp_conn_count`.
 
 ### Defaulting rules
 
@@ -208,25 +197,20 @@ The daemon must validate that pinned classes have enough capacity for the config
 
 ```yaml
 pinned_memory:
-  total_bytes: 12GB
+  # Derived total pinned bytes = sum(classes[].pool_bytes) = 9GB in this example.
   allocation_timeout: 30s
   classes:
     - name: engine
       slice_bytes: 256MB
-      min_bytes: 4GB
+      pool_bytes: 4GB
     - name: comm_gpu
       slice_bytes: 16MB
-      min_bytes: 4GB
-      max_bytes: 4GB
+      pool_bytes: 4GB
       rdma_preregister: true
     - name: comm_cpu
       slice_bytes: 4MB
-      min_bytes: 1GB
-      max_bytes: 1GB
+      pool_bytes: 1GB
       rdma_preregister: true
-    - name: checkpoint
-      slice_bytes: 256MB
-      min_bytes: 2GB
 
 engine:
   artifact_chunk_bytes: 256MB
@@ -235,28 +219,23 @@ engine:
 communicator:
   stager:
     buffers_per_flow: 4
-
-checkpoint:
-  streaming:
-    num_buffers: 4
 ```
 
 ## Naming Compliance
 
 | Category | Names | Compliance |
 | --- | --- | --- |
-| Classes | `PinnedMemoryAuthority`, `PinnedClassPool`, `PinnedLease`, `StreamingPinnedBuffer` | PascalCase |
-| Methods | `get_class_pool`, `acquire_slices`, `acquire_slices_blocking`, `release_slices`, `list_buffers`, `list_slabs`, `slice_bytes` | snake_case |
+| Classes | `PinnedMemoryAuthority`, `PinnedBufferPool`, `StreamingPinnedBuffer` | PascalCase |
+| Methods | `get_class_pool`, `get_class_config`, `allocate`, `deallocate`, `list_buffers`, `list_slabs`, `slice_bytes` | snake_case |
 | Constants | `kMemoryAlignment`, `kDirectIOAlignment` | `k` prefixed const per core C++ style |
 
 # Invariants and Error Model
 
-- `pinned_memory.total_bytes` must be greater than or equal to the sum of all `min_bytes`.
+- **Fixed-allocation mode (Phase 1):** total pinned bytes is derived as `sum(classes[].pool_bytes)` and pinned pools are fully preallocated at startup.
 - Each class `slice_bytes` must be a multiple of 4096 bytes (page aligned; implies 512 B alignment required by O_DIRECT).
 - `engine.artifact_chunk_bytes` must be a multiple of `pinned_memory.classes[name=engine].slice_bytes` so each artifact chunk is composed of an integral number of transfer slices and transfer ranges never cross chunk boundaries.
 - Communicator staging chunk size equals `pinned_memory.classes[name=comm_gpu].slice_bytes` (GPU staging) and `pinned_memory.classes[name=comm_cpu].slice_bytes` (CPU staging).
-- Checkpoint streaming IO chunk size equals the checkpoint pinned class `slice_bytes`.
-- UMA capacity deductions use `pinned_memory.total_bytes` as the conservative pinned reservation.
+- UMA capacity deductions use total pinned bytes (`sum(pinned_memory.classes[].pool_bytes)`) as the conservative pinned reservation.
 - Allocation timeouts return `absl::ResourceExhausted` with diagnostics (class name, requested slices, free slices).
 - Invalid config returns `absl::InvalidArgumentError` and fails startup.
 
@@ -271,10 +250,19 @@ checkpoint:
 
 Pinned allocation stalls are one of the most operationally painful failure modes. To make issues diagnosable and to avoid thread-pool starvation deadlocks:
 
-- **No blocking waits on cpu_executor()/serial_executor()**. Waiting for pinned slices must be done via async (`folly::SemiFuture`) and/or on `blocking_executor()`.
-- Every acquire has a deadline. Sustained waits emit periodic "no progress" warnings including: class, waiters, free/total slices, inflight leases, and a per-caller tag.
+- **No unbounded waits.** Any wait for pinned slices must be bounded by `pinned_memory.allocation_timeout` (or a tighter call-site deadline).
+- **Avoid blocking cpu_executor()/serial_executor().** Call sites must not perform bounded waits on shared CPU executors; if a wait is required, do it on a dedicated blocking context.
+- Sustained waits emit periodic "no progress" warnings including: class, waiters, free/total slices, and deadline.
 - If deadlines expire, return `absl::ResourceExhausted` or `absl::DeadlineExceededError` (depending on call site) and include the same diagnostics in the status message.
 - Cleanup paths must be ops-safe: release/shutdown of shared streaming buffers and pools must return an error status (never `LOG(FATAL)` in production code paths).
+
+### MTCP staging (daemon: Communicator)
+
+To ensure the configured deadline actually applies, MTCP staging must not block inside `MemoryStager::stage()` when pinned buffers are exhausted:
+
+- `MemoryStager::stage(..., StageMode::kTry)` returns `Unavailable/ResourceExhausted` when no staging buffers are available.
+- The MTCP staging loop owns the wait policy (backoff + deadline) and must bound retries by `pinned_memory.allocation_timeout`.
+- On deadline expiry, the request fails with a diagnosable `ResourceExhausted` error (rather than hanging indefinitely).
 
 ## Observability (required)
 
@@ -308,22 +296,22 @@ To keep dashboards and alerts stable across implementations, metrics should use 
 ## Sizing heuristics
 
 - Start with `engine.slice_bytes == engine.artifact_chunk_bytes` to minimize chunk splits during transfer.
-- For communicator staging, ensure `comm_gpu.min_bytes >= (buffers_per_flow + transport.tcp_conn_count) * comm_gpu.slice_bytes`.
-- For preregistered classes, set `min_bytes == max_bytes` and keep them stable to bound RDMA registration time.
+- For communicator staging, ensure `comm_gpu.pool_bytes >= (buffers_per_flow + transport.tcp_conn_count) * comm_gpu.slice_bytes`.
+- For preregistered classes, keep `pool_bytes` stable to bound RDMA registration time.
 
 ## Diagnostic checklist
 
 - If staging stalls, inspect `tc_pinned_class_waiters` and `tc_pinned_class_free_slices` for the class in use.
 - If preregistration is slow or failing, confirm RDMA is enabled and class budgets are fixed.
-- If UMA capacity shrinks unexpectedly, verify `pinned_memory.total_bytes` against host DRAM sizing and tier config.
+- If UMA capacity shrinks unexpectedly, verify total pinned bytes (`sum(pinned_memory.classes[].pool_bytes)`) against host DRAM sizing and tier config.
 
 # Schema Changes
 
 - Add `PinnedMemory` to `DaemonConfig`.
+- Use `PinnedClass.pool_bytes` as the per-class pinned pool capacity (replaces `min_bytes`/`max_bytes` in Phase 1 fixed-allocation).
 - Add `engine.streaming_buffer_chunks`.
 - Remove `engine.mem_pool_size_bytes`, `engine.tx_slice_bytes`, `engine.pinned_allocation_timeout`, `engine.streaming_buffer_max_concurrent_sessions`.
 - Remove `communicator.pool`, `communicator.stager.stage_chunk_mb_gpu`, `communicator.stager.stage_chunk_mb_cpu`, and `communicator.stager.direct_chunk_mb` from `CommunicatorConfig`.
-- Remove `checkpoint.streaming.pinned_pool_bytes` and `checkpoint.streaming.io_chunk_bytes`.
 - No `schema.sql` changes.
 
 # Alternatives and rationale
@@ -344,18 +332,27 @@ To keep dashboards and alerts stable across implementations, metrics should use 
 - Size-class fragmentation is bounded within each class (fixed-size slices); poor class sizing can still waste budget.
 - RDMA preregistration cost moves to class level and must be bounded by class reservation; preregister only RDMA-used classes.
 - Communicator staging chunk tuning is done via the `comm_gpu`/`comm_cpu` class `slice_bytes` rather than separate stage-chunk fields.
-- Full pinned sharing requires daemon-owned checkpoint streaming; client-side streaming remains separate.
+- Test-only local disk helpers remain separate by design.
 
 # Compatibility and Acceptance Criteria
 
 - No backward compatibility. Legacy pool fields are removed and rejected.
 - Acceptance criteria:
   - Only one PMA exists in the daemon; all daemon-owned pinned allocations are mediated by it.
-  - StoreEngine, Communicator, and daemon-owned checkpoint streaming allocate from PMA class pools.
+  - StoreEngine and Communicator allocate from PMA class pools.
   - Configuration uses `pinned_memory` only; per-component pinned pool sizing fields do not exist.
   - Communicator uses `comm_gpu` and `comm_cpu` classes for staging; RDMA prereg only applies to RDMA-used classes.
-  - UMA budget uses `pinned_memory.total_bytes` for capacity deduction.
+  - UMA budget uses total pinned bytes (`sum(pinned_memory.classes[].pool_bytes)`) for capacity deduction.
   - Metrics expose per-class pinned usage and global pinned usage; pinned allocation stalls are diagnosable from metrics/logs alone.
+
+## SDK local disk helpers (test-only)
+
+Local disk save/load utilities are intentionally **test-only** and are not part of the daemon's pinned memory budgeting:
+
+- Test API surface: `tensorcast.testing.io_disk.save_dict()` / `tensorcast.testing.io_disk.load_dict_from_disk()`.
+- Internal implementation: `tensorcast.api._io_disk` functions are guarded and require an internal escape hatch to call.
+
+This keeps daemon pinned ownership unambiguous: production persistence and materialization are daemon-routed (see `docs/designs/0038-daemon-only-disk-materialization.md`).
 
 # References
 

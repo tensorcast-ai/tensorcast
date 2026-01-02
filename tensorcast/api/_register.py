@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -44,7 +44,6 @@ from tensorcast.api._indices import (
     TensorMetaIndex,
     calculate_tensor_device_offsets,
 )
-from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
@@ -361,28 +360,13 @@ def _persist_publish_if_needed(
     client: DaemonCtl,
 ) -> None:
     if options.disk_path is not None and options.disk_path.strip() == "":
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            root = storage_root_default()
-            if not root:
-                raise TensorCastError(
-                    "ClientConfig.storage.default_root is required when disk_path==''"
-                )
-            out_dir = Path(root) / desc.artifact_id
-            if state_dict_to_save is not None:
-                save_dict(state_dict_to_save, str(out_dir))
-            _upsert_key_mapping_if_needed(
-                key=options.key,
-                artifact_id=desc.artifact_id,
-                disk_path=str(out_dir),
-                descriptor=desc,
-                client=client,
+        if state_dict_to_save is not None:
+            raise TensorCastError(
+                "disk_path=='' local persistence is test-only and disabled in production. "
+                "Provide an explicit disk_path, or persist via your own pipeline; "
+                "tests may use tensorcast.testing.io_disk.save_dict."
             )
-        except TensorCastError:
-            raise
-        except Exception:
-            pass
+        return
     else:
         _upsert_key_mapping_if_needed(
             key=options.key,

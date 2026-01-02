@@ -29,10 +29,9 @@ Why: The unified MemoryStager and staged P2P require a consistent, typed configu
 
 ```yaml
 communicator:
+  enable_rdma: false
   stager:
     stage_cpu_for_rdma: true
-    stage_chunk_mb_cpu: 4
-    stage_chunk_mb_gpu: 16
     buffers_per_flow: 4
     expected_gpu_channels: 0
   rdma:
@@ -41,20 +40,16 @@ communicator:
     traffic_class: 186
     qp_timeout: 20
     qp_retry: 7
-  pool:
-    preregister_mr: true
-    pool_size_bytes: 8589934592
-    chunk_bytes: 67108864
-    simple_numa:
-      enable: true
-      nodes:
-        - id: 0
-          nics: ["mlx5_0", "mlx5_1"]
-          gpus: [0, 1]
-          default: true
-        - id: 1
-          nics: ["mlx5_2", "mlx5_3"]
-          gpus: [2, 3]
+  simple_numa:
+    enable: true
+    nodes:
+      - id: 0
+        nics: ["mlx5_0", "mlx5_1"]
+        gpus: [0, 1]
+        default: true
+      - id: 1
+        nics: ["mlx5_2", "mlx5_3"]
+        gpus: [2, 3]
   transport:
     tcp_conn_count: 8
     connect_timeout_sec: 10
@@ -63,16 +58,18 @@ communicator:
     enable: false
 ```
 
+Pinned pool sizing and chunking are no longer part of `CommunicatorConfig`. When running inside the Store Daemon, staging pools are injected from `DaemonConfig.pinned_memory` via the `comm_gpu` / `comm_cpu` classes. Standalone `Communicator` constructions (e.g. tests/tools) use internal defaults unless pools are explicitly injected.
+
 ## Env Deprecations and Replacements
 
-- `DEFAULT_DEV` → `pool.simple_numa.nodes[n].nics`
-- `GPU_TCP_STAGER_CHUNK_SIZE_MB` → `stager.stage_chunk_mb_gpu`
+- `DEFAULT_DEV` → `simple_numa.nodes[n].nics`
+- `GPU_TCP_STAGER_CHUNK_SIZE_MB` → `DaemonConfig.pinned_memory.classes[name=comm_gpu].slice_bytes`
 - `GPU_TCP_STAGER_NUM_BUFFERS` → `stager.buffers_per_flow`
 - `GPU_TCP_RECV_NUM_BUFFERS` → `stager.buffers_per_flow`
 - `RDMA_ACK_TTL_MS` → `rdma.ack_ttl_ms`
-- `STAGER_NUMA_ENABLE` → `pool.simple_numa.enable`
-- `STAGER_NUMA_GPU_MAP` → `pool.simple_numa.nodes[].gpus`
-- `STAGER_NUMA_NIC_MAP` → `pool.simple_numa.nodes[].nics`
+- `STAGER_NUMA_ENABLE` → `simple_numa.enable`
+- `STAGER_NUMA_GPU_MAP` → `simple_numa.nodes[].gpus`
+- `STAGER_NUMA_NIC_MAP` → `simple_numa.nodes[].nics`
 
 ## Failure Modes (by design)
 

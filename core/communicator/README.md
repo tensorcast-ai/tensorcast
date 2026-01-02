@@ -63,7 +63,7 @@ flowchart TB
 * **Transport Layer** — Pluggable I/O mechanisms: TCP control, Multi-TCP (MTCP) bulk data, and RDMA queue pairs.
 * **PartitionTensorStore** — Thread-safe registry for local tensors (CPU and GPU) backed by `misc::Map`.
 * **Memory Stagers** — Unified `MemoryStager` interface with `GpuNetStager` (GPU→pinned) and `DRAMStager` (CPU→pinned) implementations.
-* **PinnedBufferPool & StreamingPinnedBuffer** — Shared pools sized from config for staging chunks and streaming TCP receives.
+* **PinnedBufferPool & StreamingPinnedBuffer** — Shared pinned pools sourced from the daemon-wide `pinned_memory` authority (or internal defaults when constructed standalone).
 * **MrCache** — Per-protection-domain cache that reuses RDMA MRs for staged buffers to avoid repeated registrations.
 
 ---
@@ -216,7 +216,7 @@ classDiagram
 Key design points:
 - All public methods are thread-safe.
 - Internal worker threads (`request_thread_`, `gc_thread_`, `mtcp_staging_thread_`) handle async operations and lifecycle cleanup.
-- Memory staging pools (GPU and CPU) plus the MR cache are constructed from `CommunicatorConfig` on startup.
+- Memory staging pools (GPU and CPU) are injected at startup (daemon: from `DaemonConfig.pinned_memory` via `comm_gpu` / `comm_cpu` class pools). `CommunicatorConfig` controls staging and transport behavior, not pool sizing.
 - RDMA responses always stage into pinned buffers; clients acknowledge completions with `RDMA_READ_DONE_EX` so the server can recycle buffers.
 
 ### 3.2 Channel
@@ -285,9 +285,9 @@ sequenceDiagram
 
 Key characteristics:
 - Multi-buffer pipelining: `buffers_per_flow` from config controls how many chunks `StreamingPinnedBuffer` rotates.
-- Chunk sizing: `stage_chunk_mb_gpu` and `stage_chunk_mb_cpu` define per-stager slice sizes; GPU defaults to 16 MiB, CPU to 4 MiB.
-- Zero-copy window sizing: `direct_chunk_mb` sets the per-window RDMA segment size when zero-copy is active (defaults to the GPU chunk size).
-- Pool reuse: a single `PinnedBufferPool` services both staging paths (NUMA-specific pools are created when `simple_numa` is enabled).
+- Chunk sizing: staging slice sizes are defined by `pinned_memory.classes[name=comm_gpu].slice_bytes` and `pinned_memory.classes[name=comm_cpu].slice_bytes`.
+- Zero-copy window sizing: direct RDMA uses `direct_rdma_chunk_bytes = pinned_memory.classes[name=comm_gpu].slice_bytes`.
+- Pool reuse: staging buffers are allocated from the daemon-wide pinned memory authority via the `comm_gpu`/`comm_cpu` class pools.
 - Explicit release: MTCP senders free staged buffers once their socket writes complete, while RDMA paths rely on `RDMA_READ_DONE_EX` to release the corresponding `StageLease` entries in the registry.
 - GPU staging slots now use `StreamingChunkGuard` to acquire, promote, and hand buffers to async consumers, ensuring `StreamingPinnedBuffer` state transitions stay consistent while still aborting to the free queue if staging or copy submission fails.
 - Unified flow control: `FlowCreditLedger` grants staging credit per channel, `StagingWindow` slices responses into credit-bounded windows, and `stager.max_window_segments` (0 → auto) optionally caps the number of segments emitted per window.
@@ -368,19 +368,18 @@ flowchart TB
 
 #### Staging Buffer Configuration (typed)
 
-Use `CommunicatorConfig` fields instead of env vars:
+Staging uses `CommunicatorConfig` for fan-out and `DaemonConfig.pinned_memory` for pinned sizing:
 
-- stager.stage_chunk_mb_gpu: size of each staging chunk (MB). Default: 16.
-- stager.direct_chunk_mb: per-window zero-copy RDMA chunk size (MB). Default: stage_chunk_mb_gpu.
-- stager.stage_chunk_mb_cpu: CPU chunk size (MB). Default: 4.
-- stager.buffers_per_flow: number of buffers per flow. Default: 4.
-- stager.expected_gpu_channels: optional cap on concurrent GPU MTCP transports. Default: 0 (auto).
-- pool.pool_size_bytes: total pinned memory reserved for staging. Default: 8 GiB (shared across GPU/CPU stagers).
-- pool.preregister_mr: when true (default), RDMA contexts pre-register all pool slices on startup.
+- `pinned_memory.classes[name=comm_gpu].slice_bytes`: GPU staging slice size (host-pinned).
+- `pinned_memory.classes[name=comm_cpu].slice_bytes`: CPU staging slice size (host-pinned).
+- `pinned_memory.classes[name=comm_*].pool_bytes`: staging pool budgets (capacity is `pool_bytes / slice_bytes`).
+- `pinned_memory.classes[name=comm_*].rdma_preregister`: when RDMA is enabled, preregister slabs once per NIC/PD.
+- `stager.buffers_per_flow`: number of buffers per flow (default: 4).
+- `stager.expected_gpu_channels`: optional cap on concurrent GPU MTCP transports (default: 0 = auto).
 
 #### Performance Characteristics
 
-1. **Memory Usage**: `PinnedBufferPool` capacity is capped by config; slices are reused across RDMA and MTCP flows.
+1. **Memory Usage**: staging capacity is capped by pinned class budgets; slices are reused across RDMA and MTCP flows.
 2. **Pipelining**: Multiple buffers per flow allow GPU copies to overlap with socket I/O.
 3. **CPU Path**: MTCP can stream CPU tensors without staging, while RDMA stages CPU slices through `DRAMStager` and reuses cached MRs.
 4. **Explicit release**: `MemoryStager::release_staged_buffer` is invoked after MTCP send completion or upon `RDMA_READ_DONE_EX` to recycle pinned chunks.
@@ -535,10 +534,13 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 - `enable_rdma`: enables RDMA transports and MR caching.
 - `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts. The engine now honors the configured TCP fan-out during both the server listener setup and client dial; values ≤1 are automatically raised to the default multi-socket budget so staging credit math stays consistent.
 - `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT`. Leave enabled in production multi-tenant deployments; tests disable it to force deterministic single-owner control sockets when running communicator suites in parallel.
-- `stager.stage_chunk_mb_{gpu,cpu}` & `stager.buffers_per_flow`: staging chunk size and pipeline depth.
-- `pool.pool_size_bytes` / `pool.preregister_mr`: pinned pool sizing and prereregistration policy.
+- `stager.buffers_per_flow`: staging pipeline depth.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.
-- `simple_numa.nodes`: optional mapping from NICs/GPUs to dedicated stagers and pools.
+- `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets).
+
+Pinned pool sizing and chunking are configured via `DaemonConfig.pinned_memory`:
+- `pinned_memory.classes[name=comm_gpu]`: GPU staging pool (slice size + min/max bytes).
+- `pinned_memory.classes[name=comm_cpu]`: CPU staging pool (slice size + min/max bytes).
 
 Additional runtime knobs supplied by the daemon include `channel_expire_sec` (control-channel idle timeout, `0` = never).
 
@@ -559,15 +561,15 @@ Set `transport.tcp_conn_count` and `channel_expire_sec` in `CommunicatorConfig`.
 ### Memory Registration
 - RDMA memory registration happens asynchronously; `MrCache` keeps staged slices alive per PD.
 - First access may still incur registration latency for tensor-backed MRs.
-- Leaving `pool.preregister_mr=true` pre-registers pooled buffers across all RDMA devices.
+- Setting `pinned_memory.classes[name=comm_*].rdma_preregister=true` preregisters staging slabs once per NIC/PD (only when `enable_rdma=true`).
 
 ### GPU Transfer Optimization
-Tune `stager.stage_chunk_mb_gpu`, `stager.buffers_per_flow`, and `transport.tcp_conn_count`.
+Tune `pinned_memory.classes[name=comm_gpu].slice_bytes`, `stager.buffers_per_flow`, and `transport.tcp_conn_count`.
 
 **GPU-Specific Tips:**
 1. **Chunk Size**: Match staging chunk size to typical tensor dimensions.
 2. **Buffer Count**: Increase for concurrent transfers (e.g., replica parallel loading).
-3. **Pinned Pool Headroom**: Ensure `pool.pool_size_bytes` covers simultaneous inflight stages on both ends.
+3. **Pinned Pool Headroom**: Ensure `pinned_memory.classes[name=comm_gpu].pool_bytes` covers simultaneous inflight stages on both ends.
 4. **Device Selection**: Ensure the correct `device_id` so `cuda::set_device` avoids cross-GPU copies.
 
 ---
@@ -681,7 +683,7 @@ sequenceDiagram
 - **Client handshake:** On the client side `on_receive_response()` locates the local NIC from `tensor->get_dev()`. The first RDMA response ensures the endpoint transitions from `Idle → ConnectRequested`, queues the `ReadRequest`, and emits `ENGINE_OP_RDMA_CONNECT_REQUEST`. While in `ConnectRequested` additional reads are enqueued; explicit failures (`ENGINE_OP_RDMA_CONNECT_FAILED` or QP setup errors) transition the endpoint to `Failed`, flush the queue with `REMOTE_RDMA_CONNECT_FAILED`, and schedule an exponential backoff before retrying.
 - **Posting READs:** When the endpoint reaches `Ready`, the client builds `RdmaReadSeg` entries (remote `addr`/`rkey`, local destination based on `remote_offset_`) and invokes `transport->read_multi()`. The transport refuses to post READ WRs while `ready() == false`, so only the handshake path can transition the QP to RTS. Failures update the request status and drop it from `pending_requests_`.
 - **ACK and cleanup:** For staged responses the client installs an `ack_action` that batches all segment offsets into `ENGINE_OP_RDMA_READ_DONE_EX`. Once all RDMA completions fire, this ACK releases staged buffers, deregisters MRs when needed, and removes the corresponding `StageLease` entries from the registry so the channel credit ledger can refill.
-- **Staging backpressure:** If staging buffers are exhausted (for example, GPU tensors with chunked copies but few `StreamingPinnedBuffer` slots), the server logs `StreamingPinnedBuffer capacity exhausted...` warnings while waiting for the client’s `RDMA_READ_DONE_EX` to recycle buffers, making “hangs” due to undersized pools visible in logs. MTCP transports now retry buffer initialization with a blocking wait, emitting a progress warning once per minute until slices become available instead of aborting the handshake.
+- **Staging backpressure:** If staging buffers are exhausted (for example, GPU tensors with chunked copies but an undersized `pinned_memory.classes[name=comm_gpu].pool_bytes`), the server does **not** block inside `MemoryStager::stage()`. Instead, staging attempts return `Unavailable/ResourceExhausted` and the MTCP staging loop retries with bounded backoff until the daemon-configured `pinned_memory.allocation_timeout` elapses; on expiry the request fails with a diagnosable `ResourceExhausted` error. Watch `[staging_credit]` WARN entries to confirm backpressure is cycling and to identify undersized pools.
 
 #### Operational Monitoring
 - `[staging_credit]` INFO logs emit whenever a window is staged or released; the log includes the request key, transport, window sequence, credit granted, and the current outstanding credit. Use these entries to verify that credit is cycling while transfers are in flight.

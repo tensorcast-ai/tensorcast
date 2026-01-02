@@ -21,10 +21,22 @@ data:
       num_threads: 16
 
     engine:
-      mem_pool_size_bytes: 8GB
-      tx_slice_bytes: 256MB
       artifact_chunk_bytes: 256MB
-      pinned_allocation_timeout: 30s
+      streaming_buffer_chunks: 16
+
+    pinned_memory:
+      # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes)
+      allocation_timeout: 30s
+      classes:
+        - name: engine
+          slice_bytes: 256MB
+          pool_bytes: 8GB
+        - name: comm_gpu
+          slice_bytes: 16MB
+          pool_bytes: 8GB
+        - name: comm_cpu
+          slice_bytes: 4MB
+          pool_bytes: 1GB
 
     high_availability:
       enabled: true
@@ -182,5 +194,3 @@ spec:
     rollingUpdate:
       maxSurge: 0
       maxUnavailable: "100%"
-
-

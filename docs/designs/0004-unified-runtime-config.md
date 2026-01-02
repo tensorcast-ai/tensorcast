@@ -43,7 +43,8 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
   - `lifecycle`: eviction toggles and intervals, PID scanning, sweeper intervals, TTLs, VRAM fraction.
   - `high_availability`: `global_store_endpoints`, heartbeat/periodic sync/retry.
   - `communicator`: `tensorcast.communicator.v1.CommunicatorConfig` (reused schema).
-  - `engine`: `*_bytes`, streaming and CPU VS sizing, `pinned_allocation_timeout`.
+  - `engine`: `*_bytes`, streaming and CPU VS sizing, `streaming_buffer_chunks`.
+  - `pinned_memory`: daemon-wide pinned budget, class pools, and allocation timeout.
   - `observability`: OTel (lang‑agnostic), logging (enum level, sinks), tracing; `otel_cxx` holds C++‑specific toggles.
   - `compatibility`: targeted compatibility switches (e.g., `confirm_requires_disk_path`, `verification_timeout_status`).
   - `debug.cuda`: guardrails for same‑process IPC fallback.

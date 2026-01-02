@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -93,6 +93,7 @@ TEST_CASE("DiskLoader streaming disk load to GPU", "[loader][disk][streaming][gp
       artifact_chunk_bytes,
       /*max_buffer_bytes=*/static_cast<size_t>(1024 * 2), // 2 KB buffer to force streaming
       std::chrono::milliseconds::zero(),
+      /*streaming_buffer_chunks=*/16,
       artifact_size);
 
   // Launch streaming load to GPU

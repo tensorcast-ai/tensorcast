@@ -20,7 +20,13 @@ using tensorcast::testing::parse_options;
 
 int run_server() {
   auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
-  tensorcast::communicator::engine::Communicator engine(cfg);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/g_rdma);
+  tensorcast::communicator::engine::Communicator engine(cfg, std::move(pools));
   engine.init("0.0.0.0", g_port);
   uint8_t* addr[8][1024] = {{nullptr}};
 
@@ -44,7 +50,13 @@ int run_server() {
 
 int run_client() {
   auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
-  tensorcast::communicator::engine::Communicator engine(cfg, 10);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/g_rdma);
+  tensorcast::communicator::engine::Communicator engine(cfg, std::move(pools), 10);
   engine.init("0.0.0.0", g_port + 1);
   uint8_t* addr[8][1024] = {{nullptr}};
 

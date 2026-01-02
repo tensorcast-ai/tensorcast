@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
 #include <cstdint>
@@ -33,7 +33,13 @@ struct TcpTestFixture {
         server_init_status_ = absl::InternalError("failed to find available server port");
       } else {
         server_port_ = static_cast<uint16_t>(sp);
-        server_ = new communicator::engine::Communicator(srv_cfg, 30);
+        auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+            srv_cfg.stager().buffers_per_flow(),
+            srv_cfg.transport().tcp_conn_count(),
+            /*gpu_slice_bytes=*/(16ULL << 20),
+            /*cpu_slice_bytes=*/(4ULL << 20),
+            /*enable_rdma=*/false);
+        server_ = new communicator::engine::Communicator(srv_cfg, std::move(pools), 30);
         server_init_status_ = server_->init("127.0.0.1", sp, 8);
       }
     }
@@ -46,7 +52,13 @@ struct TcpTestFixture {
         client_init_status_ = absl::InternalError("failed to find available client port");
       } else {
         client_port_ = static_cast<uint16_t>(cp);
-        client_ = new communicator::engine::Communicator(cli_cfg, 30);
+        auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+            cli_cfg.stager().buffers_per_flow(),
+            cli_cfg.transport().tcp_conn_count(),
+            /*gpu_slice_bytes=*/(16ULL << 20),
+            /*cpu_slice_bytes=*/(4ULL << 20),
+            /*enable_rdma=*/false);
+        client_ = new communicator::engine::Communicator(cli_cfg, std::move(pools), 30);
         client_init_status_ = client_->init("127.0.0.1", cp, 8);
       }
     }
