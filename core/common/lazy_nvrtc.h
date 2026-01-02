@@ -59,7 +59,7 @@ class LazyNvrtc {
       if (!library_.has_value()) {
         return absl::FailedPreconditionError("NVRTC library not loaded");
       }
-      auto symbol_or = library_->ResolveSymbol(symbol_name);
+      auto symbol_or = library_->resolve_symbol(symbol_name);
       if (!symbol_or.ok()) {
         return symbol_or.status();
       }

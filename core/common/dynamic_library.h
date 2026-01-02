@@ -11,7 +11,7 @@ namespace tensorcast::common {
 
 class DynamicLibrary {
  public:
-  static absl::StatusOr<DynamicLibrary> Open(std::string_view library_name);
+  static absl::StatusOr<DynamicLibrary> open(std::string_view library_name);
 
   DynamicLibrary(DynamicLibrary&& other) noexcept;
   DynamicLibrary& operator=(DynamicLibrary&& other) noexcept;
@@ -21,7 +21,7 @@ class DynamicLibrary {
 
   ~DynamicLibrary();
 
-  absl::StatusOr<void*> ResolveSymbol(std::string_view symbol_name) const;
+  absl::StatusOr<void*> resolve_symbol(std::string_view symbol_name) const;
 
   bool is_loaded() const {
     return handle_ != nullptr;

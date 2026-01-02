@@ -33,7 +33,7 @@ absl::Status LazyNvrtc::ensure_loaded() {
 absl::Status LazyNvrtc::open_library() {
   std::string errors;
   for (const char* library_name : kNvrtcLibraryNames) {
-    absl::StatusOr<common::DynamicLibrary> lib_or = common::DynamicLibrary::Open(library_name);
+    absl::StatusOr<common::DynamicLibrary> lib_or = common::DynamicLibrary::open(library_name);
     if (lib_or.ok()) {
       absl::MutexLock lock(&mutex_);
       library_ = std::move(lib_or.value());

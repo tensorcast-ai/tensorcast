@@ -54,7 +54,7 @@ DynamicLibrary::~DynamicLibrary() {
   }
 }
 
-absl::StatusOr<DynamicLibrary> DynamicLibrary::Open(std::string_view library_name) {
+absl::StatusOr<DynamicLibrary> DynamicLibrary::open(std::string_view library_name) {
   dlerror();
   void* handle = dlopen(std::string(library_name).c_str(), RTLD_NOW | RTLD_LOCAL);
   const char* error = dlerror();
@@ -65,7 +65,7 @@ absl::StatusOr<DynamicLibrary> DynamicLibrary::Open(std::string_view library_nam
   return DynamicLibrary(handle, std::string(library_name));
 }
 
-absl::StatusOr<void*> DynamicLibrary::ResolveSymbol(std::string_view symbol_name) const {
+absl::StatusOr<void*> DynamicLibrary::resolve_symbol(std::string_view symbol_name) const {
   return resolve_symbol(handle_, symbol_name);
 }
 
