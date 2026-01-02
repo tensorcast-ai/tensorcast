@@ -478,8 +478,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
 
         const size_t element_size = c10::elementSize(dtype);
         const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
-        const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
-
         torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
 
         std::shared_ptr<void> owner;
@@ -880,6 +878,46 @@ std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
   }
 
   return std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t));
+}
+
+absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
+    int device_id,
+    std::uint64_t memory_ptr) {
+  if (memory_ptr == 0) {
+    return absl::InvalidArgumentError("memory_ptr must be non-zero");
+  }
+
+  auto set_device_status = cuda::set_device(device_id);
+  if (!set_device_status.ok()) {
+    return set_device_status;
+  }
+
+  void* base = nullptr;
+  size_t range_bytes = 0;
+  auto range_status = cuda::mem_get_address_range(&base, &range_bytes, reinterpret_cast<void*>(memory_ptr));
+  if (!range_status.ok() || base == nullptr) {
+    // Fall back to the legacy behavior: export directly from memory_ptr with a
+    // zero base offset. This preserves previous semantics when address-range
+    // queries are unavailable.
+    const std::string handle = get_cuda_memory_handle(device_id, memory_ptr);
+    if (handle.empty()) {
+      return absl::FailedPreconditionError("Failed to export CUDA IPC handle");
+    }
+    return std::make_pair(handle, static_cast<std::uint64_t>(0));
+  }
+
+  const auto base_addr = reinterpret_cast<std::uint64_t>(base);
+  if (memory_ptr < base_addr) {
+    return absl::FailedPreconditionError("CUDA address range base exceeds memory_ptr");
+  }
+  const std::uint64_t base_offset = memory_ptr - base_addr;
+
+  cudaIpcMemHandle_t handle;
+  auto ipc_status = cuda::get_ipc_mem_handle(&handle, base);
+  if (!ipc_status.ok()) {
+    return ipc_status;
+  }
+  return std::make_pair(std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t)), base_offset);
 }
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle) {

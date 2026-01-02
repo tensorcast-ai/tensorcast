@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <atomic>
 #include <chrono>
@@ -9,7 +9,7 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/communicator/engine/engine.h"
-#include "core/communicator/engine/gpu_net_stager.h"
+#include "core/communicator/engine/host_pinned_gpu_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
 #include "core/testing/test_helpers.h"
 
@@ -50,7 +50,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
   SECTION("Staging buffer exhaustion recovery") {
     // Create a GPU stager with very limited buffers
     auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2 * 1024 * 1024, 1024 * 1024);
-    tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 1, pool);
+    tensorcast::communicator::engine::HostPinnedGpuStager stager(1024 * 1024, 1, pool);
 
     // Allocate GPU memory
     void* gpu_ptr;
@@ -134,7 +134,7 @@ TEST_CASE("TCP Mode GPU Error Handling", "[communicator][tcp][gpu][error]") {
 
   SECTION("Out of bounds staging") {
     auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(2 * 1024 * 1024, 1024 * 1024);
-    tensorcast::communicator::engine::GpuNetStager stager(1024 * 1024, 2, pool);
+    tensorcast::communicator::engine::HostPinnedGpuStager stager(1024 * 1024, 2, pool);
 
     void* gpu_ptr;
     const std::size_t tensor_size = 1024 * 1024;

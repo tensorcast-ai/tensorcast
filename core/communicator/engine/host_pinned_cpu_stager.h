@@ -18,16 +18,16 @@
 
 namespace tensorcast::communicator::engine {
 
-// DRAM (CPU) stager: memcpy from source VA into host-pinned pool buffer.
+// Host-pinned CPU stager: memcpy from source VA into host-pinned pool buffer.
 // Supports UMA-backed short pin leases via an optional LeaseProvider injected
 // by the StoreEngine. When set, stage() acquires a short lease for the
 // [offset, bytes] region and releases it after memcpy completes.
-class DRAMStager : public MemoryStager {
+class HostPinnedCpuStager : public MemoryStager {
  public:
-  explicit DRAMStager(
+  explicit HostPinnedCpuStager(
       gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool,
       size_t num_buffers_hint = 4);
-  ~DRAMStager() override = default;
+  ~HostPinnedCpuStager() override = default;
 
   // UMA pin-lease provider interface (optional). If set, stage() will
   // acquire a lease for the [offset, bytes] region and release it immediately
@@ -53,7 +53,15 @@ class DRAMStager : public MemoryStager {
       uint64_t bytes,
       StageMode mode = StageMode::kBlocking) override;
 
-  absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override;
+  absl::Status release_staged_buffer(gsl::not_null<void*> exposed_ptr) override;
+
+  std::optional<MrSlab> mr_slab_for_ptr(gsl::not_null<void*> exposed_ptr) const override {
+    auto slab = pool_->slab_for_ptr(exposed_ptr);
+    if (!slab.has_value()) {
+      return std::nullopt;
+    }
+    return MrSlab{slab->base.get(), slab->bytes};
+  }
 
   size_t get_chunk_size() const override {
     return chunk_size_;

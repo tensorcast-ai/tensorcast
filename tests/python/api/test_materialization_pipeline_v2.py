@@ -95,6 +95,12 @@ class _FakeClient:
         self.unloaded.append(f"{replica_uuid}:{disk_path}")
         return True
 
+    def get_artifact_index_by_id(self, _artifact_id: str) -> bytes:
+        # Region-backed get_into may probe artifact indices even when tests do not
+        # set up a daemon. Returning an empty canonical index forces the region-backed
+        # path to fall back cleanly.
+        return b"{}"
+
     def resolve_artifact_from_disk_v2(
         self, *, disk_path: str, verify_checksums: bool = True
     ):
@@ -138,6 +144,9 @@ class _RuntimeStub:
 
     def ensure_client(self) -> _FakeClient:
         return self.client
+
+    def get_artifact_index_cached(self, artifact_id: str):
+        return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)

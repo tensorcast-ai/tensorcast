@@ -5,7 +5,7 @@ related_code:
   - core/communicator/engine/engine.cc
   - core/communicator/engine/engine.h
   - core/communicator/engine/channel.h
-  - core/communicator/engine/gpu_net_stager.h
+  - core/communicator/engine/host_pinned_gpu_stager.h
   - core/common/memory/streaming_pinned_buffer.*
   - core/communicator/transport/rdma_transport.cc
   - core/communicator/transport/mtcp_transport.cc
@@ -18,7 +18,7 @@ links:
 
 # Summary
 
-The Communicator dedicates a shared staging infrastructure (`GpuNetStager`, `DRAMStager`, `StreamingPinnedBuffer`) to serve both RDMA and MTCP transfers. Today, RDMA responses require pre-staging every segment before the server emits a single `READ_RESPONSE_EX`; if a request spans more bytes than the pool capacity (`buffers_per_flow * chunk_size`), the server blocks inside `GpuNetStager::stage()`, preventing the control channel from responding and the client from issuing reads—deadlocking the transfer. MTCP avoids this deadlock only because its send path streams staged buffers as soon as they are available, but RDMA and MTCP compete for the same pool without explicit arbitration, so one flow can starve the other under heavy load.
+The Communicator dedicates a shared staging infrastructure (`HostPinnedGpuStager`, `HostPinnedCpuStager`, `StreamingPinnedBuffer`) to serve both RDMA and MTCP transfers. Today, RDMA responses require pre-staging every segment before the server emits a single `READ_RESPONSE_EX`; if a request spans more bytes than the pool capacity (`buffers_per_flow * chunk_size`), the server blocks inside `HostPinnedGpuStager::stage()`, preventing the control channel from responding and the client from issuing reads—deadlocking the transfer. MTCP avoids this deadlock only because its send path streams staged buffers as soon as they are available, but RDMA and MTCP compete for the same pool without explicit arbitration, so one flow can starve the other under heavy load.
 
 This design introduces a **unified staging flow controller** that manages credit across transports, slices responses into windows bounded by available credit, and continuously refills both RDMA and MTCP pipelines as acknowledgements (RDMA) or send completions (MTCP) arrive. The approach aligns with the Communicator architecture in `core/communicator/README.md`, preserves staged-only RDMA semantics, improves fairness across concurrent flows, and adds observability and configuration validation for staging pressure. We assume a simultaneous rollout of all daemons/clients, so no backward-compatibility shims are required.
 
@@ -63,7 +63,7 @@ We retain these invariants while adding transport-agnostic flow credit and windo
 - Keeps waitlists for requests that cannot obtain credit immediately.
 
 ### StageLease
-- Wraps a staged buffer (host pointer, bytes, staging metadata) and remembers the owning FlowCredit lease.
+- Wraps a staged buffer (exposed pointer, bytes, staging metadata) and remembers the owning FlowCredit lease.
 - Carries RDMA registration state: `{ibv_mr*, bool deregister_on_release}` so the unified controller—not ad hoc maps—owns MR lifecycle.
 - Provides `void release()` which invokes the stored `release_fn` (stager release + optional MR deregistration) and returns the credit back to `FlowCreditLedger`.
 - Uniform across RDMA and MTCP: RDMA returns the lease when ACK arrives; MTCP returns it on send completion.
@@ -137,7 +137,7 @@ sequenceDiagram
 
 ### Non-blocking Staging
 
-- `GpuNetStager::stage()` gains a `StageMode` enum:
+- `HostPinnedGpuStager::stage()` gains a `StageMode` enum:
   ```cpp
   enum class StageMode { kBlocking, kTry };
   absl::StatusOr<StageLease> stage(..., StageMode mode);

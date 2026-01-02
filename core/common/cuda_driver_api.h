@@ -13,6 +13,7 @@ namespace tensorcast::cuda {
   X(cuInit)                              \
   X(cuDeviceGet)                         \
   X(cuDeviceGetAttribute)                \
+  X(cuMemGetAddressRange)                \
   X(cuMemGetAllocationGranularity)       \
   X(cuMemAddressReserve)                 \
   X(cuMemCreate)                         \

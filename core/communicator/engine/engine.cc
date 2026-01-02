@@ -21,11 +21,13 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
+#include "core/common/cuda_api.h"
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/dram_stager.h"
 #include "core/communicator/engine/engine.h"
-#include "core/communicator/engine/gpu_net_stager.h"
+#include "core/communicator/engine/gpu_vram_rdma_stager.h"
+#include "core/communicator/engine/host_pinned_cpu_stager.h"
+#include "core/communicator/engine/host_pinned_gpu_stager.h"
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/protocol.h"
 #include "core/communicator/engine/staging_flow_controller.h"
@@ -110,6 +112,31 @@ const char* DirectFallbackReasonToString(DirectFallbackReason reason) {
   return "unknown";
 }
 
+v1::RdmaConfig::StagedRdmaBackend NormalizeStagedBackend(const v1::CommunicatorConfig& config) {
+  auto backend = config.rdma().staging_backend();
+  if (backend == v1::RdmaConfig::STAGED_RDMA_BACKEND_UNSPECIFIED) {
+    return v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
+  }
+  return backend;
+}
+
+const char* StagedBackendToString(v1::RdmaConfig::StagedRdmaBackend backend) {
+  switch (backend) {
+    case v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED:
+      return "host_pinned";
+    case v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM:
+      return "gpu_vram";
+    case v1::RdmaConfig::STAGED_RDMA_BACKEND_UNSPECIFIED:
+    case v1::RdmaConfig_StagedRdmaBackend_RdmaConfig_StagedRdmaBackend_INT_MIN_SENTINEL_DO_NOT_USE_:
+    case v1::RdmaConfig_StagedRdmaBackend_RdmaConfig_StagedRdmaBackend_INT_MAX_SENTINEL_DO_NOT_USE_:
+      break;
+  }
+  return "host_pinned";
+}
+
+void record_staged_backend_metrics(v1::RdmaConfig::StagedRdmaBackend backend, bool tensor_on_cpu, uint64_t bytes);
+void record_mr_register_metrics(const char* location, const char* reason, bool success);
+
 StagingWindow::StageFn MakeStageFunction(
     const std::shared_ptr<PartitionTensor>& tensor,
     FlowCreditLedger* ledger,
@@ -117,6 +144,7 @@ StagingWindow::StageFn MakeStageFunction(
     const net_dev_t& dev,
     MrCache* mr_cache,
     std::string tensor_key,
+    v1::RdmaConfig::StagedRdmaBackend staged_backend,
     bool use_direct,
     ibv_mr* direct_mr) {
   if (use_direct) {
@@ -146,46 +174,51 @@ StagingWindow::StageFn MakeStageFunction(
   }
 
   auto fallback_stager = stager;
-  return [fallback_stager, tensor, dev, ledger, mr_cache, tensor_key = std::move(tensor_key)](
+  return [fallback_stager, tensor, dev, ledger, mr_cache, tensor_key = std::move(tensor_key), staged_backend](
              uint64_t offset, uint32_t bytes, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
     constexpr int kAccess = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
     auto staged_or = fallback_stager->stage(tensor, offset, bytes, MemoryStager::StageMode::kTry);
     if (!staged_or.ok()) {
       return staged_or.status();
     }
-    void* host_ptr = *staged_or;
+    void* exposed_ptr = *staged_or;
     ibv_mr* staged_mr = nullptr;
     bool deregister_mr = false;
 
-    gsl::not_null<void*> host_ptr_nn{host_ptr};
+    gsl::not_null<void*> exposed_ptr_nn{exposed_ptr};
+    const char* mr_location = StagedBackendToString(staged_backend);
     if (mr_cache) {
-      gsl::not_null<void*> mr_base = host_ptr_nn;
-      size_t mr_bytes = bytes;
-      if (auto dram = std::dynamic_pointer_cast<DRAMStager>(fallback_stager)) {
-        if (auto slab = dram->pinned_pool()->slab_for_ptr(host_ptr_nn); slab.has_value()) {
-          mr_base = slab->base.get();
-          mr_bytes = slab->bytes;
-        }
-      }
+      const auto slab = NormalizeMrRegion(*fallback_stager, exposed_ptr_nn, bytes);
+      gsl::not_null<void*> mr_base = slab.base;
+      size_t mr_bytes = slab.bytes;
 
-      staged_mr = mr_cache->get_or_register(dev->get_pd(), mr_base, mr_bytes, kAccess);
+      auto mr_result = mr_cache->get_or_register(dev->get_pd(), mr_base, mr_bytes, kAccess);
+      staged_mr = mr_result.mr;
       if (staged_mr == nullptr) {
-        auto release_status = fallback_stager->release_staged_buffer(host_ptr_nn);
+        record_mr_register_metrics(mr_location, "cache_register_failed", false);
+        auto release_status = fallback_stager->release_staged_buffer(exposed_ptr_nn);
         if (!release_status.ok()) {
           LOG(WARNING) << "Failed to release staged buffer after MR cache failure: " << release_status;
         }
         return absl::InternalError("failed to register MR via cache");
       }
+      if (mr_result.registered) {
+        record_mr_register_metrics(mr_location, nullptr, true);
+      }
     } else {
-      if (dev->reg_mr(&staged_mr, host_ptr, bytes, kAccess) != SUCCESS) {
-        auto release_status = fallback_stager->release_staged_buffer(host_ptr_nn);
+      if (dev->reg_mr(&staged_mr, exposed_ptr, bytes, kAccess) != SUCCESS) {
+        record_mr_register_metrics(mr_location, "direct_register_failed", false);
+        auto release_status = fallback_stager->release_staged_buffer(exposed_ptr_nn);
         if (!release_status.ok()) {
           LOG(WARNING) << "Failed to release staged buffer after MR registration failure: " << release_status;
         }
         return absl::InternalError("failed to register staged MR");
       }
+      record_mr_register_metrics(mr_location, nullptr, true);
       deregister_mr = true;
     }
+
+    record_staged_backend_metrics(staged_backend, tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU, bytes);
 
     StageLease::Metadata metadata;
     metadata.transport = StageTransport::kRdma;
@@ -194,7 +227,7 @@ StagingWindow::StageFn MakeStageFunction(
     metadata.bytes = bytes;
     metadata.zero_copy = false;
 
-    return StageLease(fallback_stager, ledger, host_ptr, bytes, staged_mr, deregister_mr, metadata);
+    return StageLease(fallback_stager, ledger, exposed_ptr, bytes, staged_mr, deregister_mr, metadata);
   };
 }
 
@@ -203,15 +236,26 @@ opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_bytes_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_fallback_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_rdma_direct_window_bytes_hist;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_staged_backend_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_staged_bytes_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_mr_register_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_mr_register_failures_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_pinned_rdma_prereg_failures_total;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_pinned_rdma_prereg_latency_ms_hist;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_pinned_rdma_prereg_bytes_gauge;
 std::atomic<double> g_pinned_rdma_prereg_bytes_last{0.0};
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_vram_rdma_prereg_failures_total;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> g_vram_rdma_prereg_latency_ms_hist;
+opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> g_vram_rdma_prereg_bytes_gauge;
+std::atomic<double> g_vram_rdma_prereg_bytes_last{0.0};
 
 absl::once_flag g_comm_meter_once;
 absl::once_flag g_rdma_direct_window_metrics_once;
 absl::once_flag g_rdma_direct_fallback_metric_once;
+absl::once_flag g_rdma_staged_metrics_once;
+absl::once_flag g_rdma_mr_register_metrics_once;
 absl::once_flag g_pinned_rdma_prereg_metrics_once;
+absl::once_flag g_vram_rdma_prereg_metrics_once;
 
 inline void ensure_communicator_meter() {
   absl::call_once(g_comm_meter_once, []() {
@@ -235,6 +279,22 @@ inline void ensure_rdma_direct_fallback_metric() {
   });
 }
 
+inline void ensure_rdma_staged_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_staged_metrics_once, []() {
+    g_rdma_staged_backend_total = g_comm_meter->CreateDoubleCounter("tc_rdma_staged_backend_total");
+    g_rdma_staged_bytes_total = g_comm_meter->CreateDoubleCounter("tc_rdma_staged_bytes_total");
+  });
+}
+
+inline void ensure_rdma_mr_register_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_rdma_mr_register_metrics_once, []() {
+    g_rdma_mr_register_total = g_comm_meter->CreateDoubleCounter("tc_rdma_mr_register_total");
+    g_rdma_mr_register_failures_total = g_comm_meter->CreateDoubleCounter("tc_rdma_mr_register_failures_total");
+  });
+}
+
 void pinned_rdma_prereg_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
   auto obs =
       opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
@@ -255,6 +315,26 @@ inline void ensure_pinned_rdma_prereg_metrics() {
   });
 }
 
+void vram_rdma_prereg_bytes_callback(opentelemetry::metrics::ObserverResult result, void* /*state*/) noexcept {
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  obs->Observe(g_vram_rdma_prereg_bytes_last.load());
+}
+
+inline void ensure_vram_rdma_prereg_metrics() {
+  ensure_communicator_meter();
+  absl::call_once(g_vram_rdma_prereg_metrics_once, []() {
+    g_vram_rdma_prereg_failures_total = g_comm_meter->CreateDoubleCounter("tc_vram_rdma_prereg_failures_total");
+    g_vram_rdma_prereg_latency_ms_hist = g_comm_meter->CreateDoubleHistogram("tc_vram_rdma_prereg_latency_ms");
+    g_vram_rdma_prereg_bytes_gauge = g_comm_meter->CreateDoubleObservableGauge("tc_vram_rdma_prereg_bytes");
+    g_vram_rdma_prereg_bytes_gauge->AddCallback(&vram_rdma_prereg_bytes_callback, nullptr);
+  });
+}
+
 void record_direct_window_metrics(int device_id, uint64_t segments, uint64_t bytes) {
   if (segments == 0 && bytes == 0) {
     return;
@@ -272,6 +352,41 @@ void record_direct_window_metrics(int device_id, uint64_t segments, uint64_t byt
     g_rdma_direct_bytes_total->Add(bytes_double, attr_view, ctx);
     g_rdma_direct_window_bytes_hist->Record(bytes_double, attr_view, ctx);
   }
+}
+
+void record_staged_backend_metrics(v1::RdmaConfig::StagedRdmaBackend backend, bool tensor_on_cpu, uint64_t bytes) {
+  ensure_rdma_staged_metrics();
+  if (!g_rdma_staged_backend_total || !g_rdma_staged_bytes_total) {
+    return;
+  }
+  const char* backend_label = StagedBackendToString(backend);
+  const char* mem_label = tensor_on_cpu ? "cpu" : "gpu";
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("backend", backend_label);
+  attrs.emplace("mem", mem_label);
+  auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+  g_rdma_staged_backend_total->Add(1.0, attr_view, opentelemetry::context::Context{});
+  g_rdma_staged_bytes_total->Add(static_cast<double>(bytes), attr_view, opentelemetry::context::Context{});
+}
+
+void record_mr_register_metrics(const char* location, const char* reason, bool success) {
+  ensure_rdma_mr_register_metrics();
+  if (!g_rdma_mr_register_total || !g_rdma_mr_register_failures_total) {
+    return;
+  }
+  if (success) {
+    std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+    attrs.emplace("method", "ibv_reg_mr");
+    attrs.emplace("location", location);
+    auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+    g_rdma_mr_register_total->Add(1.0, attr_view, opentelemetry::context::Context{});
+    return;
+  }
+  std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+  attrs.emplace("method", "ibv_reg_mr");
+  attrs.emplace("reason", reason);
+  auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+  g_rdma_mr_register_failures_total->Add(1.0, attr_view, opentelemetry::context::Context{});
 }
 
 void record_direct_fallback_metric(DirectFallbackReason reason) {
@@ -349,7 +464,7 @@ RdmaDriveResult DriveRdmaSession(Channel::FlowState& flow_state, RdmaReadSession
       auto* seg_pl = reinterpret_cast<ProtoReadResponseExSeg*>(
           reinterpret_cast<uint8_t*>(hdr) + sizeof(ProtoReadResponseExHeader) + i * sizeof(ProtoReadResponseExSeg));
 
-      seg_pl->addr = reinterpret_cast<uint64_t>(segment.lease.host_ptr());
+      seg_pl->addr = reinterpret_cast<uint64_t>(segment.lease.exposed_ptr());
       seg_pl->offset = segment.offset;
       seg_pl->bytes = segment.bytes;
       seg_pl->rkey = segment.lease.mr() ? segment.lease.mr()->rkey : 0;
@@ -505,6 +620,37 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     LOG(WARNING) << "Communicator staging_wait_timeout is <= 0; defaulting to 30s";
     staging_wait_timeout_ = absl::Seconds(30);
   }
+  const auto staging_backend = NormalizeStagedBackend(config_);
+  if (staging_backend == v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM && !enable_rdma_) {
+    LOG(FATAL) << "rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM requires enable_rdma=true";
+  }
+  use_gpu_vram_staging_ = enable_rdma_ && staging_backend == v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM;
+  if (use_gpu_vram_staging_) {
+    const uint64_t pool_bytes = config_.rdma().vram_pool_bytes_per_gpu();
+    const uint64_t slice_bytes = config_.rdma().vram_slice_bytes();
+    if (pool_bytes == 0 || slice_bytes == 0) {
+      LOG(FATAL) << "rdma.vram_pool_bytes_per_gpu and rdma.vram_slice_bytes must be > 0 when "
+                    "STAGED_RDMA_BACKEND_GPU_VRAM staging is set";
+    }
+    int device_count = 0;
+    auto count_status = cuda::get_device_count(&device_count);
+    if (!count_status.ok()) {
+      LOG(FATAL) << "Failed to query CUDA device count for GPU VRAM staging: " << count_status;
+    }
+    if (device_count <= 0) {
+      LOG(FATAL) << "GPU VRAM staging requires at least one CUDA device";
+    }
+    for (int device_id = 0; device_id < device_count; ++device_id) {
+      auto pool = std::make_shared<GpuVramStagingPool>(
+          device_id, static_cast<size_t>(pool_bytes), static_cast<size_t>(slice_bytes));
+      auto init_status = pool->initialize();
+      if (!init_status.ok()) {
+        LOG(FATAL) << "Failed to initialize GPU VRAM staging pool for device=" << device_id << ": " << init_status;
+      }
+      gpu_vram_pools_[device_id] = pool;
+      gpu_vram_stagers_[device_id] = std::make_shared<GpuVramRdmaStager>(pool);
+    }
+  }
 
   if (config_.stager().buffers_per_flow() <= 0) {
     LOG(FATAL) << "stager.buffers_per_flow must be > 0";
@@ -548,7 +694,7 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
                << " (buffers_per_flow=" << num_buffers << " tcp_conn_count=" << config_.transport().tcp_conn_count()
                << ")";
   }
-  gpu_memory_stager_ = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
+  gpu_memory_stager_ = std::make_shared<HostPinnedGpuStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
 
   const size_t total_gpu_slices = capacity_gpu_slices;
   if (total_gpu_slices == 0) {
@@ -597,10 +743,10 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     }
   }
   auto dram_pool = cpu_memory_pool_ ? cpu_memory_pool_ : gpu_memory_pool_;
-  memory_stager_ = std::make_shared<DRAMStager>(
+  memory_stager_ = std::make_shared<HostPinnedCpuStager>(
       gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{dram_pool}, /*num_buffers_hint=*/num_buffers);
-  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
-    ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+  if (auto ds = std::dynamic_pointer_cast<HostPinnedCpuStager>(memory_stager_)) {
+    ds->set_lease_provider(HostPinnedCpuStager::make_noop_lease_provider());
   }
 
   if (enable_rdma_) {
@@ -609,16 +755,17 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     // Apply typed RDMA QP tuning
     rdma_context_->set_qp_params(
         config_.rdma().traffic_class(), config_.rdma().qp_timeout(), config_.rdma().qp_retry());
+    int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
 
     if (config_.simple_numa().enable()) {
       for (const auto& node : config_.simple_numa().nodes()) {
-        auto cpu_stager = std::make_shared<DRAMStager>(
+        auto cpu_stager = std::make_shared<HostPinnedCpuStager>(
             gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>>{dram_pool},
             /*num_buffers_hint=*/num_buffers);
-        if (auto ds = std::dynamic_pointer_cast<DRAMStager>(cpu_stager)) {
-          ds->set_lease_provider(DRAMStager::make_noop_lease_provider());
+        if (auto ds = std::dynamic_pointer_cast<HostPinnedCpuStager>(cpu_stager)) {
+          ds->set_lease_provider(HostPinnedCpuStager::make_noop_lease_provider());
         }
-        auto gpu_mem_stager = std::make_shared<GpuNetStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
+        auto gpu_mem_stager = std::make_shared<HostPinnedGpuStager>(gpu_chunk_size, num_buffers, gpu_memory_pool_);
         // Map GPU ids
         for (int gid : node.gpus()) {
           gpu_mem_stagers_[gid] = gpu_mem_stager;
@@ -630,10 +777,60 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
       }
     }
 
+    if (use_gpu_vram_staging_) {
+      ensure_vram_rdma_prereg_metrics();
+      const auto prereg_start = std::chrono::steady_clock::now();
+      uint64_t prereg_bytes = 0;
+      for (const auto& entry : gpu_vram_pools_) {
+        prereg_bytes += entry.second->pool_bytes();
+      }
+      g_vram_rdma_prereg_bytes_last.store(static_cast<double>(prereg_bytes));
+
+      uint64_t failures = 0;
+      for (const auto& dev : rdma_context_->list_devs()) {
+        for (const auto& entry : gpu_vram_pools_) {
+          auto slab = entry.second->mr_slab();
+          if (!slab.has_value()) {
+            ++failures;
+            LOG(WARNING) << "Failed to preregister VRAM MR for device=" << entry.first << ": missing slab";
+            record_mr_register_metrics("gpu_vram", "preregister_failed", false);
+            continue;
+          }
+          auto result = meta_mr_cache_->get_or_register(dev->get_pd(), slab->base, slab->bytes, access);
+          if (result.mr == nullptr) {
+            ++failures;
+            LOG(WARNING) << "Failed to preregister VRAM MR for slab " << static_cast<void*>(slab->base.get())
+                         << " bytes=" << slab->bytes << " on PD";
+            record_mr_register_metrics("gpu_vram", "preregister_failed", false);
+            continue;
+          }
+          if (result.registered) {
+            record_mr_register_metrics("gpu_vram", nullptr, true);
+          }
+        }
+      }
+      const auto prereg_end = std::chrono::steady_clock::now();
+      const double prereg_ms =
+          std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(prereg_end - prereg_start).count();
+      if (g_vram_rdma_prereg_latency_ms_hist) {
+        std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+        auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+        g_vram_rdma_prereg_latency_ms_hist->Record(prereg_ms, attr_view, opentelemetry::context::Context{});
+      }
+      if (failures > 0 && g_vram_rdma_prereg_failures_total) {
+        std::map<std::string, opentelemetry::common::AttributeValue> attrs;
+        auto attr_view = opentelemetry::common::KeyValueIterableView(attrs);
+        g_vram_rdma_prereg_failures_total->Add(
+            static_cast<double>(failures), attr_view, opentelemetry::context::Context{});
+      }
+      if (failures > 0) {
+        LOG(FATAL) << "GPU VRAM staging preregistration failed for " << failures << " slabs";
+      }
+    }
+
     // Preregister MRs for selected pools (slab-level).
     ensure_pinned_rdma_prereg_metrics();
     const auto prereg_start = std::chrono::steady_clock::now();
-    int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
     std::vector<std::shared_ptr<common::memory::PinnedBufferPool>> pools;
     if (preregister_gpu_pool_) {
       pools.push_back(gpu_memory_pool_);
@@ -653,11 +850,14 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     for (const auto& dev : rdma_context_->list_devs()) {
       for (auto& pool : pools) {
         for (const auto& slab : pool->list_slabs()) {
-          auto* mr = meta_mr_cache_->get_or_register(dev->get_pd(), slab.base.get(), slab.bytes, access);
-          if (mr == nullptr) {
+          auto result = meta_mr_cache_->get_or_register(dev->get_pd(), slab.base.get(), slab.bytes, access);
+          if (result.mr == nullptr) {
             ++failures;
             LOG(WARNING) << "Failed to preregister MR for slab " << static_cast<void*>(slab.base.get())
                          << " bytes=" << slab.bytes << " on PD";
+            record_mr_register_metrics("host_pinned", "preregister_failed", false);
+          } else if (result.registered) {
+            record_mr_register_metrics("host_pinned", nullptr, true);
           }
         }
       }
@@ -849,7 +1049,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     if (!staged_or.ok()) {
       return staged_or.status();
     }
-    void* host_ptr = *staged_or;
+    void* exposed_ptr = *staged_or;
 
     StageLease::Metadata metadata;
     metadata.transport = StageTransport::kMtcp;
@@ -858,7 +1058,14 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
     metadata.bytes = bytes;
     metadata.segment_idx = segment_idx;
 
-    return StageLease(stager, &flow_state->ledger, host_ptr, bytes, /*mr=*/nullptr, /*deregister_mr=*/false, metadata);
+    return StageLease(
+        stager,
+        &flow_state->ledger,
+        exposed_ptr,
+        bytes,
+        /*mr=*/nullptr,
+        /*deregister_mr=*/false,
+        metadata);
   };
 
   StagingWindow window(
@@ -944,7 +1151,7 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       flow_state->registry.put(key, lease);
 
       transport::MTcpTransport::StageSendSegment send_segment;
-      send_segment.data = lease.host_ptr();
+      send_segment.data = lease.exposed_ptr();
       send_segment.bytes = metadata.bytes;
       send_segment.metadata = metadata;
 
@@ -982,15 +1189,15 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
   }
 }
 
-void Communicator::set_dram_lease_provider(const std::shared_ptr<DRAMStager::LeaseProvider>& provider) {
+void Communicator::set_dram_lease_provider(const std::shared_ptr<HostPinnedCpuStager::LeaseProvider>& provider) {
   if (!memory_stager_)
     return;
-  if (auto ds = std::dynamic_pointer_cast<DRAMStager>(memory_stager_)) {
+  if (auto ds = std::dynamic_pointer_cast<HostPinnedCpuStager>(memory_stager_)) {
     ds->set_lease_provider(provider);
   }
   // Also propagate to NUMA CPU stagers if present
   for (auto& kv : nic_cpu_stagers_) {
-    if (auto ds2 = std::dynamic_pointer_cast<DRAMStager>(kv.second)) {
+    if (auto ds2 = std::dynamic_pointer_cast<HostPinnedCpuStager>(kv.second)) {
       ds2->set_lease_provider(provider);
     }
   }
@@ -1184,13 +1391,18 @@ absl::Status Communicator::handle_rdma_read_request(
   std::shared_ptr<MemoryStager> stager;
   if (tensor_on_cpu) {
     stager = get_cpu_stager_for_nic(dev->get_name());
+  } else if (use_gpu_vram_staging_) {
+    stager = get_gpu_vram_stager_for_id(tensor->get_device_id());
   } else {
-    // TODO: need to check
     stager = get_gpu_mem_stager_for_id(tensor->get_device_id());
   }
 
   if (!stager) {
-    stager = tensor_on_cpu ? memory_stager_ : gpu_memory_stager_;
+    if (tensor_on_cpu) {
+      stager = memory_stager_;
+    } else if (!use_gpu_vram_staging_) {
+      stager = gpu_memory_stager_;
+    }
   }
 
   const uint64_t total_bytes = request.bytes;
@@ -1239,7 +1451,13 @@ absl::Status Communicator::handle_rdma_read_request(
       ? (direct_rdma_chunk_bytes_ > 0 ? direct_rdma_chunk_bytes_ : request.bytes)
       : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes);
 
-  auto stage_fn = MakeStageFunction(tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, use_direct, direct_mr);
+  const v1::RdmaConfig::StagedRdmaBackend staged_backend = tensor_on_cpu
+      ? v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED
+      : (use_gpu_vram_staging_ ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
+                               : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED);
+
+  auto stage_fn = MakeStageFunction(
+      tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, staged_backend, use_direct, direct_mr);
 
   auto session = std::make_shared<RdmaReadSession>();
   session->request = request;
@@ -2569,6 +2787,13 @@ std::shared_ptr<MemoryStager> Communicator::get_cpu_stager_for_nic(const std::st
 std::shared_ptr<MemoryStager> Communicator::get_gpu_mem_stager_for_id(int gpu_id) const {
   auto it = gpu_mem_stagers_.find(gpu_id);
   if (it != gpu_mem_stagers_.end())
+    return it->second;
+  return nullptr;
+}
+
+std::shared_ptr<MemoryStager> Communicator::get_gpu_vram_stager_for_id(int gpu_id) const {
+  auto it = gpu_vram_stagers_.find(gpu_id);
+  if (it != gpu_vram_stagers_.end())
     return it->second;
   return nullptr;
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/lip_metadata_utils.h"
 
@@ -33,7 +33,12 @@ absl::StatusOr<std::string> build_canonical_index_from_metadata(
         return absl::InvalidArgumentError(absl::StrCat("conflicting dst_offset for storage_id=", seg.storage_id));
       }
     }
-    if (!seg.handle_bytes.empty()) {
+    // Handle-only mapping is only meaningful when the segment does not carry a
+    // storage_id reference. In unified flows, multiple storage entries can
+    // legitimately share the same CUDA IPC handle bytes (e.g., allocator
+    // sub-allocations) while mapping to different dst offsets; do not treat
+    // that as an error.
+    if (seg.storage_id.empty() && !seg.handle_bytes.empty()) {
       auto [it, inserted] = handle_to_dst.emplace(seg.handle_bytes, seg.dst_offset);
       if (!inserted && it->second != seg.dst_offset) {
         return absl::InvalidArgumentError("conflicting dst_offset for handle_bytes segment");

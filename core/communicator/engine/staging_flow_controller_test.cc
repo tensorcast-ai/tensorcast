@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/communicator/engine/staging_flow_controller.h"
 
@@ -25,8 +25,8 @@ class DummyStager : public MemoryStager {
     return absl::UnimplementedError("DummyStager stage not used");
   }
 
-  absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override {
-    released_ptrs_.push_back(host_ptr);
+  absl::Status release_staged_buffer(gsl::not_null<void*> exposed_ptr) override {
+    released_ptrs_.push_back(exposed_ptr);
     return absl::OkStatus();
   }
 
