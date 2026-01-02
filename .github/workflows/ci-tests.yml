@@ -62,15 +62,18 @@ jobs:
       - name: Build libcheckpoint_ext.so
         run: |
           bazel build //core:libcheckpoint_ext.so \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
       - name: Build tensorcast_daemon
         run: |
           bazel build @folly//folly:config_h_gen \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
           bazel build //daemon:tensorcast_daemon \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
       - name: Upload libcheckpoint_ext.so artifact
@@ -158,6 +161,7 @@ jobs:
             --test_output=errors \
             --test_summary=detailed \
             --test_timeout=500 \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
@@ -172,6 +176,7 @@ jobs:
             --test_summary=detailed \
             --test_timeout=600 \
             --local_test_jobs=1 \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
