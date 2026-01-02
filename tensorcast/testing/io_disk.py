@@ -22,10 +22,13 @@ def save_dict(
     tests and offline fixtures.
     """
 
+    streaming_config_dict: dict[str, Any] | None = (
+        dict(streaming_config) if streaming_config is not None else None
+    )
     return _save_dict(
         state_dict,
         disk_path,
-        streaming_config=streaming_config,
+        streaming_config=streaming_config_dict,
         _unsafe_allow_local_disk_io=True,
     )
 
