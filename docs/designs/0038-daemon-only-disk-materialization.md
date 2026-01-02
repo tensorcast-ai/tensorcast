@@ -245,7 +245,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 # Compatibility & Acceptance Criteria
 
 1. **Proto parity**: `buf lint` + Bazel proto tests pass with the new `SourcePreference` and `MaterializationSource` fields; no backward-compatibility layer is required because all components roll forward together.
-2. **Daemon tests**: `bazel test //daemon:materialization_v2_test //daemon:disk_loader_materialization_test --define=use_fake_cuda=true`.
+2. **Daemon tests**: `bazel test //daemon:materialization_v2_test //daemon:disk_loader_materialization_test --test_env=TENSORCAST_CUDA_BACKEND=fake`.
 3. **Python tests**:
    - `uv run pytest tests/python/api/test_disk_materialization_v2.py`
    - `uv run pytest tests/python/test_streaming_save.py`

@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 # ========== Type definitions ==========
 
 # Header-only token and VA range types for direct-write capability
@@ -345,16 +339,12 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@cudart",
         "@gsl",
+        "@libtorch//:torch",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@cudart",
-            "@libtorch//:torch",
-        ],
-    }),
+    ],
 )
 
 # Tests for store_engine

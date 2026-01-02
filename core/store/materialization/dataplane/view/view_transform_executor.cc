@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 
@@ -8,6 +8,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
 
 #include <torch/torch.h>
@@ -53,13 +54,10 @@ torch::TensorOptions create_tensor_options_for_location(
     at::ScalarType scalar_type,
     common::memory::MemoryLocation location,
     int device_id) {
-#ifdef USE_FAKE_CUDA
-  (void)device_id;
   if (location == common::memory::MemoryLocation::GPU) {
-    return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
-  }
-#endif
-  if (location == common::memory::MemoryLocation::GPU) {
+    if (cuda::is_fake()) {
+      return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
+    }
     return torch::TensorOptions().device(torch::kCUDA, device_id).dtype(scalar_type);
   }
   return torch::TensorOptions().device(torch::kCPU).dtype(scalar_type);
@@ -81,13 +79,9 @@ absl::Status execute_transform(
   }
 
   const bool is_gpu = (location == common::memory::MemoryLocation::GPU);
-#ifdef USE_FAKE_CUDA
-  (void)device_id;
-#else
-  if (is_gpu && device_id < 0) {
+  if (is_gpu && !cuda::is_fake() && device_id < 0) {
     return absl::InvalidArgumentError("execute_transform (GPU) requires a valid CUDA device id");
   }
-#endif
 
   torch::NoGradGuard no_grad;
 

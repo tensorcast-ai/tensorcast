@@ -1,173 +1,16 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#ifndef TENSORCAST_CORE_COMMON_CUDA_API_H_
-#define TENSORCAST_CORE_COMMON_CUDA_API_H_
+#pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <string>
 
-#include "absl/status/status.h"
-#include "absl/status/statusor.h"
-
-// CUDA runtime API types that we need to replicate
-#ifndef USE_FAKE_CUDA
 #include <cuda.h>
 #include <cuda_runtime_api.h>
-#else
-// Define minimal CUDA types for fake backend
-enum cudaMemcpyKind {
-  cudaMemcpyHostToHost = 0,
-  cudaMemcpyHostToDevice = 1,
-  cudaMemcpyDeviceToHost = 2,
-  cudaMemcpyDeviceToDevice = 3,
-  cudaMemcpyDefault = 4
-};
 
-// Define opaque types for fake backend
-struct CUstream_st;
-typedef struct CUstream_st* cudaStream_t;
-
-struct CUevent_st;
-typedef struct CUevent_st* cudaEvent_t;
-
-// CUDA error enum for fake backend
-typedef enum cudaError {
-  cudaSuccess = 0,
-  cudaErrorInvalidValue = 1,
-  cudaErrorMemoryAllocation = 2,
-  cudaErrorInitializationError = 3,
-  cudaErrorLaunchFailure = 4,
-  cudaErrorInvalidConfiguration = 9,
-  cudaErrorUnknown = 999
-} cudaError_t;
-
-// Define cudaIpcMemHandle_t for fake backend
-typedef struct cudaIpcMemHandle_st {
-  char reserved[64]; // CUDA IPC handles are 64 bytes
-} cudaIpcMemHandle_t;
-
-// Define cudaUUID_t for fake backend
-typedef struct CUuuid_st {
-  char bytes[16]; // CUDA definition of UUID
-} cudaUUID_t;
-
-// Define cudaDeviceProp for fake backend (minimal version)
-typedef struct cudaDeviceProp {
-  char name[256];
-  size_t totalGlobalMem;
-  int major;
-  int minor;
-  int pciBusID;
-  int pciDeviceID;
-  int pciDomainID;
-  cudaUUID_t uuid; // Add UUID field
-  // Add more fields as needed
-} cudaDeviceProp;
-
-// Stream creation flags
-#define cudaStreamDefault 0x00
-#define cudaStreamNonBlocking 0x01
-
-// Event creation flags
-#define cudaEventDefault 0x00
-#define cudaEventBlockingSync 0x01
-#define cudaEventDisableTiming 0x02
-#define cudaEventInterprocess 0x04
-
-// IPC flags
-#define cudaIpcMemLazyEnablePeerAccess 0x01
-
-// Host memory registration flags
-#define cudaHostRegisterDefault 0x00
-#define cudaHostRegisterPortable 0x01
-#define cudaHostRegisterMapped 0x02
-#define cudaHostRegisterIoMemory 0x04
-
-// Memory types
-enum cudaMemoryType {
-  cudaMemoryTypeHost = 1,
-  cudaMemoryTypeDevice = 2,
-  cudaMemoryTypeArray = 3,
-  cudaMemoryTypeUnified = 4
-};
-
-// Pointer attributes structure
-typedef struct cudaPointerAttributes {
-  void* devicePointer;
-  void* hostPointer;
-  int device;
-  cudaMemoryType type; // CUDA 10.0+
-  cudaMemoryType memoryType; // Pre-CUDA 10.0
-  int isManaged;
-} cudaPointerAttributes;
-
-// ---------------------------------------------------------------------------
-// Minimal CUDA Driver API types for FakeCuda (CUDA VMM support).
-// These definitions only cover the subset used by TensorCast.
-// ---------------------------------------------------------------------------
-
-typedef int CUresult;
-
-typedef int CUdevice;
-
-typedef enum CUdevice_attribute_enum {
-  CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED = 1,
-  CU_DEVICE_ATTRIBUTE_HOST_ALLOC_DMA_BUF_SUPPORTED = 2,
-} CUdevice_attribute;
-
-typedef std::uintptr_t CUdeviceptr;
-typedef std::uint64_t CUmemGenericAllocationHandle;
-
-typedef enum CUmemLocationType_enum {
-  CU_MEM_LOCATION_TYPE_INVALID = 0,
-  CU_MEM_LOCATION_TYPE_DEVICE = 1,
-} CUmemLocationType;
-
-typedef struct CUmemLocation_st {
-  CUmemLocationType type;
-  int id;
-} CUmemLocation;
-
-typedef enum CUmemAllocationType_enum {
-  CU_MEM_ALLOCATION_TYPE_INVALID = 0,
-  CU_MEM_ALLOCATION_TYPE_PINNED = 1,
-} CUmemAllocationType;
-
-typedef enum CUmemAllocationHandleType_enum {
-  CU_MEM_HANDLE_TYPE_NONE = 0,
-  CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR = 1,
-} CUmemAllocationHandleType;
-
-typedef struct CUmemAllocationProp_st {
-  CUmemAllocationType type;
-  CUmemAllocationHandleType requestedHandleTypes;
-  CUmemLocation location;
-  void* win32HandleMetaData;
-  std::uint64_t allocFlags;
-} CUmemAllocationProp;
-
-typedef enum CUmemAllocationGranularity_flags_enum {
-  CU_MEM_ALLOC_GRANULARITY_MINIMUM = 0,
-  CU_MEM_ALLOC_GRANULARITY_RECOMMENDED = 1,
-} CUmemAllocationGranularity_flags;
-
-typedef enum CUmemAccess_flags_enum {
-  CU_MEM_ACCESS_FLAGS_PROT_NONE = 0,
-  CU_MEM_ACCESS_FLAGS_PROT_READ = 1,
-  CU_MEM_ACCESS_FLAGS_PROT_READWRITE = 3,
-} CUmemAccess_flags;
-
-typedef struct CUmemAccessDesc_st {
-  CUmemLocation location;
-  CUmemAccess_flags flags;
-} CUmemAccessDesc;
-
-// cuMemGetHandleForAddressRange types (subset).
-typedef enum CUmemRangeHandleType_enum {
-  CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD = 1,
-} CUmemRangeHandleType;
-#endif
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 
 namespace tensorcast::cuda {
 
@@ -295,18 +138,4 @@ absl::Status cu_mem_get_handle_for_address_range(
     CUmemRangeHandleType handle_type,
     unsigned long long flags);
 
-// Helper macro for operations not supported by fake backend
-#ifdef USE_FAKE_CUDA
-#define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation)                                                   \
-  do {                                                                                                  \
-    return absl::UnimplementedError(absl::StrCat("Operation not supported in FakeCuda: ", #operation)); \
-  } while (0)
-#else
-#define SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(operation) \
-  do {                                                \
-  } while (0)
-#endif
-
 } // namespace tensorcast::cuda
-
-#endif // TENSORCAST_CORE_COMMON_CUDA_API_H_

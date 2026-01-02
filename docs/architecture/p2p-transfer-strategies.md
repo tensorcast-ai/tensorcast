@@ -57,22 +57,22 @@ All transports now use a common staging controller to guarantee progress even wh
 
 ### Benchmark Quickstart
 
-1. Build the communicator with fake CUDA so tests can run locally:
+1. Build the communicator (fake CUDA is selected at runtime for tests):
    ```bash
-   USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+   BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
    ```
 2. Exercise the RDMA window flow with logs enabled:
    ```bash
-   bazel test //core/communicator:rdma_engine_test --test_output=all --define=use_fake_cuda=true
+   bazel test //core/communicator:rdma_engine_test --test_output=all --test_env=TENSORCAST_CUDA_BACKEND=fake
    ```
    Inspect `[staging_credit]` lines to verify window grant/release cadence.
 3. Stress the MTCP path and observe staged completions:
    ```bash
-   bazel test //core/communicator:tcp_engine_test --test_output=all --define=use_fake_cuda=true
+   bazel test //core/communicator:tcp_engine_test --test_output=all --test_env=TENSORCAST_CUDA_BACKEND=fake
    ```
    Adjust `stager.buffers_per_flow` or `stager.max_window_segments` in a test config snippet to evaluate different credit budgets.
 4. For mixed transport scenarios, run both tests back-to-back while tailing server logs; use the emitted outstanding-credit gauges to identify tuning opportunities before running large-scale soak tests.
-5. To validate the unified flow controller end-to-end, run `bazel test //core/communicator:cross_transport_soak_test --define=use_fake_cuda=true`; on hosts with RDMA hardware this target issues concurrent RDMA+MTCP reads against a 128 MiB tensor and surfaces `[staging_credit]` activity across transports (it exits early with a success note when verbs support is unavailable).
+5. To validate the unified flow controller end-to-end, run `bazel test //core/communicator:cross_transport_soak_test --test_env=TENSORCAST_CUDA_BACKEND=fake`; on hosts with RDMA hardware this target issues concurrent RDMA+MTCP reads against a 128 MiB tensor and surfaces `[staging_credit]` activity across transports (it exits early with a success note when verbs support is unavailable).
 
 ## Load Balancing Strategy
 

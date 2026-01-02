@@ -87,6 +87,10 @@ class _FakeClient:
         self.unloaded: list[str] = []
         self.resolve_calls: list[tuple[str, bool]] = []
 
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        del artifact_id
+        return b"{}"
+
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append(f"{replica_uuid}:{disk_path}")
         return True
@@ -140,6 +144,9 @@ class _RuntimeStub:
 
     def get_artifact_index_by_disk_path(self, disk_path: str):
         return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
+
+    def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
+        return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
     def cache_key_mapping(self, *_, **__) -> None:  # pragma: no cover - noop
         return None

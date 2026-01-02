@@ -66,8 +66,8 @@ Deliver the streaming `MaterializationPipeline` described in the design by (1) r
 - **Unit / Integration**
   - `uv run pytest tests/python/api/test_materialization_pipeline_v2.py`
   - `uv run pytest tests/python/api/test_disk_materialization_v2.py`
-  - `bazel test //daemon:materialization_v2_test --define=use_fake_cuda=true`
-  - `bazel test //daemon:disk_loader_materialization_test --define=use_fake_cuda=true`
+  - `bazel test //daemon:materialization_v2_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
+  - `bazel test //daemon:disk_loader_materialization_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
 - **Soak / Observability**
   - Enable the v2 RPC flag on a staging daemon pool; verify OTLP traces show descriptor-level attributes and metrics differentiate subset vs. full loads.
   - Run mixed SDK versions to ensure v1 clients continue to work until the fleet is flipped.

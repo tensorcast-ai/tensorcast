@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 # Aligned buffer utilities
 sc_cc_library(
     name = "aligned_buffer_lib",
@@ -50,12 +44,8 @@ sc_cc_library(
         "//core/common:streaming_pinned_buffer_lib",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/synchronization",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@libtorch",
-        ],
-    }),
+        "@libtorch",
+    ],
 )
 
 # Main checkpoint library
@@ -74,14 +64,10 @@ sc_cc_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store/materialization/dataplane:safetensors_util",
         "@abseil-cpp//absl/log:check",
+        "@cublas",
+        "@cublas//:cublasLt",
         "@libtorch",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@cublas",
-            "@cublas//:cublasLt",
-        ],
-    }),
+    ],
 )
 
 # Aggregate target for backward compatibility

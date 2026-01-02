@@ -1,34 +1,33 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
-load("//core:BUILD.bzl", "cuda_conditional_deps", "sc_cc_library", "sc_header_only_library")
-
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 # Core CUDA API abstraction
 sc_cc_library(
     name = "cuda_api_lib",
-    srcs = select({
-        ":use_fake_cuda": ["cuda_fake.cc"],
-        "//conditions:default": ["cuda_real.cc"],
-    }),
-    hdrs = ["cuda_api.h"],
-    defines = select({
-        ":use_fake_cuda": ["USE_FAKE_CUDA"],
-        "//conditions:default": [],
-    }),
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-ldl"],
-    }),
+    srcs = [
+        "cuda_backend.cc",
+        "cuda_backend_fake.cc",
+        "cuda_backend_real.cc",
+        "cuda_driver_api.cc",
+        "dynamic_library.cc",
+        "lazy_nvrtc.cc",
+    ],
+    hdrs = [
+        "cuda_api.h",
+        "cuda_backend.h",
+        "cuda_driver_api.h",
+        "dynamic_library.h",
+        "lazy_nvrtc.h",
+    ],
+    linkopts = ["-ldl"],
     visibility = ["//visibility:public"],
     deps = [
         ":error_handling_lib",
         "//third_party/cuda_compat:nv_target",
+        "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
         "@cublas",
@@ -42,10 +41,8 @@ sc_cc_library(
         "@cusparselt",
         "@nccl",
         "@nvjitlink//:nvJitLink",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [],
-    }),
+        "@nvrtc//:nvrtc_headers",
+    ],
     alwayslink = True,
 )
 
@@ -116,10 +113,6 @@ sc_cc_library(
         "artifact_hash.h",
         "artifact_hash_internal.h",
     ],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-ldl"],
-    }),
     visibility = ["//visibility:public"],
     deps = [
         ":cuda_api_lib",
@@ -128,10 +121,7 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@boringssl//:crypto",
-    ] + cuda_conditional_deps(
-        fake_cuda_deps = [],
-        real_cuda_deps = ["@nvrtc//:nvrtc"],
-    ),
+    ],
 )
 
 sc_cc_library(
@@ -467,6 +457,16 @@ cc_test(
         ":cuda_api_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "cuda_backend_selection_test",
+    srcs = ["cuda_backend_selection_test.cc"],
+    deps = [
+        ":cuda_api_lib",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

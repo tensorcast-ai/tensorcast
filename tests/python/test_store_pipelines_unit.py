@@ -55,6 +55,10 @@ class _FakeClient:
     def __init__(self) -> None:
         self.unloaded: list[str] = []
 
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        del artifact_id
+        return b"{}"
+
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
         return None, None
 
@@ -94,6 +98,14 @@ class _DummyRuntime:
 
     def ensure_client(self) -> _FakeClient:
         return self.client
+
+    def get_artifact_index_cached(self, artifact_id: str):
+        del artifact_id
+        return None
+
+    def cache_artifact_index(self, entry) -> None:  # pragma: no cover - noop
+        del entry
+        return None
 
     def cache_key_mapping(self, *_, **__) -> None:  # pragma: no cover - noop
         return None

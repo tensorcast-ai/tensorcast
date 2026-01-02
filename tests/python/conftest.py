@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Pytest configuration and shared fixtures.
@@ -14,6 +14,13 @@ import pytest
 
 from tests.python.utils.ports import get_free_port, get_free_port_pair
 from tests.python.utils.hardware import has_cuda_or_fake
+
+# PyTest's `PYTEST_CURRENT_TEST` is not guaranteed to be set during all hook
+# phases (e.g. `pytest_runtest_setup`). TensorCast's fake CUDA backend gate
+# relies on this signal, so when tests explicitly request `fake`, ensure a
+# stable session-level value is present early.
+if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+    os.environ.setdefault("PYTEST_CURRENT_TEST", "tensorcast_pytest_session")
 
 # Configure logging for tests
 logging.basicConfig(

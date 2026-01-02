@@ -17,6 +17,8 @@ pytestmark = pytest.mark.requires_cuda_or_fake
 @pytest.fixture
 def has_cuda():
     """Whether CUDA is available on the test host."""
+    if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+        return False
     return torch.cuda.is_available()
 
 

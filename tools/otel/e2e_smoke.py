@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Minimal end-to-end observability smoke test.
 # - Starts OpenTelemetry Collector (if Docker available)
@@ -89,9 +89,9 @@ def main() -> int:
                     print("[info] collector starting (docker)")
                     time.sleep(2)
 
-        # 2) Build daemon with fake CUDA to avoid GPU dependency
-        print("[info] building daemon (fake CUDA)")
-        _run(["bazel", "build", "--define", "use_fake_cuda=true", "//daemon:tensorcast_daemon"])  # may take time
+        # 2) Build daemon (runtime fake CUDA selection avoids GPU dependency)
+        print("[info] building daemon")
+        _run(["bazel", "build", "//daemon:tensorcast_daemon"])  # may take time
         daemon_bin = repo / "bazel-bin" / "daemon" / "tensorcast_daemon"
         if not daemon_bin.exists():
             print(f"[error] daemon binary not found: {daemon_bin}")
@@ -122,6 +122,7 @@ def main() -> int:
         # 4) Start Daemon (points to GS)
         env_daemon = dict(os.environ)
         env_daemon["OTEL_EXPORTER_OTLP_ENDPOINT"] = args.otlp
+        env_daemon["TENSORCAST_CUDA_BACKEND"] = "fake"
         daemon_cmd = [
             str(daemon_bin),
             "--listen_addr",

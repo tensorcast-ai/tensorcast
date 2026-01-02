@@ -1,6 +1,6 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_api.h"
+#include "core/common/cuda_backend.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -30,7 +30,7 @@
 
 // NOLINTBEGIN
 
-namespace tensorcast::cuda {
+namespace tensorcast::cuda::fake_backend {
 namespace {
 
 struct StreamTask {
@@ -705,13 +705,21 @@ absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr) {
 
   auto it = state.allocations.find(ptr);
   if (it == state.allocations.end()) {
-    return absl::InvalidArgumentError("Pointer not found in allocations");
+    if (device) {
+      *device = -1;
+    }
+    if (device_ptr) {
+      *device_ptr = nullptr;
+    }
+    return absl::OkStatus();
   }
 
-  if (device)
+  if (device) {
     *device = it->second.device_id;
-  if (device_ptr)
+  }
+  if (device_ptr) {
     *device_ptr = ptr; // In fake backend, host and device pointers are the same
+  }
   return absl::OkStatus();
 }
 
@@ -721,19 +729,21 @@ absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes*
 
   auto it = state.allocations.find(const_cast<void*>(ptr));
   if (it == state.allocations.end()) {
-    return absl::InvalidArgumentError("Pointer not found in allocations");
+    // Match modern CUDA behavior: unregistered host pointers are valid and
+    // return host attributes (not an error).
+    std::memset(attrs, 0, sizeof(*attrs));
+    attrs->devicePointer = nullptr;
+    attrs->hostPointer = const_cast<void*>(ptr);
+    attrs->device = -1;
+    attrs->type = cudaMemoryTypeHost;
+    return absl::OkStatus();
   }
 
   // Fill in attributes for fake backend
-  attrs->devicePointer = const_cast<void*>(ptr);
   attrs->hostPointer = const_cast<void*>(ptr);
+  attrs->devicePointer = it->second.is_pinned ? nullptr : const_cast<void*>(ptr);
   attrs->device = it->second.device_id;
-  attrs->type = cudaMemoryTypeDevice;
-#ifdef USE_FAKE_CUDA
-  // These legacy fields are only present in the fake CUDA runtime we define
-  attrs->memoryType = cudaMemoryTypeDevice;
-  attrs->isManaged = 0;
-#endif
+  attrs->type = it->second.is_pinned ? cudaMemoryTypeHost : cudaMemoryTypeDevice;
 
   return absl::OkStatus();
 }
@@ -1161,7 +1171,7 @@ absl::Status cu_device_get(CUdevice* device, int ordinal) {
   if (device == nullptr) {
     return absl::InvalidArgumentError("device pointer is null");
   }
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGet);
+  return absl::UnimplementedError("cuDeviceGet not supported in FakeCuda");
 }
 
 absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device) {
@@ -1170,7 +1180,7 @@ absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, C
   if (value == nullptr) {
     return absl::InvalidArgumentError("value pointer is null");
   }
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuDeviceGetAttribute);
+  return absl::UnimplementedError("cuDeviceGetAttribute not supported in FakeCuda");
 }
 
 absl::Status cu_mem_get_allocation_granularity(
@@ -1356,8 +1366,21 @@ absl::Status cu_mem_get_handle_for_address_range(
   static_cast<void>(size);
   static_cast<void>(handle_type);
   static_cast<void>(flags);
-  SC_RETURN_IF_FAKE_CUDA_UNSUPPORTED(cuMemGetHandleForAddressRange);
+  return absl::UnimplementedError("cuMemGetHandleForAddressRange not supported in FakeCuda");
 }
+
+} // namespace tensorcast::cuda::fake_backend
+
+namespace tensorcast::cuda {
+
+#define TENSORCAST_DEFINE_FAKE_BACKEND(return_type, name, args, ...) \
+  return_type FakeCudaBackend::name args {                           \
+    return fake_backend::name(__VA_ARGS__);                          \
+  }
+
+TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DEFINE_FAKE_BACKEND)
+
+#undef TENSORCAST_DEFINE_FAKE_BACKEND
 
 } // namespace tensorcast::cuda
 

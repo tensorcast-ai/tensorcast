@@ -5,6 +5,7 @@ from typing import Sequence
 
 import pytest
 import torch
+import os
 
 from tensorcast import FallbackOptions, artifact, startup
 from tensorcast.testing.io_disk import save_dict
@@ -64,7 +65,11 @@ def test_shared_storage_roundtrip(tmp_path):
                 allow_p2p=False,
                 verify_checksums=False,
             )
-            device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
+            device_selector = (
+                "cpu"
+                if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
+                else ("cuda:0" if torch.cuda.is_available() else "cpu")
+            )
             loaded_state_dict = artifact(
                 artifact_id=descriptor["artifact_id"],
                 fallback=fallback,

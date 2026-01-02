@@ -1,10 +1,9 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_api.h"
+#include "core/common/cuda_backend.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-#include <dlfcn.h>
 #include <atomic>
 #include <iomanip>
 #include <mutex>
@@ -19,168 +18,18 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
+#include "core/common/cuda_driver_api.h"
 #include "core/common/error_handling.h"
 
-namespace tensorcast::cuda {
+namespace tensorcast::cuda::real_backend {
 
 namespace {
-constexpr const char* kCudaDriverLibraryNames[] = {"libcuda.so.1", "libcuda.so"};
-
-// NOLINTBEGIN(readability-identifier-naming)
-struct CudaDriverVmmSymbols {
-  decltype(&::cuInit) cuInit = nullptr;
-  decltype(&::cuDeviceGet) cuDeviceGet = nullptr;
-  decltype(&::cuDeviceGetAttribute) cuDeviceGetAttribute = nullptr;
-  decltype(&::cuGetErrorName) cuGetErrorName = nullptr;
-  decltype(&::cuGetErrorString) cuGetErrorString = nullptr;
-  decltype(&::cuMemGetAllocationGranularity) cuMemGetAllocationGranularity = nullptr;
-  decltype(&::cuMemGetHandleForAddressRange) cuMemGetHandleForAddressRange = nullptr;
-  decltype(&::cuMemAddressReserve) cuMemAddressReserve = nullptr;
-  decltype(&::cuMemCreate) cuMemCreate = nullptr;
-  decltype(&::cuMemMap) cuMemMap = nullptr;
-  decltype(&::cuMemSetAccess) cuMemSetAccess = nullptr;
-  decltype(&::cuMemUnmap) cuMemUnmap = nullptr;
-  decltype(&::cuMemRelease) cuMemRelease = nullptr;
-  decltype(&::cuMemAddressFree) cuMemAddressFree = nullptr;
-};
-
-// NOLINTEND(readability-identifier-naming)
-
-void*& cuda_driver_handle() {
-  static void* handle = nullptr;
-  return handle;
-}
-
-CudaDriverVmmSymbols& cuda_driver_symbols() {
-  static auto* symbols = new CudaDriverVmmSymbols();
-  return *symbols;
-}
-
-template <typename Fn>
-absl::Status load_cuda_symbol(void* handle, const char* symbol_name, Fn& out) {
-  dlerror();
-  void* symbol = dlsym(handle, symbol_name);
-  const char* error = dlerror();
-  if (symbol == nullptr || error != nullptr) {
-    return absl::UnavailableError(
-        absl::StrCat(
-            "Failed to load CUDA driver symbol ", symbol_name, ": ", error != nullptr ? error : "symbol not found"));
-  }
-  out = reinterpret_cast<Fn>(symbol);
-  return absl::OkStatus();
-}
-
 absl::Status ensure_cuda_driver_loaded() {
-  static std::once_flag once;
-  static absl::Status load_status = absl::OkStatus();
-  std::call_once(once, [&]() {
-    void*& handle = cuda_driver_handle();
-    std::string load_errors;
-
-    for (const char* lib_name : kCudaDriverLibraryNames) {
-      dlerror();
-      handle = dlopen(lib_name, RTLD_NOW | RTLD_LOCAL);
-      if (handle != nullptr) {
-        break;
-      }
-      const char* error = dlerror();
-      if (error != nullptr) {
-        if (!load_errors.empty()) {
-          absl::StrAppend(&load_errors, "; ");
-        }
-        absl::StrAppend(&load_errors, "dlopen(", lib_name, "): ", error);
-      }
-    }
-
-    if (handle == nullptr) {
-      load_status = absl::UnavailableError(
-          absl::StrCat(
-              "Failed to load CUDA driver library (libcuda.so): ",
-              load_errors.empty() ? "(no error details)" : load_errors));
-      return;
-    }
-
-    auto load_or = [&](auto& fn, const char* name) -> absl::Status { return load_cuda_symbol(handle, name, fn); };
-
-    CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-    if (auto status = load_or(symbols.cuInit, "cuInit"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuDeviceGet, "cuDeviceGet"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuDeviceGetAttribute, "cuDeviceGetAttribute"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuGetErrorName, "cuGetErrorName"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuGetErrorString, "cuGetErrorString"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemGetAllocationGranularity, "cuMemGetAllocationGranularity"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemGetHandleForAddressRange, "cuMemGetHandleForAddressRange"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemAddressReserve, "cuMemAddressReserve"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemCreate, "cuMemCreate"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemMap, "cuMemMap"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemSetAccess, "cuMemSetAccess"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemUnmap, "cuMemUnmap"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemRelease, "cuMemRelease"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-    if (auto status = load_or(symbols.cuMemAddressFree, "cuMemAddressFree"); !status.ok()) {
-      load_status = status;
-      return;
-    }
-
-    load_status = absl::OkStatus();
-  });
-
-  return load_status;
+  return DriverApi::ensure_loaded();
 }
 
 absl::Status cu_result_as_status(CUresult result, absl::string_view context) {
-  if (result == CUDA_SUCCESS) {
-    return absl::OkStatus();
-  }
-
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  const char* name = "unknown";
-  const char* desc = "unknown";
-  if (symbols.cuGetErrorName != nullptr) {
-    (void)symbols.cuGetErrorName(result, &name);
-  }
-  if (symbols.cuGetErrorString != nullptr) {
-    (void)symbols.cuGetErrorString(result, &desc);
-  }
-  return absl::InternalError(absl::StrCat(context, " - ", name, ": ", desc));
+  return DriverApi::get().to_status(result, context);
 }
 
 // Best-effort same-process fallback for CUDA IPC handles during unit tests.
@@ -630,8 +479,8 @@ absl::Status cu_init(unsigned int flags) {
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuInit(flags), "cuInit");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuInit(flags), "cuInit");
 }
 
 absl::Status cu_device_get(CUdevice* device, int ordinal) {
@@ -642,8 +491,8 @@ absl::Status cu_device_get(CUdevice* device, int ordinal) {
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuDeviceGet(device, ordinal), "cuDeviceGet");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuDeviceGet(device, ordinal), "cuDeviceGet");
 }
 
 absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, CUdevice device) {
@@ -654,8 +503,8 @@ absl::Status cu_device_get_attribute(int* value, CUdevice_attribute attribute, C
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuDeviceGetAttribute(value, attribute, device), "cuDeviceGetAttribute");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuDeviceGetAttribute(value, attribute, device), "cuDeviceGetAttribute");
 }
 
 absl::Status cu_mem_get_allocation_granularity(
@@ -672,9 +521,9 @@ absl::Status cu_mem_get_allocation_granularity(
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  const DriverApi& driver = DriverApi::get();
   return cu_result_as_status(
-      symbols.cuMemGetAllocationGranularity(granularity, prop, option), "cuMemGetAllocationGranularity");
+      driver.cuMemGetAllocationGranularity(granularity, prop, option), "cuMemGetAllocationGranularity");
 }
 
 absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignment, CUdeviceptr addr, uint64_t flags) {
@@ -685,8 +534,8 @@ absl::Status cu_mem_address_reserve(CUdeviceptr* ptr, size_t size, size_t alignm
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemAddressReserve(ptr, size, alignment, addr, flags), "cuMemAddressReserve");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemAddressReserve(ptr, size, alignment, addr, flags), "cuMemAddressReserve");
 }
 
 absl::Status cu_mem_create(
@@ -704,8 +553,8 @@ absl::Status cu_mem_create(
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemCreate(handle, size, prop, flags), "cuMemCreate");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemCreate(handle, size, prop, flags), "cuMemCreate");
 }
 
 absl::Status cu_mem_map(
@@ -718,8 +567,8 @@ absl::Status cu_mem_map(
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemMap(ptr, size, offset, handle, flags), "cuMemMap");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemMap(ptr, size, offset, handle, flags), "cuMemMap");
 }
 
 absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDesc* desc, size_t count) {
@@ -730,8 +579,8 @@ absl::Status cu_mem_set_access(CUdeviceptr ptr, size_t size, const CUmemAccessDe
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemSetAccess(ptr, size, desc, count), "cuMemSetAccess");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemSetAccess(ptr, size, desc, count), "cuMemSetAccess");
 }
 
 absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size) {
@@ -739,8 +588,8 @@ absl::Status cu_mem_unmap(CUdeviceptr ptr, size_t size) {
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemUnmap(ptr, size), "cuMemUnmap");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemUnmap(ptr, size), "cuMemUnmap");
 }
 
 absl::Status cu_mem_release(CUmemGenericAllocationHandle handle) {
@@ -748,8 +597,8 @@ absl::Status cu_mem_release(CUmemGenericAllocationHandle handle) {
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemRelease(handle), "cuMemRelease");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemRelease(handle), "cuMemRelease");
 }
 
 absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
@@ -757,8 +606,8 @@ absl::Status cu_mem_address_free(CUdeviceptr ptr, size_t size) {
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
-  return cu_result_as_status(symbols.cuMemAddressFree(ptr, size), "cuMemAddressFree");
+  const DriverApi& driver = DriverApi::get();
+  return cu_result_as_status(driver.cuMemAddressFree(ptr, size), "cuMemAddressFree");
 }
 
 absl::Status cu_mem_get_handle_for_address_range(
@@ -778,9 +627,9 @@ absl::Status cu_mem_get_handle_for_address_range(
   if (!status.ok()) {
     return status;
   }
-  const CudaDriverVmmSymbols& symbols = cuda_driver_symbols();
+  const DriverApi& driver = DriverApi::get();
   return cu_result_as_status(
-      symbols.cuMemGetHandleForAddressRange(handle, dptr, size, handle_type, flags), "cuMemGetHandleForAddressRange");
+      driver.cuMemGetHandleForAddressRange(handle, dptr, size, handle_type, flags), "cuMemGetHandleForAddressRange");
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {
@@ -797,5 +646,18 @@ absl::Status host_unregister(void* ptr) {
   SC_RETURN_IF_CUDA_ERROR(cudaHostUnregister(ptr));
   return absl::OkStatus();
 }
+
+} // namespace tensorcast::cuda::real_backend
+
+namespace tensorcast::cuda {
+
+#define TENSORCAST_DEFINE_REAL_BACKEND(return_type, name, args, ...) \
+  return_type RealCudaBackend::name args {                           \
+    return real_backend::name(__VA_ARGS__);                          \
+  }
+
+TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DEFINE_REAL_BACKEND)
+
+#undef TENSORCAST_DEFINE_REAL_BACKEND
 
 } // namespace tensorcast::cuda

@@ -2,10 +2,10 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
+# Config for using mock IBV backend
 config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
+    name = "use_mock_ibv",
+    define_values = {"use_mock_ibv": "true"},
 )
 
 # ========== Base definitions ==========
@@ -53,14 +53,14 @@ sc_cc_library(
     srcs = ["misc/ibv_wrap.cc"],
     hdrs = ["misc/ibv_wrap.h"],
     defines = select({
-        ":use_fake_cuda": ["USE_FAKE_CUDA"],
+        ":use_mock_ibv": ["USE_MOCK_IBV"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
     deps = [
         ":common_lib",
     ] + select({
-        ":use_fake_cuda": [":ibv_mock_lib"],
+        ":use_mock_ibv": [":ibv_mock_lib"],
         "//conditions:default": [],
     }),
 )
@@ -405,11 +405,9 @@ sc_cc_library(
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
+        "@cudart",
         "@opentelemetry-cpp//api:api",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["@cudart"],
-    }),
+    ],
 )
 
 # MR cache for pinned buffers per PD

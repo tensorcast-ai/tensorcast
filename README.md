@@ -104,5 +104,5 @@ bazel test //core/...
 
 For P2P/RDMA and communicator coverage, see `docs/development/testing.md`.
 
-For CPU-only development, use `USE_FAKE_CUDA=1` or
-`--define=use_fake_cuda=true`. See `AGENTS.md`.
+For CPU-only development, set `TENSORCAST_CUDA_BACKEND=fake` (test-only) and
+use `--test_env=TENSORCAST_CUDA_BACKEND=fake` for Bazel tests. See `AGENTS.md`.

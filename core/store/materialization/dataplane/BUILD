@@ -364,12 +364,6 @@ sc_cc_library(
     ],
 )
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 # Minimal loader for memory-only path (InlineBufferSource)
 sc_header_only_library(
     name = "inline_buffer_loader",

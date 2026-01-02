@@ -27,15 +27,15 @@ bazel test //core/... --test_tag_filters="-stress,-rdma,-multi_gpu"
 bazel test //core/... --test_tag_filters="+stress"
 ```
 
-To force the fake CUDA backend in C++ tests, add `--define=use_fake_cuda=true`.
-To use real CUDA, pass `--define=use_fake_cuda=false`.
+To force the fake CUDA backend in C++ tests, add `--test_env=TENSORCAST_CUDA_BACKEND=fake`.
+To use real CUDA, leave the env unset (or set `TENSORCAST_CUDA_BACKEND=real`).
 
 ## Communicator tests (TCP/RDMA)
 
 ```bash
 bazel test //core/communicator:tcp_engine_test
 bazel test //core/communicator:tcp_transfer_test
-bazel test //core/communicator:rdma_engine_test --define=use_fake_cuda=true
+bazel test //core/communicator:rdma_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake
 ```
 
 RDMA device selection and rail mapping are configured via environment variables.
@@ -76,8 +76,8 @@ the processes with Ctrl+C when finished.
 ## Store P2P tests (Replica)
 
 ```bash
-bazel test //core/store/replica:replica_p2p_registration_test --define=use_fake_cuda=true
-bazel test //core/store/replica:replica_p2p_transfer_test --define=use_fake_cuda=true
+bazel test //core/store/replica:replica_p2p_registration_test --test_env=TENSORCAST_CUDA_BACKEND=fake
+bazel test //core/store/replica:replica_p2p_transfer_test --test_env=TENSORCAST_CUDA_BACKEND=fake
 ```
 
 These tests are tagged `requires_cuda`. To skip them, add

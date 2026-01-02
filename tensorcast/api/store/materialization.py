@@ -946,6 +946,7 @@ class MaterializationPipeline:
         device_id: int,
         fallback: FallbackOptions | None,
         options: GetArtifactOptions,
+        mark_started: Callable[[], None] | None = None,
         span=None,
     ) -> None:
         if not artifact_id:
@@ -999,6 +1000,8 @@ class MaterializationPipeline:
 
         client = self._runtime.ensure_client()
         try:
+            if mark_started is not None:
+                mark_started()
             response = client.materialize_into_target_v2(
                 artifact_id=artifact_id,
                 target_layout=layout,
@@ -1097,14 +1100,13 @@ class MaterializationPipeline:
                     )
                     return False
         try:
-            if mark_started is not None:
-                mark_started()
             self._materialize_into_target(
                 target=target,
                 artifact_id=artifact_id,
                 device_id=device_id,
                 fallback=fallback,
                 options=options,
+                mark_started=mark_started,
                 span=span,
             )
         except ArtifactError:

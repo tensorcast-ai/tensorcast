@@ -1,6 +1,7 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import time
+import os
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ def _start_daemon_binary(listen_addr: str, storage_path: Path):
 
 
 def _skip_if_no_cuda() -> None:
+    if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+        pytest.skip("Fake CUDA backend enabled; skipping real-CUDA LIP helper test")
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available – skipping LIP helper test")
 

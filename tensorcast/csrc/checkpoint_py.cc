@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <ranges>
 
 #include <pybind11/stl.h>
@@ -916,22 +917,21 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   // Initialize logging only once across all modules
   tensorcast::common::ensure_logging_initialized();
 
-#ifdef USE_FAKE_CUDA
-  py::module_::import("warnings")
-      .attr("warn")("CUDA not detected, running with FakeCuda backend. Only logical correctness is guaranteed.");
-#endif
-
   // Expose build configuration for runtime validation
   m.def(
       "is_fake_cuda",
       []() -> bool {
-#ifdef USE_FAKE_CUDA
-        return true;
-#else
-        return false;
-#endif
+        const bool fake = tensorcast::cuda::is_fake();
+        if (fake) {
+          static std::once_flag warn_once;
+          std::call_once(warn_once, []() {
+            py::module_::import("warnings")
+                .attr("warn")("TensorCast Fake CUDA backend active (TEST ONLY). GPU operations are simulated.");
+          });
+        }
+        return fake;
       },
-      "Returns True if this extension was built with the fake CUDA backend");
+      "Returns True if the runtime Fake CUDA backend is active");
 
   m.def("save_tensors", &tensorcast::checkpoint::save_tensors, "Save a state dict")
       .def(
