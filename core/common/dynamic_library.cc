@@ -10,7 +10,7 @@
 namespace tensorcast::common {
 namespace {
 
-absl::StatusOr<void*> resolve_symbol(void* handle, std::string_view symbol_name) {
+absl::StatusOr<void*> resolve_symbol_impl(void* handle, std::string_view symbol_name) {
   if (handle == nullptr) {
     return absl::FailedPreconditionError("dynamic library handle is null");
   }
@@ -66,7 +66,7 @@ absl::StatusOr<DynamicLibrary> DynamicLibrary::open(std::string_view library_nam
 }
 
 absl::StatusOr<void*> DynamicLibrary::resolve_symbol(std::string_view symbol_name) const {
-  return resolve_symbol(handle_, symbol_name);
+  return resolve_symbol_impl(handle_, symbol_name);
 }
 
 } // namespace tensorcast::common

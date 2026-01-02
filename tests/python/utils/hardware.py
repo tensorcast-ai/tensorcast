@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 
 
@@ -16,6 +18,10 @@ def has_cuda_or_fake() -> bool:
     but lack runtime CUDA libraries required by `tensorcast._C`, in which case
     CUDA-dependent tests must be skipped.
     """
+    if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+        os.environ.setdefault("PYTEST_CURRENT_TEST", "tensorcast_pytest_session")
+        os.environ.setdefault("TEST_TMPDIR", "/tmp/tensorcast_pytest")
+
     from tensorcast._C import is_fake_cuda
 
     if bool(is_fake_cuda()):

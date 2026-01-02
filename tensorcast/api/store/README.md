@@ -56,6 +56,9 @@ managing clients manually.
 - Async consumers can `await artifact.tensor_async(...)` or
   `await artifact.tensor_dict_async(...)`; calls are coalesced by the process
   `MaterializationBatcher` (1ms window) on the store event loop.
+- `tensor_dict_into_async` / `tensor_into_async` cancellation is best-effort:
+  once a region-backed RPC is in-flight, `cancel()` may return `False`; streaming
+  materialization remains cancellable before the RPC boundary.
 - `artifact.prefetch(device=...)` issues background materialization
   (`wait_for_completion=False`) and returns a tuple of
   `(prefetched_handle, PrefetchTicket)`. The returned handle is a clone whose

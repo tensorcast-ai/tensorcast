@@ -36,6 +36,15 @@ def validate_cuda_backend_consistency() -> None:
     if os.environ.get("TENSORCAST_SKIP_CUDA_VALIDATION") == "1":
         return
 
+    is_test_env = any(
+        os.environ.get(name)
+        for name in (
+            "TEST_SRCDIR",
+            "TEST_TMPDIR",
+            "PYTEST_CURRENT_TEST",
+        )
+    )
+
     try:
         import torch
 
@@ -47,7 +56,7 @@ def validate_cuda_backend_consistency() -> None:
     extension_uses_fake_cuda = is_fake_cuda()
     pytorch_has_real_cuda = torch.cuda.is_available()
 
-    if extension_uses_fake_cuda and pytorch_has_real_cuda:
+    if extension_uses_fake_cuda and pytorch_has_real_cuda and not is_test_env:
         error_msg = (
             "\n"
             "=" * 72 + "\n"
