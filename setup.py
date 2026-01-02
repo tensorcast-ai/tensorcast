@@ -588,14 +588,68 @@ def find_cuda_runtime_lib_dir():
     2. nvidia.cuda_runtime Python package's bundled lib dir
     3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
     """
-    # Use the installed Python package
-    import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+    if (env_dir := os.environ.get("CUDA_RUNTIME_LIB_DIR")) is not None:
+        candidate = Path(env_dir)
+        if candidate.is_dir():
+            return str(candidate)
 
-    pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
-    if pkg_lib.is_dir():
-        return str(pkg_lib)
+    try:
+        # Use the installed Python package
+        import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+        pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
+        if pkg_lib.is_dir():
+            return str(pkg_lib)
+    except Exception:
+        pass
+
+    for base in sys.path:
+        candidate = Path(base) / "nvidia" / "cuda_runtime" / "lib"
+        if candidate.is_dir():
+            return str(candidate)
 
     return None
+
+
+def find_cuda_include_dirs() -> list[str]:
+    """Locate CUDA headers (cuda.h, cuda_runtime_api.h) for C++ extension builds.
+
+    TensorCast's C++ sources include CUDA headers for type declarations even when
+    running in fake CUDA mode. CI environments may not have a full CUDA toolkit
+    installed, so we additionally look for headers shipped via Python packages.
+    """
+    candidates: list[Path] = []
+
+    for env_var in ("CUDA_HOME", "CUDA_PATH"):
+        if (env_dir := os.environ.get(env_var)) is None:
+            continue
+        candidates.append(Path(env_dir) / "include")
+
+    try:
+        import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+        candidates.append(Path(nvidia_cuda_runtime.__file__).parent / "include")
+    except Exception:
+        pass
+
+    for base in sys.path:
+        candidates.append(Path(base) / "triton" / "backends" / "nvidia" / "include")
+        candidates.append(Path(base) / "nvidia" / "cuda_runtime" / "include")
+
+    include_dirs: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if not ((candidate / "cuda.h").is_file() and (candidate / "cuda_runtime_api.h").is_file()):
+            continue
+        path_str = str(candidate)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+        include_dirs.append(path_str)
+
+    return include_dirs
 
 
 def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
@@ -627,6 +681,7 @@ def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
 
 if BUILD_EXTENSION:
     CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
+    CUDA_INCLUDE_DIRS = find_cuda_include_dirs()
     if CUDA_RUNTIME_LIB_DIR:
         ensure_cudart_unversioned_symlink(CUDA_RUNTIME_LIB_DIR)
 
@@ -669,6 +724,7 @@ if BUILD_EXTENSION:
             dir_path + "/external/xz+/src",
             dir_path + "/external/zlib+",
         ] + boost_include_dirs
+        _include_dirs += CUDA_INCLUDE_DIRS
 
         # Library search paths
         _library_dirs = [
