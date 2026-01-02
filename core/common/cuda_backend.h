@@ -160,21 +160,21 @@ class CudaBackend {
  public:
   virtual ~CudaBackend() = default;
 
-#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, call) virtual return_type name args = 0;
+#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, ...) virtual return_type name args = 0;
   TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DECLARE_BACKEND_METHOD)
 #undef TENSORCAST_DECLARE_BACKEND_METHOD
 };
 
 class RealCudaBackend final : public CudaBackend {
  public:
-#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, call) return_type name args override;
+#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, ...) return_type name args override;
   TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DECLARE_BACKEND_METHOD)
 #undef TENSORCAST_DECLARE_BACKEND_METHOD
 };
 
 class FakeCudaBackend final : public CudaBackend {
  public:
-#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, call) return_type name args override;
+#define TENSORCAST_DECLARE_BACKEND_METHOD(return_type, name, args, ...) return_type name args override;
   TENSORCAST_CUDA_BACKEND_FUNCTIONS(TENSORCAST_DECLARE_BACKEND_METHOD)
 #undef TENSORCAST_DECLARE_BACKEND_METHOD
 };

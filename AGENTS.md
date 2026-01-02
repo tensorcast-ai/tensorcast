@@ -50,7 +50,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 ### Build Systems
 - **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
 - **Secondary**: setuptools + `uv` for Python packaging/clients
-- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.6+, gRPC, Protocol Buffers
+- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.4+, gRPC, Protocol Buffers
 
 ## Documentation Structure and Project Hierarchy
 

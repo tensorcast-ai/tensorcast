@@ -40,7 +40,7 @@ Key changes:
 - **No conditional compilation for fake/real**: remove the `USE_FAKE_CUDA` macro branching in code; keep feature differences behind a runtime backend boundary.
 - **Lazy NVRTC**: refactor GPU hashing to load NVRTC and (driver) module APIs lazily at runtime, inspired by PyTorch’s `LazyNVRTC` pattern.
 
-This design assumes **Linux-only** and **CUDA Toolkit 12.6+** (`CUDA_VERSION >= 12060`).
+This design assumes **Linux-only** and **CUDA Toolkit 12.4+** (`CUDA_VERSION >= 12040`).
 
 Important: TensorCast will continue to **always link and depend on** the CUDA Runtime (`libcudart.so`). “CPU-only” in this design means **no NVIDIA driver / no GPU / no NVRTC present**, while still having the CUDA runtime available so the single binary can load and the fake backend can run.
 
@@ -51,6 +51,7 @@ Important: TensorCast will continue to **always link and depend on** the CUDA Ru
 - NVRTC GPU hashing now falls back to CPU hashing when unavailable in `core/common/artifact_hash_gpu.cc`.
 - Call-site runtime behavior replaces `#ifdef USE_FAKE_CUDA` in `core/checkpoint/checkpoint.cc`, view executors, and `tensorcast/csrc/checkpoint_py.cc`.
 - Backend selection tests are covered in `core/common/cuda_backend_selection_test.cc` (includes fake-mode driver-load guard).
+- Validated on a CUDA-enabled host with `bazel test //core/... --verbose_failures --test_tag_filters="-stress,-rdma,-multi_gpu" --test_output=errors --test_summary=detailed` (all tests passed; Bazel noted size-filter warnings).
 
 ## Runtime dependency model (Linux)
 
@@ -61,7 +62,7 @@ Important: TensorCast will continue to **always link and depend on** the CUDA Ru
 ## Baseline enforcement
 
 We should enforce the toolkit baseline at compile time in the CUDA backend implementation layer:
-- `static_assert(CUDA_VERSION >= 12060, "TensorCast requires CUDA Toolkit 12.6+");`
+- `static_assert(CUDA_VERSION >= 12040, "TensorCast requires CUDA Toolkit 12.4+");`
 
 This keeps the codebase honest about the supported surface and avoids accidentally depending on older-toolkit behavior.
 
@@ -87,7 +88,7 @@ We want FakeCuda to be a **test-only runtime backend** with a single build artif
 
 ## Non-Goals
 
-- Support CUDA versions older than 12.6.
+- Support CUDA versions older than 12.4.
 - Support Windows or ROCm/HIP.
 - Make `fake` suitable for production. `fake` exists only to enable hermetic tests and driverless (no NVIDIA driver) development validation.
 - Preserve existing `USE_FAKE_CUDA` behavior as a long-term compatibility mode.
@@ -305,7 +306,7 @@ Replace both with a single `DriverApi` loader that:
 - Uses `cudaGetDriverEntryPoint(...)` (available since CUDA 12.4) as the primary resolution mechanism to avoid hard dependency on `dlopen` and to reduce driver/loader mismatch risks.
   - If resolution fails, return `absl::UnavailableError` with actionable details.
 
-### Resolution mechanics (CUDA 12.6 baseline)
+### Resolution mechanics (CUDA 12.4 baseline)
 
 `cudaGetDriverEntryPoint` resolves a CUDA Driver API symbol name into a callable function pointer via the CUDA Runtime library. This avoids hardcoding `libcuda.so` names and reduces duplication of `dlopen/dlsym` logic.
 
@@ -358,7 +359,7 @@ Adopt key ideas from PyTorch `aten/src/ATen/cuda/detail/LazyNVRTC.cpp`:
 
 ### NVRTC library name strategy (Linux, CUDA 12.x)
 
-For CUDA 12.6+ on Linux, the primary expected soname is:
+For CUDA 12.4+ on Linux, the primary expected soname is:
 - `libnvrtc.so.12`
 
 Recommended fallback attempts (in order):
@@ -449,7 +450,7 @@ New internal interfaces proposed by this design must follow repository naming ru
 # Trade-offs & Risks
 
 - **Stricter configuration behavior**: invalid `TENSORCAST_CUDA_BACKEND` values fail fast (intentional), which may surprise users who previously relied on build-time defaults.
-- **CUDA 13+ forward work**: `cudaGetDriverEntryPoint` is deprecated in CUDA 13 (PyTorch notes this). Our baseline is CUDA 12.6, but if TensorCast later moves to CUDA 13, `DriverApi` should add a follow-up design to adopt the versioned entrypoint API.
+- **CUDA 13+ forward work**: `cudaGetDriverEntryPoint` is deprecated in CUDA 13 (PyTorch notes this). Our baseline is CUDA 12.4, but if TensorCast later moves to CUDA 13, `DriverApi` should add a follow-up design to adopt the versioned entrypoint API.
 - **Non-CUDA coupling**: `USE_FAKE_CUDA` is currently reused for non-CUDA mocks (IBV). Removing it requires an explicit decoupling step (tracked in the plan).
 - **NVRTC packaging variance**: some environments may not ship `libnvrtc.so.12`; the lazy loader must produce actionable errors and reliably fall back to CPU hashing.
 
@@ -482,7 +483,7 @@ Acceptance criteria:
 - When fake is selected, an unmistakable `LOG(ERROR)` banner is emitted once.
 - `core/common/artifact_hash_gpu.cc` no longer hard-links NVRTC; NVRTC is loaded lazily and can fail over to CPU hashing.
 - All existing `tensorcast::cuda::*` call sites remain source-compatible.
-- CUDA Toolkit baseline is 12.6+; any missing driver entrypoints are treated as unsupported and reported clearly.
+- CUDA Toolkit baseline is 12.4+; any missing driver entrypoints are treated as unsupported and reported clearly.
 
 Config philosophy compatibility:
 - `docs/designs/0004-unified-runtime-config.md` forbids environment variables for production behavior. This design treats `TENSORCAST_CUDA_BACKEND=fake` as a **test-only escape hatch**; production daemons/clients should not rely on it.

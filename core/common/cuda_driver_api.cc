@@ -15,7 +15,7 @@
 namespace tensorcast::cuda {
 namespace {
 
-static_assert(CUDA_VERSION >= 12060, "TensorCast requires CUDA Toolkit 12.6+");
+static_assert(CUDA_VERSION >= 12040, "TensorCast requires CUDA Toolkit 12.4+");
 
 std::atomic<bool> g_driver_api_load_attempted{false};
 
@@ -82,7 +82,7 @@ absl::Status DriverApi::load() {
     if (!status.ok()) {                                                                  \
       return status;                                                                     \
     }                                                                                    \
-  } while (0)
+  } while (0);
 
   TENSORCAST_DRIVER_API_SYMBOLS(TENSORCAST_RESOLVE_DRIVER_SYMBOL)
 

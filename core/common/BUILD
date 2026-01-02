@@ -23,7 +23,6 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":error_handling_lib",
-        ":nvrtc_headers",
         "//third_party/cuda_compat:nv_target",
         "@abseil-cpp//absl/base:no_destructor",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -42,17 +41,9 @@ sc_cc_library(
         "@cusparselt",
         "@nccl",
         "@nvjitlink//:nvJitLink",
+        "@nvrtc//:nvrtc_headers",
     ],
     alwayslink = True,
-)
-
-sc_header_only_library(
-    name = "nvrtc_headers",
-    hdrs = [
-        "@nvrtc//:nvidia/cuda_nvrtc/include/nvrtc.h",
-    ],
-    strip_include_prefix = "nvidia/cuda_nvrtc/include",
-    visibility = ["//visibility:public"],
 )
 
 # Device management utilities
