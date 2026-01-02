@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -303,25 +303,26 @@ def materialize_artifact_v2(
             raise DaemonUnavailable(
                 "Materialization payload is missing a mem_handle; tensor data is not available"
             )
-        for desc in descriptors:
-            meta_state_dict = {
-                desc.name: (
-                    list(desc.shape),
-                    list(desc.stride),
-                    desc.dtype,
-                    int(desc.storage_offset),
-                )
-            }
-            tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
-                dev_id: {desc.name: int(desc.buffer_offset)}
-            }
-            memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
-            tensors = restore_tensors(
-                meta_state_dict,
-                memory_ptrs,
-                tensor_offsets,
-                True,
+        meta_state_dict = {
+            desc.name: (
+                list(desc.shape),
+                list(desc.stride),
+                desc.dtype,
+                int(desc.storage_offset),
             )
+            for desc in descriptors
+        }
+        tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
+            dev_id: {desc.name: int(desc.buffer_offset) for desc in descriptors}
+        }
+        memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
+        tensors = restore_tensors(
+            meta_state_dict,
+            memory_ptrs,
+            tensor_offsets,
+            True,
+        )
+        for desc in descriptors:
             yield desc, tensors[desc.name]
 
     if opts.enable_verification:

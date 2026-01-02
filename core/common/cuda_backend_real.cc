@@ -655,7 +655,11 @@ absl::Status cu_mem_get_handle_for_address_range(
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {
-  SC_RETURN_IF_CUDA_ERROR(cudaIpcCloseMemHandle(dev_ptr));
+  const cudaError_t err = cudaIpcCloseMemHandle(dev_ptr);
+  if (err != cudaSuccess) {
+    static_cast<void>(cudaGetLastError());
+    return common::cuda_as_status(err, "cudaIpcCloseMemHandle");
+  }
   return absl::OkStatus();
 }
 

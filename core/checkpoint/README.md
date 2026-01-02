@@ -15,6 +15,7 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **Efficient I/O**: Uses 4K-aligned buffers for optimal disk performance
 - **Partitioned Storage**: Automatically splits large models into manageable chunks (10GB per partition)
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
+- **CUDA IPC restores**: When restoring tensors backed by a CUDA IPC mapping, tensors share a single reference-counted owner so the mapping is closed exactly once after the last tensor is released.
 - **Fake CUDA test mode**: When `TENSORCAST_CUDA_BACKEND=fake` is active in tests, device restores use shared-memory mappings and `device_id` restores fall back to CPU tensors.
 - **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)

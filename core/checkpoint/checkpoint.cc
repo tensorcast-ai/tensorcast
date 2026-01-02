@@ -507,7 +507,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
   }
 
   std::unordered_map<std::string, torch::Tensor> state_dict;
-  std::unordered_set<std::uint64_t> handled_memory;
+  std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
   for (const auto& [device, tensor_offset] : tensor_device_offsets) {
     for (const auto& p : tensor_offset) {
       const std::string name = p.first;
@@ -524,39 +524,33 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         torch::Device tensor_device(torch::kCUDA, device);
         // LOG(INFO) << "Restore tensor " << name << " to device " << device << " with offset " << offset;
 
-        auto deleter = [from_ipc_shm](void* ptr) {
-          absl::Status status;
-          if (from_ipc_shm) {
-            status = cuda::close_ipc_mem_handle(ptr);
-          } else {
-            status = cuda::free(ptr);
-          }
-
-          if (!status.ok()) {
-            LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
-          }
-        };
-
-        if (offset == 0 && handled_memory.find(base_address) == handled_memory.end()) {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              c10::makeArrayRef(sizes),
-              c10::makeArrayRef(strides),
-              deleter,
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
-          handled_memory.insert(base_address);
-          // std::cerr << "Tensor " << name << " is restored to device " <<
-          // device << std::endl;
+        std::shared_ptr<void> owner;
+        auto it = owners.find(base_address);
+        if (it == owners.end()) {
+          owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm, device](void* ptr) {
+            if (device >= 0) {
+              absl::Status device_status = cuda::set_device(device);
+              if (!device_status.ok()) {
+                LOG(WARNING) << "CUDA cleanup set_device failed: " << device_status.message();
+              }
+            }
+            absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+            if (!status.ok()) {
+              LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
+            }
+          });
+          owners.emplace(base_address, owner);
         } else {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              sizes,
-              strides,
-              [](void* ptr) {},
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
+          owner = it->second;
         }
+
+        const torch::Tensor real_tensor = torch::from_blob(
+            reinterpret_cast<void*>(data_address),
+            c10::makeArrayRef(sizes),
+            c10::makeArrayRef(strides),
+            [owner](void*) mutable { owner.reset(); },
+            torch::TensorOptions().device(tensor_device).dtype(dtype));
+        state_dict[name] = real_tensor;
       } else {
         LOG(FATAL) << "Cannot find device " << device;
       }

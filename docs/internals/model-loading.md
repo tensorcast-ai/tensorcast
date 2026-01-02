@@ -139,6 +139,7 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 - SDK registration flows call `tensorcast.api._tensor_graph.build_tensor_storage_graph()` before feeding lease segments.
 - The helper deduplicates `torch.Storage` objects and emits a `TensorStorageGraph` containing `StorageEntry` rows (unique storage id, device id, base pointer, storage length) plus `TensorAlias` metadata (tensor name, storage id, storage offset, logical byte length, shape, stride, dtype).
 - Clients transmit the deduplicated storage table via `storage_entries` and alias metadata via `tensor_aliases`. The daemon reconstructs canonical index JSON from these structures, producing byte-for-byte parity with disk persistence and opening each CUDA IPC handle only once per unique storage.
+- On materialization, the SDK maps the returned CUDA IPC handle once and constructs all `torch.Tensor` views from that mapping in one pass so the mapping is reference-counted across tensors and closed exactly once.
 
 Recommended: rely on `tensorcast.register(...)` (or `register_async`) with
 `RegisterArtifactOptions(lease_in_place=True)` and an explicit `ttl_ms`. The Store
