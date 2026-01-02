@@ -33,7 +33,12 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
     int source_port = find_available_port(50000);
     REQUIRE(source_port > 0);
 
+    const int num_readers = 4;
+
     auto cfg1 = make_tcp_communicator_config();
+    // Ensure the source staging pool is sized for concurrent GPU readers.
+    cfg1.mutable_transport()->set_tcp_conn_count(num_readers);
+    cfg1.mutable_stager()->set_expected_gpu_channels(num_readers);
     auto source_engine = std::make_shared<Communicator>(cfg1);
     REQUIRE(source_engine->init("127.0.0.1", source_port).ok());
 
@@ -58,7 +63,6 @@ TEST_CASE("TCP Mode Concurrent Operations", "[communicator][tcp][gpu][concurrent
             .ok());
 
     // Create multiple target engines
-    const int num_readers = 4;
     std::vector<std::shared_ptr<Communicator>> target_engines;
     std::vector<void*> target_buffers;
     std::vector<int> target_ports;

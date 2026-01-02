@@ -144,12 +144,26 @@ bazel test //daemon:session_lifecycle_test \
   --ui_event_filters=warning,error
 ```
 
-#### Fake CUDA Backend (Development Without GPU)
-Use `nvidia-smi` to check if you have GPU available. The project supports a fake CUDA backend for development and testing without GPU hardware. The backend is selected at runtime via `TENSORCAST_CUDA_BACKEND` and is test-only (it fails fast outside test environments).
+#### CUDA Backend (Runtime Selection)
+TensorCast ships a **single binary** that supports both CUDA backends:
+- `real` (default)
+- `fake` (TEST ONLY; simulated CUDA for development and running tests without GPU hardware)
+
+Backend selection is **runtime**, via `TENSORCAST_CUDA_BACKEND`:
+- Unset / `real`: use the real backend.
+- `fake`: allowed only in recognized test environments (fails fast otherwise). Signals: Bazel tests set `TEST_SRCDIR`/`TEST_TMPDIR`; PyTest sets `PYTEST_CURRENT_TEST`.
+
+Runtime dependencies (Linux):
+- Always required: CUDA runtime (`libcudart.so`).
+- Optional (real backend): NVIDIA driver (`libcuda.so.1`).
+- Optional (GPU hashing capability): NVRTC (`libnvrtc.so.12` / `libnvrtc.so`) is lazy-loaded; if unavailable, hashing falls back to CPU hashing.
 
 ```bash
 # Build Python extension (single binary supports real/fake at runtime)
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+# Run Python tests with fake CUDA backend
+TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/...
 
 # Run C++ tests with fake CUDA backend
 # Select fake explicitly via test env:
@@ -161,13 +175,9 @@ bazel test //daemon:grpc_service_impl_registration_test
 ```
 
 **Fake CUDA Mode Features:**
-- Enables development and testing without GPU hardware
-- Simulates 4 GPUs for testing multi-device scenarios
-- Stream and event APIs now execute callbacks asynchronously on a lightweight worker so `AsyncCopyManager` and staged transfers behave like the real runtime
-- All CUDA operations return successful status
-- Memory allocations tracked but use CPU memory
-- Zero overhead when using real CUDA backend
-- Complete API coverage for all CUDA operations used in codebase
+- Simulates 4 GPUs for multi-device tests.
+- Streams/events execute callbacks asynchronously; operations are simulated.
+- Allocations are tracked but use CPU memory.
 
 ### Code Quality and Linting
 
