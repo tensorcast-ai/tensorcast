@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -85,12 +85,36 @@ def start_daemon_binary(
                 "grpc": {"tcp_nodelay": True, "so_reuseport": False},
             },
             "engine": {
-                "mem_pool_size_bytes": 268435456,
-                "tx_slice_bytes": 8388608,
                 "artifact_chunk_bytes": 8388608,
-                "streaming_buffer_max_concurrent_sessions": 1,
+                "streaming_buffer_chunks": 4,
             },
-            "communicator": {"enable_rdma": False},
+            "pinned_memory": {
+                "allocation_timeout": "30s",
+                "classes": [
+                    {
+                        "name": "engine",
+                        "slice_bytes": 8388608,
+                        "pool_bytes": 67108864,
+                    },
+                    {
+                        "name": "comm_gpu",
+                        "slice_bytes": 16777216,
+                        "pool_bytes": 67108864,
+                        "rdma_preregister": False,
+                    },
+                    {
+                        "name": "comm_cpu",
+                        "slice_bytes": 4194304,
+                        "pool_bytes": 8388608,
+                        "rdma_preregister": False,
+                    },
+                ],
+            },
+            "communicator": {
+                "enable_rdma": False,
+                "stager": {"buffers_per_flow": 1},
+                "transport": {"tcp_conn_count": 2},
+            },
             "observability": {
                 "otel": {"enabled": False},
                 "logging": {"level": "INFO"},
@@ -115,7 +139,15 @@ def start_daemon_binary(
             "{"
             f'"server": {{"listen": {{"host": "{host}", "port": {port}}}, '
             f'"storage_path": "{str(storage_path)}", "num_threads": 2}}, '
-            '"engine": {"mem_pool_size_bytes": 268435456, "tx_slice_bytes": 8388608, "artifact_chunk_bytes": 268435456}, '
+            '"engine": {"artifact_chunk_bytes": 8388608, "streaming_buffer_chunks": 4}, '
+            '"pinned_memory": {'
+            '"allocation_timeout": "30s", '
+            '"classes": ['
+            '{"name": "engine", "slice_bytes": 8388608, "pool_bytes": 67108864}, '
+            '{"name": "comm_gpu", "slice_bytes": 16777216, "pool_bytes": 67108864}, '
+            '{"name": "comm_cpu", "slice_bytes": 4194304, "pool_bytes": 8388608}'
+            ']}, '
+            '"communicator": {"enable_rdma": false, "stager": {"buffers_per_flow": 1}, "transport": {"tcp_conn_count": 2}}, '
             f'"debug": {{"cuda": {{"enable_same_process_ipc_fallback": {str(enable_same_process_ipc_fallback).lower()} }}}}'
             "}"
         )

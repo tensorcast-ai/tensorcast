@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -126,7 +126,6 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
         "tensorcast.api",
         "calculate_tensor_device_offsets",
     ),
-    "save_dict": ("tensorcast.api", "save_dict"),
     "PrefetchTicket": ("tensorcast.api.store", "PrefetchTicket"),
     "artifact": ("tensorcast.api.store", "artifact"),
     "artifact_async": ("tensorcast.api.store", "artifact_async"),
@@ -177,7 +176,6 @@ if TYPE_CHECKING:
         StoreOptions,
         build_indices_from_safetensors,
         calculate_tensor_device_offsets,
-        save_dict,
     )
     from tensorcast.api.store import (  # type: ignore[no-redef]  # noqa: F401
         PrefetchTicket,
@@ -208,7 +206,6 @@ __all__ = [
     "ArtifactError",
     "ArtifactFuture",
     "FallbackOptions",
-    "save_dict",
     "RegisteredLease",
     "RegistrationResult",
     "PlanType",

@@ -9,6 +9,8 @@
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 
+#include "absl/log/check.h"
+
 using tensorcast::testing::g_actor;
 using tensorcast::testing::g_chunk;
 using tensorcast::testing::g_count;
@@ -20,10 +22,17 @@ using tensorcast::testing::parse_options;
 
 int run_server() {
   auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
-  tensorcast::communicator::engine::Communicator engine(cfg);
-  engine.init("0.0.0.0", g_port);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/g_rdma);
+  tensorcast::communicator::engine::Communicator engine(cfg, std::move(pools));
+  CHECK_OK(engine.init("0.0.0.0", g_port));
   uint8_t* addr[8][1024] = {{nullptr}};
 
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
   for (uint32_t i = 0; i < g_gpu; i++) {
     tensorcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
 
@@ -33,7 +42,17 @@ int run_server() {
       std::stringstream name;
       name << std::string("gpu-ce-test-tensor-");
       name << i << "-" << j;
-      engine.register_tensor(name.str(), reinterpret_cast<uint64_t>(addr[i][j]), g_count, 0, i);
+      tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
+      opts.register_mr = (g_rdma != 0);
+      opts.needs_staging = (g_rdma == 0);
+      opts.async = false;
+      CHECK_OK(engine.register_tensor_ex(
+          name.str(),
+          reinterpret_cast<uint64_t>(addr[i][j]),
+          g_count,
+          COMMUNICATE_ENGINE_DEV_GPU,
+          static_cast<int>(i),
+          opts));
     }
   }
   while (true) {
@@ -44,10 +63,17 @@ int run_server() {
 
 int run_client() {
   auto cfg = tensorcast::testing::make_tcp_communicator_config(g_rdma);
-  tensorcast::communicator::engine::Communicator engine(cfg, 10);
-  engine.init("0.0.0.0", g_port + 1);
+  auto pools = tensorcast::testing::make_test_pinned_staging_pools(
+      cfg.stager().buffers_per_flow(),
+      cfg.transport().tcp_conn_count(),
+      /*gpu_slice_bytes=*/(16ULL << 20),
+      /*cpu_slice_bytes=*/(4ULL << 20),
+      /*enable_rdma=*/g_rdma);
+  tensorcast::communicator::engine::Communicator engine(cfg, std::move(pools), 10);
+  CHECK_OK(engine.init("0.0.0.0", g_port + 1));
   uint8_t* addr[8][1024] = {{nullptr}};
 
+  using tensorcast::communicator::base::COMMUNICATE_ENGINE_DEV_GPU;
   for (uint32_t i = 0; i < g_gpu; i++) {
     tensorcast::cuda::set_device(static_cast<int>(i)).IgnoreError();
     for (uint32_t j = 0; j < g_chunk; j++) {
@@ -55,16 +81,22 @@ int run_client() {
     }
   }
 
-  std::vector<tensorcast::communicator::future_read_result_t> futures;
+  std::vector<tensorcast::communicator::transport::future_read_result_t> futures;
 
-  auto start = tensorcast::communicator::get_us();
+  auto start = tensorcast::communicator::misc::get_us();
   for (uint32_t i = 0; i < g_gpu; i++) {
     for (uint32_t j = 0; j < g_chunk; j++) {
       std::stringstream name;
       name << std::string("gpu-ce-test-tensor-");
       name << i << "-" << j;
-      futures.push_back(
-          engine.read_tensor(name.str(), reinterpret_cast<uint64_t>(addr[i][j]), g_count, 0, i, g_ip, g_port));
+      futures.push_back(engine.read_tensor(
+          name.str(),
+          reinterpret_cast<uint64_t>(addr[i][j]),
+          g_count,
+          COMMUNICATE_ENGINE_DEV_GPU,
+          static_cast<int>(i),
+          g_ip,
+          g_port));
     }
   }
 
@@ -80,17 +112,23 @@ int run_client() {
         result.rdma_regmr_cost,
         result.read_cost);
   }
-  printf("all with result: cost=%lu\n", tensorcast::communicator::get_us() - start);
+  printf("all with result: cost=%lu\n", tensorcast::communicator::misc::get_us() - start);
 
   futures.clear();
-  start = tensorcast::communicator::get_us();
+  start = tensorcast::communicator::misc::get_us();
   for (uint32_t i = 0; i < g_gpu; i++) {
     for (uint32_t j = 0; j < g_chunk; j++) {
       std::stringstream name;
       name << std::string("gpu-ce-test-tensor-");
       name << i << "-" << j;
-      futures.push_back(
-          engine.read_tensor(name.str(), reinterpret_cast<uint64_t>(addr[i][j]), g_count, 0, i, g_ip, g_port));
+      futures.push_back(engine.read_tensor(
+          name.str(),
+          reinterpret_cast<uint64_t>(addr[i][j]),
+          g_count,
+          COMMUNICATE_ENGINE_DEV_GPU,
+          static_cast<int>(i),
+          g_ip,
+          g_port));
     }
   }
 
@@ -107,7 +145,7 @@ int run_client() {
         result.read_cost);
   }
 
-  printf("all no regmr result: cost=%lu\n", tensorcast::communicator::get_us() - start);
+  printf("all no regmr result: cost=%lu\n", tensorcast::communicator::misc::get_us() - start);
   return 0;
 }
 

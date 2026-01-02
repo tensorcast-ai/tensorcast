@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
 #include <chrono>
@@ -15,6 +15,7 @@
 #include "core/common/config/daemon_config_io.h"
 #include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
+#include "core/common/memory/pinned_memory_authority.h"
 #include "core/common/otel/init.h"
 #include "core/common/trace/trace_manager.h"
 #include "core/store/components/communication_manager.h"
@@ -104,20 +105,138 @@ int main(int argc, char** argv) {
 
   LOG(INFO) << "Config: " << cfg.DebugString();
 
+  if (!cfg.has_pinned_memory()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory is required (no legacy pinned pool fields exist)";
+    return 2;
+  }
+
+  auto duration_to_millis = [](const google::protobuf::Duration& d) -> std::chrono::milliseconds {
+    return std::chrono::milliseconds(d.seconds() * 1000 + d.nanos() / 1000000);
+  };
+
+  auto duration_to_absl = [](const google::protobuf::Duration& d) -> absl::Duration {
+    return absl::Seconds(d.seconds()) + absl::Nanoseconds(d.nanos());
+  };
+
+  const auto pinned_allocation_timeout_ms = [&]() -> std::chrono::milliseconds {
+    if (cfg.pinned_memory().has_allocation_timeout()) {
+      return duration_to_millis(cfg.pinned_memory().allocation_timeout());
+    }
+    return std::chrono::milliseconds(30000);
+  }();
+
+  common::memory::PinnedMemoryAuthority::Config pm_cfg;
+  if (cfg.pinned_memory().has_allocation_timeout()) {
+    pm_cfg.allocation_timeout = duration_to_absl(cfg.pinned_memory().allocation_timeout());
+  }
+  pm_cfg.classes.reserve(static_cast<size_t>(cfg.pinned_memory().classes_size()));
+  uint64_t pinned_total_bytes = 0;
+  for (const auto& cls : cfg.pinned_memory().classes()) {
+    common::memory::PinnedMemoryAuthority::ClassConfig cc;
+    cc.name = cls.name();
+    cc.slice_bytes = cls.slice_bytes();
+    cc.pool_bytes = cls.pool_bytes();
+    cc.rdma_preregister = cls.rdma_preregister();
+    pinned_total_bytes += cls.pool_bytes();
+    pm_cfg.classes.push_back(std::move(cc));
+  }
+
+  absl::StatusOr<std::shared_ptr<common::memory::PinnedMemoryAuthority>> pma_or =
+      common::memory::PinnedMemoryAuthority::create(std::move(pm_cfg));
+  if (!pma_or.ok()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory invalid: " << pma_or.status();
+    return 2;
+  }
+  auto pma = std::move(*pma_or);
+
+  auto engine_pool_or = pma->get_class_pool("engine");
+  auto comm_gpu_pool_or = pma->get_class_pool("comm_gpu");
+  auto comm_cpu_pool_or = pma->get_class_pool("comm_cpu");
+  if (!engine_pool_or.ok() || !comm_gpu_pool_or.ok() || !comm_cpu_pool_or.ok()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory must define required classes: engine, comm_gpu, comm_cpu";
+    return 2;
+  }
+  auto engine_pool = std::move(*engine_pool_or);
+  auto comm_gpu_pool = std::move(*comm_gpu_pool_or);
+  auto comm_cpu_pool = std::move(*comm_cpu_pool_or);
+
+  if (cfg.engine().artifact_chunk_bytes() % engine_pool->slice_bytes() != 0) {
+    LOG(ERROR)
+        << "INVALID_ARGUMENT: engine.artifact_chunk_bytes must be a multiple of pinned_memory.classes[name=engine].slice_bytes";
+    return 2;
+  }
+
+  uint32_t streaming_buffer_chunks = cfg.engine().streaming_buffer_chunks();
+  if (streaming_buffer_chunks == 0) {
+    LOG(WARNING) << "engine.streaming_buffer_chunks is unset/0; defaulting to 16";
+    streaming_buffer_chunks = 16;
+  }
+
+  // Fail fast on communicator pinned sizing before starting communicator threads.
+  const int buffers_per_flow = cfg.communicator().stager().buffers_per_flow();
+  if (buffers_per_flow <= 0) {
+    LOG(ERROR) << "INVALID_ARGUMENT: communicator.stager.buffers_per_flow must be > 0";
+    return 2;
+  }
+  int tcp_conn_count = cfg.communicator().transport().tcp_conn_count();
+  if (tcp_conn_count <= 0) {
+    // Keep consistent with Communicator defaults (proto comment: default 8).
+    tcp_conn_count = 8;
+  }
+  tcp_conn_count = std::max(2, tcp_conn_count);
+
+  const size_t num_buffers = static_cast<size_t>(buffers_per_flow);
+  const size_t required_gpu_slices = num_buffers + (num_buffers * static_cast<size_t>(tcp_conn_count));
+  const size_t capacity_gpu_slices = comm_gpu_pool->capacity_slices();
+  if (capacity_gpu_slices < required_gpu_slices) {
+    LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=comm_gpu] too small: capacity_slices="
+               << capacity_gpu_slices << " required_slices=" << required_gpu_slices
+               << " slice_bytes=" << comm_gpu_pool->slice_bytes() << " (buffers_per_flow=" << buffers_per_flow
+               << " tcp_conn_count=" << tcp_conn_count << ")";
+    return 2;
+  }
+
+  if (comm_cpu_pool && comm_cpu_pool.get() != comm_gpu_pool.get()) {
+    const size_t required_cpu_slices = num_buffers;
+    const size_t capacity_cpu_slices = comm_cpu_pool->capacity_slices();
+    if (capacity_cpu_slices < required_cpu_slices) {
+      LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=comm_cpu] too small: capacity_slices="
+                 << capacity_cpu_slices << " required_slices=" << required_cpu_slices
+                 << " slice_bytes=" << comm_cpu_pool->slice_bytes() << " (buffers_per_flow=" << buffers_per_flow << ")";
+      return 2;
+    }
+  }
+
+  const uint32_t expected_gpu_channels = cfg.communicator().stager().expected_gpu_channels();
+  if (expected_gpu_channels > 0) {
+    const size_t stager_reserve = num_buffers;
+    const size_t available_gpu_slices =
+        (capacity_gpu_slices > stager_reserve) ? (capacity_gpu_slices - stager_reserve) : 0;
+    const size_t computed_limit =
+        (buffers_per_flow > 0) ? (available_gpu_slices / static_cast<size_t>(buffers_per_flow)) : 0;
+    if (static_cast<size_t>(expected_gpu_channels) > computed_limit) {
+      LOG(ERROR) << "INVALID_ARGUMENT: communicator.stager.expected_gpu_channels=" << expected_gpu_channels
+                 << " exceeds staging capacity: computed_limit=" << computed_limit
+                 << " (gpu_pool_slices=" << capacity_gpu_slices << " reserve=" << stager_reserve
+                 << " buffers_per_flow=" << buffers_per_flow
+                 << "). Increase pinned_memory.classes[name=comm_gpu].pool_bytes "
+                 << "or reduce expected_gpu_channels.";
+      return 2;
+    }
+  }
+
   // Map config to StoreEngineOptions
   store::StoreEngineOptions opts;
   opts.storage_path = storage_root.string();
   opts.num_thread = static_cast<int>(cfg.server().num_threads());
-  opts.memory_pool_size = static_cast<size_t>(cfg.engine().mem_pool_size_bytes());
-  opts.tx_slice_bytes = static_cast<size_t>(cfg.engine().tx_slice_bytes());
+  opts.memory_pool_size = static_cast<size_t>(engine_pool->capacity_slices() * engine_pool->slice_bytes());
+  opts.tx_slice_bytes = static_cast<size_t>(engine_pool->slice_bytes());
+  opts.pinned_buffer_pool_override = engine_pool;
+  opts.pinned_memory_authority = pma;
+  opts.pinned_total_bytes = static_cast<size_t>(pinned_total_bytes);
   opts.artifact_chunk_bytes = static_cast<size_t>(cfg.engine().artifact_chunk_bytes());
-  opts.streaming_buffer_max_concurrent_sessions =
-      static_cast<int>(cfg.engine().streaming_buffer_max_concurrent_sessions());
-  if (cfg.engine().has_pinned_allocation_timeout()) {
-    opts.pinned_memory_timeout = std::chrono::milliseconds(
-        cfg.engine().pinned_allocation_timeout().seconds() * 1000 +
-        cfg.engine().pinned_allocation_timeout().nanos() / 1000000);
-  }
+  opts.streaming_buffer_chunks = streaming_buffer_chunks;
+  opts.pinned_memory_timeout = pinned_allocation_timeout_ms;
   if (cfg.engine().has_memory_tiers()) {
     store::MemoryTierConfig tiers;
     const auto& mt = cfg.engine().memory_tiers();
@@ -138,7 +257,22 @@ int main(int argc, char** argv) {
   }
   comm_mgr = std::make_shared<store::components::CommunicationManager>();
   {
-    auto st = comm_mgr->initialize_with_config(p2p_host, p2p_port, cfg.communicator());
+    bool prereg_gpu = false;
+    bool prereg_cpu = false;
+    if (cfg.communicator().enable_rdma()) {
+      auto cfg_gpu_or = pma->get_class_config("comm_gpu");
+      auto cfg_cpu_or = pma->get_class_config("comm_cpu");
+      prereg_gpu = cfg_gpu_or.ok() && cfg_gpu_or->rdma_preregister;
+      prereg_cpu = cfg_cpu_or.ok() && cfg_cpu_or->rdma_preregister;
+    }
+    tensorcast::communicator::engine::Communicator::PinnedStagingPools pools{
+        .gpu_pool = comm_gpu_pool,
+        .cpu_pool = comm_cpu_pool,
+        .preregister_gpu = prereg_gpu,
+        .preregister_cpu = prereg_cpu,
+        .staging_wait_timeout = pma->config().allocation_timeout,
+    };
+    auto st = comm_mgr->initialize_with_config_and_pools(p2p_host, p2p_port, cfg.communicator(), std::move(pools));
     if (!st.ok()) {
       LOG(WARNING) << "Failed to initialize communication engine: " << st.message();
     } else {

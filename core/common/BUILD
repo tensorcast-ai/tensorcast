@@ -188,6 +188,18 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "pinned_memory_authority_lib",
+    srcs = ["memory/pinned_memory_authority.cc"],
+    hdrs = ["memory/pinned_memory_authority.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+    ],
+)
+
 # Memory location enum header
 sc_header_only_library(
     name = "memory_location_lib",

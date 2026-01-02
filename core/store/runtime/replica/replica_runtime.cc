@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/replica/replica_runtime.h"
 
@@ -36,6 +36,9 @@ size_t ReplicaRuntime::get_available_memory() const {
 
 void ReplicaRuntime::update_memory_pool_metrics() {
   metrics().update_all_metrics(*pinned_pool(), registry(), device_manager());
+  if (context_ != nullptr && context_->options().pinned_memory_authority) {
+    metrics().update_pinned_authority_metrics(*context_->options().pinned_memory_authority);
+  }
 }
 
 std::vector<ReplicaInfo> ReplicaRuntime::get_all_replicas_info() const {

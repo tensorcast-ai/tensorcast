@@ -171,29 +171,25 @@ global_store_address: 127.0.0.1:6000
 P2P/RDMA communicator is configured via a single YAML/JSON file (no per‑field flags). Example:
 
 ```yaml
-enable_rdma: false
-stager:
-  stage_cpu_for_rdma: true
-  stage_chunk_mb_cpu: 4
-  stage_chunk_mb_gpu: 16
-  buffers_per_flow: 4
-rdma:
-  outstanding_wr: 64
-  ack_ttl_ms: 30000
-  traffic_class: 186
-  qp_timeout: 20
-  qp_retry: 7
-pool:
-  preregister_mr: true
-  pool_size_bytes: 8GB
-  chunk_bytes: 64MB
-transport:
-  tcp_conn_count: 8
-  connect_timeout_sec: 10
-  tcp_tos: 0
+communicator:
+  enable_rdma: false
+  stager:
+    stage_cpu_for_rdma: true
+    buffers_per_flow: 4
+    expected_gpu_channels: 0
+  rdma:
+    outstanding_wr: 64
+    ack_ttl_ms: 30000
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
+  transport:
+    tcp_conn_count: 8
+    connect_timeout_sec: 10
+    tcp_tos: 0
 ```
 
-Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`. `pool_size_bytes` and `chunk_bytes` accept humanized sizes like `8GB`/`64MB` when embedded in the daemon config.
+Pinned staging pool sizing and chunking come from the daemon-wide pinned memory configuration (`DaemonConfig.pinned_memory`) via the `comm_gpu` / `comm_cpu` classes (`slice_bytes` + `pool_bytes`), not from `CommunicatorConfig`.
 
 ## RDMA Environment Variables
 

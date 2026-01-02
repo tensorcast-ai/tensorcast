@@ -52,7 +52,7 @@ Together these invariants make the canonical index a pure description of *layout
 
 ## Build Paths
 
-### Disk save (`tensorcast.save_dict`)
+### Disk save (`tensorcast.testing.io_disk.save_dict`, test-only)
 
 `tensorcast/csrc/checkpoint_py.cc` materializes canonical index bytes when persisting to disk:
 

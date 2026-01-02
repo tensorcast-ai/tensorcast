@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -61,6 +61,10 @@ class DRAMStager : public MemoryStager {
 
   size_t get_num_buffers() const override {
     return num_buffers_hint_;
+  }
+
+  std::shared_ptr<common::memory::PinnedBufferPool> pinned_pool() const {
+    return pool_.get();
   }
 
  private:

@@ -1,12 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "metrics_collector.h"
 
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/pinned_memory_authority.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/replica_registry.h"
 
 #include <map>
+#include <mutex>
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
@@ -51,6 +53,182 @@ void MetricsCollector::registration_pending_callback(
        {"scope", opentelemetry::common::AttributeValue("registration")}});
 }
 
+void MetricsCollector::pinned_class_capacity_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  std::vector<PinnedClassSnapshot> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    snapshots = self->pinned_classes_last_;
+  }
+  for (const auto& cls : snapshots) {
+    obs->Observe(cls.capacity_slices, {{"class", opentelemetry::common::AttributeValue(cls.name)}});
+  }
+}
+
+void MetricsCollector::pinned_class_in_use_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  std::vector<PinnedClassSnapshot> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    snapshots = self->pinned_classes_last_;
+  }
+  for (const auto& cls : snapshots) {
+    obs->Observe(cls.in_use_slices, {{"class", opentelemetry::common::AttributeValue(cls.name)}});
+  }
+}
+
+void MetricsCollector::pinned_class_free_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  std::vector<PinnedClassSnapshot> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    snapshots = self->pinned_classes_last_;
+  }
+  for (const auto& cls : snapshots) {
+    obs->Observe(cls.free_slices, {{"class", opentelemetry::common::AttributeValue(cls.name)}});
+  }
+}
+
+void MetricsCollector::pinned_class_waiters_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  std::vector<PinnedClassSnapshot> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    snapshots = self->pinned_classes_last_;
+  }
+  for (const auto& cls : snapshots) {
+    obs->Observe(cls.waiters, {{"class", opentelemetry::common::AttributeValue(cls.name)}});
+  }
+}
+
+void MetricsCollector::pinned_class_timeouts_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  std::vector<PinnedClassSnapshot> snapshots;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    snapshots = self->pinned_classes_last_;
+  }
+  for (const auto& cls : snapshots) {
+    obs->Observe(cls.acquire_timeouts_total, {{"class", opentelemetry::common::AttributeValue(cls.name)}});
+  }
+}
+
+void MetricsCollector::pinned_total_bytes_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  double value = 0.0;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    value = self->pinned_total_bytes_last_;
+  }
+  obs->Observe(value);
+}
+
+void MetricsCollector::pinned_committed_bytes_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  double value = 0.0;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    value = self->pinned_committed_bytes_last_;
+  }
+  obs->Observe(value);
+}
+
+void MetricsCollector::pinned_budget_exhausted_callback(
+    opentelemetry::metrics::ObserverResult result,
+    void* state) noexcept {
+  auto* self = static_cast<MetricsCollector*>(state);
+  if (self == nullptr) {
+    return;
+  }
+  auto obs =
+      opentelemetry::nostd::get<opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObserverResultT<double>>>(
+          result);
+  if (!obs) {
+    return;
+  }
+  double value = 0.0;
+  {
+    const std::lock_guard<std::mutex> lock(self->pinned_snapshot_mutex_);
+    value = self->pinned_budget_exhausted_total_last_;
+  }
+  obs->Observe(value);
+}
+
 MetricsCollector::MetricsCollector() {
   meter_ = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   p2p_bytes_total_ = meter_->CreateDoubleCounter("tc_p2p_bytes_total");
@@ -63,12 +241,63 @@ MetricsCollector::MetricsCollector() {
 
   registration_pending_gauge_ = meter_->CreateDoubleObservableGauge("tc_register_pending_gauge");
   registration_pending_gauge_->AddCallback(&registration_pending_callback, this);
+
+  pinned_class_capacity_slices_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_class_capacity_slices");
+  pinned_class_capacity_slices_gauge_->AddCallback(&pinned_class_capacity_callback, this);
+  pinned_class_in_use_slices_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_class_in_use_slices");
+  pinned_class_in_use_slices_gauge_->AddCallback(&pinned_class_in_use_callback, this);
+  pinned_class_free_slices_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_class_free_slices");
+  pinned_class_free_slices_gauge_->AddCallback(&pinned_class_free_callback, this);
+  pinned_class_waiters_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_class_waiters");
+  pinned_class_waiters_gauge_->AddCallback(&pinned_class_waiters_callback, this);
+  pinned_class_acquire_timeouts_total_gauge_ =
+      meter_->CreateDoubleObservableGauge("tc_pinned_class_acquire_timeouts_total");
+  pinned_class_acquire_timeouts_total_gauge_->AddCallback(&pinned_class_timeouts_callback, this);
+
+  pinned_total_bytes_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_total_bytes");
+  pinned_total_bytes_gauge_->AddCallback(&pinned_total_bytes_callback, this);
+  pinned_committed_bytes_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_committed_bytes");
+  pinned_committed_bytes_gauge_->AddCallback(&pinned_committed_bytes_callback, this);
+  pinned_budget_exhausted_total_gauge_ = meter_->CreateDoubleObservableGauge("tc_pinned_budget_exhausted_total");
+  pinned_budget_exhausted_total_gauge_->AddCallback(&pinned_budget_exhausted_callback, this);
 }
 
 void MetricsCollector::update_memory_pool_metrics(const common::memory::PinnedBufferPool& memory_pool) {
   // Track available size via ObservableGauge snapshot
   size_t available_size = memory_pool.get_available_size();
   cpu_available_bytes_last_ = static_cast<double>(available_size);
+}
+
+void MetricsCollector::update_pinned_authority_metrics(const common::memory::PinnedMemoryAuthority& authority) {
+  const auto names = authority.class_names();
+  std::vector<PinnedClassSnapshot> next;
+  next.reserve(names.size());
+
+  uint64_t budget_exhausted_total = 0;
+  for (const auto& name : names) {
+    auto pool_or = authority.get_class_pool(name);
+    if (!pool_or.ok() || !*pool_or) {
+      continue;
+    }
+    const auto& pool = *pool_or;
+    PinnedClassSnapshot cls;
+    cls.name = name;
+    cls.capacity_slices = static_cast<double>(pool->capacity_slices());
+    cls.free_slices = static_cast<double>(pool->free_slices());
+    cls.in_use_slices = static_cast<double>(pool->in_use_slices());
+    cls.waiters = static_cast<double>(pool->waiters());
+    cls.acquire_timeouts_total = static_cast<double>(pool->acquire_timeouts_total());
+    budget_exhausted_total += pool->budget_exhausted_total();
+    next.push_back(std::move(cls));
+  }
+
+  {
+    const std::lock_guard<std::mutex> lock(pinned_snapshot_mutex_);
+    pinned_classes_last_ = std::move(next);
+    pinned_total_bytes_last_ = static_cast<double>(authority.total_bytes());
+    pinned_committed_bytes_last_ = static_cast<double>(authority.committed_bytes());
+    pinned_budget_exhausted_total_last_ = static_cast<double>(budget_exhausted_total);
+  }
 }
 
 void MetricsCollector::update_replica_metrics(const ReplicaRegistry& replica_registry) {

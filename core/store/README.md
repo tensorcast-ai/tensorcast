@@ -167,10 +167,10 @@ These helpers intentionally operate on generic `SeekableSource` instances; the d
 
 - Canonical sizes:
   - Artifact chunk (layout/state): `artifact_chunk_bytes`
-  - Transfer slice/window (pump, pinned blocks): `tx_slice_bytes`
+  - Transfer slice/window (pump, pinned blocks): `pinned_memory.classes[name=engine].slice_bytes` (surfaced as `tx_slice_bytes`)
   - Hash leaf (content-addressed leaf): `hash_leaf_bytes`
 - Invariants enforced at startup:
-  - `artifact_chunk_bytes % tx_slice_bytes == 0`
+  - `artifact_chunk_bytes % pinned_memory.classes[name=engine].slice_bytes == 0` (equivalently `artifact_chunk_bytes % tx_slice_bytes == 0`)
   - Pinned buffer pool slice size aligned to 512 B and page size
 - Transfer ranges never cross artifact chunk boundaries; pump slices always align to `tx_slice_bytes`.
 
@@ -272,7 +272,7 @@ stateDiagram-v2
 - `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
 - Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
 - `StableDramCacheManager` gates local stable-DRAM retention by acquiring UMA stable leases on admission, applies and upgrades per-entry retention/overflow policy (`best_effort` → `ttl` → `pinned`), filters eviction candidates during demand-driven cache pressure, treats `overflow_policy=spill` as a hard requirement on shared-disk availability plus a spill-evictable durability check before evicting, and de-duplicates concurrent admits so accounting only updates on successful inserts while eviction clears tracking once stable leases are released. `StoreEngine::admit_stable_cache_policy(...)` exposes this as an engine-level hook so the daemon can apply/upgrade stable retention contracts post-commit.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. Session buffer depth is controlled by `engine.streaming_buffer_chunks` (used for disk/P2P loads and local CPU→GPU copies). GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration
 
@@ -438,8 +438,8 @@ For broader architectural context, see docs/architecture.md and docs/state-manag
 ## Granularity Terminology and Invariants
 
 - Artifact layout chunk: `artifact_chunk_bytes` (VS/UMA)
-- Transfer slice/window: `tx_slice_bytes` (pinned buffer block)
-- Invariant: `artifact_chunk_bytes % tx_slice_bytes == 0`
+- Transfer slice/window: `pinned_memory.classes[name=engine].slice_bytes` (surfaced as `tx_slice_bytes`)
+- Invariant: `artifact_chunk_bytes % pinned_memory.classes[name=engine].slice_bytes == 0`
 - Pinned pool block is aligned to 512 B and 4096 B (page) and validated at startup.
 
 Defaults are defined in `core/common/const/granularity.h` and exposed to Python via the extension module.

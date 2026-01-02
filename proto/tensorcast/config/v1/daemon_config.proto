@@ -67,9 +67,8 @@ message HighAvailability {
 }
 
 message Engine {
-  uint64 mem_pool_size_bytes = 1;
-  // Renamed: chunk_bytes -> tx_slice_bytes (field number unchanged)
-  uint64 tx_slice_bytes = 2;
+  reserved 1, 2, 4, 5;
+  reserved "mem_pool_size_bytes", "tx_slice_bytes", "streaming_buffer_max_concurrent_sessions", "pinned_allocation_timeout";
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
   uint64 artifact_chunk_bytes = 3;
   message MemoryTiers {
@@ -84,11 +83,30 @@ message Engine {
   }
   // Reserve legacy identifiers to avoid accidental reuse
   reserved "chunk_bytes", "cpu_chunk_size_bytes";
-  uint32 streaming_buffer_max_concurrent_sessions = 4;
-  google.protobuf.Duration pinned_allocation_timeout = 5;
+  // Depth (in slices) for engine-owned StreamingPinnedBuffer instances used for
+  // streaming CPU<->GPU transfers and disk/p2p pipelines.
+  uint32 streaming_buffer_chunks = 8;
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;
+}
+
+message PinnedMemory {
+  message PinnedClass {
+    string name = 1;
+    uint64 slice_bytes = 2;
+    // Phase 1 fixed-allocation: pool_bytes is the full preallocated capacity
+    // for the class. Total pinned reservation is derived as sum(classes[].pool_bytes).
+    uint64 pool_bytes = 3;
+    reserved 4;
+    reserved "min_bytes", "max_bytes";
+    bool rdma_preregister = 5;
+  }
+
+  reserved 1;
+  reserved "total_bytes";
+  google.protobuf.Duration allocation_timeout = 2;
+  repeated PinnedClass classes = 3;
 }
 
 message DaemonConfig {
@@ -110,6 +128,7 @@ message DaemonConfig {
 
   reserved 8;
   reserved "checkpoint";
+  PinnedMemory pinned_memory = 20;
 
   message Debug {
     message Cuda {

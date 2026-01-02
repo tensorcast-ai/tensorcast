@@ -128,6 +128,8 @@ struct P2PModelSource {
 
 ```python
 # Automatically generate verification information when saving
+from tensorcast.testing.io_disk import save_dict  # test-only helper
+
 save_dict(state_dict, "/path/to/replica")
 
 # Automatically verify when loading via the Store facade

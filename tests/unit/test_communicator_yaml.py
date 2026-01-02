@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ def test_python_helper_from_yaml(tmp_path: Path) -> None:
         """
 enable_rdma: false
 stager:
-  stage_chunk_mb_cpu: 12
+  buffers_per_flow: 2
 transport:
   tcp_conn_count: 3
         """
@@ -22,9 +22,8 @@ transport:
     cfg = pycfg.from_yaml(yaml)
     # Provided fields
     assert cfg.enable_rdma is False
-    assert cfg.stager.stage_chunk_mb_cpu == 12
+    assert cfg.stager.buffers_per_flow == 2
     assert cfg.transport.tcp_conn_count == 3
     # Defaults
     assert cfg.stager.stage_cpu_for_rdma is True
-    assert cfg.stager.stage_chunk_mb_gpu == 16
     assert cfg.transport.connect_timeout_sec == 10

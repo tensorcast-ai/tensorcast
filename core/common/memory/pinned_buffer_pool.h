@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -20,7 +20,12 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
+#include <cstdint>
 #include <mutex>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
@@ -34,7 +39,13 @@ class PinnedBufferPool {
   static constexpr size_t kMemoryAlignment = 4096; // Page size for optimal alignment
   static constexpr size_t kDirectIOAlignment = 512; // Minimum alignment for DIRECT_IO
 
-  PinnedBufferPool(size_t total_size, size_t chunk_size);
+  struct Slab {
+    gsl::not_null<char*> base;
+    size_t bytes;
+  };
+
+  explicit PinnedBufferPool(size_t total_size, size_t chunk_size);
+  PinnedBufferPool(size_t total_size, size_t chunk_size, std::string name);
   ~PinnedBufferPool();
 
   int allocate(
@@ -48,22 +59,43 @@ class PinnedBufferPool {
     return chunk_size_;
   }
 
+  std::string_view name() const {
+    return name_;
+  }
+
   size_t get_available_size() const;
   size_t capacity_slices() const;
+  size_t free_slices() const;
+  size_t in_use_slices() const;
+  size_t waiters() const;
+
+  uint64_t acquire_timeouts_total() const;
+  uint64_t budget_exhausted_total() const;
 
   // Expose current pool buffers for registration/warmup purposes.
   // Returns a snapshot copy of buffer base pointers.
   std::vector<gsl::not_null<char*>> list_buffers() const;
+
+  // Expose the backing allocation slabs. When slabs are used, a single MR can
+  // be registered per slab and reused for any slice pointer within the slab.
+  std::vector<Slab> list_slabs() const;
+
+  std::optional<Slab> slab_for_ptr(gsl::not_null<void*> ptr) const;
 
   // Forbid copy and assignment
   PinnedBufferPool(const PinnedBufferPool&) = delete;
   PinnedBufferPool& operator=(const PinnedBufferPool&) = delete;
 
  private:
+  std::vector<Slab> slabs_;
   mutable std::mutex mutex_;
   std::condition_variable cv_;
   std::unordered_set<char*> free_list_;
   std::unordered_set<char*> pool_;
+  size_t waiters_ = 0;
+  uint64_t acquire_timeouts_total_ = 0;
+  uint64_t budget_exhausted_total_ = 0;
   size_t chunk_size_; // May be adjusted in constructor for alignment
+  std::string name_;
 };
 } // namespace tensorcast::common::memory

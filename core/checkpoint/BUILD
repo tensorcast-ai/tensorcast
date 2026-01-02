@@ -63,9 +63,11 @@ sc_cc_library(
     name = "checkpoint_lib",
     srcs = ["checkpoint.cc"],
     hdrs = ["checkpoint.h"],
+    includes = ["."],
     visibility = ["//visibility:public"],
     deps = [
         ":aligned_buffer_lib",
+        ":progress_bar_lib",
         ":tensor_writer_lib",
         "//core/common:artifact_verification_lib",
         "//core/common:cuda_api_lib",

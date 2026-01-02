@@ -209,7 +209,7 @@ flowchart LR
 
     GET -->|resolve key/view, cache canonical index| GS
     GET -->|prefer_disk?| FALL
-    FALL -->|load_dict_from_disk + validate index| GET
+    FALL -->|test-only: tensorcast.testing.io_disk.load_dict_from_disk + validate index| GET
 
     GET -->|MaterializeReplicaRequest| CTRL
     CTRL -->|try_satisfy_from_lip| LIP

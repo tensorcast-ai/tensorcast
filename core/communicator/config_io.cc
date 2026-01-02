@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/communicator/config_io.h"
 
@@ -84,10 +84,6 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
 
   // Stager defaults
   auto* st = cfg->mutable_stager();
-  if (st->stage_chunk_mb_cpu() <= 0)
-    st->set_stage_chunk_mb_cpu(4);
-  if (st->stage_chunk_mb_gpu() <= 0)
-    st->set_stage_chunk_mb_gpu(16);
   if (st->buffers_per_flow() <= 0)
     st->set_buffers_per_flow(4);
 
@@ -103,14 +99,6 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
     rd->set_qp_timeout(20);
   if (rd->qp_retry() <= 0)
     rd->set_qp_retry(7);
-
-  // Pool defaults
-  auto* pl = cfg->mutable_pool();
-  // bool preregister_mr handled via presence in loader
-  if (pl->pool_size_bytes() == 0)
-    pl->set_pool_size_bytes(8ull * 1024 * 1024 * 1024);
-  if (pl->chunk_bytes() == 0)
-    pl->set_chunk_bytes(64ull * 1024 * 1024);
 
   // Transport defaults
   auto* tr = cfg->mutable_transport();
@@ -170,9 +158,6 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   // Handle boolean defaults that require presence checks on the original JSON
   if (!(root_json.contains("stager") && root_json["stager"].contains("stage_cpu_for_rdma"))) {
     cfg.mutable_stager()->set_stage_cpu_for_rdma(true);
-  }
-  if (!(root_json.contains("pool") && root_json["pool"].contains("preregister_mr"))) {
-    cfg.mutable_pool()->set_preregister_mr(true);
   }
 
   normalize_defaults(&cfg);

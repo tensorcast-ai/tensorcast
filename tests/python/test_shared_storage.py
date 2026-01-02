@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from pathlib import Path
 from typing import Sequence
@@ -6,7 +6,8 @@ from typing import Sequence
 import pytest
 import torch
 
-from tensorcast import FallbackOptions, artifact, save_dict, startup
+from tensorcast import FallbackOptions, artifact, startup
+from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
 

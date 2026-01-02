@@ -396,9 +396,19 @@ p2p_port: 9090                          # RDMA/TCP communication port (must be n
 grpc_port: 50052                        # Local gRPC port
 
 # Memory settings
-mem_pool_size: 8589934592               # Memory pool size (8GB)
-tx_slice_bytes: 134217728               # Transfer slice/window size (128MB)
-pinned_memory_timeout_ms: 30000         # Pinned memory timeout (30s)
+pinned_memory:
+  # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes).
+  allocation_timeout: 30s               # Deadline for pinned slice acquisition
+  classes:
+    - name: engine
+      slice_bytes: 128MB                # StoreEngine transfer slice size (tx_slice_bytes)
+      pool_bytes: 8GB                   # Engine pinned pool capacity
+    - name: comm_gpu
+      slice_bytes: 16MB                 # Communicator GPU staging chunk size
+      pool_bytes: 8GB
+    - name: comm_cpu
+      slice_bytes: 4MB                  # Communicator CPU staging chunk size
+      pool_bytes: 1GB
 
 # Lifecycle settings
 gpu_memory_limit_fraction: 0.60         # GPU memory threshold before eviction
