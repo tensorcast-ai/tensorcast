@@ -137,6 +137,8 @@ const char* StagedBackendToString(v1::RdmaConfig::StagedRdmaBackend backend) {
 void record_staged_backend_metrics(v1::RdmaConfig::StagedRdmaBackend backend, bool tensor_on_cpu, uint64_t bytes);
 void record_mr_register_metrics(const char* location, const char* reason, bool success);
 
+} // namespace
+
 StagingWindow::StageFn MakeStageFunction(
     const std::shared_ptr<PartitionTensor>& tensor,
     FlowCreditLedger* ledger,
@@ -170,6 +172,13 @@ StagingWindow::StageFn MakeStageFunction(
           direct_mr,
           /*deregister_mr=*/false,
           metadata);
+    };
+  }
+
+  if (!stager) {
+    return [tensor_key = std::move(tensor_key)](
+               uint64_t /*offset*/, uint32_t /*bytes*/, uint32_t /*segment_idx*/) -> absl::StatusOr<StageLease> {
+      return absl::FailedPreconditionError(absl::StrCat("no staging backend available for tensor=", tensor_key));
     };
   }
 
@@ -230,6 +239,8 @@ StagingWindow::StageFn MakeStageFunction(
     return StageLease(fallback_stager, ledger, exposed_ptr, bytes, staged_mr, deregister_mr, metadata);
   };
 }
+
+namespace {
 
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> g_comm_meter;
 opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> g_rdma_direct_segments_total;
@@ -1387,20 +1398,31 @@ absl::Status Communicator::handle_rdma_read_request(
   }
 
   const bool tensor_on_cpu = tensor->get_mem_type() == COMMUNICATE_ENGINE_DEV_CPU;
+  const int device_id = tensor->get_device_id();
 
   std::shared_ptr<MemoryStager> stager;
   if (tensor_on_cpu) {
     stager = get_cpu_stager_for_nic(dev->get_name());
   } else if (use_gpu_vram_staging_) {
-    stager = get_gpu_vram_stager_for_id(tensor->get_device_id());
+    stager = get_gpu_vram_stager_for_id(device_id);
   } else {
-    stager = get_gpu_mem_stager_for_id(tensor->get_device_id());
+    stager = get_gpu_mem_stager_for_id(device_id);
   }
 
   if (!stager) {
     if (tensor_on_cpu) {
       stager = memory_stager_;
-    } else if (!use_gpu_vram_staging_) {
+    } else if (use_gpu_vram_staging_) {
+      // VRAM staging is RDMA-only and depends on a per-GPU pool. If the tensor reports an
+      // unexpected device id, fall back to host-pinned GPU staging so we never end up with
+      // a nullptr stager later in the RDMA staging path.
+      LOG_FIRST_N(WARNING, 1) << "GPU VRAM staging enabled but no VRAM stager for device_id=" << device_id
+                              << "; falling back to host-pinned staging";
+      stager = get_gpu_mem_stager_for_id(device_id);
+      if (!stager) {
+        stager = gpu_memory_stager_;
+      }
+    } else {
       stager = gpu_memory_stager_;
     }
   }
@@ -1451,10 +1473,11 @@ absl::Status Communicator::handle_rdma_read_request(
       ? (direct_rdma_chunk_bytes_ > 0 ? direct_rdma_chunk_bytes_ : request.bytes)
       : (stager && stager->get_chunk_size() > 0 ? stager->get_chunk_size() : request.bytes);
 
-  const v1::RdmaConfig::StagedRdmaBackend staged_backend = tensor_on_cpu
-      ? v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED
-      : (use_gpu_vram_staging_ ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
-                               : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED);
+  const bool using_gpu_vram_stager =
+      !tensor_on_cpu && use_gpu_vram_staging_ && stager && stager == get_gpu_vram_stager_for_id(device_id);
+  const v1::RdmaConfig::StagedRdmaBackend staged_backend = using_gpu_vram_stager
+      ? v1::RdmaConfig::STAGED_RDMA_BACKEND_GPU_VRAM
+      : v1::RdmaConfig::STAGED_RDMA_BACKEND_HOST_PINNED;
 
   auto stage_fn = MakeStageFunction(
       tensor, ledger_ptr, stager, dev, mr_cache_ptr, tensor_key, staged_backend, use_direct, direct_mr);

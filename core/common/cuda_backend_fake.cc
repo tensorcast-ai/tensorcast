@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/no_destructor.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
@@ -133,8 +134,8 @@ struct FakeCudaState {
 };
 
 FakeCudaState& get_state() {
-  static FakeCudaState state;
-  return state;
+  static absl::NoDestructor<FakeCudaState> state;
+  return *state;
 }
 
 std::string generate_random_handle() {

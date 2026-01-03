@@ -262,6 +262,7 @@ The communicator routes tensor payloads through `MemoryStager` implementations:
 RDMA staging backend selection is explicit:
 - `STAGED_RDMA_BACKEND_HOST_PINNED` (default) uses host-pinned stagers for both CPU and GPU tensors.
 - `STAGED_RDMA_BACKEND_GPU_VRAM` uses `GpuVramRdmaStager` for GPU tensors and keeps `HostPinnedCpuStager` for CPU tensors. `StageLease::exposed_ptr()` may therefore reference host or device memory depending on backend.
+  - If a request references a GPU `device_id` without a configured VRAM staging pool, the communicator logs a warning and falls back to host-pinned staging for that request (avoids null stagers and keeps the RDMA pipeline alive).
 
 #### GPU staging (HostPinnedGpuStager)
 

@@ -521,6 +521,16 @@ cc_test(
 )
 
 cc_test(
+    name = "rdma_stage_fn_test",
+    srcs = ["engine/rdma_stage_fn_test.cc"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "tcp_engine_test",
     srcs = ["engine/tcp_engine_test.cc"],
     deps = [
