@@ -97,7 +97,7 @@ Contract highlights:
 - Observability is best-effort and never changes control flow; high-cardinality fields are gated. Background HA counters (heartbeat/sync) tolerate missing meters so registration and sync continue even when telemetry providers are unavailable.
 - Idempotent unload and lock cleanup; expired tokens are unlocked automatically.
 - Lease-in-place commits rebuild the canonical tensor index from the fed `storage_entries` and `tensor_aliases`, emitting `tc_register_storage_count` / `tc_register_tensor_count` metrics so rollouts can confirm dedupe efficacy.
-- LIP segment alignment checks apply to logical segment base offsets and destinations; region-backed `region_base_offset` is only bounds-validated and does not need chunk alignment.
+- LIP segment alignment checks apply to logical artifact offsets (`LeasedSegment.artifact_offset`) and segment lengths; physical offsets (`StorageEntry.mapping_base_offset` / `LeasedSegment.storage_offset`) are only bounds-validated and may be unaligned (e.g., PyTorch sub-allocations).
 
 ## Directory Layout (What lives here)
 

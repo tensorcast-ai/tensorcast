@@ -125,13 +125,13 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 
 ### LeaseSegments ↔ SegmentPlan
 
-- Robust protocol: each `LeasedSegment` now includes `dst_offset` (destination offset in the coalesced VRAM buffer). This removes any ordering assumption when sending lease segments.
+- Robust protocol: each `LeasedSegment` includes `artifact_offset` (logical byte offset in the canonical artifact layout) plus a `storage_id` reference. This removes any ordering assumption when sending lease segments.
 - Daemon behavior:
   - Builds the `SegmentPlan` from canonical index bytes.
-  - Zeros all `PAD` intervals in the destination VRAM buffer.
-  - Copies each `LeasedSegment` payload into `dst_offset .. dst_offset+length` regardless of feed order.
+  - Treats all `PAD` intervals as zero-filled for hashing and for any materialization copies.
+  - Reads `DATA` intervals from the referenced storage windows (`StorageEntry` + `mapping_base_offset` + `storage_offset`) regardless of feed order.
 - Client behavior:
-  - SDK already computes a coalesced layout and sets `dst_offset` per unique storage block.
+  - SDK computes a coalesced logical layout and sets `artifact_offset` per unique storage block.
   - Ordering no longer matters, but the SDK still sorts for stable traces.
 
 ### Shared Storage Graph Helper

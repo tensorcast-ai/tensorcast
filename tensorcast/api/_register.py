@@ -987,12 +987,10 @@ class _LeaseUploader:
                 base_offset = int(entry.base_ptr) - int(rec.base_ptr)
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=None,
-                        base_addr=0,
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1002,7 +1000,7 @@ class _LeaseUploader:
                         cuda_ipc_handle=None,
                         storage_length=length_bytes,
                         vram_region_id=rec.region_id,
-                        region_base_offset=int(base_offset),
+                        mapping_base_offset=int(base_offset),
                     )
                 )
             else:
@@ -1014,12 +1012,10 @@ class _LeaseUploader:
                     )
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=None,
-                        base_addr=int(base_offset),
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1028,6 +1024,7 @@ class _LeaseUploader:
                         device_id=int(ctx.device_id),
                         cuda_ipc_handle=handle_bytes,
                         storage_length=length_bytes,
+                        mapping_base_offset=int(base_offset),
                     )
                 )
         if not storages_payload:

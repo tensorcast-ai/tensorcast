@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -65,11 +65,24 @@ TEST_CASE("LIP TTL expiry gates P2P source selection", "[daemon][lip][ttl][fakec
   freq.set_registration_id(bresp.registration_id());
   auto* ls = freq.mutable_lease_segments();
   auto* s = ls->add_segments();
-  s->set_device_id(0);
+  auto* storage = freq.add_storage_entries();
+  storage->set_storage_id("s0");
+  storage->set_device_id(0);
+  storage->set_storage_length(1 * 1024 * 1024);
+  storage->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h), sizeof(h)));
+  storage->set_mapping_base_offset(0);
+  auto* alias = freq.add_tensor_aliases();
+  alias->set_name("tensor");
+  alias->set_storage_id("s0");
+  alias->set_storage_offset(0);
+  alias->set_logical_length(1 * 1024 * 1024);
+  alias->add_shape(1 * 1024 * 1024);
+  alias->add_stride(1);
+  alias->set_dtype("torch.uint8");
+  s->set_storage_id("s0");
+  s->set_storage_offset(0);
   s->set_length(1 * 1024 * 1024);
-  s->set_base_addr(0);
-  s->set_dst_offset(0);
-  s->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h), sizeof(h)));
+  s->set_artifact_offset(0);
   st = svc.feed_register_artifact_stream_vector({freq});
   REQUIRE(st.ok());
 

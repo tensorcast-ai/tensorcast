@@ -1406,14 +1406,10 @@ class DaemonCtl:
             )
             for s in segments:
                 seg = req.lease_segments.segments.add()
-                seg.device_id = int(s.device_id)
-                if s.cuda_ipc_handle is not None:
-                    seg.cuda_ipc_handle = s.cuda_ipc_handle
-                seg.base_addr = int(s.base_addr)
+                seg.storage_id = s.storage_id
+                seg.storage_offset = int(s.storage_offset)
                 seg.length = int(s.length)
-                seg.dst_offset = int(s.dst_offset)
-                if s.storage_id:
-                    seg.storage_id = s.storage_id
+                seg.artifact_offset = int(s.artifact_offset)
             if storages:
                 for storage in storages:
                     entry = req.storage_entries.add()
@@ -1424,8 +1420,7 @@ class DaemonCtl:
                     if storage.vram_region_id:
                         entry.vram_region_id = storage.vram_region_id
                     entry.storage_length = int(storage.storage_length)
-                    if storage.region_base_offset is not None:
-                        entry.region_base_offset = int(storage.region_base_offset)
+                    entry.mapping_base_offset = int(storage.mapping_base_offset)
             if tensor_aliases:
                 for alias in tensor_aliases:
                     dst = req.tensor_aliases.add()

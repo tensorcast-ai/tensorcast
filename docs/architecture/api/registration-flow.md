@@ -94,9 +94,9 @@ Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast
 | `storage_id` | Client-chosen identifier used for deduplication. | Must be unique within the registration stream. |
 | `device_id` | GPU ordinal that owns this storage. | Used for validation and handle resolution. |
 | `cuda_ipc_handle` | Inline CUDA IPC handle for the storage. | Mutually exclusive with `vram_region_id`. |
-| `vram_region_id` | Reference to a previously registered VRAM region. | Used with `region_base_offset`. |
+| `vram_region_id` | Reference to a previously registered VRAM region. | Used with `mapping_base_offset`. |
 | `storage_length` | Length in bytes of the storage. | Bounds checks for aliases/segments. |
-| `region_base_offset` | Base offset into the referenced region (bytes). | Defaults to `0` when unset. |
+| `mapping_base_offset` | Base offset from the mapped handle to the start of this storage window (bytes). | For `cuda_ipc_handle`, this is the CUDA allocation offset (sub-allocation safe). For `vram_region_id`, this is the offset into the region mapping. |
 
 `TensorAlias` maps logical tensors to storages and offsets:
 
@@ -114,11 +114,10 @@ Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast
 
 | Field | What it means | Why it exists |
 |---|---|---|
-| `device_id` | GPU ordinal for the segment handle. | Validation; multi-device correctness. |
-| `cuda_ipc_handle` | CUDA IPC handle bytes for this segment. | Legacy/inline mode when not using `storage_id`. |
-| `base_addr`, `length` | Segment base address and length (bytes). | Defines the source range. |
-| `dst_offset` | Destination offset in the canonical coalesced buffer. | Defines where the bytes land in the artifact. |
-| `storage_id` | Optional reference to a `StorageEntry`. | Preferred: reuses storage metadata instead of inline handles. |
+| `storage_id` | Reference to a `StorageEntry`. | Required: segments never inline CUDA IPC handles. |
+| `storage_offset` | Offset into the referenced storage window (bytes). | Allows slicing a storage window (usually `0`). |
+| `artifact_offset` | Destination offset in the canonical artifact layout (bytes). | Defines where the bytes land in the artifact. |
+| `length` | Segment length (bytes). | Must match the referenced storage length for full-storage registrations. |
 
 ### CommitRegisteredArtifactResponse (caller-visible outcomes)
 
@@ -140,7 +139,7 @@ segments.
 - Lease segments reference storage entries and specify destination offsets.
 
 Region-backed LIP is preferred when a storage is fully covered by a registered
-VRAM region. The SDK emits `vram_region_id` and `region_base_offset` in
+VRAM region. The SDK emits `vram_region_id` and `mapping_base_offset` in
 `StorageEntry` and does not send per-storage CUDA handles in that case.
 
 ### Region Referenced LIP Storage

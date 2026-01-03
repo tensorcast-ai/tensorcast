@@ -86,7 +86,7 @@ When LIP registration sees a storage fully covered by a registered region, the
 SDK emits:
 
 - `StorageEntry.vram_region_id`
-- `StorageEntry.region_base_offset`
+- `StorageEntry.mapping_base_offset`
 
 The lease segments then reference the storage id without attaching a per-storage
 CUDA IPC handle. The daemon resolves region handles and holds refs for the

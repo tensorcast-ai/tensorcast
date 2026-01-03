@@ -102,11 +102,11 @@ class _DummyRuntime:
     def ensure_client(self) -> _FakeClient:
         return self.client
 
-    def get_artifact_index_cached(self, artifact_id: str):
+    def get_artifact_index_cached(self, artifact_id: str) -> object | None:
         del artifact_id
         return None
 
-    def cache_artifact_index(self, entry) -> None:  # pragma: no cover - noop
+    def cache_artifact_index(self, entry: object) -> None:  # pragma: no cover - noop
         del entry
         return None
 
@@ -118,13 +118,7 @@ class _DummyRuntime:
     ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         return self.client.resolve_key_mapping(key)
 
-    def get_artifact_index_cached(self, _artifact_id: str):
-        return None
-
-    def get_artifact_index_by_disk_path(self, _disk_path: str):
-        return None
-
-    def cache_artifact_index(self, _entry) -> None:
+    def get_artifact_index_by_disk_path(self, _disk_path: str) -> object | None:
         return None
 
     def invalidate_artifact(

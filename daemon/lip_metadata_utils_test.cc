@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/lip_metadata_utils.h"
 
@@ -11,10 +11,16 @@ using tensorcast::daemon::RegisterTensorAliasMeta;
 
 TEST_CASE("BuildCanonicalIndexFromMetadata generates stable JSON", "[daemon][lip]") {
   std::vector<LeaseSegMeta> segments = {
-      LeaseSegMeta{.device_id = 0, .handle_bytes = "handle-a", .base_offset = 0, .length = 1024, .dst_offset = 0},
+      LeaseSegMeta{.storage_id = "s0", .storage_offset = 0, .artifact_offset = 0, .length = 1024},
   };
   std::vector<RegisterStorageMeta> storages = {
-      RegisterStorageMeta{.storage_id = "s0", .device_id = 0, .handle_bytes = "handle-a", .storage_length = 1024},
+      RegisterStorageMeta{
+          .storage_id = "s0",
+          .device_id = 0,
+          .handle_bytes = "handle-a",
+          .storage_length = 1024,
+          .mapping_base_offset = 0,
+      },
   };
   std::vector<RegisterTensorAliasMeta> aliases;
   RegisterTensorAliasMeta a;
@@ -47,12 +53,24 @@ TEST_CASE("BuildCanonicalIndexFromMetadata generates stable JSON", "[daemon][lip
 
 TEST_CASE("BuildCanonicalIndexFromMetadata handles multiple storages and views", "[daemon][lip]") {
   std::vector<LeaseSegMeta> segments = {
-      LeaseSegMeta{.device_id = 0, .handle_bytes = "handle-a", .base_offset = 0, .length = 1024, .dst_offset = 0},
-      LeaseSegMeta{.device_id = 0, .handle_bytes = "handle-b", .base_offset = 0, .length = 2048, .dst_offset = 4096},
+      LeaseSegMeta{.storage_id = "s0", .storage_offset = 0, .artifact_offset = 0, .length = 1024},
+      LeaseSegMeta{.storage_id = "s1", .storage_offset = 0, .artifact_offset = 4096, .length = 2048},
   };
   std::vector<RegisterStorageMeta> storages = {
-      RegisterStorageMeta{.storage_id = "s0", .device_id = 0, .handle_bytes = "handle-a", .storage_length = 1024},
-      RegisterStorageMeta{.storage_id = "s1", .device_id = 0, .handle_bytes = "handle-b", .storage_length = 2048},
+      RegisterStorageMeta{
+          .storage_id = "s0",
+          .device_id = 0,
+          .handle_bytes = "handle-a",
+          .storage_length = 1024,
+          .mapping_base_offset = 0,
+      },
+      RegisterStorageMeta{
+          .storage_id = "s1",
+          .device_id = 0,
+          .handle_bytes = "handle-b",
+          .storage_length = 2048,
+          .mapping_base_offset = 0,
+      },
   };
 
   std::vector<RegisterTensorAliasMeta> aliases;
@@ -105,10 +123,16 @@ TEST_CASE("BuildCanonicalIndexFromMetadata handles multiple storages and views",
 
 TEST_CASE("BuildCanonicalIndexFromMetadata detects mismatched storage", "[daemon][lip]") {
   std::vector<LeaseSegMeta> segments = {
-      LeaseSegMeta{.device_id = 0, .handle_bytes = "seg", .base_offset = 0, .length = 256, .dst_offset = 0},
+      LeaseSegMeta{.storage_id = "s1", .storage_offset = 0, .artifact_offset = 0, .length = 256},
   };
   std::vector<RegisterStorageMeta> storages = {
-      RegisterStorageMeta{.storage_id = "s0", .device_id = 0, .handle_bytes = "other", .storage_length = 256},
+      RegisterStorageMeta{
+          .storage_id = "s0",
+          .device_id = 0,
+          .handle_bytes = "other",
+          .storage_length = 256,
+          .mapping_base_offset = 0,
+      },
   };
   std::vector<RegisterTensorAliasMeta> aliases = {
       RegisterTensorAliasMeta{
