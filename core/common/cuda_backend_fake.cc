@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/base/no_destructor.h"
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/log/log.h"
@@ -133,8 +134,8 @@ struct FakeCudaState {
 };
 
 FakeCudaState& get_state() {
-  static FakeCudaState state;
-  return state;
+  static absl::NoDestructor<FakeCudaState> state;
+  return *state;
 }
 
 std::string generate_random_handle() {
@@ -746,6 +747,29 @@ absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes*
   attrs->type = it->second.is_pinned ? cudaMemoryTypeHost : cudaMemoryTypeDevice;
 
   return absl::OkStatus();
+}
+
+absl::Status mem_get_address_range(void** base, size_t* range_bytes, const void* ptr) {
+  if (base == nullptr || range_bytes == nullptr || ptr == nullptr) {
+    return absl::InvalidArgumentError("base/range_bytes/ptr must be non-null");
+  }
+
+  auto& state = get_state();
+  absl::MutexLock lock(&state.mutex);
+
+  const std::uintptr_t needle = reinterpret_cast<std::uintptr_t>(ptr);
+  for (const auto& [alloc_ptr, alloc] : state.allocations) {
+    static_cast<void>(alloc_ptr);
+    const std::uintptr_t start = reinterpret_cast<std::uintptr_t>(alloc.ptr);
+    const std::uintptr_t end = start + alloc.size;
+    if (needle >= start && needle < end) {
+      *base = alloc.ptr;
+      *range_bytes = alloc.size;
+      return absl::OkStatus();
+    }
+  }
+
+  return absl::NotFoundError("pointer not found in fake CUDA allocations");
 }
 
 // Stream management

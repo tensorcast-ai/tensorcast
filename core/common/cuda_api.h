@@ -37,6 +37,7 @@ absl::StatusOr<std::string> get_device_name(int device_id);
 absl::Status get_device_properties(int device_id, void* prop); // cudaDeviceProp*
 absl::Status pointer_get_attributes(void* ptr, int* device, void** device_ptr);
 absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes* attrs);
+absl::Status mem_get_address_range(void** base, size_t* range_bytes, const void* ptr);
 
 // IPC handle operations (string-based for compatibility)
 absl::Status get_ipc_handle(const void* ptr, std::string* handle);

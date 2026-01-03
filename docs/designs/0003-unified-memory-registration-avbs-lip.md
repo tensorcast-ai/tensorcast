@@ -94,7 +94,7 @@ The daemon exposes one RPC family shared across plans:
 
 Key fields and behaviors
 - Begin validates device/size/index and emits plan‑specific handshakes (e.g., IPC mapping for coalesced VRAM).
-- Feed for Lease provides `lease_segments(dst_offset,len,...)` covering DATA ranges; PAD is implicit and zero‑filled by the daemon.
+- Feed for Lease provides `storage_entries` (CUDA IPC handles or region references) plus `lease_segments(storage_id,artifact_offset,length,...)` covering DATA ranges; PAD is implicit and zero‑filled by the daemon.
 - KeepAlive requires `owner_pid` matching Begin; extends registration or LIP lease.
 - Commit computes `mi2:` over AVBS with PAD=0 and registers the replica type.
 - Feed now includes deduplicated storage descriptors plus tensor alias metadata, mirroring the disk pipeline so the daemon can rebuild the canonical index without inferring alias groups from raw segments.

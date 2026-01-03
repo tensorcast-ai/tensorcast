@@ -42,6 +42,7 @@ namespace tensorcast::cuda {
   X(absl::Status, get_device_properties, (int device_id, void* prop), device_id, prop)                                \
   X(absl::Status, pointer_get_attributes, (void* ptr, int* device, void** device_ptr), ptr, device, device_ptr)       \
   X(absl::Status, pointer_get_attributes_full, (const void* ptr, cudaPointerAttributes* attrs), ptr, attrs)           \
+  X(absl::Status, mem_get_address_range, (void** base, size_t* range_bytes, const void* ptr), base, range_bytes, ptr) \
   X(absl::Status, get_ipc_handle, (const void* ptr, std::string* handle), ptr, handle)                                \
   X(absl::Status, open_ipc_handle, (const std::string& handle, void** ptr), handle, ptr)                              \
   X(absl::Status, close_ipc_handle, (void* ptr), ptr)                                                                 \

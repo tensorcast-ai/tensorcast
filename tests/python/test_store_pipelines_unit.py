@@ -55,12 +55,15 @@ class _FakeClient:
     def __init__(self) -> None:
         self.unloaded: list[str] = []
 
-    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
-        del artifact_id
-        return b"{}"
-
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
         return None, None
+
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        # Region-backed get_into may probe indices before determining that no
+        # VRAM region is registered; return an empty canonical index so the
+        # region-backed path falls back cleanly.
+        del artifact_id
+        return b"{}"
 
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append(f"{replica_uuid}:{disk_path}")
@@ -99,11 +102,11 @@ class _DummyRuntime:
     def ensure_client(self) -> _FakeClient:
         return self.client
 
-    def get_artifact_index_cached(self, artifact_id: str):
+    def get_artifact_index_cached(self, artifact_id: str) -> object | None:
         del artifact_id
         return None
 
-    def cache_artifact_index(self, entry) -> None:  # pragma: no cover - noop
+    def cache_artifact_index(self, entry: object) -> None:  # pragma: no cover - noop
         del entry
         return None
 
@@ -114,6 +117,9 @@ class _DummyRuntime:
         self, *, key: str
     ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         return self.client.resolve_key_mapping(key)
+
+    def get_artifact_index_by_disk_path(self, _disk_path: str) -> object | None:
+        return None
 
     def invalidate_artifact(
         self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None

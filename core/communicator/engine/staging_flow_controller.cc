@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/communicator/engine/staging_flow_controller.h"
 
@@ -190,7 +190,7 @@ void FlowCreditLedger::wake_waiters_locked() {
 StageLease::State::State(
     std::shared_ptr<MemoryStager> stager,
     FlowCreditLedger* ledger,
-    void* host_ptr,
+    void* exposed_ptr,
     size_t bytes,
     ibv_mr* mr,
     bool deregister_mr,
@@ -198,7 +198,7 @@ StageLease::State::State(
     std::function<void()> extra_release_hook)
     : stager(std::move(stager)),
       ledger(ledger),
-      host_ptr(host_ptr),
+      exposed_ptr(exposed_ptr),
       bytes(bytes),
       mr(mr),
       deregister_mr(deregister_mr),
@@ -213,8 +213,8 @@ void StageLease::State::do_release() {
   if (mr != nullptr && deregister_mr) {
     DeregisterMr(mr);
   }
-  if (stager != nullptr && host_ptr != nullptr) {
-    auto status = stager->release_staged_buffer(gsl::not_null<void*>{host_ptr});
+  if (stager != nullptr && exposed_ptr != nullptr) {
+    auto status = stager->release_staged_buffer(gsl::not_null<void*>{exposed_ptr});
     if (!status.ok()) {
       LOG(WARNING) << "Failed to release staged buffer: " << status;
     }
@@ -227,7 +227,7 @@ void StageLease::State::do_release() {
 StageLease::StageLease(
     std::shared_ptr<MemoryStager> stager,
     FlowCreditLedger* ledger,
-    void* host_ptr,
+    void* exposed_ptr,
     size_t bytes,
     ibv_mr* mr,
     bool deregister_mr,
@@ -237,7 +237,7 @@ StageLease::StageLease(
           std::make_shared<State>(
               std::move(stager),
               ledger,
-              host_ptr,
+              exposed_ptr,
               bytes,
               mr,
               deregister_mr,
@@ -269,8 +269,8 @@ void StageLease::release() {
   }
 }
 
-void* StageLease::host_ptr() const {
-  return state_ ? state_->host_ptr : nullptr;
+void* StageLease::exposed_ptr() const {
+  return state_ ? state_->exposed_ptr : nullptr;
 }
 
 size_t StageLease::bytes() const {

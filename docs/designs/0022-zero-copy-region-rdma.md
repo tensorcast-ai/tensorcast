@@ -65,7 +65,7 @@ sequenceDiagram
 ## Stage Function Variants
 
 - Introduce helper `MakeStageFunction(const std::shared_ptr<PartitionTensor>& tensor, FlowCreditLedger* ledger)`.
-  - **Direct path:** returns a lambda that creates `StageLease{stager=nullptr, ledger, host_ptr=tensor_base+offset, mr=tensor->get_mr(), deregister_mr=false}`.
+  - **Direct path:** returns a lambda that creates `StageLease{stager=nullptr, ledger, exposed_ptr=tensor_base+offset, mr=tensor->get_mr(), deregister_mr=false}`.
   - **Fallback path:** retains current staging lambda using `MemoryStager::stage`.
 - `StagingWindow` continues to drive chunking. Add configuration knob `stager().direct_chunk_mb` (defaults to `stage_chunk_mb_gpu`) to tune zero-copy window size without affecting staging chunking.
 

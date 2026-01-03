@@ -1,6 +1,6 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/communicator/engine/dram_stager.h"
+#include "core/communicator/engine/host_pinned_cpu_stager.h"
 
 #include <cstring>
 
@@ -10,11 +10,11 @@
 namespace tensorcast::communicator::engine {
 
 namespace {
-class NoOpLeaseHandle : public DRAMStager::LeaseHandle {};
+class NoOpLeaseHandle : public HostPinnedCpuStager::LeaseHandle {};
 
-class NoOpLeaseProvider : public DRAMStager::LeaseProvider {
+class NoOpLeaseProvider : public HostPinnedCpuStager::LeaseProvider {
  public:
-  std::unique_ptr<DRAMStager::LeaseHandle> acquire(
+  std::unique_ptr<HostPinnedCpuStager::LeaseHandle> acquire(
       const std::string& /*tensor_key*/,
       uint64_t /*offset*/,
       uint64_t /*bytes*/) override {
@@ -23,15 +23,17 @@ class NoOpLeaseProvider : public DRAMStager::LeaseProvider {
 };
 } // namespace
 
-std::shared_ptr<DRAMStager::LeaseProvider> DRAMStager::make_noop_lease_provider() {
+std::shared_ptr<HostPinnedCpuStager::LeaseProvider> HostPinnedCpuStager::make_noop_lease_provider() {
   static auto provider = std::make_shared<NoOpLeaseProvider>();
   return provider;
 }
 
-DRAMStager::DRAMStager(gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool, size_t num_buffers_hint)
+HostPinnedCpuStager::HostPinnedCpuStager(
+    gsl::not_null<std::shared_ptr<common::memory::PinnedBufferPool>> pool,
+    size_t num_buffers_hint)
     : pool_(std::move(pool)), chunk_size_(pool_->slice_bytes()), num_buffers_hint_(num_buffers_hint) {}
 
-absl::StatusOr<void*> DRAMStager::stage(
+absl::StatusOr<void*> HostPinnedCpuStager::stage(
     const std::shared_ptr<communicator::transport::PartitionTensor>& tensor,
     uint64_t offset,
     uint64_t bytes,
@@ -55,14 +57,14 @@ absl::StatusOr<void*> DRAMStager::stage(
     return absl::ResourceExhaustedError("PinnedBufferPool out of buffers for staging");
   }
 
-  void* host_ptr = bufs[0];
+  void* exposed_ptr = bufs[0];
   // memcpy from source VA
   std::unique_ptr<LeaseHandle> lease;
   if (lease_provider_) {
     lease = lease_provider_->acquire(tensor->get_key(), offset, bytes);
   }
   auto* src = tensor->get_addr<uint8_t>() + offset;
-  std::memcpy(host_ptr, src, static_cast<size_t>(bytes));
+  std::memcpy(exposed_ptr, src, static_cast<size_t>(bytes));
 
   {
     absl::MutexLock lock(&mu_);
@@ -70,19 +72,19 @@ absl::StatusOr<void*> DRAMStager::stage(
     wrapped.reserve(bufs.size());
     for (auto* p : bufs)
       wrapped.emplace_back(gsl::not_null<char*>{p});
-    allocations_[host_ptr] = std::move(wrapped);
+    allocations_[exposed_ptr] = std::move(wrapped);
   }
-  return host_ptr;
+  return exposed_ptr;
 }
 
-absl::Status DRAMStager::release_staged_buffer(gsl::not_null<void*> host_ptr) {
+absl::Status HostPinnedCpuStager::release_staged_buffer(gsl::not_null<void*> exposed_ptr) {
   // pool_ is guaranteed non-null
   std::vector<char*> bufs;
   {
     absl::MutexLock lock(&mu_);
-    auto it = allocations_.find(host_ptr.get());
+    auto it = allocations_.find(exposed_ptr.get());
     if (it == allocations_.end()) {
-      return absl::InvalidArgumentError("Unknown host_ptr for DRAMStager::release_staged_buffer");
+      return absl::InvalidArgumentError("Unknown exposed_ptr for HostPinnedCpuStager::release_staged_buffer");
     }
     bufs.reserve(it->second.size());
     for (auto p : it->second)

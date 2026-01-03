@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -49,7 +49,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   breq.mutable_tensor_index_data()->set_data(index_bytes);
   breq.mutable_tensor_index_data()->set_schema_version("v3");
   breq.mutable_tensor_index_data()->set_encoding("json");
-  (void)breq.mutable_lease();
+  breq.mutable_lease()->set_in_place(true);
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
@@ -73,19 +73,48 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   // Feed in reverse order to validate order independence; include explicit dst_offset
   tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest freq;
   freq.set_registration_id(bresp.registration_id());
+  // Storage metadata (deduplicated table).
+  auto* storage2 = freq.add_storage_entries();
+  storage2->set_storage_id("s2");
+  storage2->set_device_id(0);
+  storage2->set_storage_length(16);
+  storage2->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h2), sizeof(cudaIpcMemHandle_t)));
+  storage2->set_mapping_base_offset(0);
+  auto* storage1 = freq.add_storage_entries();
+  storage1->set_storage_id("s1");
+  storage1->set_device_id(0);
+  storage1->set_storage_length(16);
+  storage1->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h1), sizeof(cudaIpcMemHandle_t)));
+  storage1->set_mapping_base_offset(0);
+  // Tensor alias metadata (required for LIP commits).
+  auto* a = freq.add_tensor_aliases();
+  a->set_name("a");
+  a->set_storage_id("s1");
+  a->set_storage_offset(0);
+  a->set_logical_length(16);
+  a->add_shape(16);
+  a->add_stride(1);
+  a->set_dtype("torch.uint8");
+  auto* b = freq.add_tensor_aliases();
+  b->set_name("b");
+  b->set_storage_id("s2");
+  b->set_storage_offset(0);
+  b->set_logical_length(16);
+  b->add_shape(16);
+  b->add_stride(1);
+  b->set_dtype("torch.uint8");
+
   auto* ls = freq.mutable_lease_segments();
   auto* s2 = ls->add_segments();
-  s2->set_device_id(0);
+  s2->set_storage_id("s2");
+  s2->set_storage_offset(0);
   s2->set_length(16);
-  s2->set_base_addr(0);
-  s2->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h2), sizeof(cudaIpcMemHandle_t)));
-  s2->set_dst_offset(32);
+  s2->set_artifact_offset(32);
   auto* s1 = ls->add_segments();
-  s1->set_device_id(0);
+  s1->set_storage_id("s1");
+  s1->set_storage_offset(0);
   s1->set_length(16);
-  s1->set_base_addr(0);
-  s1->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h1), sizeof(cudaIpcMemHandle_t)));
-  s1->set_dst_offset(0);
+  s1->set_artifact_offset(0);
 
   // Use helper to feed streaming vector without spinning up gRPC server
   std::vector<tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest> reqs;

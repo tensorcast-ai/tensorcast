@@ -20,6 +20,14 @@ message RdmaConfig {
   int32 traffic_class = 3; // default: 186 (TOS)
   int32 qp_timeout = 4; // default: 20
   int32 qp_retry = 5; // default: 7
+  enum StagedRdmaBackend {
+    STAGED_RDMA_BACKEND_UNSPECIFIED = 0; // treated as STAGED_RDMA_BACKEND_HOST_PINNED
+    STAGED_RDMA_BACKEND_HOST_PINNED = 1; // stage into host-pinned buffers (default)
+    STAGED_RDMA_BACKEND_GPU_VRAM = 2; // stage into GPU VRAM (RDMA-only)
+  }
+  StagedRdmaBackend staging_backend = 6;
+  uint64 vram_pool_bytes_per_gpu = 7;
+  uint64 vram_slice_bytes = 8;
 }
 
 message TransportConfig {

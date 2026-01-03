@@ -75,6 +75,11 @@ def get_cuda_memory_handle(
     memory_ptr: _Ptr,
 ) -> bytes: ...
 
+def get_cuda_memory_handle_with_offset(
+    device_id: int,
+    memory_ptr: _Ptr,
+) -> Tuple[bytes, int]: ...
+
 
 def get_device_uuid_map() -> Dict[_DeviceId, str]: ...
 

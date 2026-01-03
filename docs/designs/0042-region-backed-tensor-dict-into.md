@@ -91,14 +91,14 @@ Region-backed `tensor_dict_into` needs a compact description of where each tenso
 **StorageEntry** (existing, v1)
 - `storage_id`, `device_id`, `storage_length`
 - `vram_region_id` (required for region-backed target)
-- `region_base_offset` (required)
+- `mapping_base_offset` (required)
 
 **TensorAlias** (existing, v1)
 - `name`, `storage_id`, `storage_offset`, `logical_length`
 - `shape`, `stride`, `dtype`
 
 The **offset table** maps each tensor's logical offset to a region offset:
-`logical_offset (canonical or view) -> region_id + region_base_offset + storage_offset`.
+`logical_offset (canonical or view) -> region_id + mapping_base_offset + storage_offset`.
 
 ### Layout Compaction
 - `TENSOR_SPEC_KIND_OFFSETS` sends only `TargetTensorOffset` entries; dtype/shape/stride come
@@ -110,7 +110,7 @@ The **offset table** maps each tensor's logical offset to a region offset:
 `logical_layout_hash` is a SHA-256 digest over the logical byte space only:
 - Derive it from canonical (or view) index bytes plus `index_kind`; prefer `index_multihash`
   when present to avoid re-hashing large indices.
-- Exclude physical binding fields (`storage_id`, `vram_region_id`, `region_base_offset`,
+- Exclude physical binding fields (`storage_id`, `vram_region_id`, `mapping_base_offset`,
   `storage_offset`) so the hash stays stable across region bindings.
 - In Phase 1 the on-wire field is optional and diagnostic; SegmentPlan caching should
   key on `index_multihash` (or a locally computed `logical_layout_hash`) plus
@@ -141,7 +141,7 @@ does not implement this logic.
 ### Layout Modes
 1. **COALESCED**: the target region is arranged in logical order (canonical or view).
    The daemon verifies `storage_offset == logical_offset` for each tensor, and a single
-   storage entry spans the logical space (`storage_length == logical_total_size`). The `region_base_offset` acts as the base of
+   storage entry spans the logical space (`storage_length == logical_total_size`). The `mapping_base_offset` acts as the base of
    the coalesced buffer slice in the region. This lets the pipeline stream ranges
    without extra scatter logic and reuse `pump_ranges`.
    COALESCED implies the storage covers the full logical space and includes every tensor
@@ -178,8 +178,8 @@ daemon-side write. It builds a `TargetLayout` only when all of the following are
    and `view_subset_hash` must be empty for Phase 1.
 5. Group target tensors by storage; assign deterministic `storage_id` (e.g., hash of base
    pointer + size).
-6. For each storage, find the covering region and compute `region_base_offset`.
-7. Emit `StorageEntry` records with `vram_region_id`, `region_base_offset`, and
+6. For each storage, find the covering region and compute `mapping_base_offset`.
+7. Emit `StorageEntry` records with `vram_region_id`, `mapping_base_offset`, and
    `storage_length == logical_total_size`.
 8. Emit `TargetTensorOffset` records for each tensor with `storage_offset` and
    `logical_length` (use `TensorAlias` only when `tensor_spec_kind=ALIAS`).
@@ -307,7 +307,7 @@ target_layout {
     storage_id: "s0"
     device_id: 0
     vram_region_id: "region:0001"
-    region_base_offset: 0
+    mapping_base_offset: 0
     storage_length: 3072
   }
   offsets: [
@@ -353,7 +353,7 @@ target_layout {
     storage_id: "s0"
     device_id: 0
     vram_region_id: "region:0002"
-    region_base_offset: 0
+    mapping_base_offset: 0
     storage_length: 8192
   }
   offsets: [
@@ -402,7 +402,7 @@ so the data-path stays in core and shares scheduling, buffer pools, and loaders.
 - `device_uuid` is present and resolves to a device; each storage entry `device_id`
   matches the resolved UUID (device_id is not authoritative across processes).
 - `layout_kind == COALESCED` and `len(storages) == 1`.
-- `region_base_offset + storage_length <= region.size_bytes`.
+- `mapping_base_offset + storage_length <= region.size_bytes`.
 - `owner_pid` matches the session (via `IpcRegionRegistry::acquire`).
 - Region is not poisoned (fail fast if the registry marks the region as invalid).
 - `TensorAlias` or `TargetTensorOffset` matches canonical entry (length, name).
@@ -423,7 +423,7 @@ For COALESCED layouts, the logical offsets match the destination offsets. The da
 ### External GPU Target
 Introduce an external GPU target in the materialization pipeline:
 - Bypass `AllocationStage` and `HandleStage`; no daemon-owned replica or IPC export.
-- Open the single region IPC handle and pass `gpu_base_ptr = region_base + region_base_offset`
+- Open the single region IPC handle and pass `gpu_base_ptr = region_base + mapping_base_offset`
   into `GpuMemorySink`, with `total_size = logical_total_size` to enforce a full copy.
 - Acquire the region via `IpcRegionRegistry::acquire` to extend TTL and enforce ownership,
   then release on completion to decrement the refcount.
@@ -566,7 +566,7 @@ updates are acceptable in this pre-launch phase.
 Proposed API and type names follow repository conventions:
 - **Proto messages**: `TargetLayout`, `TargetTensorOffset` (PascalCase)
 - **Proto messages**: `MaterializeIntoTargetRequest`, `MaterializeIntoTargetResponse` (PascalCase)
-- **Proto fields**: `target_layout`, `layout_kind`, `region_base_offset` (snake_case)
+- **Proto fields**: `target_layout`, `layout_kind`, `mapping_base_offset` (snake_case)
 - **RPCs**: `MaterializeIntoTarget` (PascalCase)
 - **C++ functions**: `materialize_into_target` (snake_case)
 - **Python types**: `RegionBackedMode`, `TargetLayout` (PascalCase)

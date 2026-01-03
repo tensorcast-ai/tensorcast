@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/service/controllers/materialization_controller.h"
 
@@ -1306,11 +1306,6 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "storage_not_region", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
   }
-  if (!storage.has_region_base_offset()) {
-    record_materialize_into_target(
-        "error", "region_base_offset_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "region_base_offset is required for region-backed targets"};
-  }
 
   const auto device = d_.devices.From(v1::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
   if (storage.device_id() != device.ordinal) {
@@ -1402,7 +1397,7 @@ grpc::Status MaterializationController::materialize_into_target(
     d_.regions.release(storage.vram_region_id()).IgnoreError();
     return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
   }
-  const uint64_t region_end = storage.region_base_offset() + storage.storage_length();
+  const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
   if (region_end > region_desc.size_bytes) {
     record_materialize_into_target("error", "bounds", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     d_.regions.release(storage.vram_region_id()).IgnoreError();
@@ -1451,7 +1446,7 @@ grpc::Status MaterializationController::materialize_into_target(
 
   record_materialize_into_target_verification_skipped();
 
-  void* region_base_ptr = static_cast<uint8_t*>(map_or->get()) + static_cast<uint64_t>(storage.region_base_offset());
+  void* region_base_ptr = static_cast<uint8_t*>(map_or->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
   auto result_or = d_.engine.materialize_into_target(
       device, gsl::not_null<void*>{region_base_ptr}, logical_total_size, *canonical_json_or, generation, hints);

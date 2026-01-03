@@ -604,28 +604,30 @@ message LeaseSegments {
   repeated LeasedSegment segments = 1;
 }
 message LeasedSegment {
-  int32 device_id = 1;
-  bytes cuda_ipc_handle = 2;
-  uint64 base_addr = 3;
+  // Physical storage backing this segment (must match a StorageEntry.storage_id).
+  string storage_id = 1;
+  // Byte offset within the referenced storage window where this segment begins.
+  uint64 storage_offset = 2;
+  // Logical byte offset within the artifact where this segment begins.
+  // This offset defines LIP's logical segment base and must obey artifact_chunk_bytes alignment rules.
+  uint64 artifact_offset = 3;
+  // Length of this segment in bytes.
   uint64 length = 4;
-  // Destination offset in the coalesced VRAM buffer (bytes).
-  // This locates the DATA interval within the SegmentPlan; PAD is handled by the daemon.
-  uint64 dst_offset = 5;
-  // Optional reference to a RegisterStorage entry. When set, the daemon reuses the
-  // associated storage metadata (region-backed or cuda handle) instead of the inline handle.
-  optional string storage_id = 6;
 }
 
 message StorageEntry {
   string storage_id = 1;
   int32 device_id = 2;
+  // Length of this storage window in bytes.
+  uint64 storage_length = 3;
   oneof storage_source {
-    bytes cuda_ipc_handle = 3;
+    // CUDA IPC handle for the allocation base pointer that backs this storage.
+    bytes cuda_ipc_handle = 4;
     string vram_region_id = 5;
   }
-  uint64 storage_length = 4;
-  // Base offset into the referenced region. When unset, defaults to zero.
-  optional uint64 region_base_offset = 6;
+  // Byte offset from the mapped base pointer (allocation base for cuda_ipc_handle, region base for vram_region_id)
+  // to the start of this storage window.
+  uint64 mapping_base_offset = 6;
 }
 
 message TensorAlias {

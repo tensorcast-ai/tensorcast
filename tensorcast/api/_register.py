@@ -20,7 +20,7 @@ from opentelemetry.trace import SpanKind
 
 from tensorcast._c_ext import (
     compute_view_registration_plan,
-    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
     get_cuda_memory_ptr,
     restore_tensors,
 )
@@ -931,8 +931,8 @@ class _LeaseUploader:
         handshake: Handshake,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, torch.Tensor]:
-        def _export_cuda_ipc_handle(ptr: int) -> bytes:
-            return get_cuda_memory_handle(ctx.device_id, int(ptr))
+        def _export_cuda_ipc_handle(ptr: int) -> tuple[bytes, int]:
+            return get_cuda_memory_handle_with_offset(ctx.device_id, int(ptr))
 
         graph = ctx.storage_graph
         offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
@@ -987,12 +987,10 @@ class _LeaseUploader:
                 base_offset = int(entry.base_ptr) - int(rec.base_ptr)
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=None,
-                        base_addr=0,
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1002,20 +1000,22 @@ class _LeaseUploader:
                         cuda_ipc_handle=None,
                         storage_length=length_bytes,
                         vram_region_id=rec.region_id,
-                        region_base_offset=int(base_offset),
+                        mapping_base_offset=int(base_offset),
                     )
                 )
             else:
                 # Fallback to legacy handle-based path.
-                handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
+                handle_bytes, base_offset = _export_cuda_ipc_handle(int(entry.base_ptr))
+                if not handle_bytes:
+                    raise TensorCastError(
+                        f"Failed to export CUDA IPC handle for storage '{storage_id}'"
+                    )
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=handle_bytes,
-                        base_addr=0,
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1024,6 +1024,7 @@ class _LeaseUploader:
                         device_id=int(ctx.device_id),
                         cuda_ipc_handle=handle_bytes,
                         storage_length=length_bytes,
+                        mapping_base_offset=int(base_offset),
                     )
                 )
         if not storages_payload:

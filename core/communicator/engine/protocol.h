@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_
 #define CORE_COMMUNICATOR_ENGINE_PROTOCOL_H_
@@ -94,7 +94,7 @@ struct ProtoReadRequest {
 struct ProtoReadResponseExHeader {
   char tensor_key[kMaxTensorNameLen];
   uint8_t transport_type;
-  uint8_t staged; // 1 if segments are staged on server
+  uint8_t staged; // 1 if segments require RDMA_READ_DONE_EX to release staging credit
   char nic_name[kMaxDevName];
   uint32_t num_segments;
   uint32_t window_seq;

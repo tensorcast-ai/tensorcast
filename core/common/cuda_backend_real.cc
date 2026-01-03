@@ -281,6 +281,28 @@ absl::Status pointer_get_attributes_full(const void* ptr, cudaPointerAttributes*
   return absl::OkStatus();
 }
 
+absl::Status mem_get_address_range(void** base, size_t* range_bytes, const void* ptr) {
+  if (base == nullptr || range_bytes == nullptr || ptr == nullptr) {
+    return absl::InvalidArgumentError("base/range_bytes/ptr must be non-null");
+  }
+
+  auto status = ensure_cuda_driver_loaded();
+  if (!status.ok()) {
+    return status;
+  }
+
+  const DriverApi& driver = DriverApi::get();
+  CUdeviceptr base_ptr = 0;
+  status = cu_result_as_status(
+      driver.cuMemGetAddressRange(&base_ptr, range_bytes, reinterpret_cast<CUdeviceptr>(ptr)), "cuMemGetAddressRange");
+  if (!status.ok()) {
+    return status;
+  }
+
+  *base = reinterpret_cast<void*>(base_ptr);
+  return absl::OkStatus();
+}
+
 // Stream management
 absl::Status stream_create(cudaStream_t* stream) {
   SC_RETURN_IF_CUDA_ERROR(cudaStreamCreate(stream));
@@ -633,7 +655,11 @@ absl::Status cu_mem_get_handle_for_address_range(
 }
 
 absl::Status close_ipc_mem_handle(void* dev_ptr) {
-  SC_RETURN_IF_CUDA_ERROR(cudaIpcCloseMemHandle(dev_ptr));
+  const cudaError_t err = cudaIpcCloseMemHandle(dev_ptr);
+  if (err != cudaSuccess) {
+    static_cast<void>(cudaGetLastError());
+    return common::cuda_as_status(err, "cudaIpcCloseMemHandle");
+  }
   return absl::OkStatus();
 }
 

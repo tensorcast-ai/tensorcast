@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -22,19 +22,19 @@
 
 namespace tensorcast::communicator::engine {
 
-// GPU MemoryStager implementation using a StreamingPinnedBuffer for D2H staging.
-class GpuNetStager : public MemoryStager {
+// Host-pinned GPU stager using a StreamingPinnedBuffer for D2H staging.
+class HostPinnedGpuStager : public MemoryStager {
  public:
-  GpuNetStager(size_t chunk_size, size_t num_buffers, std::shared_ptr<common::memory::PinnedBufferPool> pool)
+  HostPinnedGpuStager(size_t chunk_size, size_t num_buffers, std::shared_ptr<common::memory::PinnedBufferPool> pool)
       : chunk_size_(chunk_size), num_buffers_(num_buffers), pool_(std::move(pool)) {
     if (chunk_size_ == 0) {
-      LOG(FATAL) << "GpuNetStager chunk_size must be > 0";
+      LOG(FATAL) << "HostPinnedGpuStager chunk_size must be > 0";
     }
     if (num_buffers_ == 0) {
-      LOG(FATAL) << "GpuNetStager num_buffers must be > 0";
+      LOG(FATAL) << "HostPinnedGpuStager num_buffers must be > 0";
     }
     if (!pool_) {
-      LOG(FATAL) << "GpuNetStager pool must not be null";
+      LOG(FATAL) << "HostPinnedGpuStager pool must not be null";
     }
   }
 
@@ -44,14 +44,14 @@ class GpuNetStager : public MemoryStager {
       uint64_t bytes,
       StageMode mode) override {
     if (bytes == 0 || bytes > chunk_size_) {
-      return absl::InvalidArgumentError("GpuNetStager: bytes must be within (0, chunk_size]");
+      return absl::InvalidArgumentError("HostPinnedGpuStager: bytes must be within (0, chunk_size]");
     }
     if (offset + bytes > tensor->get_bytes()) {
-      return absl::InvalidArgumentError("GpuNetStager: staging beyond tensor bounds");
+      return absl::InvalidArgumentError("HostPinnedGpuStager: staging beyond tensor bounds");
     }
     if (!streaming_) {
       if (!pool_)
-        return absl::FailedPreconditionError("GpuNetStager: no pinned pool");
+        return absl::FailedPreconditionError("HostPinnedGpuStager: no pinned pool");
       streaming_ = std::make_unique<common::memory::StreamingPinnedBuffer>(num_buffers_, chunk_size_, pool_);
       auto st = streaming_->initialize();
       if (!st.ok())
@@ -85,31 +85,39 @@ class GpuNetStager : public MemoryStager {
     }
     const int promoted_slot = slot_guard.release_for_async();
 
-    void* host_ptr = static_cast<void*>(dst);
+    void* exposed_ptr = static_cast<void*>(dst);
     {
       absl::MutexLock lk(&mu_);
-      staged_slots_[host_ptr] = SlotMetadata{
+      staged_slots_[exposed_ptr] = SlotMetadata{
           .slot_id = promoted_slot,
           .bytes_in_chunk = static_cast<size_t>(bytes),
           .tensor_offset = offset,
           .chunk_index = chunk_index,
       };
     }
-    return host_ptr;
+    return exposed_ptr;
   }
 
-  absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) override {
+  absl::Status release_staged_buffer(gsl::not_null<void*> exposed_ptr) override {
     SlotMetadata metadata;
     {
       absl::MutexLock lk(&mu_);
-      auto it = staged_slots_.find(host_ptr.get());
+      auto it = staged_slots_.find(exposed_ptr.get());
       if (it == staged_slots_.end()) {
-        return absl::NotFoundError("GpuNetStager: host ptr not found");
+        return absl::NotFoundError("HostPinnedGpuStager: exposed ptr not found");
       }
       metadata = it->second;
       staged_slots_.erase(it);
     }
     return streaming_->return_chunk(metadata.slot_id);
+  }
+
+  std::optional<MrSlab> mr_slab_for_ptr(gsl::not_null<void*> exposed_ptr) const override {
+    auto slab = pool_->slab_for_ptr(exposed_ptr);
+    if (!slab.has_value()) {
+      return std::nullopt;
+    }
+    return MrSlab{slab->base.get(), slab->bytes};
   }
 
   size_t get_chunk_size() const override {

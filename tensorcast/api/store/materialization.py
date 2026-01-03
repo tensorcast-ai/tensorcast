@@ -929,7 +929,7 @@ class MaterializationPipeline:
             device_id=int(device_id),
             storage_length=int(logical_total_size),
             vram_region_id=region.region_id,
-            region_base_offset=int(region_base_offset),
+            mapping_base_offset=int(region_base_offset),
         )
         layout.offsets.extend(offsets)
         digest = hashlib.sha256()
@@ -999,9 +999,9 @@ class MaterializationPipeline:
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
         client = self._runtime.ensure_client()
+        if mark_started is not None:
+            mark_started()
         try:
-            if mark_started is not None:
-                mark_started()
             response = client.materialize_into_target_v2(
                 artifact_id=artifact_id,
                 target_layout=layout,

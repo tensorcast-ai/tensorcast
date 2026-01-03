@@ -478,8 +478,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
 
         const size_t element_size = c10::elementSize(dtype);
         const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
-        const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
-
         torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
 
         std::shared_ptr<void> owner;
@@ -509,7 +507,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
   }
 
   std::unordered_map<std::string, torch::Tensor> state_dict;
-  std::unordered_set<std::uint64_t> handled_memory;
+  std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
   for (const auto& [device, tensor_offset] : tensor_device_offsets) {
     for (const auto& p : tensor_offset) {
       const std::string name = p.first;
@@ -526,39 +524,33 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         torch::Device tensor_device(torch::kCUDA, device);
         // LOG(INFO) << "Restore tensor " << name << " to device " << device << " with offset " << offset;
 
-        auto deleter = [from_ipc_shm](void* ptr) {
-          absl::Status status;
-          if (from_ipc_shm) {
-            status = cuda::close_ipc_mem_handle(ptr);
-          } else {
-            status = cuda::free(ptr);
-          }
-
-          if (!status.ok()) {
-            LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
-          }
-        };
-
-        if (offset == 0 && handled_memory.find(base_address) == handled_memory.end()) {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              c10::makeArrayRef(sizes),
-              c10::makeArrayRef(strides),
-              deleter,
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
-          handled_memory.insert(base_address);
-          // std::cerr << "Tensor " << name << " is restored to device " <<
-          // device << std::endl;
+        std::shared_ptr<void> owner;
+        auto it = owners.find(base_address);
+        if (it == owners.end()) {
+          owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm, device](void* ptr) {
+            if (device >= 0) {
+              absl::Status device_status = cuda::set_device(device);
+              if (!device_status.ok()) {
+                LOG(WARNING) << "CUDA cleanup set_device failed: " << device_status.message();
+              }
+            }
+            absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+            if (!status.ok()) {
+              LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
+            }
+          });
+          owners.emplace(base_address, owner);
         } else {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              sizes,
-              strides,
-              [](void* ptr) {},
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
+          owner = it->second;
         }
+
+        const torch::Tensor real_tensor = torch::from_blob(
+            reinterpret_cast<void*>(data_address),
+            c10::makeArrayRef(sizes),
+            c10::makeArrayRef(strides),
+            [owner](void*) mutable { owner.reset(); },
+            torch::TensorOptions().device(tensor_device).dtype(dtype));
+        state_dict[name] = real_tensor;
       } else {
         LOG(FATAL) << "Cannot find device " << device;
       }
@@ -880,6 +872,46 @@ std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
   }
 
   return std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t));
+}
+
+absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
+    int device_id,
+    std::uint64_t memory_ptr) {
+  if (memory_ptr == 0) {
+    return absl::InvalidArgumentError("memory_ptr must be non-zero");
+  }
+
+  auto set_device_status = cuda::set_device(device_id);
+  if (!set_device_status.ok()) {
+    return set_device_status;
+  }
+
+  void* base = nullptr;
+  size_t range_bytes = 0;
+  auto range_status = cuda::mem_get_address_range(&base, &range_bytes, reinterpret_cast<void*>(memory_ptr));
+  if (!range_status.ok() || base == nullptr) {
+    // Fall back to the legacy behavior: export directly from memory_ptr with a
+    // zero base offset. This preserves previous semantics when address-range
+    // queries are unavailable.
+    const std::string handle = get_cuda_memory_handle(device_id, memory_ptr);
+    if (handle.empty()) {
+      return absl::FailedPreconditionError("Failed to export CUDA IPC handle");
+    }
+    return std::make_pair(handle, static_cast<std::uint64_t>(0));
+  }
+
+  const auto base_addr = reinterpret_cast<std::uint64_t>(base);
+  if (memory_ptr < base_addr) {
+    return absl::FailedPreconditionError("CUDA address range base exceeds memory_ptr");
+  }
+  const std::uint64_t base_offset = memory_ptr - base_addr;
+
+  cudaIpcMemHandle_t handle;
+  auto ipc_status = cuda::get_ipc_mem_handle(&handle, base);
+  if (!ipc_status.ok()) {
+    return ipc_status;
+  }
+  return std::make_pair(std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t)), base_offset);
 }
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle) {

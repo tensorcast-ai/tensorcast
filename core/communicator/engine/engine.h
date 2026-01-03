@@ -22,7 +22,7 @@
 
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/engine/channel.h"
-#include "core/communicator/engine/dram_stager.h"
+#include "core/communicator/engine/host_pinned_cpu_stager.h"
 #include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/engine/message.h"
 #include "core/communicator/engine/mr_cache.h"
@@ -32,6 +32,7 @@
 namespace tensorcast::communicator::engine {
 
 class CommunicatorTestPeer;
+class GpuVramStagingPool;
 
 class Communicator {
  public:
@@ -129,7 +130,7 @@ class Communicator {
   absl::Status close_connection(const std::string& dst_ip, uint16_t dst_port);
 
   // Inject a UMA-backed lease provider for DRAM staging (optional).
-  void set_dram_lease_provider(const std::shared_ptr<DRAMStager::LeaseProvider>& provider);
+  void set_dram_lease_provider(const std::shared_ptr<HostPinnedCpuStager::LeaseProvider>& provider);
 
   // Lightweight UMA residency provider (reserved)
   struct ResidencyProvider {
@@ -250,8 +251,12 @@ class Communicator {
   uint32_t max_window_segments_ = 0;
   uint64_t direct_rdma_chunk_bytes_ = 0;
 
-  // GPU->CPU staging uses unified GPU MemoryStager only
+  // Host-pinned GPU staging uses unified GPU MemoryStager only.
   std::shared_ptr<engine::MemoryStager> gpu_memory_stager_;
+  // GPU VRAM staged-RDMA backend (when enabled).
+  std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_vram_stagers_;
+  std::unordered_map<int, std::shared_ptr<GpuVramStagingPool>> gpu_vram_pools_;
+  bool use_gpu_vram_staging_ = false;
 
   // Shared pinned memory pool for GPU operations
   std::shared_ptr<common::memory::PinnedBufferPool> gpu_memory_pool_;
@@ -274,12 +279,13 @@ class Communicator {
   // --- Simple NUMA mapping (Phase 3) ---
   // Mapping from NIC name -> CPU MemoryStager (pool per NUMA node)
   std::unordered_map<std::string, std::shared_ptr<MemoryStager>> nic_cpu_stagers_;
-  // Mapping from GPU id -> MemoryStager (GpuNetStager adapter per NUMA node)
+  // Mapping from GPU id -> MemoryStager (host-pinned GPU staging per NUMA node)
   std::unordered_map<int, std::shared_ptr<MemoryStager>> gpu_mem_stagers_;
 
   // Helpers to select NUMA-aware stagers
   std::shared_ptr<engine::MemoryStager> get_cpu_stager_for_nic(const std::string& nic_name) const;
   std::shared_ptr<engine::MemoryStager> get_gpu_mem_stager_for_id(int gpu_id) const;
+  std::shared_ptr<engine::MemoryStager> get_gpu_vram_stager_for_id(int gpu_id) const;
 
   absl::Mutex handshake_retry_mu_;
   absl::CondVar handshake_retry_cv_;
