@@ -1,0 +1,114 @@
+# Example: High-Performance RDMA Configuration with Multi-QP
+#
+# This configuration demonstrates how to enable multi-QP functionality
+# for improved RDMA throughput and load balancing across multiple NICs.
+#
+# Usage:
+#   tensorcast-daemon --config=multi_qp_config.yaml
+
+meta:
+  description: "High-performance RDMA configuration with multi-QP support"
+  cluster_token: "multi-qp-demo"
+
+server:
+  listen:
+    host: 0.0.0.0
+    port: 50052
+  p2p_listen:
+    host: 0.0.0.0  # Bind to all interfaces for RDMA
+    port: 65090
+  storage_path: /data/models
+  num_threads: 32
+
+engine:
+  artifact_chunk_bytes: 512MB
+  streaming_buffer_chunks: 32
+  memory_tiers:
+    enable_preemptible: false
+    stable_bytes: 16GB
+    preemptible_limit_bytes: 0
+    preemptible_low_watermark_ratio: 0.4
+
+pinned_memory:
+  allocation_timeout: 60s
+  classes:
+    - name: engine
+      slice_bytes: 512MB
+      pool_bytes: 16GB
+    - name: comm_gpu
+      slice_bytes: 32MB  # Larger slices for multi-QP efficiency
+      pool_bytes: 32GB  # Larger pool for concurrent multi-QP operations
+      rdma_preregister: true
+    - name: comm_cpu
+      slice_bytes: 8MB
+      pool_bytes: 4GB
+      rdma_preregister: true
+
+high_availability:
+  enabled: true
+  global_store_endpoints:
+    - host: 127.0.0.1
+      port: 50051
+  heartbeat_interval: 5s
+  periodic_sync_interval: 10s
+
+lifecycle:
+  gpu_memory_limit_fraction: 0.8
+  enable_periodic_eviction: true
+  eviction_loop_interval: 2s
+  sessions_ttl: 120s
+  locks_ttl: 240s
+
+# Multi-QP RDMA Configuration
+communicator:
+  enable_rdma: true  # Enable RDMA transports
+
+  stager:
+    stage_cpu_for_rdma: true
+    buffers_per_flow: 8  # More buffers for multi-QP parallelism
+    max_window_segments: 0
+    expected_gpu_channels: 0
+
+  rdma:
+    # Basic QP tuning
+    outstanding_wr: 128  # More outstanding WRs for multi-QP
+    ack_ttl_ms: 60000     # Longer timeout for high-latency fabrics
+    traffic_class: 186    # TOS value (leave default unless QoS configured)
+    qp_timeout: 18       # QP timeout in microseconds
+    qp_retry: 7          # Retry count
+
+    # Multi-QP Configuration
+    qp_count: 4          # Create 4 QPs per transport (1-16)
+    bonding_balance: true # Enable LAG port balancing
+
+    # VRAM staging configuration (optional)
+    staging_backend: STAGED_RDMA_BACKEND_HOST_PINNED  # or STAGED_RDMA_BACKEND_GPU_VRAM
+    vram_pool_bytes_per_gpu: 8GB    # Only needed for GPU_VRAM backend
+    vram_slice_bytes: 32MB           # Only needed for GPU_VRAM backend
+
+  transport:
+    tcp_conn_count: 16   # More TCP connections for control plane
+    connect_timeout_sec: 15
+    tcp_tos: 0
+    so_reuseport: true
+
+  affinity:
+    enable: false
+    simple_numa:
+      enable: false
+      # Example NUMA mapping for multi-QP:
+      # nodes:
+      #   - id: 0
+      #     nics: ["mlx5_0", "mlx5_1"]
+      #     gpus: [0, 1]
+      #     is_default: true
+      #   - id: 1
+      #     nics: ["mlx5_2", "mlx5_3"]
+      #     gpus: [2, 3]
+      nodes: []
+
+observability:
+  logging:
+    level: INFO
+    file: ""
+    vlog_level: 0

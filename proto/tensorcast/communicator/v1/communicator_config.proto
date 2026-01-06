@@ -20,6 +20,9 @@ message RdmaConfig {
   int32 traffic_class = 3; // default: 186 (TOS)
   int32 qp_timeout = 4; // default: 20
   int32 qp_retry = 5; // default: 7
+  // Multi-QP configuration
+  int32 qp_count = 4; // default: 1 (single QP), range: 1-16
+  bool bonding_balance = 1; // default: false (disable LAG port balancing)
   enum StagedRdmaBackend {
     STAGED_RDMA_BACKEND_UNSPECIFIED = 0; // treated as STAGED_RDMA_BACKEND_HOST_PINNED
     STAGED_RDMA_BACKEND_HOST_PINNED = 1; // stage into host-pinned buffers (default)

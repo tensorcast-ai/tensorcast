@@ -15,7 +15,7 @@ RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t 
     : context_(context),
       dev_(std::move(dev)),
       io_thread_(std::move(th)),
-      qp_count_(1),
+      qp_count_(context->qp_count()),
       next_qp_index_(0),
       local_gid_({}),
       gid_idx_(-1),
@@ -65,9 +65,9 @@ misc::result_t RdmaTransport::connect(RdmaTransportInfo* info) {
     return res;
   }
 
-  // check env TENSORCAST_BONDING_BALANCE
-  const char* balance_enable = std::getenv("TENSORCAST_BONDING_BALANCE");
-  if (balance_enable != nullptr && std::string(balance_enable) == "1") {
+  // Apply bonding balance if enabled in config
+  if (context_->bonding_balance() && qp_count_ > 1) {
+    LOG(INFO) << "Applying LAG port balancing for " << qp_count_ << " QPs";
     for (size_t i = 0; i < qps_.size(); ++i) {
       int lag = (i % 2) + 1;
       do_modify_qp_lag_port(qps_[i], lag);
@@ -97,25 +97,17 @@ misc::result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
 }
 
 misc::result_t RdmaTransport::do_init_qp() {
-  // Get QP count from environment variable
-  const char* qp_count_env = std::getenv("TENSORCAST_QP_COUNT");
-  if (qp_count_env != nullptr) {
-    try {
-      qp_count_ = std::stoi(qp_count_env);
-      if (qp_count_ <= 0) {
-        LOG(WARNING) << "Invalid TENSORCAST_QP_COUNT: " << qp_count_env << ", using default 1";
-        qp_count_ = 1;
-      } else if (qp_count_ > 16) {
-        LOG(WARNING) << "TENSORCAST_QP_COUNT too large: " << qp_count_ << ", limiting to 16";
-        qp_count_ = 16;
-      }
-    } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to parse TENSORCAST_QP_COUNT: " << qp_count_env << ", using default 1";
-      qp_count_ = 1;
-    }
+  // Validate QP count from config
+  if (qp_count_ <= 0) {
+    LOG(WARNING) << "Invalid qp_count: " << qp_count_ << ", using default 1";
+    qp_count_ = 1;
+  } else if (qp_count_ > 16) {
+    LOG(WARNING) << "qp_count too large: " << qp_count_ << ", limiting to 16";
+    qp_count_ = 16;
   }
 
-  LOG(INFO) << "Initializing " << qp_count_ << " QPs for device " << dev_->get_name();
+  LOG(INFO) << "Initializing " << qp_count_ << " QPs for device " << dev_->get_name()
+            << " (bonding_balance=" << (context_->bonding_balance() ? "true" : "false") << ")";
 
   struct ibv_qp_init_attr init_attr{};
   misc::CLEAR(init_attr);

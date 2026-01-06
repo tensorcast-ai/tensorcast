@@ -448,21 +448,33 @@ When `rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM`:
 
 Location: `transport/rdma_transport.{h,cc}` (QP, posting logic) and the RDMA paths in `engine/engine.cc`.
 
-#### Environment Variables
+#### Multi-QP Configuration
 
-The following environment variables can be used to tune RDMA performance and behavior:
+The following configuration options can be used to enable multi-QP functionality for improved RDMA performance:
 
-- **`TENSORCAST_QP_COUNT`**: Number of Queue Pairs (QPs) to create per RDMA transport connection.
-  - **Type**: Integer (1-16)
+- **`rdma.qp_count`**: Number of Queue Pairs (QPs) to create per RDMA transport connection.
+  - **Type**: int32
   - **Default**: 1 (single QP)
+  - **Range**: 1-16
   - **Description**: When set to N > 1, creates N QPs for each RDMA transport and uses round-robin scheduling to distribute RDMA operations across them. This can improve throughput by leveraging multiple hardware queues and reducing contention.
-  - **Example**: `export TENSORCAST_QP_COUNT=4`
+  - **Example**:
+    ```yaml
+    communicator:
+      rdma:
+        qp_count: 4
+    ```
 
-- **`TENSORCAST_BONDING_BALANCE`**: Enable LAG (Link Aggregation Group) port balancing for multi-QP setups.
-  - **Type**: String ("0" or "1")
-  - **Default**: "0" (disabled)
-  - **Description**: When set to "1" and `TENSORCAST_QP_COUNT` > 1, automatically distributes QPs across different LAG ports to achieve load balancing across multiple physical links. This requires NIC LAG configuration.
-  - **Example**: `export TENSORCAST_BONDING_BALANCE=1`
+- **`rdma.bonding_balance`**: Enable LAG (Link Aggregation Group) port balancing for multi-QP setups.
+  - **Type**: bool
+  - **Default**: false (disabled)
+  - **Description**: When set to true and `qp_count` > 1, automatically distributes QPs across different LAG ports to achieve load balancing across multiple physical links. This requires NIC LAG configuration.
+  - **Example**:
+    ```yaml
+    communicator:
+      rdma:
+        qp_count: 4
+        bonding_balance: true
+    ```
 
 Key behaviors:
 - `Channel::RdmaEndpoint` tracks each `<local_dev>|<peer_dev>` pair and governs the handshake lifecycle: `Idle → ConnectRequested → Ready → Failed`. Reads arriving while the endpoint is not `Ready` are enqueued with a generation token and drained only after the handshake succeeds.
@@ -649,8 +661,8 @@ Tune `pinned_memory.classes[name=comm_gpu].slice_bytes`, `stager.buffers_per_flo
 
 ### Multi-QP Performance Optimization
 For high-throughput RDMA scenarios, consider using multiple Queue Pairs:
-- **Multi-QP Throughput**: Set `TENSORCAST_QP_COUNT` > 1 to leverage multiple hardware queues and reduce contention
-- **LAG Balancing**: Enable `TENSORCAST_BONDING_BALANCE=1` with NIC LAG configuration to distribute traffic across physical links
+- **Multi-QP Throughput**: Set `rdma.qp_count` > 1 to leverage multiple hardware queues and reduce contention
+- **LAG Balancing**: Enable `rdma.bonding_balance: true` with NIC LAG configuration to distribute traffic across physical links
 - **Optimal QP Count**: Typical values range from 2-8 QPs depending on hardware capabilities and workload patterns
 - **Monitoring**: Monitor per-device completion queues to ensure balanced load distribution across QPs
 
