@@ -50,8 +50,14 @@ sc_header_only_library(
 
 sc_cc_library(
     name = "ibv_wrap_lib",
-    srcs = ["misc/ibv_wrap.cc"],
-    hdrs = ["misc/ibv_wrap.h"],
+    srcs = [
+        "misc/ibv_wrap.cc",
+        "misc/mlx5_warp.cc",
+    ],
+    hdrs = [
+        "misc/ibv_wrap.h",
+        "misc/mlx5_warp.h",
+    ],
     defines = select({
         ":use_mock_ibv": ["USE_MOCK_IBV"],
         "//conditions:default": [],
