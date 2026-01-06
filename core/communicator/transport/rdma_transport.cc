@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <utility>
 
@@ -15,6 +15,8 @@ RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t 
     : context_(context),
       dev_(std::move(dev)),
       io_thread_(std::move(th)),
+      qp_count_(1),
+      next_qp_index_(0),
       local_gid_({}),
       gid_idx_(-1),
       ready_(false),
@@ -30,10 +32,14 @@ RdmaTransport::~RdmaTransport() {
   }
 
   io_thread_->unregister_transport(this);
-  if (qp_ != nullptr) {
-    CHECK_WARN(misc::wrap_ibv_destroy_qp(qp_), "failed to destroy qp");
-    qp_ = nullptr;
+
+  // Destroy all QPs
+  for (auto qp : qps_) {
+    if (qp != nullptr) {
+      CHECK_WARN(misc::wrap_ibv_destroy_qp(qp), "failed to destroy qp");
+    }
   }
+  qps_.clear();
 }
 
 misc::result_t RdmaTransport::read(read_request_t request) {
@@ -58,6 +64,16 @@ misc::result_t RdmaTransport::connect(RdmaTransportInfo* info) {
     std::memset(&peer_info_, 0, sizeof(peer_info_));
     return res;
   }
+
+  // check env TENSORCAST_BONDING_BALANCE
+  const char* balance_enable = std::getenv("TENSORCAST_BONDING_BALANCE");
+  if (balance_enable != nullptr && std::string(balance_enable) == "1") {
+    for (size_t i = 0; i < qps_.size(); ++i) {
+      int lag = (i % 2) + 1;
+      do_modify_qp_lag_port(qps_[i], lag);
+    }
+  }
+
   ready_.store(true);
   if (io_thread_ != nullptr) {
     io_thread_->notify_send();
@@ -67,17 +83,40 @@ misc::result_t RdmaTransport::connect(RdmaTransportInfo* info) {
 }
 
 misc::result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
+  if (qps_.empty()) {
+    return misc::FAILED;
+  }
   info->link_layer = dev_->get_link();
   info->ib_port = dev_->get_port();
   info->mtu = IBV_MTU_4096;
   info->psn = 0;
-  info->qpn = qp_->qp_num;
+  info->qpn = qps_[0]->qp_num; // Use first QP as primary
   info->lid = 0;
   std::memcpy(info->gid, local_gid_.raw, 16);
   return misc::SUCCESS;
 }
 
 misc::result_t RdmaTransport::do_init_qp() {
+  // Get QP count from environment variable
+  const char* qp_count_env = std::getenv("TENSORCAST_QP_COUNT");
+  if (qp_count_env != nullptr) {
+    try {
+      qp_count_ = std::stoi(qp_count_env);
+      if (qp_count_ <= 0) {
+        LOG(WARNING) << "Invalid TENSORCAST_QP_COUNT: " << qp_count_env << ", using default 1";
+        qp_count_ = 1;
+      } else if (qp_count_ > 16) {
+        LOG(WARNING) << "TENSORCAST_QP_COUNT too large: " << qp_count_ << ", limiting to 16";
+        qp_count_ = 16;
+      }
+    } catch (const std::exception& e) {
+      LOG(WARNING) << "Failed to parse TENSORCAST_QP_COUNT: " << qp_count_env << ", using default 1";
+      qp_count_ = 1;
+    }
+  }
+
+  LOG(INFO) << "Initializing " << qp_count_ << " QPs for device " << dev_->get_name();
+
   struct ibv_qp_init_attr init_attr{};
   misc::CLEAR(init_attr);
   init_attr.send_cq = dev_->get_cq();
@@ -89,22 +128,28 @@ misc::result_t RdmaTransport::do_init_qp() {
   init_attr.cap.max_recv_sge = 1;
   init_attr.cap.max_inline_data = 256;
 
-  COMM_CHECK(dev_->create_qp(&qp_, &init_attr));
+  // Create all QPs
+  for (int i = 0; i < qp_count_; i++) {
+    struct ibv_qp* qp = nullptr;
+    COMM_CHECK(dev_->create_qp(&qp, &init_attr));
+    qps_.push_back(qp);
 
-  struct ibv_qp_attr qp_attr{};
-  misc::CLEAR(qp_attr);
-  qp_attr.qp_state = IBV_QPS_INIT;
-  qp_attr.pkey_index = 0;
-  qp_attr.port_num = dev_->get_port();
-  qp_attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
-  COMM_CHECK(
-      misc::wrap_ibv_modify_qp(qp_, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
+    // Initialize QP state
+    struct ibv_qp_attr qp_attr{};
+    misc::CLEAR(qp_attr);
+    qp_attr.qp_state = IBV_QPS_INIT;
+    qp_attr.pkey_index = 0;
+    qp_attr.port_num = dev_->get_port();
+    qp_attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_READ;
+    COMM_CHECK(
+        misc::wrap_ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS));
+  }
 
   COMM_CHECK(dev_->get_best_gid(&local_gid_, &gid_idx_));
 
-  LOG(INFO) << "init qp done:"
-            << " dev=" << dev_->get_name() << ", qpn=" << qp_->qp_num << ", type=" << qp_->qp_type
-            << ", gid-idx=" << gid_idx_ << ", gid=" << misc::gid2str(local_gid_.raw);
+  LOG(INFO) << "init " << qp_count_ << " qps done:"
+            << " dev=" << dev_->get_name() << ", first_qpn=" << qps_[0]->qp_num << ", gid-idx=" << gid_idx_
+            << ", gid=" << misc::gid2str(local_gid_.raw);
   return misc::SUCCESS;
 }
 
@@ -132,12 +177,16 @@ misc::result_t RdmaTransport::do_modify_qp_rtr() {
   // to fail with ENODEV during RTR. Always use the port associated with the
   // local NetDev to avoid that mismatch.
   qp_attr.ah_attr.port_num = dev_->get_port();
-  COMM_CHECK(
-      misc::wrap_ibv_modify_qp(
-          qp_,
-          &qp_attr,
-          IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
-              IBV_QP_MIN_RNR_TIMER));
+
+  // Modify all QPs to RTR state
+  for (auto qp : qps_) {
+    COMM_CHECK(
+        misc::wrap_ibv_modify_qp(
+            qp,
+            &qp_attr,
+            IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
+                IBV_QP_MIN_RNR_TIMER));
+  }
   return misc::SUCCESS;
 }
 
@@ -150,12 +199,16 @@ misc::result_t RdmaTransport::do_modify_qp_rts() {
   qp_attr.rnr_retry = 7;
   qp_attr.sq_psn = 0;
   qp_attr.max_rd_atomic = 1;
-  COMM_CHECK(
-      misc::wrap_ibv_modify_qp(
-          qp_,
-          &qp_attr,
-          IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
-              IBV_QP_MAX_QP_RD_ATOMIC));
+
+  // Modify all QPs to RTS state
+  for (auto qp : qps_) {
+    COMM_CHECK(
+        misc::wrap_ibv_modify_qp(
+            qp,
+            &qp_attr,
+            IBV_QP_STATE | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY | IBV_QP_SQ_PSN |
+                IBV_QP_MAX_QP_RD_ATOMIC));
+  }
   return misc::SUCCESS;
 }
 
@@ -208,8 +261,12 @@ misc::result_t RdmaTransport::do_post_send() {
   read_sge.length = local_tensor->get_bytes();
   read_sge.lkey = mr->lkey;
 
+  // Select QP using round robin
+  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
+  struct ibv_qp* selected_qp = qps_[qp_index];
+
   inflight_queue_.push(req);
-  auto res = misc::wrap_ibv_post_send(qp_, &read_wr, &read_bad_wr);
+  auto res = misc::wrap_ibv_post_send(selected_qp, &read_wr, &read_bad_wr);
   if (res) {
     req->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send failed: return=", res)));
     return misc::FAILED;
@@ -263,14 +320,19 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     inflight_queue_.push(request);
   }
 
-  auto res = misc::wrap_ibv_post_send(qp_, wrs.data(), &bad_wr);
+  // Select QP using round robin for multi-segment operations
+  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
+  struct ibv_qp* selected_qp = qps_[qp_index];
+
+  auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
   if (res) {
     request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
     LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
                  << " errno=" << errno;
     return misc::FAILED;
   }
-  LOG(INFO) << "[rdma_transport] Posted " << segs.size() << " RDMA READ WRs for request=" << request->get_key();
+  LOG(INFO) << "[rdma_transport] Posted " << segs.size() << " RDMA READ WRs on QP " << qp_index
+            << " for request=" << request->get_key();
   return misc::SUCCESS;
 }
 
@@ -294,6 +356,21 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
     }
   }
   return misc::SUCCESS;
+}
+
+misc::result_t RdmaTransport::do_modify_qp_lag_port(struct ibv_qp* qp, int lag = 1) {
+  int ret = wrap_mlx5dv_modify_qp_lag_port(qp, lag);
+  if (ret != 1) {
+    LOG(WARNING) << "Failed to mlx5dv_modify_qp_lag_port qp [" << qp->qp_num << "] to port: " << lag
+                 << ", qp type: " << qp->qp_type;
+    return misc::FAILED;
+  } else {
+    uint8_t set_port = 0xff, act_port = 0xff;
+    wrap_mlx5dv_query_qp_lag_port(qp, &set_port, &act_port);
+    LOG(INFO) << "QP LAG Port: QP: " << qp->qp_num << ", Modify Port: " << lag
+              << ", Set to Port: " << static_cast<int>(set_port) << ", Active Port: " << static_cast<int>(act_port);
+    return misc::SUCCESS;
+  }
 }
 
 misc::result_t RdmaTransport::do_post_recv() {

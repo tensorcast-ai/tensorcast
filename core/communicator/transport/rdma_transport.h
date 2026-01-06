@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
@@ -8,6 +8,7 @@
 #include <memory>
 #include <vector>
 
+#include "core/communicator/misc/mlx5_warp.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/request.h"
 
@@ -83,7 +84,9 @@ class RdmaTransport {
   RdmaContext* context_;
   net_dev_t dev_;
   rdma_thread_t io_thread_;
-  struct ibv_qp* qp_{};
+  std::vector<struct ibv_qp*> qps_;
+  int qp_count_;
+  std::atomic<int> next_qp_index_;
   union ibv_gid local_gid_;
   int gid_idx_;
   RdmaTransportInfo peer_info_;
@@ -93,6 +96,8 @@ class RdmaTransport {
   misc::Queue<read_request_t> inflight_queue_;
 
   std::function<void(const read_request_t&)> ack_cb_;
+
+  misc::result_t do_modify_qp_lag_port(struct ibv_qp* qp, int lag = 1);
 
   friend class RdmaThread;
   int transport_index_{};

@@ -448,6 +448,22 @@ When `rdma.staging_backend=STAGED_RDMA_BACKEND_GPU_VRAM`:
 
 Location: `transport/rdma_transport.{h,cc}` (QP, posting logic) and the RDMA paths in `engine/engine.cc`.
 
+#### Environment Variables
+
+The following environment variables can be used to tune RDMA performance and behavior:
+
+- **`TENSORCAST_QP_COUNT`**: Number of Queue Pairs (QPs) to create per RDMA transport connection.
+  - **Type**: Integer (1-16)
+  - **Default**: 1 (single QP)
+  - **Description**: When set to N > 1, creates N QPs for each RDMA transport and uses round-robin scheduling to distribute RDMA operations across them. This can improve throughput by leveraging multiple hardware queues and reducing contention.
+  - **Example**: `export TENSORCAST_QP_COUNT=4`
+
+- **`TENSORCAST_BONDING_BALANCE`**: Enable LAG (Link Aggregation Group) port balancing for multi-QP setups.
+  - **Type**: String ("0" or "1")
+  - **Default**: "0" (disabled)
+  - **Description**: When set to "1" and `TENSORCAST_QP_COUNT` > 1, automatically distributes QPs across different LAG ports to achieve load balancing across multiple physical links. This requires NIC LAG configuration.
+  - **Example**: `export TENSORCAST_BONDING_BALANCE=1`
+
 Key behaviors:
 - `Channel::RdmaEndpoint` tracks each `<local_dev>|<peer_dev>` pair and governs the handshake lifecycle: `Idle → ConnectRequested → Ready → Failed`. Reads arriving while the endpoint is not `Ready` are enqueued with a generation token and drained only after the handshake succeeds.
 - When an endpoint sits in `Failed` backoff, new RDMA responses queue their reads and a dedicated retry worker schedules the next handshake exactly at `next_retry_at`, so queued requests resume automatically once the backoff expires (no additional control traffic is required to nudge the handshake).
@@ -630,6 +646,13 @@ Tune `pinned_memory.classes[name=comm_gpu].slice_bytes`, `stager.buffers_per_flo
 2. **Buffer Count**: Increase for concurrent transfers (e.g., replica parallel loading).
 3. **Pinned Pool Headroom**: Ensure `pinned_memory.classes[name=comm_gpu].pool_bytes` covers simultaneous inflight stages on both ends.
 4. **Device Selection**: Ensure the correct `device_id` so `cuda::set_device` avoids cross-GPU copies.
+
+### Multi-QP Performance Optimization
+For high-throughput RDMA scenarios, consider using multiple Queue Pairs:
+- **Multi-QP Throughput**: Set `TENSORCAST_QP_COUNT` > 1 to leverage multiple hardware queues and reduce contention
+- **LAG Balancing**: Enable `TENSORCAST_BONDING_BALANCE=1` with NIC LAG configuration to distribute traffic across physical links
+- **Optimal QP Count**: Typical values range from 2-8 QPs depending on hardware capabilities and workload patterns
+- **Monitoring**: Monitor per-device completion queues to ensure balanced load distribution across QPs
 
 ---
 
