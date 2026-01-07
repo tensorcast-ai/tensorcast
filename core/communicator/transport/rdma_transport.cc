@@ -351,14 +351,14 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
 }
 
 misc::result_t RdmaTransport::do_modify_qp_lag_port(struct ibv_qp* qp, int lag = 1) {
-  int ret = wrap_mlx5dv_modify_qp_lag_port(qp, lag);
+  int ret = misc::wrap_mlx5dv_modify_qp_lag_port(qp, lag);
   if (ret != 1) {
     LOG(WARNING) << "Failed to mlx5dv_modify_qp_lag_port qp [" << qp->qp_num << "] to port: " << lag
                  << ", qp type: " << qp->qp_type;
     return misc::FAILED;
   } else {
     uint8_t set_port = 0xff, act_port = 0xff;
-    wrap_mlx5dv_query_qp_lag_port(qp, &set_port, &act_port);
+    misc::wrap_mlx5dv_query_qp_lag_port(qp, &set_port, &act_port);
     LOG(INFO) << "QP LAG Port: QP: " << qp->qp_num << ", Modify Port: " << lag
               << ", Set to Port: " << static_cast<int>(set_port) << ", Active Port: " << static_cast<int>(act_port);
     return misc::SUCCESS;

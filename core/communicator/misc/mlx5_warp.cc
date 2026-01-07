@@ -2,7 +2,7 @@
 
 #include "mlx5_warp.h"
 
-namespace stepkv {
+namespace tensorcast::communicator::misc {
 // Attempt to load a specific symbol version - fail silently
 #define LOAD_SYM_VERSION(handle, symbol, funcptr, version) \
   do {                                                     \
@@ -78,4 +78,4 @@ int wrap_mlx5dv_symbols(void) {
   return initResult;
 }
 
-} // namespace stepkv
+} // namespace tensorcast::communicator::misc

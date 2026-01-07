@@ -24,7 +24,7 @@ extern "C" {
 #ifndef MLX5_WARP_H_
 #define MLX5_WARP_H_
 
-namespace stepkv {
+namespace tensorcast::communicator::misc {
 
 //  static pthread_once_t initOnceControl;
 //  int initResult;
@@ -35,6 +35,6 @@ int wrap_mlx5dv_modify_qp_lag_port(struct ibv_qp* qp, uint8_t port_num);
 
 int wrap_mlx5dv_symbols(void);
 
-} // namespace stepkv
+} // namespace tensorcast::communicator::misc
 
 #endif // IBVWARP_H_
