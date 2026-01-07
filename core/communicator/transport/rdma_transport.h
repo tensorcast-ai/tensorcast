@@ -18,10 +18,13 @@ struct RdmaTransportInfo {
   uint32_t mtu = IBV_MTU_4096;
   uint32_t ib_port = 0;
   uint32_t link_layer = 0;
-  uint32_t qpn = 0;
+  uint32_t qpn = 0; // First QP number (backward compatibility)
   uint32_t lid = 0;
   uint32_t psn = 0;
   uint8_t gid[16] = {};
+  // Multi-QP support: qp_count indicates number of QPs, qpns[0..qp_count-1] contain QPNs
+  uint32_t qp_count = 1; // Number of QPs (1-16)
+  uint32_t qpns[16] = {}; // QPN array for all QPs
 };
 
 class RdmaContext; // fwd decl to avoid circular include

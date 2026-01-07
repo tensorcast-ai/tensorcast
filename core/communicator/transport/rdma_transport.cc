@@ -90,9 +90,16 @@ misc::result_t RdmaTransport::get_local_info(RdmaTransportInfo* info) {
   info->ib_port = dev_->get_port();
   info->mtu = IBV_MTU_4096;
   info->psn = 0;
-  info->qpn = qps_[0]->qp_num; // Use first QP as primary
+  info->qpn = qps_[0]->qp_num; // First QP (backward compatibility)
   info->lid = 0;
   std::memcpy(info->gid, local_gid_.raw, 16);
+
+  // Fill QPN array for multi-QP support
+  info->qp_count = static_cast<uint32_t>(qps_.size());
+  for (size_t i = 0; i < qps_.size() && i < 16; ++i) {
+    info->qpns[i] = qps_[i]->qp_num;
+  }
+
   return misc::SUCCESS;
 }
 
@@ -170,14 +177,33 @@ misc::result_t RdmaTransport::do_modify_qp_rtr() {
   // local NetDev to avoid that mismatch.
   qp_attr.ah_attr.port_num = dev_->get_port();
 
-  // Modify all QPs to RTR state
-  for (auto qp : qps_) {
+  // Determine number of remote QPNs available
+  // Backward compatibility: if qp_count is 0, assume single QP mode (old protocol)
+  uint32_t remote_qp_count = peer_info_.qp_count;
+  bool use_multi_qp = (remote_qp_count > 1);
+
+  // Modify each QP to RTR state with its corresponding remote QPN
+  for (size_t i = 0; i < qps_.size(); ++i) {
+    // For multi-QP: use corresponding remote QPN from array
+    if (use_multi_qp && i < remote_qp_count && peer_info_.qpns[i] != 0) {
+      qp_attr.dest_qp_num = peer_info_.qpns[i];
+    } else if (remote_qp_count == 1 && peer_info_.qpns[0] != 0) {
+      // Single QP mode with new protocol: use qpns[0]
+      qp_attr.dest_qp_num = peer_info_.qpns[0];
+    } else {
+      // Backward compatibility: use qpn field (old protocol)
+      qp_attr.dest_qp_num = peer_info_.qpn;
+    }
+
     COMM_CHECK(
         misc::wrap_ibv_modify_qp(
-            qp,
+            qps_[i],
             &qp_attr,
             IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC |
                 IBV_QP_MIN_RNR_TIMER));
+
+    LOG(INFO) << "QP[" << i << "] (local_qpn=" << qps_[i]->qp_num
+              << ") configured to connect to remote_qpn=" << qp_attr.dest_qp_num;
   }
   return misc::SUCCESS;
 }

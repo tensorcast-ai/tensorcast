@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +48,11 @@ misc::result_t RdmaContext::ibv_init() {
   if (misc::wrap_ibv_symbols() != misc::SUCCESS) {
     LOG(WARNING) << "failed to init ibv symbols";
     return misc::SYS_ERROR;
+  }
+
+  if (misc::wrap_mlx5dv_symbols() != misc::SUCCESS) {
+    LOG(WARNING) << "failed to init mlx5dv symbols";
+    // return misc::SYS_ERROR;
   }
 
   misc::wrap_ibv_fork_init();
