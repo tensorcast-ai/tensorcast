@@ -75,7 +75,7 @@ int wrap_mlx5dv_modify_qp_lag_port(struct ibv_qp* qp, uint8_t port_num) {
 
 int wrap_mlx5dv_symbols(void) {
   pthread_once(&initOnceControl, []() { initResult = buildMlx5dvSymbols(&mlx5dvSymbols); });
-  return misc::SUCCESS;
+  return initResult;
 }
 
 } // namespace tensorcast::communicator::misc

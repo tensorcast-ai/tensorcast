@@ -50,7 +50,7 @@ misc::result_t RdmaContext::ibv_init() {
     return misc::SYS_ERROR;
   }
 
-  if (misc::wrap_mlx5dv_symbols() != misc::SUCCESS) {
+  if (misc::wrap_mlx5dv_symbols() != 1) {
     LOG(WARNING) << "failed to init mlx5dv symbols";
     // return misc::SYS_ERROR;
   }
