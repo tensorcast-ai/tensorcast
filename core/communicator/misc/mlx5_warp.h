@@ -5,7 +5,15 @@
  */
 #include <dlfcn.h>
 #include <errno.h>
+extern "C" {
+#ifdef USE_MOCK_IBV
+#include "core/communicator/misc/ibv_mock.h" // NOLINT
+}
+#else
+}
 #include <infiniband/verbs.h>
+#endif
+
 #include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
