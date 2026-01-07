@@ -97,7 +97,7 @@ class RdmaTransport {
 
   std::function<void(const read_request_t&)> ack_cb_;
 
-  misc::result_t do_modify_qp_lag_port(struct ibv_qp* qp, int lag = 1);
+  misc::result_t do_modify_qp_lag_port(struct ibv_qp* qp, int lag);
 
   friend class RdmaThread;
   int transport_index_{};
