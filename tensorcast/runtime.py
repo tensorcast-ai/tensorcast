@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -295,6 +295,40 @@ def _split_address(address: str | None) -> tuple[str | None, int | None]:
         return address, None
 
 
+def _dial_address_from_health(candidate: str, health: "object") -> str:
+    """Derive a routable dial address from a candidate host:port and a health payload.
+
+    Global Store health responses include listen_host/listen_port (bind address), where
+    listen_host may legitimately be "0.0.0.0". That value is not a valid dial target.
+
+    Policy:
+    - Prefer the candidate host if provided (CLI / env / runtime record).
+    - Use the health port to backfill the real bound port (especially when config uses port=0).
+    - If candidate host is missing or unspecified, fall back to resolve_connect_host(...) behavior.
+    """
+
+    host_hint, port_hint = _split_address(candidate)
+    # Lazily import to avoid import cycles in CLI/runtime code paths.
+    from tensorcast.cli_utils.network import resolve_connect_host
+
+    # Pick host: prefer explicit candidate host (routable), otherwise derive from health listen_host.
+    host = host_hint
+    if not host:
+        listen_host = getattr(health, "listen_host", None)
+        host = resolve_connect_host(listen_host)
+    else:
+        # If user passed an unspecified bind-like host, normalize it.
+        host = resolve_connect_host(host)
+
+    # Pick port: prefer health.listen_port when available (it reflects actual bound port).
+    listen_port = getattr(health, "listen_port", None)
+    port = int(listen_port) if listen_port else (int(port_hint) if port_hint else None)
+
+    if host and port:
+        return f"{host}:{port}"
+    return candidate
+
+
 def _resolve_global_store(
     *,
     mode: Literal["connect", "start", "none"],
@@ -369,9 +403,7 @@ def _resolve_global_store(
                 )
             return _ResolvedGlobalStore(
                 mode="connect",
-                address=f"{health.listen_host}:{health.listen_port}"
-                if health.listen_host and health.listen_port
-                else candidate,
+                address=_dial_address_from_health(candidate, health),
                 session_id=runtime_gs_session,
                 owner=False,
                 cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
@@ -400,9 +432,7 @@ def _resolve_global_store(
                 )
             return _ResolvedGlobalStore(
                 mode="start",
-                address=f"{health.listen_host}:{health.listen_port}"
-                if health.listen_host and health.listen_port
-                else runtime_gs_address,
+                address=_dial_address_from_health(runtime_gs_address, health),
                 session_id=runtime_gs_session,
                 owner=False,
                 cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
