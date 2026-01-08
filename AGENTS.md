@@ -153,11 +153,6 @@ Backend selection is **runtime**, via `TENSORCAST_CUDA_BACKEND`:
 - Unset / `real`: use the real backend.
 - `fake`: allowed only in recognized test environments (fails fast otherwise). Signals: Bazel tests set `TEST_SRCDIR`/`TEST_TMPDIR`; PyTest sets `PYTEST_CURRENT_TEST`.
 
-Runtime dependencies (Linux):
-- Always required: CUDA runtime (`libcudart.so`).
-- Optional (real backend): NVIDIA driver (`libcuda.so.1`).
-- Optional (GPU hashing capability): NVRTC (`libnvrtc.so.12` / `libnvrtc.so`) is lazy-loaded; if unavailable, hashing falls back to CPU hashing.
-
 ```bash
 # Build Python extension (single binary supports real/fake at runtime)
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
@@ -173,11 +168,6 @@ bazel test //core/communicator/engine:gpu_ce_test --test_env=TENSORCAST_CUDA_BAC
 # To run with real CUDA, leave the env unset (or set TENSORCAST_CUDA_BACKEND=real):
 bazel test //daemon:grpc_service_impl_registration_test
 ```
-
-**Fake CUDA Mode Features:**
-- Simulates 4 GPUs for multi-device tests.
-- Streams/events execute callbacks asynchronously; operations are simulated.
-- Allocations are tracked but use CPU memory.
 
 ### Code Quality and Linting
 
@@ -237,6 +227,8 @@ third_party/   ─▶  BUILD files defining cc_library targets (no source code h
      ▼
 ./external/    ─▶  Actual headers & sources (populated after bazel build)
 ```
+
+**Mapping rule**: Each `./third_party/<lib>/BUILD` is the Bazel-compatible wrapper for a dependency fetched in `MODULE.bazel` (via `bazel_dep` or `http_archive`); the real files live under `./external/<lib>+/...` after a Bazel build.
 
 **To explore a third-party library**: look in `./external/`, not `third_party/`.
 

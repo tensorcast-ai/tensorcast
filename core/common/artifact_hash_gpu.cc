@@ -23,9 +23,9 @@
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash_internal.h"
-#include "core/common/cuda_api.h"
-#include "core/common/cuda_driver_api.h"
-#include "core/common/lazy_nvrtc.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_driver_api.h"
+#include "core/cuda/lazy_nvrtc.h"
 
 namespace tensorcast::common {
 

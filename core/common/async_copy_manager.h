@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -16,7 +16,8 @@
 #include "absl/container/flat_hash_map.h"
 
 #include "core/common/async_runtime.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_stream.h"
 
 namespace tensorcast::common {
 
@@ -119,17 +120,18 @@ class AsyncCopyManager {
   void shutdown_impl_(bool destroy_streams);
 
   // Internal helpers to lazily create and cache per-device non-blocking streams
-  absl::StatusOr<cudaStream_t> get_h2d_stream_(int device_id);
-  absl::StatusOr<cudaStream_t> get_d2h_stream_(int device_id);
-  absl::StatusOr<cudaStream_t> get_d2d_stream_(int device_id);
+  absl::StatusOr<cuda::CudaStream> get_h2d_stream_(int device_id);
+  absl::StatusOr<cuda::CudaStream> get_d2h_stream_(int device_id);
+  absl::StatusOr<cuda::CudaStream> get_d2d_stream_(int device_id);
   std::shared_ptr<AsyncRuntime> get_async_runtime_() const;
   void enqueue_callback_(std::function<void()> cb);
   void callback_loop_();
 
   absl::Mutex mu_;
-  absl::flat_hash_map<int, cudaStream_t> h2d_streams_ ABSL_GUARDED_BY(mu_);
-  absl::flat_hash_map<int, cudaStream_t> d2h_streams_ ABSL_GUARDED_BY(mu_);
-  absl::flat_hash_map<int, cudaStream_t> d2d_streams_ ABSL_GUARDED_BY(mu_);
+  cuda::CudaStreamPool stream_pool_;
+  absl::flat_hash_map<int, cuda::CudaStream> h2d_streams_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<int, cuda::CudaStream> d2h_streams_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<int, cuda::CudaStream> d2d_streams_ ABSL_GUARDED_BY(mu_);
 
   absl::Mutex callback_mu_;
   absl::CondVar callback_cv_;

@@ -1,13 +1,13 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/dynamic_library.h"
+#include "core/cuda/dynamic_library.h"
 
 #include <dlfcn.h>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 
-namespace tensorcast::common {
+namespace tensorcast::cuda {
 namespace {
 
 absl::StatusOr<void*> resolve_symbol_impl(void* handle, std::string_view symbol_name) {
@@ -69,4 +69,4 @@ absl::StatusOr<void*> DynamicLibrary::resolve_symbol(std::string_view symbol_nam
   return resolve_symbol_impl(handle_, symbol_name);
 }
 
-} // namespace tensorcast::common
+} // namespace tensorcast::cuda

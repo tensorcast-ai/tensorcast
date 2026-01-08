@@ -8,8 +8,8 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
         "//core/communicator:engine_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:store_engine_options",
         "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
         "//core/store/runtime/context:runtime_context",
@@ -27,8 +27,8 @@ cc_test(
     tags = ["requires_cuda"],
     deps = [
         "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
         "//core/communicator:engine_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:store_engine_options",
         "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
         "//core/store/runtime/context:runtime_context",

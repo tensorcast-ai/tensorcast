@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
 #include <cstdint>
@@ -16,7 +16,7 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 
 namespace tc = tensorcast;

@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_backend.h"
+#include "core/cuda/cuda_backend.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -793,6 +793,10 @@ absl::Status stream_create(cudaStream_t* stream) {
 
 absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int /*flags*/) {
   return stream_create(stream);
+}
+
+absl::Status stream_create_with_priority(cudaStream_t* stream, unsigned int flags, int /*priority*/) {
+  return stream_create_with_flags(stream, flags);
 }
 
 absl::Status stream_destroy(cudaStream_t stream) {

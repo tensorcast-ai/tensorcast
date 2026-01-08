@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <cstdio>
 #include <cstdlib>
@@ -11,10 +11,10 @@
 #include "absl/log/absl_check.h"
 #include "absl/log/log.h"
 #include "absl/strings/str_split.h"
-#include "core/common/cuda_api.h"
 #include "core/communicator/transport/net_dev.h"
 #include "core/communicator/transport/rdma_context.h"
 #include "core/communicator/transport/rdma_transport.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::communicator::transport {
 

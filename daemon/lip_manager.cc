@@ -15,6 +15,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
+#include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
@@ -184,8 +185,9 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     return dst_map_or.status();
   auto dst_map = std::move(*dst_map_or);
   void* dst_dev = dst_map.get();
-  if (auto st_set = cuda::set_device(target_device_id); !st_set.ok()) {
-    return st_set;
+  cuda::CudaDeviceGuard dst_guard(target_device_id);
+  if (!dst_guard.status().ok()) {
+    return dst_guard.status();
   }
   for (const auto& p : plan) {
     if (p.kind != store::loader::SegmentPiece::PAD || p.length == 0)
@@ -806,8 +808,10 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
         const uint64_t local = offset - seg->dst;
         const size_t avail = static_cast<size_t>(seg->len - local);
         const size_t take = std::min(remaining, avail);
-        if (auto st = cuda::set_device(seg->device_id); !st.ok())
-          return st;
+        cuda::CudaDeviceGuard seg_guard(seg->device_id);
+        if (!seg_guard.status().ok()) {
+          return seg_guard.status();
+        }
         auto st = cuda::memcpy(
             out, static_cast<uint8_t*>(seg->map->get()) + (seg->base + local), take, cudaMemcpyDeviceToHost);
         if (!st.ok())

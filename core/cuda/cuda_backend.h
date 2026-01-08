@@ -7,7 +7,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::cuda {
 
@@ -56,6 +56,12 @@ namespace tensorcast::cuda {
   X(absl::Status, close_ipc_mem_handle, (void* dev_ptr), dev_ptr)                                                     \
   X(absl::Status, stream_create, (cudaStream_t * stream), stream)                                                     \
   X(absl::Status, stream_create_with_flags, (cudaStream_t * stream, unsigned int flags), stream, flags)               \
+  X(absl::Status,                                                                                                     \
+    stream_create_with_priority,                                                                                      \
+    (cudaStream_t * stream, unsigned int flags, int priority),                                                        \
+    stream,                                                                                                           \
+    flags,                                                                                                            \
+    priority)                                                                                                         \
   X(absl::Status, stream_destroy, (cudaStream_t stream), stream)                                                      \
   X(absl::Status, stream_synchronize, (cudaStream_t stream), stream)                                                  \
   X(absl::Status, stream_wait_event, (cudaStream_t stream, cudaEvent_t event), stream, event)                         \

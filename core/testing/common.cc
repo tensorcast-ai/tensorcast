@@ -8,7 +8,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "core/common/artifact_hash.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 
 namespace tensorcast::testing {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/verification/verification_utils.h"
 
@@ -21,7 +21,7 @@
 #include "absl/synchronization/mutex.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/testing/common.h"
 

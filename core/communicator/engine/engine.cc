@@ -21,7 +21,6 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 
-#include "core/common/cuda_api.h"
 #include "core/common/system_capabilities.h"
 #include "core/communicator/engine/channel.h"
 #include "core/communicator/engine/engine.h"
@@ -33,6 +32,7 @@
 #include "core/communicator/engine/staging_flow_controller.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/rdma_context.h"
+#include "core/cuda/cuda_api.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"

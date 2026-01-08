@@ -8,8 +8,8 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
+#include "core/cuda/cuda_api.h"
 
 #include <torch/torch.h>
 

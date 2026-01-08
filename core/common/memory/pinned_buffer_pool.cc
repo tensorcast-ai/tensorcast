@@ -24,7 +24,7 @@
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::common::memory {
 

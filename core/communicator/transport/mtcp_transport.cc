@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -24,11 +24,11 @@
 #include "absl/strings/str_cat.h"
 
 #include "core/common/async_copy_manager.h"
-#include "core/common/device_guard.h"
 #include "core/common/memory/streaming_chunk_guard.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/misc/utils.h"
 #include "core/communicator/transport/mtcp_transport.h"
+#include "core/cuda/device_guard.h"
 #include "gsl/pointers"
 
 #include <chrono>
@@ -1229,7 +1229,7 @@ void MTcpTransport::recv_loop() {
                 int device_id = tensor->get_device_id();
                 device_id = std::max(device_id, 0);
 
-                tensorcast::common::DeviceGuard guard(device_id);
+                cuda::DeviceGuard guard(device_id);
                 if (!guard.status().ok()) {
                   LOG(ERROR) << "Failed to set CUDA device: " << guard.status();
                   return {misc::TRANSPORT_FAILED, result.cost};

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/async_copy_manager.h"
 
@@ -6,8 +6,8 @@
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
-#include "absl/log/absl_check.h"
 #include "core/common/trace/trace_cuda_async_fn.h"
+#include "core/cuda/device_guard.h"
 
 namespace tensorcast::common {
 
@@ -84,9 +84,9 @@ absl::Status CopyHandle::resolve_status_() const {
   }
 
   absl::Status final_status = absl::OkStatus();
-  absl::Status set_dev_status = cuda::set_device(device_id);
-  if (!set_dev_status.ok()) {
-    final_status = set_dev_status;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    final_status = guard.status();
   } else {
     final_status = cuda::get_last_error();
   }
@@ -124,7 +124,7 @@ void AsyncCopyManager::shutdown_impl_(bool destroy_streams) {
   }
 
   absl::MutexLock lock(&mu_);
-  auto destroy_map = [](absl::flat_hash_map<int, cudaStream_t>& m) { m.clear(); };
+  auto destroy_map = [](absl::flat_hash_map<int, cuda::CudaStream>& m) { m.clear(); };
 
   if (!destroy_streams) {
     destroy_map(h2d_streams_);
@@ -133,72 +133,55 @@ void AsyncCopyManager::shutdown_impl_(bool destroy_streams) {
     return;
   }
 
-  auto destroy_streams_map = [](absl::flat_hash_map<int, cudaStream_t>& m) {
-    for (auto& kv : m) {
-      if (kv.second != nullptr) {
-        // Ignore errors during shutdown.
-        ABSL_CHECK_OK(cuda::stream_destroy(kv.second));
-      }
-    }
-    m.clear();
-  };
-  destroy_streams_map(h2d_streams_);
-  destroy_streams_map(d2h_streams_);
-  destroy_streams_map(d2d_streams_);
+  stream_pool_.release_all();
+  destroy_map(h2d_streams_);
+  destroy_map(d2h_streams_);
+  destroy_map(d2d_streams_);
 }
 
-absl::StatusOr<cudaStream_t> AsyncCopyManager::get_h2d_stream_(int device_id) {
+absl::StatusOr<cuda::CudaStream> AsyncCopyManager::get_h2d_stream_(int device_id) {
   if (device_id < 0)
     return absl::InvalidArgumentError("invalid device_id for H2D stream");
   absl::MutexLock lock(&mu_);
   auto it = h2d_streams_.find(device_id);
   if (it != h2d_streams_.end())
     return it->second;
-  cudaStream_t s = nullptr;
-  auto st = cuda::set_device(device_id);
-  if (!st.ok())
-    return st;
-  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
-  if (!st.ok())
-    return st;
-  h2d_streams_.emplace(device_id, s);
-  return s;
+  auto stream_or = stream_pool_.get_stream(device_id, cuda::CudaStreamPriority::kDefault);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  h2d_streams_.emplace(device_id, *stream_or);
+  return *stream_or;
 }
 
-absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2h_stream_(int device_id) {
+absl::StatusOr<cuda::CudaStream> AsyncCopyManager::get_d2h_stream_(int device_id) {
   if (device_id < 0)
     return absl::InvalidArgumentError("invalid device_id for D2H stream");
   absl::MutexLock lock(&mu_);
   auto it = d2h_streams_.find(device_id);
   if (it != d2h_streams_.end())
     return it->second;
-  cudaStream_t s = nullptr;
-  auto st = cuda::set_device(device_id);
-  if (!st.ok())
-    return st;
-  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
-  if (!st.ok())
-    return st;
-  d2h_streams_.emplace(device_id, s);
-  return s;
+  auto stream_or = stream_pool_.get_stream(device_id, cuda::CudaStreamPriority::kDefault);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  d2h_streams_.emplace(device_id, *stream_or);
+  return *stream_or;
 }
 
-absl::StatusOr<cudaStream_t> AsyncCopyManager::get_d2d_stream_(int device_id) {
+absl::StatusOr<cuda::CudaStream> AsyncCopyManager::get_d2d_stream_(int device_id) {
   if (device_id < 0)
     return absl::InvalidArgumentError("invalid device_id for D2D stream");
   absl::MutexLock lock(&mu_);
   auto it = d2d_streams_.find(device_id);
   if (it != d2d_streams_.end())
     return it->second;
-  cudaStream_t s = nullptr;
-  auto st = cuda::set_device(device_id);
-  if (!st.ok())
-    return st;
-  st = cuda::stream_create_with_flags(&s, cudaStreamNonBlocking);
-  if (!st.ok())
-    return st;
-  d2d_streams_.emplace(device_id, s);
-  return s;
+  auto stream_or = stream_pool_.get_stream(device_id, cuda::CudaStreamPriority::kDefault);
+  if (!stream_or.ok()) {
+    return stream_or.status();
+  }
+  d2d_streams_.emplace(device_id, *stream_or);
+  return *stream_or;
 }
 
 absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
@@ -226,12 +209,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
   auto s_or = get_h2d_stream_(dst.device_id);
   if (!s_or.ok())
     return s_or.status();
-  cudaStream_t stream_to_use = *s_or;
+  cuda::CudaStream stream = *s_or;
+  cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
   {
-    auto set_dev_status = cuda::set_device(dst.device_id);
-    if (!set_dev_status.ok()) {
-      return set_dev_status;
+    cuda::CudaDeviceGuard guard(dst.device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
     }
   }
   folly::Executor::KeepAlive<> fallback_executor;
@@ -307,12 +291,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   auto s_or = get_d2d_stream_(dst.device_id);
   if (!s_or.ok())
     return s_or.status();
-  cudaStream_t stream_to_use = *s_or;
+  cuda::CudaStream stream = *s_or;
+  cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
   {
-    auto set_dev_status = cuda::set_device(dst.device_id);
-    if (!set_dev_status.ok()) {
-      return set_dev_status;
+    cuda::CudaDeviceGuard guard(dst.device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
     }
   }
   folly::Executor::KeepAlive<> fallback_executor;
@@ -382,12 +367,13 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
   auto s_or = get_d2h_stream_(src.device_id);
   if (!s_or.ok())
     return s_or.status();
-  cudaStream_t stream_to_use = *s_or;
+  cuda::CudaStream stream = *s_or;
+  cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
   {
-    auto set_dev_status = cuda::set_device(src.device_id);
-    if (!set_dev_status.ok()) {
-      return set_dev_status;
+    cuda::CudaDeviceGuard guard(src.device_id);
+    if (!guard.status().ok()) {
+      return guard.status();
     }
   }
   folly::Executor::KeepAlive<> fallback_executor;
@@ -475,7 +461,7 @@ absl::Status AsyncCopyManager::synchronize_h2d_stream(int device_id) {
   if (device_id < 0) {
     return absl::InvalidArgumentError("invalid device_id for H2D stream synchronize");
   }
-  cudaStream_t stream = nullptr;
+  cuda::CudaStream stream;
   {
     absl::MutexLock lock(&mu_);
     auto it = h2d_streams_.find(device_id);
@@ -484,14 +470,14 @@ absl::Status AsyncCopyManager::synchronize_h2d_stream(int device_id) {
     }
     stream = it->second;
   }
-  if (stream == nullptr) {
+  if (!stream.is_valid()) {
     return absl::OkStatus();
   }
-  auto set_dev_status = cuda::set_device(device_id);
-  if (!set_dev_status.ok()) {
-    return set_dev_status;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
-  return cuda::stream_synchronize(stream);
+  return cuda::stream_synchronize(stream.stream());
 }
 
 void AsyncCopyManager::enqueue_callback_(std::function<void()> cb) {

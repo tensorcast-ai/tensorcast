@@ -3,7 +3,7 @@
 #include "daemon/grpc_service_impl.h"
 
 #include <catch2/catch_test_macros.hpp>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"

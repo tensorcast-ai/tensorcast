@@ -7,11 +7,11 @@ cc_binary(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/common:cuda_api_lib",
         "//core/common:cuda_memory_lib",
         "//core/common:logging_init_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store/materialization/dataplane:file_partition_source",
         "//core/store/materialization/dataplane:gpu_memory_sink",
         "//core/store/materialization/dataplane:index_reader",

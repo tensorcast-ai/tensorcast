@@ -20,7 +20,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":test_helpers",
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store/materialization/dataplane:disk_dir_hash",
         "@nlohmann_json//:json",
     ],

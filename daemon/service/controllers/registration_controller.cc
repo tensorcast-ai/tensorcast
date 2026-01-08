@@ -20,6 +20,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/cuda_ipc_raii.h"
@@ -253,8 +254,9 @@ absl::Status copy_to_staging_from_coalesced_gpu(
     gsl::not_null<void*> src_dev,
     absl::Span<const store::loader::SegmentPiece> plan,
     uint64_t total_size) {
-  if (auto st = cuda::set_device(device_id); !st.ok()) {
-    return st;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   if (plan.empty()) {
     return cuda::memcpy(dst_dev, src_dev, static_cast<size_t>(total_size), cudaMemcpyDeviceToDevice);
@@ -334,8 +336,9 @@ absl::Status copy_to_staging_from_lip_sources(
     absl::Span<const RegisterStorageMeta> storages,
     IpcRegionRegistry& regions,
     int owner_pid) {
-  if (auto st = cuda::set_device(device_id); !st.ok()) {
-    return st;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   if (plan.empty()) {
     return absl::InvalidArgumentError("LIP local-stable copy requires a canonical segment plan");

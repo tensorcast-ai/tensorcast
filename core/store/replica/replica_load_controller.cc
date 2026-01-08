@@ -18,11 +18,11 @@
 #include "absl/time/clock.h"
 
 #include "core/common/async_copy_manager.h"
-#include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/memory_export_registry.h"

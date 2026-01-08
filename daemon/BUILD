@@ -155,6 +155,7 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":types_hdr",
         "//core/common:artifact_hash_lib",
+        "//core/cuda:device_guard_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:canonical_index",
         "//core/store/materialization/dataplane:segment_plan_source",
@@ -283,7 +284,7 @@ sc_header_only_library(
     hdrs = ["cuda_ipc_raii.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "@abseil-cpp//absl/status",
     ],
 )
@@ -481,6 +482,7 @@ sc_cc_library(
         ":session_lifecycle_hdr",
         ":status_utils",
         ":store_policy_resolver_lib",
+        "//core/cuda:device_guard_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
         "//proto/tensorcast/common/v1:common_cc",

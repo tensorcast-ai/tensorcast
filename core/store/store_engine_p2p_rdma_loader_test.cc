@@ -1,8 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // New test for StoreEngine using P2PLoader over RDMA.
 
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 #include <chrono>
 #include <filesystem>

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <filesystem>
 #include <fstream>
@@ -13,8 +13,8 @@
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
 #include "absl/time/time.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/replica.h"

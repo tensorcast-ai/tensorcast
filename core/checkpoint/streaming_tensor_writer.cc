@@ -1,11 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/checkpoint/streaming_tensor_writer.h"
 
 #include <algorithm>
 #include <cstring>
 #include "core/common/async_copy_manager.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"

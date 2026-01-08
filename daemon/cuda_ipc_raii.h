@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Lightweight RAII wrapper for CUDA IPC memory mappings used by the daemon.
 // This avoids scattered open/close pairs and double-close bugs.
@@ -14,7 +14,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::daemon {
 

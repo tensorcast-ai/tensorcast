@@ -5,7 +5,10 @@
 #include <cstring>
 #include <vector>
 
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_event.h"
+#include "core/cuda/cuda_runtime.h"
+#include "core/cuda/cuda_stream.h"
 
 TEST_CASE("CUDA API abstraction layer", "[cuda]") {
   namespace cuda = tensorcast::cuda;
@@ -154,6 +157,28 @@ TEST_CASE("CUDA API abstraction layer", "[cuda]") {
 
     status = cuda::free_host(host_ptr);
     REQUIRE(status.ok());
+  }
+
+  SECTION("Stream and event abstractions") {
+    auto& runtime = cuda::CudaRuntime::instance();
+    auto stream_or = runtime.stream_pool().get_stream(0, cuda::CudaStreamPriority::kDefault);
+    REQUIRE(stream_or.ok());
+
+    cuda::CudaStream stream = *stream_or;
+    cuda::CudaStreamGuard guard(stream);
+    REQUIRE(guard.status().ok());
+
+    cuda::CudaStream current = cuda::current_cuda_stream(stream.device_id());
+    REQUIRE(current.stream() == stream.stream());
+
+    cuda::CudaEvent event;
+    REQUIRE(event.record(stream).ok());
+
+    bool ready = false;
+    REQUIRE(event.query(&ready).ok());
+    if (!ready) {
+      REQUIRE(event.synchronize().ok());
+    }
   }
 
   SECTION("IPC handle operations") {

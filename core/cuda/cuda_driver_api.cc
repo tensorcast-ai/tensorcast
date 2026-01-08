@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_driver_api.h"
+#include "core/cuda/cuda_driver_api.h"
 
 #include <cuda_runtime_api.h>
 

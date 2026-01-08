@@ -9,8 +9,8 @@
 #include <initializer_list>
 
 #include "absl/status/status.h"
-#include "core/common/cuda_api.h"
-#include "core/common/cuda_driver_api.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_driver_api.h"
 
 namespace {
 

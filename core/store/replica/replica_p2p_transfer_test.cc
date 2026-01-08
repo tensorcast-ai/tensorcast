@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Multi-process test for loading Replica via P2P
 #include <atomic>
@@ -11,7 +11,7 @@
 #include <thread>
 #include <vector>
 
-#include "core/common/cuda_api.h" // Use unified CUDA API
+#include "core/cuda/cuda_api.h" // Use unified CUDA API
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 

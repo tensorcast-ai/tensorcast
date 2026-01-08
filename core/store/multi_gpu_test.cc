@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StoreEngine multi-GPU tests (B-series)
 // Test multi-GPU loading, cross-GPU operations, and device-specific eviction.
@@ -11,8 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/concurrency_utils.h"
 
 using namespace tensorcast::testing;

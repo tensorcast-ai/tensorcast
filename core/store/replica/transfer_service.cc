@@ -14,7 +14,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/runtime/pump.h"
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
 #include "core/store/materialization/dataplane/sinks/cpu_va_sink.h"

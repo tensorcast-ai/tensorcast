@@ -12,7 +12,7 @@
 #include "absl/status/status.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/eviction_service.h"
 
 namespace tensorcast::store::runtime {

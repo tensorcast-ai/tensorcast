@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <filesystem>
 #include <vector>
@@ -8,8 +8,8 @@
 #include "catch2/catch_test_macros.hpp"
 
 #include "core/common/artifact_verification.h"
-#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/runtime/pipeline/ingestion_pipeline.h"
 #include "core/store/runtime/context/runtime_context.h"

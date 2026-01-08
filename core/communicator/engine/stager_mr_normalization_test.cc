@@ -8,10 +8,10 @@
 
 #include "catch2/catch_test_macros.hpp"
 
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/transport/partition_tensor.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::communicator::engine {
 

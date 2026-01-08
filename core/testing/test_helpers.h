@@ -7,9 +7,9 @@
 #include <vector>
 
 #include "catch2/catch_test_macros.hpp"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace tensorcast::testing {

@@ -128,7 +128,7 @@ sc_cc_library(
     hdrs = ["components/device_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -305,10 +305,10 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_identity_lib",
         "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/contracts:materialization_request",
