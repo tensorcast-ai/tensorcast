@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -17,9 +17,9 @@
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"

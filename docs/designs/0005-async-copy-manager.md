@@ -87,7 +87,7 @@ SPB interaction patterns
 - No slot leaks or handle leaks under 1‑hour stress; error paths remain observable and consistent.# ReferencesPrimary components and call sites
 - SPB: `core/common/memory/streaming_pinned_buffer.{h,cc}`
 - UMA/VS: `core/common/memory/virtual_address_space.{h,cc}`, `core/store/replica/unified_memory_authority.{h,cc}`
-- CUDA wrappers: `core/common/cuda_api.h`
+- CUDA wrappers: `core/cuda/cuda_api.h`
 - Tracing: `core/common/trace/trace_cuda_async_fn.h`
 - Store load path (VS→GPU, H2D): `core/store/replica/transfer_helpers.*`, `core/store/replica/transfer_service.*`
 - Checkpoint write (GPU→disk, D2H): `core/checkpoint/streaming_tensor_writer.*`

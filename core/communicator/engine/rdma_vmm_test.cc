@@ -17,10 +17,10 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
-#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/ibv_wrap.h"
 #include "core/communicator/transport/rdma_context.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/test_helpers.h"
 
 namespace tensorcast::communicator::engine {

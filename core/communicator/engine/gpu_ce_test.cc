@@ -3,9 +3,9 @@
 #include <sstream>
 #include <thread>
 
-#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
 #include "core/communicator/misc/utils.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/common.h"
 #include "core/testing/test_helpers.h"
 

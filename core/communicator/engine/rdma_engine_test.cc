@@ -11,8 +11,8 @@
 #include "core/communicator/engine/engine.h"
 
 #include "absl/synchronization/mutex.h"
-#include "core/common/cuda_api.h"
 #include "core/communicator/misc/utils.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/test_helpers.h"
 
 namespace tensorcast::communicator::engine {

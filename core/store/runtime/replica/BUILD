@@ -10,8 +10,8 @@ sc_cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:communication_manager",
         "//core/store:communication_types",
         "//core/store:device_manager",

@@ -5,20 +5,20 @@ links:
   plan: ../plans/0044-runtime-cuda-backend-and-lazy-nvrtc.md
 areas: ["core", "daemon", "sdk", "build"]
 related_code:
-  - core/common/cuda_api.h
-  - core/common/cuda_backend.h
-  - core/common/cuda_backend.cc
-  - core/common/cuda_backend_real.cc
-  - core/common/cuda_backend_fake.cc
-  - core/common/cuda_backend_selection_test.cc
-  - core/common/cuda_driver_api.h
-  - core/common/cuda_driver_api.cc
-  - core/common/lazy_nvrtc.h
-  - core/common/lazy_nvrtc.cc
-  - core/common/dynamic_library.h
-  - core/common/dynamic_library.cc
-  - core/common/error_handling.h
-  - core/common/BUILD
+  - core/cuda/cuda_api.h
+  - core/cuda/cuda_backend.h
+  - core/cuda/cuda_backend.cc
+  - core/cuda/cuda_backend_real.cc
+  - core/cuda/cuda_backend_fake.cc
+  - core/cuda/cuda_backend_selection_test.cc
+  - core/cuda/cuda_driver_api.h
+  - core/cuda/cuda_driver_api.cc
+  - core/cuda/lazy_nvrtc.h
+  - core/cuda/lazy_nvrtc.cc
+  - core/cuda/dynamic_library.h
+  - core/cuda/dynamic_library.cc
+  - core/cuda/error_handling.h
+  - core/cuda/BUILD
   - core/common/artifact_hash_gpu.cc
   - core/checkpoint/checkpoint.cc
   - core/store/materialization/dataplane/view/view_transform_executor.cc
@@ -46,11 +46,11 @@ Important: TensorCast will continue to **always link and depend on** the CUDA Ru
 
 ## Implementation Status (2026-01-02)
 
-- Runtime backend selection and dispatch live in `core/common/cuda_backend.cc`, with test-only gating and the error banner; fake/real are compiled together via `core/common/BUILD`.
-- Driver entrypoints are centralized in `core/common/cuda_driver_api.{h,cc}` and NVRTC is lazy-loaded via `core/common/lazy_nvrtc.{h,cc}` + `core/common/dynamic_library.{h,cc}`.
+- Runtime backend selection and dispatch live in `core/cuda/cuda_backend.cc`, with test-only gating and the error banner; fake/real are compiled together via `core/cuda/BUILD`.
+- Driver entrypoints are centralized in `core/cuda/cuda_driver_api.{h,cc}` and NVRTC is lazy-loaded via `core/cuda/lazy_nvrtc.{h,cc}` + `core/cuda/dynamic_library.{h,cc}`.
 - NVRTC GPU hashing now falls back to CPU hashing when unavailable in `core/common/artifact_hash_gpu.cc`.
 - Call-site runtime behavior replaces `#ifdef USE_FAKE_CUDA` in `core/checkpoint/checkpoint.cc`, view executors, and `tensorcast/csrc/checkpoint_py.cc`.
-- Backend selection tests are covered in `core/common/cuda_backend_selection_test.cc` (includes fake-mode driver-load guard).
+- Backend selection tests are covered in `core/cuda/cuda_backend_selection_test.cc` (includes fake-mode driver-load guard).
 - Validated on a CUDA-enabled host with `bazel test //core/... --verbose_failures --test_tag_filters="-stress,-rdma,-multi_gpu" --test_output=errors --test_summary=detailed` (all tests passed; Bazel noted size-filter warnings).
 
 ## Runtime dependency model (Linux)
@@ -69,7 +69,7 @@ This keeps the codebase honest about the supported surface and avoids accidental
 # Problem Statement
 
 The current approach makes FakeCuda an alternate *build* rather than an alternate *runtime mode*:
-- Header-level type splitting (`core/common/cuda_api.h:14`) creates ongoing maintenance burden and semantic drift.
+- Header-level type splitting (`core/cuda/cuda_api.h:14`) creates ongoing maintenance burden and semantic drift.
 - Multiple call sites compile different behavior under `#ifdef USE_FAKE_CUDA` (e.g., `core/checkpoint/checkpoint.cc:462`, `core/store/materialization/dataplane/view/view_transform_executor.cc:56`), making it hard to reason about correctness and test coverage.
 - GPU hashing duplicates driver loading logic and hard-links NVRTC (`core/common/artifact_hash_gpu.cc:28`), making driverless / NVRTC-missing test environments brittle.
 
@@ -82,7 +82,7 @@ We want FakeCuda to be a **test-only runtime backend** with a single build artif
 1. Ship one C++ core + daemon build that can run with `real` or `fake` CUDA behavior.
 2. Default to `real` backend; `fake` must be explicitly requested and emits a very visible log.
 3. Enforce “fake is test-only” at runtime (fail fast if enabled outside a recognized test environment).
-4. Eliminate the type-level `#ifdef USE_FAKE_CUDA` split in `core/common/cuda_api.h` so fake/real share the same CUDA types.
+4. Eliminate the type-level `#ifdef USE_FAKE_CUDA` split in `core/cuda/cuda_api.h` so fake/real share the same CUDA types.
 5. Make NVRTC an optional, lazily loaded capability so driverless / NVRTC-missing test environments can still load the binary and use the fake backend.
 6. Centralize CUDA driver symbol resolution so VMM, NVRTC module loading, and other driver features share one loader.
 
@@ -97,13 +97,13 @@ We want FakeCuda to be a **test-only runtime backend** with a single build artif
 
 TensorCast currently chooses fake/real CUDA at **build time**:
 
-- Legacy build-time selection in `core/common/BUILD` used to select `cuda_fake.cc` vs `cuda_real.cc` and define `USE_FAKE_CUDA`; runtime dispatch now lives in `cuda_backend_fake.cc` + `cuda_backend_real.cc`.
-- `core/common/cuda_api.h:14` switches between real CUDA headers and a hand-rolled “minimal CUDA” type surface under `#ifndef USE_FAKE_CUDA`.
+- Legacy build-time selection in `core/cuda/BUILD` used to select `cuda_fake.cc` vs `cuda_real.cc` and define `USE_FAKE_CUDA`; runtime dispatch now lives in `cuda_backend_fake.cc` + `cuda_backend_real.cc`.
+- `core/cuda/cuda_api.h:14` switches between real CUDA headers and a hand-rolled “minimal CUDA” type surface under `#ifndef USE_FAKE_CUDA`.
 - Many codepaths are conditionally compiled:
   - Checkpoint restore behavior: `core/checkpoint/checkpoint.cc:462`.
   - View transform/ingest tensor device placement: `core/store/materialization/dataplane/view/view_transform_executor.cc:56`, `core/store/materialization/dataplane/view/view_ingest_executor.cc:58`.
   - GPU hashing (NVRTC + driver module path) is compiled out under fake: `core/common/artifact_hash_gpu.cc:28`.
-  - CUDA error name/string helpers branch on `USE_FAKE_CUDA`: `core/common/error_handling.h:37`.
+  - CUDA error name/string helpers branch on `USE_FAKE_CUDA`: `core/cuda/error_handling.h:37`.
   - Python extension exports build-time `is_fake_cuda()` and warns under `#ifdef USE_FAKE_CUDA`: `tensorcast/csrc/checkpoint_py.cc:919`.
 
 This approach forces two different builds to exist and creates drift between fake/real semantics.
@@ -111,7 +111,7 @@ This approach forces two different builds to exist and creates drift between fak
 ## Build graph coupling (must be addressed)
 
 `use_fake_cuda` is not scoped to `core/common`; it appears in multiple Bazel packages:
-- `core/common/BUILD:5`
+- `core/cuda/BUILD:5`
 - `core/checkpoint/BUILD:6`
 - `core/communicator/BUILD:7`
 - `core/store/BUILD:6`
@@ -193,14 +193,14 @@ The public `tensorcast::cuda::*` façade must not read environment variables dir
 
 ## Public façade contract (unchanged call sites)
 
-The design keeps the existing `tensorcast::cuda::*` API stable (`core/common/cuda_api.h`) but changes its implementation model:
+The design keeps the existing `tensorcast::cuda::*` API stable (`core/cuda/cuda_api.h`) but changes its implementation model:
 
 - Today: backend implementations live in `cuda_backend_real.cc` and `cuda_backend_fake.cc`, dispatched at runtime.
 - Target: one set of free functions that dispatch to either a `RealCudaBackend` or `FakeCudaBackend` instance.
 
 ### Explicitly in-scope operations
 
-The backend boundary must cover all operations currently exposed in `core/common/cuda_api.h`, including:
+The backend boundary must cover all operations currently exposed in `core/cuda/cuda_api.h`, including:
 - Runtime API wrappers: device selection, malloc/free, host malloc/free, memcpy/memset sync+async, pointer attributes, streams, events, device sync, error query, peer access, CUDA IPC handles.
 - Driver API wrappers (VMM subset): `cu_mem_*` functions.
 
@@ -254,7 +254,7 @@ To meet “at least as elegant as PyTorch” expectations, the implementation sh
    - This mirrors PyTorch’s `C10_LIBCUDA_DRIVER_API_REQUIRED(_)` pattern (`/data/workspace/pytorch/c10/cuda/driver_api.h`).
 
 2. **Single DynamicLibrary helper** (no scattered `dlopen/dlsym`)
-   - Provide a small `DynamicLibrary` wrapper in `core/common/` (Linux-only) and use it for:
+   - Provide a small `DynamicLibrary` wrapper in `core/cuda/` (Linux-only) and use it for:
      - NVRTC library loading (`libnvrtc.so.12`, then fallback to `libnvrtc.so`)
      - any optional libraries in the future.
    - Keep `dlopen/dlsym` usage isolated to this helper.
@@ -297,7 +297,7 @@ The intent is to keep FakeCuda as a deterministic test harness, not a production
 ## Driver API loading (centralized)
 
 Today, driver symbol loading is duplicated:
-- Legacy VMM loader in `core/common/cuda_real.cc` used `dlopen("libcuda.so") + dlsym` (now replaced by `DriverApi` in `core/common/cuda_backend_real.cc`).
+- Legacy VMM loader in `core/cuda/cuda_real.cc` used `dlopen("libcuda.so") + dlsym` (now replaced by `DriverApi` in `core/cuda/cuda_backend_real.cc`).
 - GPU hashing in `core/common/artifact_hash_gpu.cc` implements its own driver loader (`core/common/artifact_hash_gpu.cc:45`).
 
 Replace both with a single `DriverApi` loader that:
@@ -317,7 +317,7 @@ Requirements and edge cases:
 ### Required driver entrypoints catalog (grounded in current code)
 
 The initial `DriverApi` must resolve the union of symbols currently used by:
-- `core/common/cuda_backend_real.cc` VMM wrappers (via `DriverApi`).
+- `core/cuda/cuda_backend_real.cc` VMM wrappers (via `DriverApi`).
 - `core/common/artifact_hash_gpu.cc` NVRTC module load and launch (see `CudaDriverSymbols`).
 
 Required symbols (v1):
@@ -401,9 +401,9 @@ Preserve existing “driver vs NVRTC mismatch” diagnostics:
 The end state requires no `#ifdef USE_FAKE_CUDA` selection logic in code. The following are the “must migrate” sites:
 
 - Header-level type splitting:
-  - `core/common/cuda_api.h:14`
+  - `core/cuda/cuda_api.h:14`
 - Error name/string selection:
-  - `core/common/error_handling.h:37`
+  - `core/cuda/error_handling.h:37`
 - Checkpoint restore behavior selection:
   - `core/checkpoint/checkpoint.cc:462`
 - View executor device selection:
@@ -491,9 +491,9 @@ Config philosophy compatibility:
 # References
 
 - TensorCast current CUDA abstraction and selection:
-  - `core/common/BUILD` (current build-time select)
-  - `core/common/cuda_api.h` (type-level `#ifdef USE_FAKE_CUDA`)
-  - `core/common/cuda_backend_real.cc` / `core/common/cuda_backend_fake.cc`
+  - `core/cuda/BUILD` (current build-time select)
+  - `core/cuda/cuda_api.h` (type-level `#ifdef USE_FAKE_CUDA`)
+  - `core/cuda/cuda_backend_real.cc` / `core/cuda/cuda_backend_fake.cc`
   - `core/common/artifact_hash_gpu.cc` (NVRTC + driver module loader)
 - Unified config philosophy:
   - `docs/designs/0004-unified-runtime-config.md`
@@ -503,4 +503,4 @@ Config philosophy compatibility:
 # Open Questions
 
 - Should we allow `TENSORCAST_CUDA_BACKEND=fake` under `bazel run` for local dev, or keep the gate strictly to test runners only?
-- Do we want to standardize a single dynamic-library helper (like PyTorch `at::DynamicLibrary`) in `core/common/` for reuse by NVRTC and other optional deps?
+- Do we want to standardize a single dynamic-library helper (like PyTorch `at::DynamicLibrary`) in `core/cuda/` for reuse by NVRTC and other optional deps?

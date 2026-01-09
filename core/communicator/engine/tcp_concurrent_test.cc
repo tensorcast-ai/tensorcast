@@ -5,7 +5,7 @@
 #include <memory>
 #include <thread>
 #include <vector>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 #include "absl/log/check.h"
 #include "absl/log/globals.h"

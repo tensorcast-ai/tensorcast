@@ -8,8 +8,8 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
-#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/test_helpers.h"
 
 using namespace tensorcast::communicator;

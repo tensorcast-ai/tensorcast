@@ -41,11 +41,14 @@ sudo apt update
 sudo apt install -y software-properties-common libxml2 libstdc++-12-dev gcc-13 g++-13
 ```
 
-If Bazel fails to download LLVM, run `bash tools/download_and_set_local_llvm.sh`.
-
 ### Build
 
+If Bazel fails to download LLVM, run `bash tools/download_and_set_local_llvm.sh`.
+
 ```bash
+# Generate Python stubs via Buf and build C++ headers via Bazel
+bash tools/build_proto_python.sh
+
 uv venv
 uv sync --all-extras --all-groups --verbose
 

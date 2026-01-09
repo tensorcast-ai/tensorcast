@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/lazy_nvrtc.h"
+#include "core/cuda/lazy_nvrtc.h"
 
 #include <array>
 
@@ -33,7 +33,7 @@ absl::Status LazyNvrtc::ensure_loaded() {
 absl::Status LazyNvrtc::open_library() {
   std::string errors;
   for (const char* library_name : kNvrtcLibraryNames) {
-    absl::StatusOr<common::DynamicLibrary> lib_or = common::DynamicLibrary::open(library_name);
+    absl::StatusOr<DynamicLibrary> lib_or = DynamicLibrary::open(library_name);
     if (lib_or.ok()) {
       absl::MutexLock lock(&mutex_);
       library_ = std::move(lib_or.value());

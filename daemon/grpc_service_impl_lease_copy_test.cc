@@ -5,7 +5,7 @@
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"

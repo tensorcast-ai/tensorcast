@@ -21,7 +21,10 @@ uv run pytest tests/python/test_global_store.py
 
 ```bash
 # Core tests without stress, rdma, or multi_gpu tags
-bazel test //core/... --test_tag_filters="-stress,-rdma,-multi_gpu"
+bazel test //core/... --verbose_failures \
+  --test_tag_filters="-stress,-rdma,-multi_gpu" \
+  --test_output=errors \
+  --test_summary=detailed
 
 # Stress-only
 bazel test //core/... --test_tag_filters="+stress"

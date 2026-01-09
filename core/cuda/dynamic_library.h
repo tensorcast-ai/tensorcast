@@ -7,7 +7,7 @@
 
 #include "absl/status/statusor.h"
 
-namespace tensorcast::common {
+namespace tensorcast::cuda {
 
 class DynamicLibrary {
  public:
@@ -38,4 +38,4 @@ class DynamicLibrary {
   std::string name_;
 };
 
-} // namespace tensorcast::common
+} // namespace tensorcast::cuda

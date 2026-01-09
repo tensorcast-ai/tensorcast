@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/artifact_verification.h"
 
@@ -17,8 +17,9 @@
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
-#include "core/common/cuda_api.h"
-#include "core/common/error_handling.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/device_guard.h"
+#include "core/cuda/error_handling.h"
 
 // for convenience
 using json = nlohmann::json;
@@ -309,9 +310,9 @@ absl::Status ArtifactVerifier::read_data_chunk(
 
     if (device_id >= 0) {
       // GPU memory copy - set device first for safety
-      auto set_device_status = cuda::set_device(device_id);
-      if (!set_device_status.ok()) {
-        return set_device_status;
+      cuda::CudaDeviceGuard guard(device_id);
+      if (!guard.status().ok()) {
+        return guard.status();
       }
       auto memcpy_status = cuda::memcpy(dest_ptr + bytes_read, src_ptr, bytes_to_read, cudaMemcpyDeviceToHost);
       if (!memcpy_status.ok()) {
@@ -379,10 +380,11 @@ absl::StatusOr<ArtifactVerificationInfo> ArtifactVerifier::generate_verification
   }
 
   // Set CUDA device if needed
+  std::optional<cuda::CudaDeviceGuard> guard;
   if (device_id >= 0) {
-    auto set_device_status = cuda::set_device(device_id);
-    if (!set_device_status.ok()) {
-      return set_device_status;
+    guard.emplace(device_id);
+    if (!guard->status().ok()) {
+      return guard->status();
     }
   }
 
@@ -480,10 +482,11 @@ absl::Status ArtifactVerifier::verify_key_points(
   }
 
   // Set CUDA device if needed
+  std::optional<cuda::CudaDeviceGuard> guard;
   if (device_id >= 0) {
-    auto set_device_status = cuda::set_device(device_id);
-    if (!set_device_status.ok()) {
-      return set_device_status;
+    guard.emplace(device_id);
+    if (!guard->status().ok()) {
+      return guard->status();
     }
   }
 

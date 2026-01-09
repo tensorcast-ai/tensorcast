@@ -45,8 +45,8 @@
 #pragma clang diagnostic pop
 
 #include "core/common/artifact_verification.h" // Add verification support
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"

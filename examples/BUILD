@@ -14,7 +14,7 @@ cc_binary(
     srcs = ["gpu_hash_benchmark.cc"],
     deps = [
         "//core/common:artifact_hash_lib",
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store/materialization/dataplane:source_hash",
         "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/status:statusor",

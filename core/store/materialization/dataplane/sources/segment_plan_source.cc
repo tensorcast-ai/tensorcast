@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 
@@ -8,7 +8,7 @@
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "nlohmann/json.hpp"
 

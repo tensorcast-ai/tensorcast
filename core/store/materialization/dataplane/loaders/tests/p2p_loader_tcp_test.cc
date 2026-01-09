@@ -4,7 +4,7 @@
 #include <cstring>
 #include <random>
 #include <vector>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"

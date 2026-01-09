@@ -1,6 +1,6 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
-#include "core/common/cuda_backend.h"
+#include "core/cuda/cuda_backend.h"
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -18,8 +18,8 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
 #include "absl/synchronization/mutex.h"
-#include "core/common/cuda_driver_api.h"
-#include "core/common/error_handling.h"
+#include "core/cuda/cuda_driver_api.h"
+#include "core/cuda/error_handling.h"
 
 namespace tensorcast::cuda::real_backend {
 
@@ -197,7 +197,7 @@ absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
 
   // If not enabled, return the CUDA error
   if (!g_enable_same_process_ipc_fallback.load(std::memory_order_relaxed)) {
-    return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
+    return cuda_as_status(err, "cudaIpcOpenMemHandle");
   }
 
   // Fallback: if export and open happen in the same process (unit tests),
@@ -206,12 +206,12 @@ absl::Status open_ipc_handle(const std::string& handle, void** ptr) {
     absl::MutexLock lock(&g_ipc_map_mu);
     auto it = g_exported_ipc_map.find(handle);
     if (it == g_exported_ipc_map.end()) {
-      return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
+      return cuda_as_status(err, "cudaIpcOpenMemHandle");
     }
     const ExportedIpcInfo& info = it->second;
     // Ensure same process
     if (info.pid != getpid()) {
-      return common::cuda_as_status(err, "cudaIpcOpenMemHandle");
+      return cuda_as_status(err, "cudaIpcOpenMemHandle");
     }
     // Ensure device consistency when possible
     int cur_dev = -1;
@@ -246,7 +246,7 @@ absl::Status close_ipc_handle(void* ptr) {
       return absl::OkStatus();
     }
   }
-  return common::cuda_as_status(err, "cudaIpcCloseMemHandle");
+  return cuda_as_status(err, "cudaIpcCloseMemHandle");
 }
 
 absl::Status device_synchronize() {
@@ -314,6 +314,11 @@ absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int flags) 
   return absl::OkStatus();
 }
 
+absl::Status stream_create_with_priority(cudaStream_t* stream, unsigned int flags, int priority) {
+  SC_RETURN_IF_CUDA_ERROR(cudaStreamCreateWithPriority(stream, flags, priority));
+  return absl::OkStatus();
+}
+
 absl::Status stream_destroy(cudaStream_t stream) {
   SC_RETURN_IF_CUDA_ERROR(cudaStreamDestroy(stream));
   return absl::OkStatus();
@@ -377,7 +382,7 @@ absl::Status event_query(cudaEvent_t event, bool* ready) {
     *ready = false;
     return absl::OkStatus();
   }
-  return tensorcast::common::cuda_as_status(rc, "cudaEventQuery");
+  return cuda_as_status(rc, "cudaEventQuery");
 }
 
 absl::Status event_synchronize(cudaEvent_t event) {
@@ -457,7 +462,7 @@ absl::Status device_can_access_peer(int* can_access, int device, int peer_device
   int value = 0;
   cudaError_t err = cudaDeviceCanAccessPeer(&value, device, peer_device);
   if (err != cudaSuccess) {
-    return common::cuda_as_status(err, "cudaDeviceCanAccessPeer");
+    return cuda_as_status(err, "cudaDeviceCanAccessPeer");
   }
   *can_access = value;
   return absl::OkStatus();
@@ -476,7 +481,7 @@ absl::Status enable_peer_access(int current_device, int peer_device) {
     return absl::OkStatus();
   }
   if (err != cudaSuccess) {
-    return common::cuda_as_status(err, "cudaDeviceEnablePeerAccess");
+    return cuda_as_status(err, "cudaDeviceEnablePeerAccess");
   }
   return absl::OkStatus();
 }
@@ -491,7 +496,7 @@ absl::Status memcpy_peer_async(
   SC_RETURN_IF_CUDA_ERROR(cudaSetDevice(dst_device));
   cudaError_t err = cudaMemcpyPeerAsync(dst, dst_device, src, src_device, bytes, stream);
   if (err != cudaSuccess) {
-    return common::cuda_as_status(err, "cudaMemcpyPeerAsync");
+    return cuda_as_status(err, "cudaMemcpyPeerAsync");
   }
   return absl::OkStatus();
 }
@@ -658,7 +663,7 @@ absl::Status close_ipc_mem_handle(void* dev_ptr) {
   const cudaError_t err = cudaIpcCloseMemHandle(dev_ptr);
   if (err != cudaSuccess) {
     static_cast<void>(cudaGetLastError());
-    return common::cuda_as_status(err, "cudaIpcCloseMemHandle");
+    return cuda_as_status(err, "cudaIpcCloseMemHandle");
   }
   return absl::OkStatus();
 }

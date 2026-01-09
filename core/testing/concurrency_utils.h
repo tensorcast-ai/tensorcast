@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Shared utilities for StoreEngine concurrency tests.
 #pragma once
@@ -16,7 +16,7 @@
 
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"

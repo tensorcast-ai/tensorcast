@@ -14,10 +14,10 @@
 #include "absl/synchronization/mutex.h"
 #include "gsl/pointers"
 
-#include "core/common/cuda_api.h"
 #include "core/communicator/base/constants.h"
 #include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::communicator::engine {
 

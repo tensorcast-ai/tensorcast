@@ -13,12 +13,12 @@
 #include "absl/status/statusor.h"
 #include "gsl/pointers"
 
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_chunk_guard.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/memory_stager.h"
 #include "core/communicator/transport/partition_tensor.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::communicator::engine {
 

@@ -10,7 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
-#include "core/common/dynamic_library.h"
+#include "core/cuda/dynamic_library.h"
 
 namespace tensorcast::cuda {
 
@@ -71,7 +71,7 @@ class LazyNvrtc {
   absl::Mutex mutex_;
   std::once_flag load_once_;
   absl::Status library_status_ ABSL_GUARDED_BY(mutex_) = absl::OkStatus();
-  std::optional<common::DynamicLibrary> library_ ABSL_GUARDED_BY(mutex_);
+  std::optional<DynamicLibrary> library_ ABSL_GUARDED_BY(mutex_);
   NvrtcApi api_ ABSL_GUARDED_BY(mutex_);
 };
 

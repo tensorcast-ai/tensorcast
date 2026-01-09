@@ -52,6 +52,7 @@ absl::Status close_ipc_mem_handle(void* dev_ptr);
 // Stream management
 absl::Status stream_create(cudaStream_t* stream);
 absl::Status stream_create_with_flags(cudaStream_t* stream, unsigned int flags);
+absl::Status stream_create_with_priority(cudaStream_t* stream, unsigned int flags, int priority);
 absl::Status stream_destroy(cudaStream_t stream);
 absl::Status stream_synchronize(cudaStream_t stream);
 absl::Status stream_wait_event(cudaStream_t stream, cudaEvent_t event);

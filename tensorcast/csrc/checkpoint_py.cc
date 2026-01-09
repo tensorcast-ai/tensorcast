@@ -19,9 +19,9 @@
 #include "core/checkpoint/streaming_tensor_writer.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/const/granularity.h"
-#include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/cuda/cuda_api.h"
 
 #include <filesystem>
 #include <fstream>

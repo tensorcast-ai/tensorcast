@@ -1,9 +1,9 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "device_manager.h"
 
 #include <cstdio>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/provider.h"
 

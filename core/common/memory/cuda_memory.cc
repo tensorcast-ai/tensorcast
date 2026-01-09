@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -22,7 +22,7 @@
 #include <sstream>
 #include "absl/log/check.h"
 #include "absl/log/log.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::common::memory {
 
