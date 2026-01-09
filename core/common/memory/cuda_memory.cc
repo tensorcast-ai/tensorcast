@@ -18,8 +18,6 @@
 //  ----------------------------------------------------------------------------
 #include "core/common/memory/cuda_memory.h"
 
-#include <iomanip>
-#include <sstream>
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "core/cuda/cuda_api.h"
@@ -82,24 +80,13 @@ absl::Status GpuDeviceMemory::adopt_ipc_handle(const cudaIpcMemHandle_t& ipc_han
     return status;
   }
 
-  // Convert cudaIpcMemHandle_t to string for the abstraction layer
-  std::stringstream ss;
-  for (int i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
-    ss << std::hex << std::setw(2) << std::setfill('0')
-       << static_cast<int>(reinterpret_cast<const unsigned char*>(&ipc_handle)[i]);
-  }
-  std::string handle_str = ss.str();
-
-  void* opened_ptr = nullptr;
-  status = cuda::open_ipc_handle(handle_str, &opened_ptr);
-  if (!status.ok()) {
-    return status;
-  }
-  if (opened_ptr == nullptr) {
-    return absl::InternalError("open_ipc_handle returned nullptr");
+  auto mapping_or = cuda::IpcMapping::open(ipc_handle);
+  if (!mapping_or.ok()) {
+    return mapping_or.status();
   }
 
-  data_ = opened_ptr;
+  ipc_mapping_ = std::move(*mapping_or);
+  data_ = ipc_mapping_.get();
   size_ = size;
   device_id_ = device_id;
   handle_ = ipc_handle;
@@ -141,11 +128,7 @@ void GpuDeviceMemory::release_resources() {
           LOG(ERROR) << "GpuDeviceMemory::release_resources - set_device(" << device_id_
                      << ") failed before ipc close: " << status;
         }
-        status = cuda::close_ipc_handle(data_);
-        if (!status.ok()) {
-          LOG(ERROR) << "GpuDeviceMemory::release_resources - close_ipc_handle failed for address " << data_ << ": "
-                     << status;
-        }
+        ipc_mapping_.reset();
       }
       break;
     case AllocationType::UNINITIALIZED:

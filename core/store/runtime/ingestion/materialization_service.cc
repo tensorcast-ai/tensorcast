@@ -3,7 +3,6 @@
 #include "core/store/runtime/ingestion/materialization_service.h"
 
 #include <algorithm>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -18,6 +17,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_identity.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/components/replica_registry.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
@@ -429,7 +429,7 @@ ReplicaHandle MaterializationService::build_handle(
 
     auto ipc_or = replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
-      std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+      handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
     }
   }
 

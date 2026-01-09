@@ -2,7 +2,6 @@
 
 #pragma once
 
-#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +18,7 @@
 #include "core/common/artifact_identity.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
-#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/components/device_manager.h"
 #include "core/store/components/global_store_client.h"
@@ -83,7 +82,7 @@ struct ArtifactRegistration {
 
 struct RegistrationBeginResult {
   std::string registration_id;
-  std::array<std::byte, sizeof(cudaIpcMemHandle_t)> cuda_ipc_handle_bytes{};
+  cuda::IpcHandleBytes cuda_ipc_handle_bytes{};
   int device_id{0};
   uint64_t size_bytes{0};
 };

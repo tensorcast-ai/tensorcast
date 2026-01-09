@@ -46,6 +46,19 @@ sc_cc_library(
     alwayslink = True,
 )
 
+sc_cc_library(
+    name = "cuda_ipc_lib",
+    srcs = ["cuda_ipc.cc"],
+    hdrs = ["cuda_ipc.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cuda_api_lib",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings:string_view",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
 # Device management utilities
 sc_header_only_library(
     name = "device_guard_lib",
@@ -101,6 +114,16 @@ cc_test(
         ":cuda_runtime_lib",
         "//core/testing:catch_main",
         "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "cuda_ipc_test",
+    srcs = ["cuda_ipc_test.cc"],
+    deps = [
+        ":cuda_ipc_lib",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],
 )

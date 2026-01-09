@@ -10,7 +10,7 @@ sc_header_only_library(
         "//core/common:artifact_identity_lib",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
-        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/store:communication_manager",
         "//core/store:device_manager",
         "//core/store:global_store_client",

@@ -15,11 +15,11 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/lip_metadata_utils.h"
 #include "nlohmann/json.hpp"
 
@@ -61,9 +61,9 @@ class RegionAcquireGuard {
   absl::flat_hash_map<std::string, uint32_t> refs_;
 };
 
-absl::StatusOr<CudaIpcMapping*> GetOrOpenMappingForStorage(
+absl::StatusOr<cuda::IpcMapping*> GetOrOpenMappingForStorage(
     const RegisterStorageMeta& storage,
-    absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>>& cache,
+    absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>>& cache,
     RegionAcquireGuard& guard,
     IpcRegionRegistry* registry,
     int owner_pid) {
@@ -74,12 +74,13 @@ absl::StatusOr<CudaIpcMapping*> GetOrOpenMappingForStorage(
     return it->second.get();
   }
 
-  std::unique_ptr<CudaIpcMapping> mapping;
+  std::unique_ptr<cuda::IpcMapping> mapping;
   if (storage.has_handle()) {
-    auto map_or = CudaIpcMapping::open(storage.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or =
+        cuda::IpcMapping::open(storage.handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok())
       return map_or.status();
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else if (storage.has_region()) {
     auto desc_or = guard.acquire(storage.region_id, owner_pid);
     if (!desc_or.ok())
@@ -90,10 +91,10 @@ absl::StatusOr<CudaIpcMapping*> GetOrOpenMappingForStorage(
     auto handle_or = registry->get_handle_bytes(storage.region_id);
     if (!handle_or.ok())
       return handle_or.status();
-    auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok())
       return map_or.status();
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else {
     return absl::InvalidArgumentError("storage entry missing source handle or region");
   }
@@ -139,7 +140,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   }
 
   RegionAcquireGuard region_guard(region_registry_);
-  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
   mapping_cache.reserve(storages.size());
   // Begin destination allocation on target device
   store::StoreEngine::ArtifactRegistration areg;
@@ -180,7 +181,8 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
     return plan_or.status();
   auto plan = *plan_or;
 
-  auto dst_map_or = CudaIpcMapping::open(out.cuda_ipc_handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+  auto dst_map_or =
+      cuda::IpcMapping::open(out.cuda_ipc_handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
   if (!dst_map_or.ok())
     return dst_map_or.status();
   auto dst_map = std::move(*dst_map_or);
@@ -199,7 +201,7 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
 
   struct Opened {
     int device_id;
-    CudaIpcMapping* map;
+    cuda::IpcMapping* map;
     uint64_t base;
     uint64_t len;
     uint64_t dst;
@@ -262,8 +264,8 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   if (!commit_or.ok())
     return commit_or.status();
   abort_guard.release();
-  std::vector<uint8_t> bytes(out.cuda_ipc_handle_bytes.size());
-  std::memcpy(bytes.data(), out.cuda_ipc_handle_bytes.data(), out.cuda_ipc_handle_bytes.size());
+  auto handle_span = out.cuda_ipc_handle_bytes.as_bytes();
+  std::vector<uint8_t> bytes(handle_span.begin(), handle_span.end());
   return bytes;
 }
 
@@ -297,7 +299,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
 
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping* map; // non-owning; lifetime held by mapping_cache/export record
+    cuda::IpcMapping* map; // non-owning; lifetime held by mapping_cache/export record
     uint64_t base;
     uint64_t len;
     uint64_t dst;
@@ -312,7 +314,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     storage_by_id.emplace(s.storage_id, &s);
   }
   RegionAcquireGuard region_guard(region_registry_);
-  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
   absl::flat_hash_map<std::string, uint32_t> region_hold_counts; // region_id -> refcount to hold beyond this scope
   mapping_cache.reserve(lip.storages.size());
   for (const auto& seg : lip.segments) {
@@ -711,7 +713,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   // Build seekable source over LIP segments using RAII CUDA IPC mappings.
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping* map; // non-owning; lifetime held by mapping_cache
+    cuda::IpcMapping* map; // non-owning; lifetime held by mapping_cache
     uint64_t base;
     uint64_t len;
     uint64_t dst;
@@ -724,7 +726,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   }
 
   RegionAcquireGuard region_guard(region_registry_);
-  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
   mapping_cache.reserve(storages.size());
 
   std::vector<OpenedSeg> opened;

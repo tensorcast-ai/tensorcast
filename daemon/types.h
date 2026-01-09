@@ -8,11 +8,11 @@
 #include <string>
 #include <vector>
 
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/ipc_region_registry.h"
 
 #include "absl/container/flat_hash_map.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/cuda_ipc.h"
 
 namespace tensorcast::daemon {
 
@@ -90,7 +90,7 @@ struct LipLeaseEntry {
 struct LipExportRecord {
   std::string artifact_id;
   int device_id{0};
-  std::vector<CudaIpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
+  std::vector<cuda::IpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
   // Region lease ownership for region-backed storages used by this export.
   // These references are acquired explicitly at staging time and must be

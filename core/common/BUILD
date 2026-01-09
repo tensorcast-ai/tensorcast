@@ -78,6 +78,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/cuda:error_handling_lib",
     ],
 )

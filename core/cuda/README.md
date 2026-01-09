@@ -16,6 +16,11 @@ CUDA backend and runtime utilities for TensorCast.
 - `CudaRuntime::instance()` in `core/cuda/cuda_runtime.h` exposes the shared stream pool.
 - `core/cuda/error_handling.h` provides `TC_CUDA_*` macros for consistent error handling.
 
+## CUDA IPC
+
+- `core/cuda/cuda_ipc.h` defines `cuda::IpcHandleBytes` and `cuda::IpcMapping` so core and daemon share a single
+  handle-bytes type and RAII mapping helper for CUDA IPC.
+
 ## `dynamic_library`
 
 `core/cuda/dynamic_library.h` provides a small RAII wrapper around `dlopen(3)`/`dlclose(3)` and symbol lookup via

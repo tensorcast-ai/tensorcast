@@ -1,13 +1,12 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
-#include <algorithm>
-#include <array>
 #include <string>
 #include "absl/hash/hash.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
+#include "core/cuda/cuda_ipc.h"
 
 namespace tensorcast::store {
 
@@ -74,15 +73,8 @@ struct Location {
 };
 
 /**
- * @brief CUDA IPC Handle wrapper for type safety
+ * @brief CUDA IPC Handle wrapper for type safety.
  */
-struct CudaIpcHandle {
-  static constexpr size_t kHandleSize = 64;
-  std::array<char, kHandleSize> bytes{{}};
-
-  [[nodiscard]] bool is_valid() const {
-    return std::any_of(bytes.begin(), bytes.end(), [](char c) { return c != 0; });
-  }
-};
+using CudaIpcHandle = cuda::IpcHandleBytes;
 
 } // namespace tensorcast::store

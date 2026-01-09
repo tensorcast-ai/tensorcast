@@ -445,7 +445,7 @@ Implementation note: extend `IpcRegionRegistry` to track region state
   via loaders/pump, even when a local replica is present.
 - **SegmentPlan cache**: cache `logical_layout_hash` (or `index_multihash`) + `generation`
   to reuse computed plans across calls; exclude physical binding fields.
-- **IPC mapping cache**: reuse `CudaIpcMapping` per region for the duration of a request
+- **IPC mapping cache**: reuse `cuda::IpcMapping` per region for the duration of a request
   batch to avoid repeated open/close overhead.
 
 ## Control Flow

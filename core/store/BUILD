@@ -26,6 +26,7 @@ sc_header_only_library(
     deps = [
         "//core/common:device_types_lib",
         "//core/common:memory_location_lib",
+        "//core/cuda:cuda_ipc_lib",
         "@abseil-cpp//absl/hash",
     ],
 )
