@@ -212,11 +212,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
   cuda::CudaStream stream = *s_or;
   cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
-  {
-    cuda::CudaDeviceGuard guard(dst.device_id);
-    if (!guard.status().ok()) {
-      return guard.status();
-    }
+  cuda::CudaDeviceGuard guard(dst.device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
@@ -294,11 +292,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   cuda::CudaStream stream = *s_or;
   cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
-  {
-    cuda::CudaDeviceGuard guard(dst.device_id);
-    if (!guard.status().ok()) {
-      return guard.status();
-    }
+  cuda::CudaDeviceGuard guard(dst.device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
@@ -370,11 +366,9 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
   cuda::CudaStream stream = *s_or;
   cudaStream_t stream_to_use = stream.stream();
   // Ensure correct device context before enqueuing work
-  {
-    cuda::CudaDeviceGuard guard(src.device_id);
-    if (!guard.status().ok()) {
-      return guard.status();
-    }
+  cuda::CudaDeviceGuard guard(src.device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
