@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -85,7 +85,7 @@ TEST_CASE("Memory Artifact registration: begin/commit lifecycle", "[store_engine
   REQUIRE_FALSE(begin.registration_id.empty());
   REQUIRE(begin.device_id == 0);
   REQUIRE(begin.size_bytes == size_bytes);
-  REQUIRE(begin.cuda_ipc_handle_bytes.size() == sizeof(cudaIpcMemHandle_t));
+  REQUIRE(begin.cuda_ipc_handle_bytes.as_bytes().size() == sizeof(cudaIpcMemHandle_t));
 
   // Commit should finalize and keep memory owned by the daemon (store)
   auto commit_or = store.commit_registered_artifact(begin.registration_id);

@@ -417,7 +417,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   out.registration_id = entry->registration_id;
   out.device_id = reg.device_id;
   out.size_bytes = reg.total_size_bytes;
-  std::memcpy(out.cuda_ipc_handle_bytes.data(), &ipc_handle, sizeof(cudaIpcMemHandle_t));
+  out.cuda_ipc_handle_bytes = cuda::IpcHandleBytes::from_native(ipc_handle);
   return out;
 }
 

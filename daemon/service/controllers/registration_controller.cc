@@ -20,10 +20,10 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/status_utils.h"
 #include "daemon/store_policy_resolver.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -284,9 +284,9 @@ absl::Status copy_to_staging_from_coalesced_gpu(
   return absl::OkStatus();
 }
 
-absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
+absl::StatusOr<cuda::IpcMapping*> get_or_open_mapping_for_storage(
     const RegisterStorageMeta& storage,
-    absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>>& cache,
+    absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>>& cache,
     RegionPinGuard& region_pin,
     IpcRegionRegistry& regions,
     int owner_pid) {
@@ -297,13 +297,14 @@ absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
     return it->second.get();
   }
 
-  std::unique_ptr<CudaIpcMapping> mapping;
+  std::unique_ptr<cuda::IpcMapping> mapping;
   if (storage.has_handle()) {
-    auto map_or = CudaIpcMapping::open(storage.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or =
+        cuda::IpcMapping::open(storage.handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {
       return map_or.status();
     }
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else if (storage.has_region()) {
     auto acq_or = regions.acquire(storage.region_id, owner_pid);
     if (!acq_or.ok()) {
@@ -314,11 +315,11 @@ absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
     if (!handle_or.ok()) {
       return handle_or.status();
     }
-    auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {
       return map_or.status();
     }
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else {
     return absl::InvalidArgumentError("storage entry missing source handle or region");
   }
@@ -352,14 +353,14 @@ absl::Status copy_to_staging_from_lip_sources(
 
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping* map;
+    cuda::IpcMapping* map;
     uint64_t base;
     uint64_t len;
     uint64_t dst;
   };
 
   RegionPinGuard pin_guard(regions);
-  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
   mapping_cache.reserve(storages.size());
 
   std::vector<OpenedSeg> opened;
@@ -783,14 +784,13 @@ grpc::Status RegistrationController::begin(
       return to_grpc_status(begin_or.status());
     const auto& out = begin_or.value();
     resp.set_registration_id(out.registration_id);
+    auto handle_view = out.cuda_ipc_handle_bytes.as_string_view();
     if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
       auto* hs = resp.mutable_stable_dram();
-      hs->set_staging_cuda_ipc_handle(
-          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+      hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
     } else {
       auto* hs = resp.mutable_coalesced();
-      hs->set_daemon_ipc_handle(
-          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+      hs->set_daemon_ipc_handle(handle_view.data(), handle_view.size());
     }
     resp.set_device_id(out.device_id);
     resp.set_total_size(out.size_bytes);

@@ -47,6 +47,7 @@
 #include "core/common/artifact_verification.h" // Add verification support
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"
@@ -871,7 +872,8 @@ std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
     return "";
   }
 
-  return std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t));
+  const auto bytes = cuda::IpcHandleBytes::from_native(handle);
+  return std::string(bytes.as_string_view());
 }
 
 absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
@@ -911,12 +913,17 @@ absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_wit
   if (!ipc_status.ok()) {
     return ipc_status;
   }
-  return std::make_pair(std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t)), base_offset);
+  const auto bytes = cuda::IpcHandleBytes::from_native(handle);
+  return std::make_pair(std::string(bytes.as_string_view()), base_offset);
 }
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle) {
-  cudaIpcMemHandle_t ipc_handle;
-  memcpy(&ipc_handle, cuda_ipc_handle.data(), sizeof(cudaIpcMemHandle_t));
+  if (cuda_ipc_handle.size() != cuda::IpcHandleBytes::kHandleSize) {
+    return absl::InvalidArgumentError("invalid CUDA IPC handle size");
+  }
+  cuda::IpcHandleBytes bytes;
+  std::memcpy(bytes.bytes.data(), cuda_ipc_handle.data(), bytes.bytes.size());
+  cudaIpcMemHandle_t ipc_handle = bytes.to_native();
 
   auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
@@ -926,20 +933,7 @@ absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::stri
   void* opened_ptr = nullptr;
   auto ipc_open_status = cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
   if (!ipc_open_status.ok()) {
-    // Fallback: try string-based open to support unit-tests in the same process
-    // where export and open may happen in a single process.
-    std::string handle_hex;
-    handle_hex.reserve(sizeof(cudaIpcMemHandle_t) * 2);
-    for (size_t i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
-      char buf[3];
-      unsigned char byte = reinterpret_cast<const unsigned char*>(&ipc_handle)[i];
-      snprintf(buf, sizeof(buf), "%02x", static_cast<unsigned int>(byte));
-      handle_hex.append(buf, 2);
-    }
-    auto alt_status = cuda::open_ipc_handle(handle_hex, &opened_ptr);
-    if (!alt_status.ok()) {
-      return ipc_open_status; // return original error for clarity
-    }
+    return ipc_open_status;
   }
 
   if (opened_ptr == nullptr) {
@@ -956,15 +950,6 @@ absl::Status close_cuda_memory_handle(int device_id, std::uint64_t cuda_ipc_ptr)
   }
 
   auto close_status = cuda::close_ipc_mem_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
-  if (close_status.ok()) {
-    return absl::OkStatus();
-  }
-  // Fallback: handle pointers that were not opened via cudaIpcOpenMemHandle
-  // (e.g., unit tests using same-process fallback). Treat as no-op.
-  auto alt_status = cuda::close_ipc_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
-  if (alt_status.ok()) {
-    return absl::OkStatus();
-  }
   return close_status;
 }
 

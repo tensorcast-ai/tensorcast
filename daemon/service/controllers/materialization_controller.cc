@@ -26,10 +26,10 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 #include "nlohmann/json.hpp"
@@ -936,8 +936,8 @@ grpc::Status MaterializationController::materialize_replica(
     resp.set_disk_path(normalized_disk_path->string());
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(
-        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
+    auto handle_view = handle.cuda_ipc_handle.as_string_view();
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
   }
   if (handle.view_index_json.has_value()) {
     resp.set_view_index_json(*handle.view_index_json);
@@ -1104,8 +1104,8 @@ grpc::Status MaterializationController::materialize_by_key(
     }
   }
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(
-        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
+    auto handle_view = handle.cuda_ipc_handle.as_string_view();
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);
@@ -1422,7 +1422,7 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "region_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(handle_or.status());
   }
-  auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+  auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
   if (!map_or.ok()) {
     record_materialize_into_target(
         "error", "map_failed", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);

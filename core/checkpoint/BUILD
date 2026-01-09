@@ -62,6 +62,7 @@ sc_cc_library(
         "//core/common:artifact_verification_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/store/materialization/dataplane:safetensors_util",
         "@abseil-cpp//absl/log:check",
         "@cublas",

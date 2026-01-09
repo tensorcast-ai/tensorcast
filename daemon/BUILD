@@ -24,7 +24,6 @@ sc_cc_library(
     copts = [],
     deps = [
         ":background_scheduler_hdr",
-        ":cuda_ipc_raii_hdr",
         ":device_resolver_hdr",
         ":grpc_metrics_hdr",
         ":grpc_span_hdr",
@@ -151,10 +150,10 @@ sc_cc_library(
         "lip_metadata_utils.h",
     ],
     deps = [
-        ":cuda_ipc_raii_hdr",
         ":ipc_region_registry_lib",
         ":types_hdr",
         "//core/common:artifact_hash_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/cuda:device_guard_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:canonical_index",
@@ -280,22 +279,12 @@ sc_header_only_library(
 )
 
 sc_header_only_library(
-    name = "cuda_ipc_raii_hdr",
-    hdrs = ["cuda_ipc_raii.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//core/cuda:cuda_api_lib",
-        "@abseil-cpp//absl/status",
-    ],
-)
-
-sc_header_only_library(
     name = "types_hdr",
     hdrs = ["types.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_ipc_raii_hdr",
         "//core/common:artifact_identity_lib",
+        "//core/cuda:cuda_ipc_lib",
     ],
 )
 
@@ -458,6 +447,7 @@ sc_cc_library(
         ":session_lifecycle_hdr",
         ":sessions_service_hdr",
         ":status_utils",
+        "//core/cuda:cuda_ipc_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
@@ -474,7 +464,6 @@ sc_cc_library(
     srcs = ["service/controllers/registration_controller.cc"],
     hdrs = ["service/controllers/registration_controller.h"],
     deps = [
-        ":cuda_ipc_raii_hdr",
         ":lip_manager_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
@@ -482,6 +471,7 @@ sc_cc_library(
         ":session_lifecycle_hdr",
         ":status_utils",
         ":store_policy_resolver_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/cuda:device_guard_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
