@@ -766,6 +766,8 @@ Communicator::Communicator(const v1::CommunicatorConfig& config, PinnedStagingPo
     // Apply typed RDMA QP tuning
     rdma_context_->set_qp_params(
         config_.rdma().traffic_class(), config_.rdma().qp_timeout(), config_.rdma().qp_retry());
+    // Apply multi-QP configuration
+    rdma_context_->set_multi_qp_config(config_.rdma().qp_count(), config_.rdma().bonding_balance());
     int access = IBV_ACCESS_REMOTE_READ | IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_RELAXED_ORDERING;
 
     if (config_.simple_numa().enable()) {

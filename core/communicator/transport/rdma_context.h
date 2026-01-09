@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
 #define COMMUNICATOR_TRANSPORT_RDMA_CONTEXT_H_
@@ -62,6 +62,12 @@ class RdmaContext {
     qp_retry_ = qp_retry;
   }
 
+  // Multi-QP configuration
+  void set_multi_qp_config(int qp_count, bool bonding_balance) {
+    qp_count_ = qp_count;
+    bonding_balance_ = bonding_balance;
+  }
+
   int traffic_class() const {
     return traffic_class_;
   }
@@ -74,6 +80,14 @@ class RdmaContext {
     return qp_retry_;
   }
 
+  int qp_count() const {
+    return qp_count_;
+  }
+
+  bool bonding_balance() const {
+    return bonding_balance_;
+  }
+
  private:
   misc::result_t ibv_init();
 
@@ -84,6 +98,8 @@ class RdmaContext {
   int traffic_class_ = 186;
   int qp_timeout_ = 20;
   int qp_retry_ = 7;
+  int qp_count_ = 1;
+  bool bonding_balance_ = false;
 };
 
 using rdma_context_t = std::shared_ptr<RdmaContext>;

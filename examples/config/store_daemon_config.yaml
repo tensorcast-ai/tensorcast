@@ -160,6 +160,9 @@ communicator:
     traffic_class: 186
     qp_timeout: 20
     qp_retry: 7
+    # Multi-QP configuration for high-throughput scenarios
+    qp_count: 1  # Number of QPs per transport (1-16, default: 1)
+    bonding_balance: false  # Enable LAG port balancing (default: false)
   transport:
     # TCP connections per peer; more lanes help bandwidth but add CPU overhead.
     tcp_conn_count: 8
