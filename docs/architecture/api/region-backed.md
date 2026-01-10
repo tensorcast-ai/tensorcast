@@ -43,7 +43,7 @@ stores region metadata and handle bytes in `IpcRegionRegistry`.
 
 ### RegisterVramRegionRequest (field reference)
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 | Field | What it does | Why it exists |
 |---|---|---|
@@ -72,7 +72,7 @@ handle = tensorcast.register_vram_region(
 
 ### UnregisterVramRegionRequest (field reference)
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 | Field | What it does | Notes |
 |---|---|---|
@@ -113,7 +113,7 @@ The SDK exposes this as `Store.deregister_artifact(...)` and returns a
 
 ### DeregisterArtifactRequest (field reference)
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 | Field | What it does | Notes |
 |---|---|---|

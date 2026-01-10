@@ -17,7 +17,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
 
 - **LocalStoreDaemon**: C++ gRPC service (see `../architecture/api/api-design.md`)
   - Binary: `daemon/tensorcast_daemon`
-  - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/ConfirmReplica/UnloadReplica；兼容保留 MaterializeReplica)
+  - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/MaterializeReplica/ConfirmReplica/UnloadReplica/MaterializeIntoTarget)
 
 - **SessionLifecycle & LIP Runtime**: `SessionLifecycleManager`, `RefTracker`, and `LipManager` (under `daemon/session_lifecycle.*` and `daemon/lip_manager.*`) track per-PID references, mint `UseLease`s for GPU replicas, and satisfy `MaterializeByKey` from already-resident CUDA IPC handles when a matching Lease-In-Place replica exists.
 

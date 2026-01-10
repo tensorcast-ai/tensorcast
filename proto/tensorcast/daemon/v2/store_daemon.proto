@@ -3,16 +3,249 @@ syntax = "proto3";
 package tensorcast.daemon.v2;
 
 import "google/protobuf/timestamp.proto";
-import "tensorcast/daemon/v1/store_daemon.proto";
+import "tensorcast/common/v1/common.proto";
 
-// Materialization v2 RPC surface focused on streaming payload descriptors.
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
+  rpc UnloadReplica(UnloadReplicaRequest) returns (UnloadReplicaResponse) {}
+
+  rpc ClearMem(ClearMemRequest) returns (ClearMemResponse) {}
+
+  rpc GetServerConfig(GetServerConfigRequest) returns (GetServerConfigResponse) {}
+
+  // Worker健康检测
+  rpc GetWorkerStatus(GetWorkerStatusRequest) returns (GetWorkerStatusResponse) {}
+
+  // ------------------------------------------------------------------
+  // Asynchronous artifact integrity verification support.  Each MaterializeReplica
+  // request triggers a background verification task on the daemon side.
+  // Clients can poll/wait for the outcome via this RPC.
+  // ------------------------------------------------------------------
+
+  // Wait until the daemon finishes verifying the specified artifact replica
+  // (identified by the <artifact_id, replica_uuid> tuple) or the
+  // provided timeout elapses.  The call returns the current verification
+  // status so that clients can decide whether to retry or abort.
+  rpc WaitReplicaVerification(WaitReplicaVerificationRequest) returns (WaitReplicaVerificationResponse) {}
+
+  // 获取详细状态信息（以 Artifact/Replica 术语为准）
+  rpc GetDetailedStatus(GetDetailedStatusRequest) returns (GetDetailedStatusResponse) {}
+
+  // V2 with pagination
+  rpc GetLoadedReplicasV2(GetLoadedReplicasV2Request) returns (GetLoadedReplicasV2Response) {}
+
+  // ========== Distributed chunk locking ==========
+  // Dual-end locking mechanism for P2P transfers
+  rpc LockTransportChunks(LockTransportChunksRequest) returns (LockTransportChunksResponse) {}
+  rpc UnlockTransportChunks(UnlockTransportChunksRequest) returns (UnlockTransportChunksResponse) {}
+
+  // ========== Memory Artifact Registration ==========
+  // New canonical RPC names
+  // Begin a registration session; returns a registration_id and plan-specific handshake.
+  rpc BeginRegisterArtifact(BeginRegisterArtifactRequest) returns (BeginRegisterArtifactResponse) {}
+  // Clients should prefer FeedRegisterArtifactStream.
+  rpc FeedRegisterArtifactStream(stream FeedRegisterArtifactStreamRequest) returns (FeedRegisterArtifactStreamResponse) {}
+  rpc KeepAliveRegisterArtifact(KeepAliveRegisterArtifactRequest) returns (KeepAliveRegisterArtifactResponse) {}
+  rpc CommitRegisteredArtifact(CommitRegisteredArtifactRequest) returns (CommitRegisteredArtifactResponse) {}
+  rpc AbortRegisteredArtifact(AbortRegisteredArtifactRequest) returns (AbortRegisteredArtifactResponse) {}
+  rpc RevokeRegisteredArtifact(RevokeRegisteredArtifactRequest) returns (RevokeRegisteredArtifactResponse) {}
+  rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
+  rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
+  rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+
+  // ========== Key-based materialization and publish ==========
+  // See docs/architecture/api/materialization-flow.md for semantics.
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
+  rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
+  // Resolve a human-friendly key to an artifact id and optional disk hint.
+  rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  // Fetch canonical tensor index bytes by artifact_id.
+  rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+
+  // ========== Persistence ==========
+  // See docs/architecture/api/policy-persistence.md for policy and task flow.
+  rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
+  rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
+}
+
+message GetServerConfigRequest {}
+
+message GetServerConfigResponse {
+  int64 mem_pool_size = 1;
+  // Reserved: previously chunk_size (legacy transfer slice)
+  reserved 2;
+  reserved "chunk_size";
+  // Reserved: previously grpc_frame_max_bytes
+  reserved 3;
+  reserved "grpc_frame_max_bytes";
+  // Artifact chunk size used by UMA/VS layout (bytes). Ranges should not cross this boundary.
+  uint64 artifact_chunk_bytes = 4;
+  // Canonical transfer slice/window size (pinned pool block size).
+  uint64 tx_slice_bytes = 5;
+}
+
+message RegisterRequest {
+  string disk_path = 1;
+}
+
+message RegisterResponse {
+  string disk_path = 1;
+  int64 artifact_size = 2;
+}
+
+enum DeviceType {
+  DEVICE_TYPE_UNSPECIFIED = 0;
+  DEVICE_TYPE_CPU = 1;
+  DEVICE_TYPE_GPU = 2;
+  DEVICE_TYPE_DISK = 3;
+}
+
+enum TransformPlacement {
+  TRANSFORM_PLACEMENT_UNSPECIFIED = 0;
+  TRANSFORM_PLACEMENT_SERVER = 1;
+  TRANSFORM_PLACEMENT_CLIENT = 2;
+}
+
+// Hint for selecting the preferred materialization source.
+enum SourcePreference {
+  SOURCE_PREFERENCE_UNSPECIFIED = 0;
+  SOURCE_PREFERENCE_AUTO = 1;
+  SOURCE_PREFERENCE_PREFER_P2P = 2;
+  SOURCE_PREFERENCE_PREFER_DISK = 3;
+}
+
+// Actual source used to serve a materialization request.
+enum MaterializationSource {
+  MATERIALIZATION_SOURCE_UNSPECIFIED = 0;
+  MATERIALIZATION_SOURCE_DISK = 1;
+  MATERIALIZATION_SOURCE_P2P = 2;
+  MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
+}
+
+enum PlacementPolicy {
+  PLACEMENT_POLICY_UNSPECIFIED = 0;
+  PLACEMENT_POLICY_LOCAL_ONLY = 1;
+  PLACEMENT_POLICY_REPLICATED = 2;
+  PLACEMENT_POLICY_SHARDED = 3;
+}
+
+enum PolicyProfile {
+  POLICY_PROFILE_UNSPECIFIED = 0;
+  POLICY_PROFILE_CACHE = 1;
+  POLICY_PROFILE_DURABLE = 2;
+  POLICY_PROFILE_HA = 3;
+  POLICY_PROFILE_COLD = 4;
+  POLICY_PROFILE_PINNED = 5;
+  POLICY_PROFILE_WARM = 6;
+}
+
+enum PolicyTier {
+  POLICY_TIER_UNSPECIFIED = 0;
+  POLICY_TIER_STABLE_DRAM = 1;
+  POLICY_TIER_SHARED_DISK = 2;
+}
+
+enum PolicyScope {
+  POLICY_SCOPE_UNSPECIFIED = 0;
+  POLICY_SCOPE_LOCAL = 1;
+  POLICY_SCOPE_REMOTE = 2;
+  POLICY_SCOPE_ANY = 3;
+}
+
+enum RetentionPolicy {
+  RETENTION_POLICY_UNSPECIFIED = 0;
+  RETENTION_POLICY_BEST_EFFORT = 1;
+  RETENTION_POLICY_TTL = 2;
+  RETENTION_POLICY_PINNED = 3;
+}
+
+enum OverflowPolicy {
+  OVERFLOW_POLICY_UNSPECIFIED = 0;
+  OVERFLOW_POLICY_EVICT = 1;
+  OVERFLOW_POLICY_SPILL = 2;
+  OVERFLOW_POLICY_REJECT = 3;
+}
+
+enum PolicyLayout {
+  POLICY_LAYOUT_UNSPECIFIED = 0;
+  POLICY_LAYOUT_AUTO = 1;
+  POLICY_LAYOUT_UNSHARDED = 2;
+  POLICY_LAYOUT_SHARDED = 3;
+}
+
+enum PersistenceState {
+  PERSISTENCE_STATE_UNSPECIFIED = 0;
+  PERSISTENCE_STATE_PENDING = 1;
+  PERSISTENCE_STATE_RUNNING = 2;
+  PERSISTENCE_STATE_DEGRADED = 3;
+  PERSISTENCE_STATE_SUCCESS = 4;
+  PERSISTENCE_STATE_FAILED = 5;
+}
+
+message MemCopyHandle {
+  bytes cuda_ipc_handle = 1;
+}
+
+message NarrowOp {
+  uint32 dim = 1;
+  int64 start = 2;
+  uint64 length = 3;
+}
+
+message TransposeOp {
+  uint32 dim0 = 1;
+  uint32 dim1 = 2;
+}
+
+message Op {
+  oneof kind {
+    NarrowOp narrow = 1;
+    TransposeOp transpose = 2;
+  }
+}
+
+message TensorViewOps {
+  repeated Op ops = 1;
+}
+
+message ViewSpec {
+  map<string, TensorViewOps> tensors = 1;
+}
+
+message CanonicalRange {
+  uint64 offset = 1;
+  uint64 length = 2;
+}
+
+message TierSpec {
+  PolicyTier tier = 1;
+  PolicyScope scope = 2;
+  uint32 min_replicas = 3;
+  RetentionPolicy retention_policy = 4;
+  optional uint64 retention_ttl_ms = 5;
+}
+
+message StorePolicy {
+  PolicyProfile profile = 1;
+  repeated TierSpec must = 2;
+  repeated TierSpec should = 3;
+  repeated TierSpec may = 4;
+  OverflowPolicy overflow_policy = 5;
+  PolicyLayout layout = 6;
+}
+
+message ViewRegistrationOptions {
+  string view_id = 1;
+  ViewSpec spec = 2;
+  TransformPlacement placement = 3;
+  uint64 canonical_size_bytes = 4;
+  repeated CanonicalRange ranges = 5;
+  bool allow_partial = 6;
 }
 
 message DiskFallbackHint {
@@ -54,8 +287,8 @@ message TargetLayout {
     TENSOR_SPEC_KIND_OFFSETS = 1;
   }
 
-  repeated tensorcast.daemon.v1.StorageEntry storages = 1;
-  repeated tensorcast.daemon.v1.TensorAlias aliases = 2;
+  repeated StorageEntry storages = 1;
+  repeated TensorAlias aliases = 2;
   repeated TargetTensorOffset offsets = 3;
   LayoutKind layout_kind = 4;
   IndexKind index_kind = 5;
@@ -71,7 +304,7 @@ message ViewSubset {
 
 message ReplicaTicket {
   string replica_uuid = 1;
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
+  MaterializeReplicaStatus status = 2;
   google.protobuf.Timestamp created_at = 3;
   string device_uuid = 4;
   google.protobuf.Timestamp expires_at = 5;
@@ -80,43 +313,58 @@ message ReplicaTicket {
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   optional string artifact_id = 1;
-  // Disk fallback hint; when present, the daemon may serve directly from disk.
   DiskFallbackHint disk_fallback = 2;
 
   string replica_uuid = 3;
   string device_uuid = 4;
-  tensorcast.daemon.v1.DeviceType target_device_type = 5;
+  DeviceType target_device_type = 5;
   int32 pinned_allocation_timeout_ms = 6;
   int32 pid = 7; // Process ID for reference tracking
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
 
-  tensorcast.daemon.v1.SourcePreference preference = 9;
+  SourcePreference preference = 9;
 
   // Selective materialization
   repeated string tensor_names = 10;
   bytes view_subset_hash = 11;
 
+  // Legacy disk fallback fields; prefer disk_fallback instead.
+  optional bool verify_checksums = 12;
+  optional string disk_path = 13;
+
   oneof view_identity {
-    tensorcast.daemon.v1.ViewSpec view = 1001;
+    ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+  TransformPlacement placement = 1003;
   bool wait_for_completion = 1004;
+}
+
+// MaterializeReplica now returns immediately after memory allocation succeeds.
+// The actual data loading continues in the background.
+enum MaterializeReplicaStatus {
+  MATERIALIZE_REPLICA_STATUS_UNSPECIFIED = 0; // Unspecified initial state
+  MATERIALIZE_REPLICA_STATUS_ALLOCATED = 1; // Memory allocated, loading in progress
+  MATERIALIZE_REPLICA_STATUS_FAILED = 2; // Allocation or initial setup failed
 }
 
 message MaterializeReplicaResponse {
   string artifact_id = 1;
   string disk_path = 2;
-  tensorcast.daemon.v1.MemCopyHandle mem_handle = 3;
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 4;
-  tensorcast.daemon.v1.MaterializationSource source = 5;
+  MemCopyHandle mem_handle = 3;
+  MaterializeReplicaStatus status = 4;
+  MaterializationSource source = 5;
   bytes canonical_index_bytes = 6;
   ViewSubset view_subset = 7;
   repeated TensorPayloadDescriptor payloads = 8;
   ReplicaTicket ticket = 9;
   bytes view_index_bytes = 10;
   uint64 generation = 11;
+
+  // Legacy view metadata for compatibility with view-based callers.
+  bytes view_index_json = 1001;
+  string view_data_hash = 1002;
 }
 
 message MaterializeIntoTargetRequest {
@@ -130,29 +378,487 @@ message MaterializeIntoTargetRequest {
   int32 pid = 5;
   string device_uuid = 6;
 
-  tensorcast.daemon.v1.SourcePreference preference = 7;
+  SourcePreference preference = 7;
 
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    tensorcast.daemon.v1.ViewSpec view = 1001;
+    ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+  TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetResponse {
   string artifact_id = 1;
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
-  tensorcast.daemon.v1.MaterializationSource source = 3;
+  MaterializeReplicaStatus status = 2;
+  MaterializationSource source = 3;
   bytes canonical_index_bytes = 4;
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
 }
 
+message ConfirmReplicaRequest {
+  string disk_path = 1;
+  string replica_uuid = 2;
+  DeviceType target_device_type = 3;
+}
+
+message ConfirmReplicaResponse {
+  string disk_path = 1;
+  int32 code = 2;
+}
+
+message UnloadReplicaRequest {
+  string disk_path = 1;
+  string replica_uuid = 2;
+  DeviceType target_device_type = 3;
+  optional int32 pid = 4; // Process ID for reference tracking
+  optional string version = 5; // Artifact version
+}
+
+message UnloadReplicaResponse {
+  string disk_path = 1;
+  int32 code = 2;
+}
+
+message ClearMemRequest {}
+
+message ClearMemResponse {}
+
+// 获取Worker状态
+message GetWorkerStatusRequest {}
+
+message GetWorkerStatusResponse {
+  bool is_registered = 1; // 是否已注册到Global Store
+  bool is_healthy = 2; // 是否健康运行
+  bool is_shutting_down = 3; // 是否正在关闭
+  uint64 mem_pool_total_size = 4; // 内存池总大小（字节）
+  uint64 mem_pool_available_size = 5; // 内存池可用大小（字节）
+  int64 uptime_seconds = 6; // 运行时间（秒）
+  string worker_id = 7; // Worker ID（如已注册）
+}
+
+// ----------------------------------------------------------------------
+// Verification related definitions
+// ----------------------------------------------------------------------
+
+enum VerificationStatus {
+  VERIFICATION_STATUS_UNSPECIFIED = 0;
+  VERIFICATION_STATUS_IN_PROGRESS = 1;
+  VERIFICATION_STATUS_PASSED = 2;
+  VERIFICATION_STATUS_FAILED = 3;
+}
+
+message WaitReplicaVerificationRequest {
+  string artifact_id = 1;
+  string replica_uuid = 2;
+  uint32 timeout_ms = 3;
+}
+
+message WaitReplicaVerificationResponse {
+  VerificationStatus status = 1;
+  string err_msg = 2;
+}
+
+// ========== 详细状态查询相关定义 ==========
+
+// 驻留位置枚举（保持枚举值兼容）
+enum MemoryLocation {
+  MEMORY_LOCATION_UNSPECIFIED = 0;
+  MEMORY_LOCATION_DISK = 1;
+  MEMORY_LOCATION_PAGEABLE_CPU = 2;
+  MEMORY_LOCATION_GPU = 3;
+  MEMORY_LOCATION_REMOTE = 4;
+}
+
+// Replica 信息（单台机器视角）
+message ReplicaInfo {
+  string artifact_id = 1; // Artifact 标识符
+  int64 artifact_size_bytes = 2; // Artifact 大小（字节）
+  MemoryLocation location = 3; // 当前位置（CPU/GPU）
+  int64 loaded_timestamp = 4; // 加载时间戳
+  int64 last_access_timestamp = 5; // 最后访问时间戳
+  repeated string replica_uuids = 6; // 关联的副本UUIDs
+  bool is_registered_for_comm = 7; // 是否已注册用于RDMA通信
+}
+
+// GPU设备信息
+message GpuDeviceInfo {
+  int32 device_id = 1; // GPU设备ID
+  string device_uuid = 2; // GPU设备UUID
+  int64 total_memory_bytes = 3; // 总显存（字节）
+  int64 free_memory_bytes = 4; // 可用显存（字节）
+  int64 used_memory_bytes = 5; // 已使用显存（字节）
+  repeated ReplicaInfo loaded_replicas = 6; // 该 GPU 上的 Replica 列表
+}
+
+// 内存池信息
+message MemoryPoolInfo {
+  int64 total_size_bytes = 1; // 内存池总大小
+  int64 available_bytes = 2; // 可用大小
+  int64 allocated_bytes = 3; // 已分配大小
+  int32 allocated_chunks_count = 4; // 已分配的块数
+  int64 chunk_size_bytes = 5; // 块大小
+}
+
+// RDMA通信信息
+message CommunicationInfo {
+  bool enabled = 1; // 是否启用RDMA
+  int64 total_transfers = 2; // 总传输次数
+  int64 total_bytes_transferred = 3; // 总传输字节数
+  int64 total_transfer_errors = 4; // 传输错误次数
+}
+
+// 详细状态请求
+message GetDetailedStatusRequest {}
+
+// 详细状态响应（Artifact/Replica 统一命名）
+message GetDetailedStatusResponse {
+  // 基础状态信息（与GetWorkerStatusResponse相同的字段）
+  bool is_registered = 1;
+  bool is_healthy = 2;
+  bool is_shutting_down = 3;
+  int64 uptime_seconds = 4;
+  string worker_id = 5;
+
+  // 内存池详细信息
+  MemoryPoolInfo memory_pool_info = 6;
+
+  // GPU 设备列表及其上的 Replica
+  repeated GpuDeviceInfo gpu_devices = 7;
+
+  // CPU 内存中的 Replica 列表
+  repeated ReplicaInfo cpu_replicas = 8;
+
+  // RDMA/通信信息
+  CommunicationInfo communication_info = 9;
+
+  // 聚合统计信息
+  int32 total_replicas_loaded = 10; // 已加载 Replica 数
+  int64 total_artifact_size_bytes = 11; // 所有 Artifact 总大小
+
+  // 配置信息
+  string storage_path = 12; // 存储路径
+  int32 num_worker_threads = 13; // 工作线程数
+}
+
+// ========== Replica 引用信息查询 ==========
+
+// 单个 Artifact 的引用信息
+message LoadedReplicaInfo {
+  string artifact_id = 1; // Artifact ID
+  string version = 2; // 模型版本
+  int32 device_id = 3; // 设备ID (-1 表示CPU)
+  int32 ref_count = 4; // 引用计数
+  repeated int32 pids = 5; // 持有引用的进程ID列表
+  int64 size_bytes = 6; // Artifact 大小（字节）
+  google.protobuf.Timestamp last_access_ts = 8; // 标准时间戳
+}
+
+// 获取已加载 Replica 请求
+// Legacy GetLoadedReplicas removed in favor of V2
+
+message GetLoadedReplicasV2Request {
+  // Filters
+  optional string artifact_id_filter = 1;
+  optional int32 device_id_filter = 2;
+  tensorcast.common.v1.Pagination pagination = 100;
+}
+
+message GetLoadedReplicasV2Response {
+  repeated LoadedReplicaInfo replicas = 1;
+  tensorcast.common.v1.PageInfo page_info = 2;
+}
+
+// ========== Chunk locking message definitions ==========
+
+// Lock chunks request
+message LockTransportChunksRequest {
+  string artifact_id = 1; // Artifact ID
+  repeated uint32 chunk_indices = 2; // List of chunk indices to lock
+  // Optional explicit device id to disambiguate when an artifact has replicas
+  // on multiple GPUs. When absent, the daemon attempts to infer a unique
+  // device from residency; if ambiguous, the RPC returns INVALID_ARGUMENT.
+  optional int32 device_id = 3;
+  // Optional TTL extension hint (milliseconds) applied to active leases if granted.
+  optional uint32 extend_ttl_ms = 4;
+}
+
+// Lock chunks response
+message LockTransportChunksResponse {
+  string lock_token = 1; // Lock token (UUID)
+  // Optional: When source is a LIP (Lease-In-Place) replica, the daemon may
+  // attach lightweight verification metadata (JSON) to aid receivers in
+  // post-transfer validation (e.g., KEY_POINTS first/middle/last values).
+  // Receivers are encouraged to verify at least key points and may upgrade to
+  // segment-level verification when available.
+  optional string verification_json = 2;
+}
+
+// Unlock chunks request
+message UnlockTransportChunksRequest {
+  string lock_token = 1; // Lock token
+}
+
+// Unlock chunks response
+message UnlockTransportChunksResponse {
+  // Empty response, returns empty message on success
+}
+
+// ========== Memory Artifact Registration Messages ==========
+
+// Begin registration request
+message BeginRegisterArtifactRequest {
+  int32 device_id = 1; // Target GPU device ID
+  uint64 total_size = 2; // Total size in bytes (8-byte aligned)
+  optional uint32 ttl_ms = 3; // TTL for registration (milliseconds), used by Lease
+  int32 owner_pid = 6; // REQUIRED: Owner process ID for lease lifecycle (must be > 0)
+  string client_artifact_id = 1002; // Optional client-provided artifact identity (cgid:...)
+
+  // Tensor index can be provided as key or data
+  oneof index {
+    string tensor_index_key = 4; // SHA-256 hash of canonical index bytes
+    TensorIndexData tensor_index_data = 5; // Full canonical index bytes (CBOR/JSON)
+  }
+
+  // Realization plan options
+  oneof plan {
+    CoalescedOptions coalesced = 10;
+    LeaseOptions lease = 12;
+    StableDramOptions stable_dram = 13;
+  }
+
+  StorePolicy policy = 14;
+
+  ViewRegistrationOptions view = 1001;
+}
+
+// Tensor index data with metadata
+message TensorIndexData {
+  bytes data = 1; // Canonical index bytes (CBOR preferred; strict canonical JSON allowed)
+  string schema_version = 2; // Schema version (must be "v3")
+  string encoding = 3; // Encoding format ("cbor" or "json")
+}
+
+message CoalescedOptions {
+  uint64 max_inflight_bytes = 1;
+  bool release_on_tensor_commit = 2;
+}
+
+message LeaseOptions {
+  uint64 min_tensor_bytes = 1;
+  uint32 max_tensor_count = 2;
+  uint64 lease_bytes_limit = 3; // 0 = daemon policy
+  bool in_place = 4; // When true, Commit registers an in-place lease (LIP)
+}
+
+message StableDramOptions {
+  bool stage_on_gpu = 1;
+  bool release_gpu_on_commit = 2;
+}
+
+// Begin registration response
+message BeginRegisterArtifactResponse {
+  string registration_id = 1; // Registration ID for subsequent calls
+  int32 device_id = 2; // Confirmed device ID
+  uint64 total_size = 3; // Confirmed total size
+  oneof handshake {
+    CoalescedHandshake coalesced = 10;
+    LeaseHandshake lease = 12;
+    StableDramHandshake stable_dram = 13;
+  }
+}
+
+message CoalescedHandshake {
+  bytes daemon_ipc_handle = 1;
+}
+
+message LeaseHandshake {}
+
+message StableDramHandshake {
+  bytes staging_cuda_ipc_handle = 1;
+}
+
+// Stream variants must not reuse unary messages per lint
+message FeedRegisterArtifactStreamRequest {
+  string registration_id = 1;
+  oneof feed {
+    LeaseSegments lease_segments = 11;
+    ViewUploadChunk view_chunk = 12;
+  }
+  // Optional deduplicated storage table and tensor alias metadata. Clients send
+  // these fields when using the unified registration flow; legacy clients omit them.
+  repeated StorageEntry storage_entries = 20;
+  repeated TensorAlias tensor_aliases = 21;
+}
+message FeedRegisterArtifactStreamResponse {}
+
+message ViewUploadChunk {
+  uint64 canonical_offset = 1;
+  uint64 view_offset = 2;
+  bytes data = 3;
+}
+
+message LeaseSegments {
+  repeated LeasedSegment segments = 1;
+}
+message LeasedSegment {
+  // Physical storage backing this segment (must match a StorageEntry.storage_id).
+  string storage_id = 1;
+  // Byte offset within the referenced storage window where this segment begins.
+  uint64 storage_offset = 2;
+  // Logical byte offset within the artifact where this segment begins.
+  // This offset defines LIP's logical segment base and must obey artifact_chunk_bytes alignment rules.
+  uint64 artifact_offset = 3;
+  // Length of this segment in bytes.
+  uint64 length = 4;
+}
+
+message StorageEntry {
+  string storage_id = 1;
+  int32 device_id = 2;
+  // Length of this storage window in bytes.
+  uint64 storage_length = 3;
+  oneof storage_source {
+    // CUDA IPC handle for the allocation base pointer that backs this storage.
+    bytes cuda_ipc_handle = 4;
+    string vram_region_id = 5;
+  }
+  // Byte offset from the mapped base pointer (allocation base for cuda_ipc_handle, region base for vram_region_id)
+  // to the start of this storage window.
+  uint64 mapping_base_offset = 6;
+}
+
+message TensorAlias {
+  string name = 1;
+  string storage_id = 2;
+  uint64 storage_offset = 3;
+  uint64 logical_length = 4;
+  repeated int64 shape = 5;
+  repeated int64 stride = 6;
+  string dtype = 7;
+}
+
+// Keep alive for lease lifecycle
+message KeepAliveRegisterArtifactRequest {
+  string registration_id = 1;
+  uint32 ttl_ms = 2;
+  uint64 epoch = 3;
+  int32 owner_pid = 4; // REQUIRED: must equal Begin.owner_pid
+}
+message KeepAliveRegisterArtifactResponse {}
+
+// Commit registration request
+message CommitRegisteredArtifactRequest {
+  string registration_id = 1; // Registration ID from Begin
+}
+
+enum LocalStableTierStatus {
+  LOCAL_STABLE_TIER_STATUS_UNSPECIFIED = 0;
+  LOCAL_STABLE_TIER_STATUS_READY = 1;
+  // Requested as `should` but could not be satisfied.
+  LOCAL_STABLE_TIER_STATUS_DEGRADED = 2;
+  // Not requested by the resolved policy (or requested only as `may`).
+  LOCAL_STABLE_TIER_STATUS_SKIPPED = 3;
+}
+
+message LocalStableTierResult {
+  LocalStableTierStatus status = 1;
+  optional string message = 2;
+}
+
+// Artifact descriptor conveying content-addressed identity and related metadata
+// Commit registration response
+message CommitRegisteredArtifactResponse {
+  // Content-addressed artifact descriptor (RFC-0007)
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 1;
+  // Idempotency indicator: true when the replica already existed on the same
+  // device and the daemon returned the existing descriptor while joining a
+  // lightweight reference for this registration. See docs/internals/model-loading.md.
+  bool existed = 2;
+  string view_id = 1001;
+  bytes view_index_json = 1002;
+  string view_data_hash = 1003;
+  repeated CanonicalRange canonical_ranges = 1004;
+  bool allow_partial = 1005;
+
+  optional LocalStableTierResult local_stable_tier = 2000;
+}
+
+// Abort registration request
+message AbortRegisteredArtifactRequest {
+  string registration_id = 1; // Registration ID to abort
+}
+
+// Abort registration response
+message AbortRegisteredArtifactResponse {}
+
+// Revoke registration (lease only)
+message RevokeRegisteredArtifactRequest {
+  string registration_id = 1;
+  string reason = 2;
+}
+message RevokeRegisteredArtifactResponse {}
+
+message RegisterVramRegionRequest {
+  // Client session identifier (best-effort) used for diagnostics and ownership.
+  optional string session_id = 1;
+  int32 device_id = 2;
+  bytes cuda_ipc_handle = 3;
+  uint64 size_bytes = 4;
+  uint32 ttl_ms = 5;
+  int32 owner_pid = 6;
+  // Optional human-readable tag for operator diagnostics.
+  optional string region_name = 7;
+}
+
+message RegisterVramRegionResponse {
+  string region_id = 1;
+  uint32 ttl_ms = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message UnregisterVramRegionRequest {
+  optional string session_id = 1;
+  string region_id = 2;
+  int32 owner_pid = 3;
+  // When true, the daemon attempts best-effort release even if TTL expired.
+  optional bool force = 4;
+}
+
+message UnregisterVramRegionResponse {
+  bool released = 1;
+}
+
+message DeregisterArtifactRequest {
+  string artifact_id = 1;
+  optional string session_id = 2;
+  // When true, the daemon blocks until all active staged exports drain or timeout.
+  bool wait_for_drain = 3;
+  // Drain timeout in milliseconds; 0 uses daemon policy.
+  optional uint32 drain_timeout_ms = 4;
+  // Optional lease TTL extension applied before entering quiesce.
+  optional uint32 extend_ttl_ms = 5;
+  // Optional owner PID verification.
+  optional int32 owner_pid = 6;
+  // Optional explicit device identifier when replicas span devices.
+  optional int32 device_id = 7;
+  // When true, release region references once deregistration completes.
+  optional bool release_regions = 8;
+}
+
+message DeregisterArtifactResponse {
+  bool drained = 1;
+  bool removed = 2;
+  repeated string released_region_ids = 3;
+  optional string message = 4;
+}
+
+// Key-based materialization request.
 message MaterializeByKeyRequest {
   string key = 1;
   int32 device_id = 2;
@@ -164,16 +870,15 @@ message MaterializeByKeyRequest {
   repeated string tensor_names = 10;
   bytes view_subset_hash = 11;
 
-  tensorcast.daemon.v1.SourcePreference preference = 12;
+  SourcePreference preference = 12;
   bool wait_for_completion = 20;
 }
-
 message MaterializeByKeyResponse {
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 1;
+  MaterializeReplicaStatus status = 1;
   string artifact_id = 2;
   string used_disk_path = 3;
-  tensorcast.daemon.v1.MemCopyHandle mem_handle = 4;
-  tensorcast.daemon.v1.MaterializationSource source = 5;
+  MemCopyHandle mem_handle = 4;
+  MaterializationSource source = 5;
   bytes canonical_index_bytes = 6;
   ViewSubset view_subset = 7;
   repeated TensorPayloadDescriptor payloads = 8;
@@ -208,4 +913,76 @@ message ReleaseReplicaRequest {
 
 message ReleaseReplicaResponse {
   bool released = 1;
+}
+
+message PublishReplicaKeyRequest {
+  string key = 1;
+  // Content-addressed artifact descriptor (RFC-0007)
+  tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 2;
+  string replica_uuid = 3;
+  string disk_path = 4; // optional
+  bool fail_if_exists = 5; // default semantics: true
+}
+message PublishReplicaKeyResponse {
+  bool ok = 1;
+  string conflict_reason = 2;
+}
+
+// Key mapping helpers exposed via daemon to keep API clients decoupled from Global Store.
+message ResolveKeyMappingRequest {
+  string key = 1;
+}
+message ResolveKeyMappingResponse {
+  string artifact_id = 1;
+  string used_disk_path = 2;
+}
+
+message GetArtifactIndexByIdRequest {
+  string artifact_id = 1;
+}
+message GetArtifactIndexByIdResponse {
+  bytes tensor_index_data = 1;
+}
+
+// ========== Persistence ==========
+message PersistenceShardStatus {
+  string shard_id = 1;
+  uint32 shard_idx = 2;
+  PersistenceState state = 3;
+  double progress = 4;
+  string degraded_reason = 5;
+  string last_error = 6;
+  repeated string target_nodes = 7;
+  repeated string lease_ids = 8;
+}
+
+message StartPersistenceRequest {
+  string artifact_id = 1;
+  StorePolicy policy = 2;
+  reserved 3;
+  reserved "placement_policy", "persist_to_shared_disk";
+}
+
+message StartPersistenceResponse {
+  string task_id = 1;
+  string plan_id = 2;
+  PersistenceState state = 3;
+  double progress = 4;
+  string degraded_reason = 5;
+}
+
+message QueryPersistenceStatusRequest {
+  string task_id = 1;
+  string artifact_id = 2;
+}
+
+message QueryPersistenceStatusResponse {
+  string task_id = 1;
+  string artifact_id = 2;
+  string plan_id = 3;
+  PersistenceState state = 4;
+  double progress = 5;
+  string degraded_reason = 6;
+  string last_error = 7;
+  repeated PersistenceShardStatus shards = 8;
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -264,13 +264,13 @@ TEST_CASE("PublishReplicaKey canonicalizes storage_path before validating disk_p
   svc_opts.storage_path = storage_link_via_dotdot;
   StoreDaemonServiceImpl svc(engine, svc_opts);
 
-  tensorcast::daemon::v1::PublishReplicaKeyRequest req;
+  tensorcast::daemon::v2::PublishReplicaKeyRequest req;
   req.set_key("key-1");
   req.mutable_artifact_descriptor()->set_artifact_id("mi2:test");
   req.set_disk_path(artifact_dir.string());
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::PublishReplicaKeyResponse resp;
+  tensorcast::daemon::v2::PublishReplicaKeyResponse resp;
   auto status = svc.PublishReplicaKey(&ctx, &req, &resp);
   REQUIRE(status.ok());
   REQUIRE(resp.ok());

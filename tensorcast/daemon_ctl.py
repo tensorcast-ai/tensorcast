@@ -18,18 +18,10 @@ from tensorcast.api._config import StorePolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
-# Use v1 daemon proto path
-from tensorcast.proto.daemon.v1 import (
-    store_daemon_pb2 as store_daemon_pb2,
-)
-from tensorcast.proto.daemon.v1 import (
+# Use v2 daemon proto path
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
-)
-from tensorcast.proto.daemon.v2 import (
-    store_daemon_pb2 as store_daemon_v2_pb2,
-)
-from tensorcast.proto.daemon.v2 import (
-    store_daemon_pb2_grpc as store_daemon_v2_pb2_grpc,
 )
 from tensorcast.types import (
     ArtifactDescriptor,
@@ -141,7 +133,7 @@ class DaemonCtl:
         self._ch_lock: RLock = RLock()
         self.channel = self._create_channel(server_address)
         self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
-        self.stub_v2 = store_daemon_v2_pb2_grpc.StoreDaemonServiceStub(self.channel)
+        self.stub_v2 = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
         self.checkpoints_in_gpu = {}
 
         # Check environment variable
@@ -172,7 +164,7 @@ class DaemonCtl:
                 self.channel.close()
             self.channel = self._create_channel(self.server_address)
             self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
-            self.stub_v2 = store_daemon_v2_pb2_grpc.StoreDaemonServiceStub(self.channel)
+            self.stub_v2 = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
             _inc_channel_refresh(self.server_address)
 
     def _unary_call(
@@ -521,20 +513,20 @@ class DaemonCtl:
         self,
         *,
         artifact_id: str,
-        target_layout: store_daemon_v2_pb2.TargetLayout,
+        target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         disk_path: str | None = None,
         pid: int | None = None,
         return_response: bool = True,
-    ) -> store_daemon_v2_pb2.MaterializeIntoTargetResponse:
+    ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
-            request = store_daemon_v2_pb2.MaterializeIntoTargetRequest(
+            request = store_daemon_pb2.MaterializeIntoTargetRequest(
                 artifact_id=artifact_id,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
@@ -547,7 +539,7 @@ class DaemonCtl:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = True
             try:
-                response: store_daemon_v2_pb2.MaterializeIntoTargetResponse = (
+                response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeIntoTarget,
                         request,
@@ -575,12 +567,12 @@ class DaemonCtl:
         return response
 
     def query_replica_status(
-        self, ticket: store_daemon_v2_pb2.ReplicaTicket
-    ) -> store_daemon_v2_pb2.QueryReplicaStatusResponse:
+        self, ticket: store_daemon_pb2.ReplicaTicket
+    ) -> store_daemon_pb2.QueryReplicaStatusResponse:
         with self._client_span("Client/QueryReplicaStatus") as span:
-            request = store_daemon_v2_pb2.QueryReplicaStatusRequest(ticket=ticket)
+            request = store_daemon_pb2.QueryReplicaStatusRequest(ticket=ticket)
             try:
-                response: store_daemon_v2_pb2.QueryReplicaStatusResponse = (
+                response: store_daemon_pb2.QueryReplicaStatusResponse = (
                     self._unary_call(
                         self.stub_v2.QueryReplicaStatus,
                         request,
@@ -595,12 +587,12 @@ class DaemonCtl:
         return response
 
     def release_replica(
-        self, ticket: store_daemon_v2_pb2.ReplicaTicket
-    ) -> store_daemon_v2_pb2.ReleaseReplicaResponse:
+        self, ticket: store_daemon_pb2.ReplicaTicket
+    ) -> store_daemon_pb2.ReleaseReplicaResponse:
         with self._client_span("Client/ReleaseReplica") as span:
-            request = store_daemon_v2_pb2.ReleaseReplicaRequest(ticket=ticket)
+            request = store_daemon_pb2.ReleaseReplicaRequest(ticket=ticket)
             try:
-                response: store_daemon_v2_pb2.ReleaseReplicaResponse = self._unary_call(
+                response: store_daemon_pb2.ReleaseReplicaResponse = self._unary_call(
                     self.stub_v2.ReleaseReplica,
                     request,
                     timeout=5.0,
@@ -630,7 +622,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
-    ) -> store_daemon_v2_pb2.MaterializeReplicaResponse: ...
+    ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
     def materialize_by_artifact_id_v2(
@@ -689,7 +681,7 @@ class DaemonCtl:
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
     ) -> (
-        store_daemon_v2_pb2.MaterializeReplicaResponse
+        store_daemon_pb2.MaterializeReplicaResponse
         | bytes
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]
     ):
@@ -703,7 +695,7 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeReplicaV2") as span:
-            request = store_daemon_v2_pb2.MaterializeReplicaRequest(
+            request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid,
@@ -728,7 +720,7 @@ class DaemonCtl:
             if placement is not None:
                 request.placement = placement
             try:
-                response: store_daemon_v2_pb2.MaterializeReplicaResponse = (
+                response: store_daemon_pb2.MaterializeReplicaResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
                         request,
@@ -796,7 +788,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
-    ) -> store_daemon_v2_pb2.MaterializeByKeyResponse: ...
+    ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
 
     @overload
     def materialize_by_key_v2(
@@ -840,7 +832,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> (
-        store_daemon_v2_pb2.MaterializeByKeyResponse
+        store_daemon_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
         | tuple[bytes, str, str]
     ):
@@ -852,7 +844,7 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeByKeyV2") as span:
-            request = store_daemon_v2_pb2.MaterializeByKeyRequest(
+            request = store_daemon_pb2.MaterializeByKeyRequest(
                 key=key,
                 device_id=int(device_id),
                 pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
@@ -867,14 +859,12 @@ class DaemonCtl:
             if view_subset_hash:
                 request.view_subset_hash = view_subset_hash
             try:
-                response: store_daemon_v2_pb2.MaterializeByKeyResponse = (
-                    self._unary_call(
-                        self.stub_v2.MaterializeByKey,
-                        request,
-                        timeout=60,
-                        span=span,
-                        retries=1,
-                    )
+                response: store_daemon_pb2.MaterializeByKeyResponse = self._unary_call(
+                    self.stub_v2.MaterializeByKey,
+                    request,
+                    timeout=60,
+                    span=span,
+                    retries=1,
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
@@ -942,11 +932,11 @@ class DaemonCtl:
 
     def resolve_artifact_from_disk_v2(
         self, *, disk_path: str, verify_checksums: bool = True
-    ) -> store_daemon_v2_pb2.ResolveArtifactFromDiskResponse:
+    ) -> store_daemon_pb2.ResolveArtifactFromDiskResponse:
         if not disk_path:
             raise ValueError("disk_path is required")
         with self._client_span("Client/ResolveArtifactFromDiskV2") as span:
-            request = store_daemon_v2_pb2.ResolveArtifactFromDiskRequest(
+            request = store_daemon_pb2.ResolveArtifactFromDiskRequest(
                 disk_path=disk_path, verify_checksums=bool(verify_checksums)
             )
             try:

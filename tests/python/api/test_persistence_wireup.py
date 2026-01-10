@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -16,7 +16,7 @@ from tensorcast.api.store import Store
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.types import ArtifactError
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _DummyExecutor:

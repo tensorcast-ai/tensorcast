@@ -42,7 +42,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   const std::string index_bytes = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 
   // Begin lease registration
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(48);
   breq.set_owner_pid(getpid());
@@ -52,7 +52,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   breq.mutable_lease()->set_in_place(true);
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = svc.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
   REQUIRE(bresp.has_lease());
@@ -71,7 +71,7 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h2, p2).ok());
 
   // Feed in reverse order to validate order independence; include explicit dst_offset
-  tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest freq;
+  tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest freq;
   freq.set_registration_id(bresp.registration_id());
   // Storage metadata (deduplicated table).
   auto* storage2 = freq.add_storage_entries();
@@ -117,15 +117,15 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   s1->set_artifact_offset(0);
 
   // Use helper to feed streaming vector without spinning up gRPC server
-  std::vector<tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest> reqs;
+  std::vector<tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest> reqs;
   reqs.push_back(freq);
   st = svc.feed_register_artifact_stream_vector(reqs);
   REQUIRE(st.ok());
 
   // Commit
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = svc.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   INFO("Commit status: " << st.error_message());
   REQUIRE(st.ok());

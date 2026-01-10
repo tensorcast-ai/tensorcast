@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Network helpers: port selection, readiness probes, and address normalization."""
 
@@ -12,7 +12,7 @@ from typing import Any
 
 import grpc
 
-from tensorcast.proto.daemon.v1 import store_daemon_pb2, store_daemon_pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 
 
 def resolve_connect_host(listen_host: str | None) -> str:

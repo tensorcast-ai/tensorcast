@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Implementation of LipBridge
 
@@ -17,7 +17,7 @@ absl::StatusOr<bool> LipBridge::try_satisfy_from_lip(
     absl::string_view artifact_id,
     int target_device_id,
     const std::function<void(const store::loading::ReplicaKey&)>& on_ready,
-    v1::MemCopyHandle* out_handle) {
+    v2::MemCopyHandle* out_handle) {
   if (!out_handle) {
     return absl::InvalidArgumentError("out_handle is null");
   }

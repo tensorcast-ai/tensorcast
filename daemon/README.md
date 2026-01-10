@@ -9,7 +9,7 @@ sidebar_position: 3
 The Store Daemon is the data-plane service process that exposes a stable gRPC API over the C++ StoreEngine. It validates and routes requests, coordinates per-request orchestration, and tracks ephemeral state (sessions, PID refs, locks). It does not own domain invariants implemented in the engine.
 
 - Binary: `//daemon:tensorcast_daemon`
-- Public API: `../proto/tensorcast/daemon/v1/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v1`); streaming descriptor v2 surface lives at `../proto/tensorcast/daemon/v2/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v2`) and is always enabled.
+- Public API: `../proto/tensorcast/daemon/v2/store_daemon.proto` (Python import: `tensorcast.proto.daemon.v2`).
 - Deployment: see `../docs/deployment/store-daemon.md`
 
 ## What It Does
@@ -61,9 +61,8 @@ flowchart TB
 
 ## Interfaces (Public Surface)
 
-- Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`.
-- Loading v2: `MaterializeByKey`/`MaterializeReplica` with descriptor payloads under `StoreDaemonServiceV2`. Descriptors are derived from UMA view plans (offset/stride/byte-length) when a view is requested so the exported buffer layout matches the planner, and disk fallbacks stay daemon-owned via `DiskFallbackHint` (respecting `verify_checksums`).
-- Loading v2 (region-backed): `MaterializeIntoTarget` streams bytes directly into a client-registered CUDA region when the SDK supplies a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`, `index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`) and `artifact_id`. The daemon validates layout/device constraints, maps the IPC handle, and never allocates a daemon-owned replica.
+- Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`. Materialization responses include descriptor payloads derived from UMA view plans (offset/stride/byte-length) so exported buffer layouts match the planner.
+- Region-backed loading: `MaterializeIntoTarget` streams bytes directly into a client-registered CUDA region when the SDK supplies a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`, `index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`) and `artifact_id`. The daemon validates layout/device constraints, maps the IPC handle, and never allocates a daemon-owned replica.
 - Disk fallbacks honor `verify_checksums` on `DiskFallbackHint`/`MaterializeReplicaRequest` and propagate the flag into engine `MaterializeHints` so checksum/descriptor validation is enforced by default but can be disabled for local development.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
@@ -71,7 +70,7 @@ flowchart TB
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
 - Local stable tier: `CommitRegisteredArtifact` can synchronously satisfy `stable_dram(scope=local)` based on the resolved `StorePolicy` and returns `local_stable_tier` (`READY`/`DEGRADED`/`SKIPPED`). `must` failures fail the RPC; `should` failures degrade. Metrics: `tc_local_stable_tier_total{op,status,requirement}`, `tc_local_stable_tier_seconds{op,status}`. See `../docs/architecture/api/registration-flow.md#local-stable-tier`.
 - Persistence: `StartPersistence`/`QueryPersistenceStatus` run through a shard-aware persistence manager that resolves `StorePolicy` into must/should/may requirements, calls Global Store `PlanPlacement`, requests stable leases per shard target, acknowledges lease acquisition, registers remote replicas back to Global Store, and reports status. Tasks start from a daemon-owned stable-DRAM replica when present and fall back to an active LIP lease otherwise. Shards follow UMA chunking (128MB sharding threshold, 64–256MB shard caps); targets include the local node, any planned remotes, and an optional shared-disk leg that deduplicates by shard digest (skipped when the digest already exists on the daemon). Background ticks drive bounded lease retries with exponential cooldown, task state, and metrics (`tc_persist_tasks_active`, `tc_persist_errors_total`, `tc_persist_progress_ratio`). An append-only task log at `/tmp/tensorcast_persistence.log` (configurable via `Options.persistence_log_path`) is replayed on startup so in-flight persistence can resume/report after restart. The persistence manager reuses the Global Store client injected by `WorkerLifecycleManager` and is updated with the mutex-guarded `node_id` on registration so lease ACK/reporting carries the registered identity, and status reports are assembled under the persistence mutex then dispatched after releasing it so slow or failed Global Store RPCs cannot stall the scheduler loop. Query responses include shard targets and lease ids (index-aligned; empty lease_id means pending) alongside task-level progress/error/degraded fields; remote/shared-disk failures degrade or fail based on the resolved policy requirement. The persistence pipeline also updates a durability index (shared-disk/remote completion) that the stable DRAM cache uses to gate `overflow_policy=spill` eviction. See `../docs/architecture/api/policy-persistence.md#startpersistence-and-querypersistencestatus`.
-- V2 requests carry `DiskFallbackHint` + `SourcePreference` so the daemon owns all disk reads; the v2 gRPC service is always registered alongside v1 for legacy clients.
+- Requests carry `DiskFallbackHint` + `SourcePreference` so the daemon owns all disk reads.
 
 Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.
@@ -80,7 +79,7 @@ Contract highlights:
 - `MaterializeIntoTarget` requires canonical layouts and `artifact_id` in Phase 1, skips verification, and returns `DATA_LOSS` on post-start failures after poisoning the region to prevent reuse.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 
-### Variant Views (v1)
+### Variant Views
 
 - `MaterializeReplicaRequest` accepts optional `view` (deterministic slice/transpose spec) or `view_id` along with a `placement` hint (`SERVER` for slice/min-byte, `CLIENT` for transpose). Requests using `view` require the canonical `artifact_id` so the daemon can normalise against canonical index v3.
 - When a non-identity view is requested, `MaterializeReplicaResponse` populates `view_index_json` (canonicalised layout for the requested ByteSpace) and `view_data_hash` when verification completes. For canonical disk-source loads, `view_index_json` is also filled from the artifact directory so clients can reconstruct tensors without querying Global Store.

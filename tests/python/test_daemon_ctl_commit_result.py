@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 def test_commit_registered_artifact_maps_local_stable_tier(monkeypatch) -> None:

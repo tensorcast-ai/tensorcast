@@ -46,8 +46,7 @@ from tensorcast.api.store.views import (
     TransformPlacement,
     ViewOrchestrator,
 )
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -812,7 +811,7 @@ class MaterializationPipeline:
         canonical_index_bytes: bytes,
         target: Mapping[str, torch.Tensor],
         device_id: int,
-    ) -> tuple[store_daemon_v2_pb2.TargetLayout, str, int]:
+    ) -> tuple[store_daemon_pb2.TargetLayout, str, int]:
         entries_by_name = {entry.name: entry for entry in canonical_index.entries}
         if not entries_by_name:
             raise ArtifactError(
@@ -828,7 +827,7 @@ class MaterializationPipeline:
             )
         storage_base_ptr: int | None = None
         logical_total_size = 0
-        offsets: list[store_daemon_v2_pb2.TargetTensorOffset] = []
+        offsets: list[store_daemon_pb2.TargetTensorOffset] = []
         for entry in canonical_index.entries:
             tensor = target.get(entry.name)
             if tensor is None:
@@ -893,7 +892,7 @@ class MaterializationPipeline:
                     retryable=False,
                 )
             offsets.append(
-                store_daemon_v2_pb2.TargetTensorOffset(
+                store_daemon_pb2.TargetTensorOffset(
                     name=entry.name,
                     storage_id="",
                     storage_offset=logical_offset,
@@ -919,10 +918,10 @@ class MaterializationPipeline:
         storage_id = f"storage:{device_id}:{storage_base_ptr:x}:{logical_total_size}"
         for offset_entry in offsets:
             offset_entry.storage_id = storage_id
-        layout = store_daemon_v2_pb2.TargetLayout(
-            layout_kind=store_daemon_v2_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
-            index_kind=store_daemon_v2_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
-            tensor_spec_kind=store_daemon_v2_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
+        layout = store_daemon_pb2.TargetLayout(
+            layout_kind=store_daemon_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
+            index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
+            tensor_spec_kind=store_daemon_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
         )
         layout.storages.add(
             storage_id=storage_id,

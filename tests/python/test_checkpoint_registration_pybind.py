@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import os
 import subprocess
@@ -10,8 +10,8 @@ import pytest
 
 import tensorcast._C as _C
 from tensorcast.daemon_ctl import DaemonCtl
-from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
-from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as _pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc as _pb2_grpc
 from tensorcast.types import CoalescedPlan, CoalescedHandshake
 from tests.python.utils.daemon import start_daemon_binary
 

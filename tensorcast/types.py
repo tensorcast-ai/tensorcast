@@ -8,9 +8,7 @@ from typing import Literal, Union
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tensorcast.common.identity import ArtifactIdKind
-from tensorcast.proto.daemon.v1 import (
-    store_daemon_pb2 as store_daemon_pb2,
-)
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 # ---------------------------------------------------------------------------
 # Canonical typed models used across the Python SDK in place of raw dicts

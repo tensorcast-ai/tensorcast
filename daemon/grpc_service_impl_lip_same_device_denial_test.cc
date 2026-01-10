@@ -35,7 +35,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   const std::string index_bytes = j.dump();
 
   // Begin lease registration with in_place=true
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1 * 1024 * 1024); // 1 MiB
   breq.set_owner_pid(getpid());
@@ -46,7 +46,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   breq.mutable_lease()->set_in_place(true);
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = svc.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
 
@@ -57,7 +57,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   cudaIpcMemHandle_t h{};
   REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h, p).ok());
 
-  tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest freq;
+  tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest freq;
   freq.set_registration_id(bresp.registration_id());
   auto* ls = freq.mutable_lease_segments();
   auto* s = ls->add_segments();
@@ -82,19 +82,19 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   st = svc.feed_register_artifact_stream_vector({freq});
   REQUIRE(st.ok());
 
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = svc.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.has_artifact_descriptor());
 
   // Attempt to materialize on the same device (0) using artifact_id; must be denied.
-  tensorcast::daemon::v1::MaterializeReplicaRequest mreq;
+  tensorcast::daemon::v2::MaterializeReplicaRequest mreq;
   mreq.set_artifact_id(cresp.artifact_descriptor().artifact_id());
   // Default target_device_type = GPU → resolves to device 0
-  tensorcast::daemon::v1::MaterializeReplicaResponse mresp;
+  tensorcast::daemon::v2::MaterializeReplicaResponse mresp;
   st = svc.MaterializeReplica(&ctx, &mreq, &mresp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  REQUIRE(mresp.status() == tensorcast::daemon::v1::MATERIALIZE_REPLICA_STATUS_FAILED);
+  REQUIRE(mresp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_FAILED);
 }

@@ -48,17 +48,13 @@ The daemon offers two primary retrieval paths:
 Both paths return descriptor metadata and payloads that the SDK uses to rebuild
 PyTorch tensors.
 
-### RPC surfaces (v1 vs v2)
+### RPC surface (v2)
 
-The SDK primarily uses the v2 surfaces for tensor payload descriptors:
+The SDK uses the v2 materialization RPCs for tensor payload descriptors:
 
-- v1 proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
 - v2 proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
-Key differences:
-
-- v1 materialization returns a handle + status, but not a per-tensor descriptor table.
-- v2 materialization returns canonical index bytes, payload descriptors, and an optional replica ticket.
+v2 materialization returns canonical index bytes, payload descriptors, and an optional replica ticket.
 
 ## Fallback And Source Preference
 

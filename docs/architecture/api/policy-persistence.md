@@ -55,7 +55,7 @@ Why this matters:
 Policy tiers are expressed as `TierSpec`.
 
 - Python model: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py) (`StorePolicy`, `TierSpec`)
-- Proto model: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto) (`StorePolicy`, `TierSpec`)
+- Proto model: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto) (`StorePolicy`, `TierSpec`)
 
 Fields:
 
@@ -163,7 +163,7 @@ queried by task id or artifact id.
 
 ### StartPersistenceRequest / QueryPersistenceStatusResponse
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 `StartPersistence`:
 
@@ -213,4 +213,4 @@ non-local tiers are satisfied.
 - Policy resolver: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc)
 - Persistence manager: [daemon/persistence_manager.cc](../../../daemon/persistence_manager.cc)
 - Global Store placement service: [tensorcast/global_store/services/placement_service.py](../../../tensorcast/global_store/services/placement_service.py)
-- Daemon RPCs: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+- Daemon RPCs: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)

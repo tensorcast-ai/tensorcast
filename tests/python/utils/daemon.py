@@ -16,8 +16,8 @@ import grpc
 import yaml
 
 from tensorcast.cli_utils.proc import build_daemon_process_env
-from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
-from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as _pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc as _pb2_grpc
 
 
 def _resolve_daemon_binary(repo_root: Path) -> Path:

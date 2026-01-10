@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -55,17 +55,17 @@ TEST_CASE(
   std::filesystem::create_directories(svc_opts.storage_path);
   StoreDaemonServiceImpl svc(engine, svc_opts);
 
-  tensorcast::daemon::v1::MaterializeReplicaRequest req;
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.set_disk_path(artifact_dir.string());
-  req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_CPU);
-  req.set_preference(tensorcast::daemon::v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
+  req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   auto status = svc.MaterializeReplica(&ctx, &req, &resp);
   REQUIRE(status.ok());
-  REQUIRE(resp.status() == tensorcast::daemon::v1::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-  REQUIRE(resp.source() == tensorcast::daemon::v1::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
   REQUIRE_FALSE(resp.view_index_json().empty());
 
   // Ensure the bytes are valid canonical index JSON (no Global Store needed).

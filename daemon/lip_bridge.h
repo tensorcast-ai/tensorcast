@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // LipBridge: thin adapter around LipManager for cross-device LIP consumption
 
@@ -11,7 +11,7 @@
 #include "absl/strings/string_view.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "daemon/lip_manager.h"
-#include "tensorcast/daemon/v1/store_daemon.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -27,7 +27,7 @@ class LipBridge {
       absl::string_view artifact_id,
       int target_device_id,
       const std::function<void(const store::loading::ReplicaKey&)>& on_ready,
-      v1::MemCopyHandle* out_handle);
+      v2::MemCopyHandle* out_handle);
 
  private:
   LipManager& lip_;

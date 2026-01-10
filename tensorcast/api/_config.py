@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 from tensorcast.api._errors import InvalidPlan
 
 if TYPE_CHECKING:
-    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+    from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 # Module-level constants
 DEFAULT_ALIGN: int = 8
@@ -295,7 +295,7 @@ def _policy_proto_maps() -> tuple[
     dict[OverflowPolicy, "store_daemon_pb2.OverflowPolicy"],
     dict[PolicyLayout, "store_daemon_pb2.PolicyLayout"],
 ]:
-    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+    from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
     return (
         {
@@ -344,7 +344,7 @@ def _policy_proto_maps() -> tuple[
 
 
 def _tier_spec_to_proto(tier: TierSpec) -> "store_daemon_pb2.TierSpec":
-    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+    from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
     spec = store_daemon_pb2.TierSpec(
         tier=_POLICY_TIER_TO_PROTO[tier.tier],
@@ -535,7 +535,7 @@ class StorePolicy(BaseModel):
         return StorePolicy.model_validate(value)
 
     def to_proto(self) -> "store_daemon_pb2.StorePolicy":
-        from tensorcast.proto.daemon.v1 import store_daemon_pb2
+        from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
         policy = store_daemon_pb2.StorePolicy()
         if self.profile is not None:

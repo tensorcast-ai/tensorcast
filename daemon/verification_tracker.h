@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // VerificationTracker: manages verification status registry and completion queue
 // for replica materialization readiness futures. Applies TTL and capacity
@@ -21,7 +21,7 @@
 #include "core/common/ready_signal.h"
 #include "folly/Executor.h"
 #include "folly/futures/Future.h"
-#include "tensorcast/daemon/v1/store_daemon.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -44,9 +44,9 @@ class VerificationTracker {
   // readiness completion. Completion updates are executed on the serial
   // executor so registry progression is completion-driven and non-polling.
   void initiate(const std::string& uuid, std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
-    set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS, "");
+    set_status(uuid, v2::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS, "");
     if (!ready_signal) {
-      set_status(uuid, v1::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
+      set_status(uuid, v2::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
       return;
     }
     ABSL_CHECK(serial_executor_) << "VerificationTracker serial executor must be set before initiate()";
@@ -57,34 +57,34 @@ class VerificationTracker {
         .via(std::move(executor))
         .thenValue([this, uuid_copy = std::move(uuid_copy)](absl::Status st) {
           if (st.ok()) {
-            set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
+            set_status(uuid_copy, v2::VerificationStatus::VERIFICATION_STATUS_PASSED, "");
           } else {
-            set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
+            set_status(uuid_copy, v2::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
           }
           return st;
         })
         .thenError(folly::tag_t<std::exception>{}, [this, uuid_copy](const std::exception& ex) {
-          set_status(uuid_copy, v1::VerificationStatus::VERIFICATION_STATUS_FAILED, ex.what());
+          set_status(uuid_copy, v2::VerificationStatus::VERIFICATION_STATUS_FAILED, ex.what());
           return absl::InternalError(ex.what());
         });
   }
 
   // Return terminal status if known; otherwise std::nullopt.
-  std::optional<std::pair<v1::VerificationStatus, std::string>> get_known(const std::string& uuid) const {
+  std::optional<std::pair<v2::VerificationStatus, std::string>> get_known(const std::string& uuid) const {
     absl::MutexLock l(&mu_);
     auto it = reg_.find(uuid);
     if (it == reg_.end())
       return std::nullopt;
     const auto& e = it->second;
-    if (e.status == v1::VerificationStatus::VERIFICATION_STATUS_PASSED ||
-        e.status == v1::VerificationStatus::VERIFICATION_STATUS_FAILED) {
+    if (e.status == v2::VerificationStatus::VERIFICATION_STATUS_PASSED ||
+        e.status == v2::VerificationStatus::VERIFICATION_STATUS_FAILED) {
       return std::make_pair(e.status, e.err);
     }
     return std::nullopt;
   }
 
   // Update status explicitly (e.g., synchronous wait path). Refreshes TTL.
-  void update(const std::string& uuid, v1::VerificationStatus st, std::string err = "") {
+  void update(const std::string& uuid, v2::VerificationStatus st, std::string err = "") {
     set_status(uuid, st, std::move(err));
   }
 
@@ -119,13 +119,13 @@ class VerificationTracker {
   using time_point = std::chrono::time_point<std::chrono::steady_clock>;
 
   struct Entry {
-    v1::VerificationStatus status{v1::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
+    v2::VerificationStatus status{v2::VerificationStatus::VERIFICATION_STATUS_IN_PROGRESS};
     std::string err;
     time_point updated_at;
     time_point expire_at;
   };
 
-  void set_status(const std::string& uuid, v1::VerificationStatus st, std::string err) {
+  void set_status(const std::string& uuid, v2::VerificationStatus st, std::string err) {
     absl::MutexLock l(&mu_);
     const auto now = std::chrono::steady_clock::now();
     Entry e;

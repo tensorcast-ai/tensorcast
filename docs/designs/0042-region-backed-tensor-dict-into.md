@@ -73,8 +73,8 @@ Region-backed `tensor_dict_into` needs a compact description of where each tenso
   (or view) index entries, not the sum of lengths; COALESCED storages must span this size.
 
 **TargetLayout** (new v2 wrapper message)
-- `repeated tensorcast.daemon.v1.StorageEntry storages`
-- `repeated tensorcast.daemon.v1.TensorAlias aliases`
+- `repeated tensorcast.daemon.v2.StorageEntry storages`
+- `repeated tensorcast.daemon.v2.TensorAlias aliases`
 - `repeated TargetTensorOffset offsets`
 - `enum LayoutKind { LAYOUT_KIND_COALESCED_UNSPECIFIED = 0; LAYOUT_KIND_TENSOR_TABLE = 1; }`
 - `LayoutKind layout_kind`
@@ -248,24 +248,24 @@ message MaterializeIntoTargetRequest {
   int32 pid = 5;
   string device_uuid = 6;
 
-  tensorcast.daemon.v1.SourcePreference preference = 7;
+  tensorcast.daemon.v2.SourcePreference preference = 7;
 
   // Selective materialization (reserved for Phase 2)
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    tensorcast.daemon.v1.ViewSpec view = 1001;
+    tensorcast.daemon.v2.ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+  tensorcast.daemon.v2.TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetResponse {
   string artifact_id = 1;
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
-  tensorcast.daemon.v1.MaterializationSource source = 3;
+  tensorcast.daemon.v2.MaterializeReplicaStatus status = 2;
+  tensorcast.daemon.v2.MaterializationSource source = 3;
   bytes canonical_index_bytes = 4;
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;

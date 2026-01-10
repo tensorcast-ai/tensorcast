@@ -49,7 +49,7 @@ from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.common.identity import ArtifactIdKind, validate_client_generated_id
 from tensorcast.observability.otel import ensure_client_otel
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
     CanonicalRange,

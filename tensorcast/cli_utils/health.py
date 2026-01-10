@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Health probes for Global Store and daemon services."""
 
@@ -13,7 +13,7 @@ import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from tensorcast.cli_utils.network import resolve_connect_host
-from tensorcast.proto.daemon.v1 import store_daemon_pb2, store_daemon_pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
     global_store_pb2_grpc,

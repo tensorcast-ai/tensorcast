@@ -53,7 +53,7 @@ committed.
 
 ### BeginRegisterArtifactRequest (what/why of each field)
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 | Field | What it means | Why it exists |
 |---|---|---|
@@ -85,7 +85,7 @@ complex tensor dicts without repeating per-tensor CUDA IPC handle metadata.
 
 #### StorageEntry / TensorAlias (LIP metadata tables)
 
-Proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 `StorageEntry` describes a backing storage segment (typically a CUDA allocation):
 

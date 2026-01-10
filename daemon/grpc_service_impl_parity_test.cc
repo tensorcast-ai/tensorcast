@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -6,7 +6,7 @@
 #include <filesystem>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -29,10 +29,10 @@ TEST_CASE("DISK unload is idempotent success", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   StoreDaemonServiceImpl svc(engine, make_service_opts());
 
-  tensorcast::daemon::v1::UnloadReplicaRequest req;
+  tensorcast::daemon::v2::UnloadReplicaRequest req;
   req.set_disk_path("/tmp/does-not-matter");
-  req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_DISK);
-  tensorcast::daemon::v1::UnloadReplicaResponse resp;
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_DISK);
+  tensorcast::daemon::v2::UnloadReplicaResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.UnloadReplica(&ctx, &req, &resp);
   REQUIRE(st.ok());
@@ -44,14 +44,14 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
   StoreDaemonServiceImpl svc(engine, make_service_opts());
   svc.begin_shutdown();
 
-  tensorcast::daemon::v1::MaterializeReplicaRequest req;
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.set_disk_path("/tmp/anything");
-  req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
-  tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.MaterializeReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::UNAVAILABLE);
-  REQUIRE(resp.status() == tensorcast::daemon::v1::MATERIALIZE_REPLICA_STATUS_FAILED);
+  REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_FAILED);
 }
 
 TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
@@ -60,9 +60,9 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
 
   // Both missing -> INVALID_ARGUMENT
   {
-    tensorcast::daemon::v1::MaterializeReplicaRequest req;
-    req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
-    tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+    tensorcast::daemon::v2::MaterializeReplicaRequest req;
+    req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::v2::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
@@ -71,11 +71,11 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
   // Both present are accepted (may still fail deeper in the stack, but not on input validation)
   {
     const auto storage_root = std::filesystem::temp_directory_path();
-    tensorcast::daemon::v1::MaterializeReplicaRequest req;
+    tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.set_disk_path((storage_root / "x").string());
     req.set_artifact_id("mi2:abc:def");
-    req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
-    tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+    req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+    tensorcast::daemon::v2::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() != grpc::StatusCode::INVALID_ARGUMENT);
@@ -88,10 +88,10 @@ TEST_CASE("MaterializeReplica enforces shared storage root", "[daemon][parity]")
   opts.storage_path = std::filesystem::temp_directory_path();
   StoreDaemonServiceImpl svc(engine, opts);
 
-  tensorcast::daemon::v1::MaterializeReplicaRequest req;
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.set_disk_path("/var/denied/path");
-  req.set_target_device_type(tensorcast::daemon::v1::DeviceType::DEVICE_TYPE_GPU);
-  tensorcast::daemon::v1::MaterializeReplicaResponse resp;
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.MaterializeReplica(&ctx, &req, &resp);
   REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
@@ -101,13 +101,13 @@ TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]")
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   StoreDaemonServiceImpl svc(engine, make_service_opts());
 
-  tensorcast::daemon::v1::WaitReplicaVerificationRequest req;
+  tensorcast::daemon::v2::WaitReplicaVerificationRequest req;
   req.set_artifact_id("nonexistent");
   req.set_replica_uuid("deadbeef-dead-beef-dead-beefdeadbeef");
   req.set_timeout_ms(10);
-  tensorcast::daemon::v1::WaitReplicaVerificationResponse resp;
+  tensorcast::daemon::v2::WaitReplicaVerificationResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.WaitReplicaVerification(&ctx, &req, &resp);
   REQUIRE(st.ok());
-  REQUIRE(resp.status() == tensorcast::daemon::v1::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
+  REQUIRE(resp.status() == tensorcast::daemon::v2::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
 }

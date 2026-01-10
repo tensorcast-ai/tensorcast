@@ -54,7 +54,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
         "//core/store/materialization/dataplane:source_hash",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
@@ -68,7 +68,7 @@ sc_cc_library(
     hdrs = ["store_policy_resolver.h"],
     deps = [
         "//core/store:stable_dram_cache_policy",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
     ],
 )
 
@@ -85,7 +85,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/replica:memory_state",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "//proto/tensorcast/global_store/v1:global_store_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
@@ -105,7 +105,7 @@ sc_header_only_library(
     deps = [
         ":ref_tracker_hdr",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@nlohmann_json//:json",
     ],
 )
@@ -116,7 +116,7 @@ sc_header_only_library(
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:ready_signal_lib",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/status",
@@ -333,7 +333,7 @@ sc_header_only_library(
         ":transport_lock_manager_hdr",
         ":verification_tracker_hdr",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/log",
         "@abseil-cpp//absl/status",
@@ -384,7 +384,7 @@ sc_header_only_library(
     hdrs = ["device_resolver.h"],
     deps = [
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -416,7 +416,7 @@ sc_header_only_library(
         ":replica_listing_hdr",
         ":rpc_context_hdr",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@opentelemetry-cpp//api:api",
     ],
@@ -429,7 +429,7 @@ sc_cc_library(
     deps = [
         ":lip_manager_lib",
         # no direct StoreEngine dependency in header; uses loading_spec
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -450,7 +450,6 @@ sc_cc_library(
         "//core/cuda:cuda_ipc_lib",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:view_planner",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
@@ -476,7 +475,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
         "//proto/tensorcast/common/v1:common_cc",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
     ],
@@ -492,7 +491,7 @@ sc_cc_library(
         ":status_utils",
         ":transport_lock_manager_hdr",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
     ],
 )
@@ -627,7 +626,7 @@ cc_test(
     srcs = ["status_utils_test.cc"],
     deps = [
         ":status_utils",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],
@@ -639,7 +638,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",
     ],
@@ -664,7 +663,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -676,7 +675,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:source_hash",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@gsl",
     ],
@@ -688,7 +687,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],
@@ -700,7 +699,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],
@@ -712,7 +711,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -723,7 +722,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -735,7 +734,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/testing:common",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],
@@ -779,7 +778,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -790,7 +789,7 @@ cc_test(
     deps = [
         ":grpc_service_impl",
         "//core/store:store_engine",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -802,7 +801,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/testing:common",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -813,7 +812,7 @@ cc_test(
     deps = [
         ":persistence_manager_lib",
         "//core/store:testing_recording_global_store_client",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
 )
@@ -823,7 +822,7 @@ cc_test(
     srcs = ["store_policy_resolver_test.cc"],
     deps = [
         ":store_policy_resolver_lib",
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/status",
         "@catch2//:catch2_main",
     ],

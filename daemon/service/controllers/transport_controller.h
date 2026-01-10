@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // TransportController: handles Lock/Unlock transport chunk operations
 
@@ -8,7 +8,7 @@
 #include "daemon/lip_manager.h"
 #include "daemon/rpc_context.h"
 #include "daemon/transport_lock_manager.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -19,14 +19,15 @@ class TransportController {
     TransportLockManager& locks;
     LipManager& lip;
   };
+
   explicit TransportController(Dep d) : d_(d) {}
 
-  grpc::Status lock(RpcContext& rctx, const v1::LockTransportChunksRequest& req, v1::LockTransportChunksResponse& resp);
+  grpc::Status lock(RpcContext& rctx, const v2::LockTransportChunksRequest& req, v2::LockTransportChunksResponse& resp);
 
   grpc::Status unlock(
       RpcContext& rctx,
-      const v1::UnlockTransportChunksRequest& req,
-      v1::UnlockTransportChunksResponse& resp);
+      const v2::UnlockTransportChunksRequest& req,
+      v2::UnlockTransportChunksResponse& resp);
 
  private:
   Dep d_;

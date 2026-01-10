@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StatusController: handles get_server_config / get_worker_status / get_detailed_status / get_loaded_replicas_v2
 
@@ -31,7 +31,7 @@ class StatusController {
 
   explicit StatusController(Dep d) : d_(std::move(d)) {}
 
-  grpc::Status get_server_config(RpcContext& rctx, v1::GetServerConfigResponse& resp) {
+  grpc::Status get_server_config(RpcContext& rctx, v2::GetServerConfigResponse& resp) {
     auto& e = d_.engine;
     (void)rctx;
     resp.set_mem_pool_size(static_cast<int64_t>(e.get_mem_pool_size()));
@@ -42,7 +42,7 @@ class StatusController {
     return grpc::Status::OK;
   }
 
-  grpc::Status get_worker_status(RpcContext& rctx, v1::GetWorkerStatusResponse& resp) const {
+  grpc::Status get_worker_status(RpcContext& rctx, v2::GetWorkerStatusResponse& resp) const {
     resp.set_is_registered(d_.is_registered());
     resp.set_is_healthy(true);
     resp.set_is_shutting_down(d_.is_shutting_down.load());
@@ -64,7 +64,7 @@ class StatusController {
     return grpc::Status::OK;
   }
 
-  grpc::Status get_detailed_status(RpcContext& rctx, v1::GetDetailedStatusResponse& resp) {
+  grpc::Status get_detailed_status(RpcContext& rctx, v2::GetDetailedStatusResponse& resp) {
     resp.set_is_registered(d_.is_registered());
     resp.set_is_healthy(true);
     resp.set_is_shutting_down(d_.is_shutting_down.load());
@@ -85,8 +85,8 @@ class StatusController {
 
   grpc::Status get_loaded_replicas_v2(
       RpcContext& rctx,
-      const v1::GetLoadedReplicasV2Request& req,
-      v1::GetLoadedReplicasV2Response& resp,
+      const v2::GetLoadedReplicasV2Request& req,
+      v2::GetLoadedReplicasV2Response& resp,
       bool use_cursor_pagination) {
     if (rctx.allow_high_card_attrs()) {
       if (req.has_artifact_id_filter())

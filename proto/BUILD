@@ -54,13 +54,13 @@ alias(
 
 alias(
     name = "store_daemon_grpc_cpp",
-    actual = "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+    actual = "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
     visibility = ["//visibility:public"],
 )
 
 alias(
     name = "store_daemon_grpc",
-    actual = "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+    actual = "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
     visibility = ["//visibility:public"],
 )
 

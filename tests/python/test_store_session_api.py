@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ from tensorcast.api.store import (
 )
 from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.common.identity import ArtifactIdKind
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 
 

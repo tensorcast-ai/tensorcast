@@ -24,8 +24,7 @@ from tensorcast.api.store.types import (
     StoreOptions,
 )
 from tensorcast.api.store.views import ViewOrchestrator
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +55,7 @@ def _patch_validate_targets(monkeypatch):
 
 
 def test_materialization_proto_alignment():
-    resp = store_daemon_v2_pb2.MaterializeReplicaResponse()
+    resp = store_daemon_pb2.MaterializeReplicaResponse()
     assert hasattr(resp, "canonical_index_bytes")
     assert hasattr(resp, "view_index_bytes")
     assert hasattr(resp, "generation")

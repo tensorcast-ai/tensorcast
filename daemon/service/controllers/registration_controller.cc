@@ -168,7 +168,7 @@ void record_local_stable_tier_metrics(
   }
 }
 
-absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpec& spec_proto) {
+absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v2::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
     store::loader::TensorViewOps tensor_ops;
@@ -195,13 +195,13 @@ absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpe
   return spec;
 }
 
-store::StoreEngine::ViewPlacement ToPlacement(v1::TransformPlacement placement) {
+store::StoreEngine::ViewPlacement ToPlacement(v2::TransformPlacement placement) {
   switch (placement) {
-    case v1::TRANSFORM_PLACEMENT_SERVER:
+    case v2::TRANSFORM_PLACEMENT_SERVER:
       return store::StoreEngine::ViewPlacement::kServer;
-    case v1::TRANSFORM_PLACEMENT_CLIENT:
+    case v2::TRANSFORM_PLACEMENT_CLIENT:
       return store::StoreEngine::ViewPlacement::kClient;
-    case v1::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    case v2::TRANSFORM_PLACEMENT_UNSPECIFIED:
     default:
       return store::StoreEngine::ViewPlacement::kUnspecified;
   }
@@ -676,8 +676,8 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
 
 grpc::Status RegistrationController::begin(
     RpcContext& rctx,
-    const v1::BeginRegisterArtifactRequest& req,
-    v1::BeginRegisterArtifactResponse& resp) {
+    const v2::BeginRegisterArtifactRequest& req,
+    v2::BeginRegisterArtifactResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req.device_id()));
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.total_size()));
@@ -837,9 +837,9 @@ grpc::Status RegistrationController::begin(
 
 grpc::Status RegistrationController::feed_stream(
     RpcContext& rctx,
-    ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>& reader,
-    v1::FeedRegisterArtifactStreamResponse& /*resp*/) {
-  v1::FeedRegisterArtifactStreamRequest req;
+    ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>& reader,
+    v2::FeedRegisterArtifactStreamResponse& /*resp*/) {
+  v2::FeedRegisterArtifactStreamRequest req;
   std::string reg_id;
   RegistrationManager::RegMeta current_meta;
   bool have_meta = false;
@@ -1002,7 +1002,7 @@ grpc::Status RegistrationController::feed_stream(
   return Status::OK;
 }
 
-grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
+grpc::Status RegistrationController::feed_vector(const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
   RegistrationManager::RegMeta current_meta;
   bool have_meta = false;
@@ -1167,8 +1167,8 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
 
 grpc::Status RegistrationController::keep_alive(
     RpcContext& rctx,
-    const v1::KeepAliveRegisterArtifactRequest& req,
-    v1::KeepAliveRegisterArtifactResponse& /*resp*/) {
+    const v2::KeepAliveRegisterArtifactRequest& req,
+    v2::KeepAliveRegisterArtifactResponse& /*resp*/) {
   {
     auto st = d_.reg.keepalive_precommit(
         req.registration_id(), req.owner_pid(), req.epoch(), req.ttl_ms() > 0 ? req.ttl_ms() : 0, d_.engine);
@@ -1197,8 +1197,8 @@ KEEPALIVE_OK:
 
 grpc::Status RegistrationController::commit(
     RpcContext& rctx,
-    const v1::CommitRegisteredArtifactRequest& req,
-    v1::CommitRegisteredArtifactResponse& resp) {
+    const v2::CommitRegisteredArtifactRequest& req,
+    v2::CommitRegisteredArtifactResponse& resp) {
   auto meta_opt = d_.reg.get_meta(req.registration_id());
   RegistrationManager::RegMeta meta;
   if (meta_opt.has_value()) {
@@ -1304,11 +1304,11 @@ grpc::Status RegistrationController::commit(
     const char* op_label = local_stable_op_label(meta.plan);
     const char* requirement = requirement_level_label(resolved.local_requirement);
     if (meta.view_registration) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       local_stable->set_message("view registrations do not satisfy the local stable tier");
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else {
       const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
@@ -1345,11 +1345,11 @@ grpc::Status RegistrationController::commit(
           ReleaseRegionRefs(d_.regions, refs);
           return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
         }
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
         local_stable->set_message(message);
         record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
       } else {
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
         const char* retention =
             stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
         const char* overflow =
@@ -1456,11 +1456,11 @@ grpc::Status RegistrationController::commit(
     const char* op_label = local_stable_op_label(meta.plan);
     const char* requirement = requirement_level_label(resolved.local_requirement);
     if (meta.view_registration) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       local_stable->set_message("view registrations do not satisfy the local stable tier");
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else {
       const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
@@ -1505,11 +1505,11 @@ grpc::Status RegistrationController::commit(
           d_.reg.erase_meta(req.registration_id());
           return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
         }
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
         local_stable->set_message(message);
         record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
       } else {
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
         const char* retention =
             stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
         const char* overflow =
@@ -1559,8 +1559,8 @@ grpc::Status RegistrationController::commit(
 
 grpc::Status RegistrationController::abort(
     RpcContext& rctx,
-    const v1::AbortRegisteredArtifactRequest& req,
-    v1::AbortRegisteredArtifactResponse& /*resp*/) {
+    const v2::AbortRegisteredArtifactRequest& req,
+    v2::AbortRegisteredArtifactResponse& /*resp*/) {
   auto st = d_.engine.abort_registered_artifact(req.registration_id());
   if (!st.ok())
     return to_grpc_status(st);
@@ -1579,8 +1579,8 @@ grpc::Status RegistrationController::abort(
 
 grpc::Status RegistrationController::revoke(
     RpcContext& rctx,
-    const v1::RevokeRegisteredArtifactRequest& req,
-    v1::RevokeRegisteredArtifactResponse& /*resp*/) {
+    const v2::RevokeRegisteredArtifactRequest& req,
+    v2::RevokeRegisteredArtifactResponse& /*resp*/) {
   // Capture meta for potential joined-reference cleanup
   auto meta_opt = d_.reg.get_meta(req.registration_id());
   {

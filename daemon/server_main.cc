@@ -360,7 +360,6 @@ int main(int argc, char** argv) {
   svc_opts.use_cursor_pagination = absl::GetFlag(FLAGS_use_cursor_pagination);
 
   daemon::StoreDaemonServiceImpl service(engine, svc_opts, async_runtime);
-  daemon::StoreDaemonServiceV2Impl service_v2(service.materialization_controller(), svc_opts.allow_high_card_attrs);
 
   // gRPC server
   const std::string listen_addr = absl::StrCat(cfg.server().listen().host(), ":", cfg.server().listen().port());
@@ -419,7 +418,6 @@ int main(int argc, char** argv) {
   builder.AddChannelArgument("grpc.tcp_nodelay", cfg.server().grpc().tcp_nodelay() ? 1 : 0);
   builder.AddChannelArgument("grpc.so_reuseport", cfg.server().grpc().so_reuseport() ? 1 : 0);
   builder.RegisterService(&service);
-  builder.RegisterService(&service_v2);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   LOG(INFO) << "tensorcast-daemon listening on " << listen_addr;
 

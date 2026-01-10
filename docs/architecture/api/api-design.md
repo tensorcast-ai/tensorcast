@@ -223,7 +223,7 @@ Contracts:
 See:
 
 - Key materialization: [Materialization Flow](./materialization-flow.md#materialize-by-key-and-by-replica)
-- v1 proto: [proto/tensorcast/daemon/v1/store_daemon.proto](../../../proto/tensorcast/daemon/v1/store_daemon.proto)
+- Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)
 
 ### Store.put (upload into daemon-owned stable DRAM)
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -24,7 +24,7 @@
 #include "daemon/background_scheduler.h"
 #include "daemon/store_policy_resolver.h"
 #include "daemon/types.h"
-#include "tensorcast/daemon/v1/store_daemon.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::store {
@@ -56,7 +56,7 @@ struct PersistenceShardState {
   uint64_t size_bytes{0};
   std::string content_digest;
   std::vector<uint32_t> chunk_ids;
-  v1::PersistenceState state{v1::PERSISTENCE_STATE_PENDING};
+  v2::PersistenceState state{v2::PERSISTENCE_STATE_PENDING};
   double progress{0.0};
   std::string degraded_reason;
   std::string last_error;
@@ -67,12 +67,12 @@ struct PersistenceTaskState {
   std::string task_id;
   std::string plan_id;
   std::string artifact_id;
-  v1::PlacementPolicy placement_policy{v1::PLACEMENT_POLICY_UNSPECIFIED};
+  v2::PlacementPolicy placement_policy{v2::PLACEMENT_POLICY_UNSPECIFIED};
   bool persist_to_shared_disk{false};
   RequirementLevel remote_requirement{RequirementLevel::kNone};
   RequirementLevel shared_disk_requirement{RequirementLevel::kNone};
-  v1::PolicyLayout layout{v1::POLICY_LAYOUT_AUTO};
-  v1::PersistenceState state{v1::PERSISTENCE_STATE_PENDING};
+  v2::PolicyLayout layout{v2::POLICY_LAYOUT_AUTO};
+  v2::PersistenceState state{v2::PERSISTENCE_STATE_PENDING};
   double progress{0.0};
   std::string degraded_reason;
   std::string last_error;
@@ -101,19 +101,19 @@ class PersistenceManager {
 
   PersistenceTaskState start_task_for_test(
       std::string artifact_id,
-      v1::PlacementPolicy placement_policy,
+      v2::PlacementPolicy placement_policy,
       bool persist_to_shared_disk,
       uint64_t total_size_bytes = 64ULL * 1024 * 1024) {
     ResolvedStorePolicy resolved;
     resolved.shared_disk_requirement = persist_to_shared_disk ? RequirementLevel::kMust : RequirementLevel::kNone;
     resolved.remote_requirement =
-        placement_policy == v1::PLACEMENT_POLICY_LOCAL_ONLY ? RequirementLevel::kNone : RequirementLevel::kShould;
-    if (placement_policy == v1::PLACEMENT_POLICY_SHARDED) {
-      resolved.layout = v1::POLICY_LAYOUT_SHARDED;
-    } else if (placement_policy == v1::PLACEMENT_POLICY_REPLICATED) {
-      resolved.layout = v1::POLICY_LAYOUT_UNSHARDED;
+        placement_policy == v2::PLACEMENT_POLICY_LOCAL_ONLY ? RequirementLevel::kNone : RequirementLevel::kShould;
+    if (placement_policy == v2::PLACEMENT_POLICY_SHARDED) {
+      resolved.layout = v2::POLICY_LAYOUT_SHARDED;
+    } else if (placement_policy == v2::PLACEMENT_POLICY_REPLICATED) {
+      resolved.layout = v2::POLICY_LAYOUT_UNSHARDED;
     } else {
-      resolved.layout = v1::POLICY_LAYOUT_AUTO;
+      resolved.layout = v2::POLICY_LAYOUT_AUTO;
     }
     PersistenceSource source;
     source.artifact_id = std::move(artifact_id);
@@ -158,10 +158,10 @@ class PersistenceManager {
       const ResolvedStorePolicy& policy);
   absl::StatusOr<PersistenceSource> resolve_source(std::string_view artifact_id) const;
   absl::StatusOr<PersistenceSource> stable_source(std::string_view artifact_id) const;
-  static v1::PlacementPolicy select_placement_policy(const ResolvedStorePolicy& policy, uint64_t total_size_bytes);
+  static v2::PlacementPolicy select_placement_policy(const ResolvedStorePolicy& policy, uint64_t total_size_bytes);
   absl::StatusOr<std::vector<PersistenceShardState>> plan_shards(
       const PersistenceSource& source,
-      v1::PolicyLayout layout) const;
+      v2::PolicyLayout layout) const;
   absl::Status apply_placement_plan(PersistenceTaskState& task, std::vector<PersistenceShardState>& shards);
   absl::StatusOr<PlacementPlanResult> request_plan(
       const PersistenceTaskState& task,
@@ -180,9 +180,9 @@ class PersistenceManager {
       const PersistenceTaskState& task,
       const PersistenceShardState& shard,
       PersistenceTargetState& target);
-  static bool is_terminal(v1::PersistenceState state);
+  static bool is_terminal(v2::PersistenceState state);
   static store::components::PersistenceReport build_report(const PersistenceTaskState& task);
-  static tensorcast::global_store::v1::PersistenceState to_global_state(v1::PersistenceState state);
+  static tensorcast::global_store::v1::PersistenceState to_global_state(v2::PersistenceState state);
   void persist_task_locked(const PersistenceTaskState& task) const ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void load_task_log();
   void update_counter_from_task_id(absl::string_view task_id) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);

@@ -91,16 +91,24 @@ absl::StatusOr<std::vector<uint8_t>> StoreDaemonServiceImpl::lip_copy_to_new_coa
 
 Status StoreDaemonServiceImpl::MaterializeReplica(
     grpc::ServerContext* ctx,
-    const v1::MaterializeReplicaRequest* req,
-    v1::MaterializeReplicaResponse* resp) {
+    const v2::MaterializeReplicaRequest* req,
+    v2::MaterializeReplicaResponse* resp) {
   RpcContext rctx{"MaterializeReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->materialize_replica(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::MaterializeIntoTarget(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeIntoTargetRequest* req,
+    v2::MaterializeIntoTargetResponse* resp) {
+  RpcContext rctx{"MaterializeIntoTarget", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->materialize_into_target(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
-    const v1::ConfirmReplicaRequest* req,
-    v1::ConfirmReplicaResponse* resp) {
+    const v2::ConfirmReplicaRequest* req,
+    v2::ConfirmReplicaResponse* resp) {
   RpcContext rctx{"ConfirmReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->confirm(rctx, *req, *resp);
 }
@@ -108,17 +116,25 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
 // Key-based materialization via Global Store mapping.
 Status StoreDaemonServiceImpl::MaterializeByKey(
     grpc::ServerContext* ctx,
-    const v1::MaterializeByKeyRequest* req,
-    v1::MaterializeByKeyResponse* resp) {
+    const v2::MaterializeByKeyRequest* req,
+    v2::MaterializeByKeyResponse* resp) {
   RpcContext rctx{"MaterializeByKey", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->materialize_by_key(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ResolveArtifactFromDisk(
+    grpc::ServerContext* ctx,
+    const v2::ResolveArtifactFromDiskRequest* req,
+    v2::ResolveArtifactFromDiskResponse* resp) {
+  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->resolve_artifact_from_disk(rctx, *req, *resp);
 }
 
 // Publish key mapping via Global Store.
 Status StoreDaemonServiceImpl::PublishReplicaKey(
     grpc::ServerContext* ctx,
-    const v1::PublishReplicaKeyRequest* req,
-    v1::PublishReplicaKeyResponse* resp) {
+    const v2::PublishReplicaKeyRequest* req,
+    v2::PublishReplicaKeyResponse* resp) {
   RpcContext rctx{"PublishReplicaKey", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req->key());
@@ -158,8 +174,8 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
 
 Status StoreDaemonServiceImpl::ResolveKeyMapping(
     grpc::ServerContext* ctx,
-    const v1::ResolveKeyMappingRequest* req,
-    v1::ResolveKeyMappingResponse* resp) {
+    const v2::ResolveKeyMappingRequest* req,
+    v2::ResolveKeyMappingResponse* resp) {
   RpcContext rctx{"ResolveKeyMapping", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req->key());
@@ -184,16 +200,16 @@ Status StoreDaemonServiceImpl::ResolveKeyMapping(
 
 Status StoreDaemonServiceImpl::GetArtifactIndexById(
     grpc::ServerContext* ctx,
-    const v1::GetArtifactIndexByIdRequest* req,
-    v1::GetArtifactIndexByIdResponse* resp) {
+    const v2::GetArtifactIndexByIdRequest* req,
+    v2::GetArtifactIndexByIdResponse* resp) {
   RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::StartPersistence(
     grpc::ServerContext* ctx,
-    const v1::StartPersistenceRequest* req,
-    v1::StartPersistenceResponse* resp) {
+    const v2::StartPersistenceRequest* req,
+    v2::StartPersistenceResponse* resp) {
   RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
@@ -227,8 +243,8 @@ Status StoreDaemonServiceImpl::StartPersistence(
 
 Status StoreDaemonServiceImpl::QueryPersistenceStatus(
     grpc::ServerContext* ctx,
-    const v1::QueryPersistenceStatusRequest* req,
-    v1::QueryPersistenceStatusResponse* resp) {
+    const v2::QueryPersistenceStatusRequest* req,
+    v2::QueryPersistenceStatusResponse* resp) {
   RpcContext rctx{"QueryPersistenceStatus", *ctx, opts_.allow_high_card_attrs};
   if (req->task_id().empty() && req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "task_id or artifact_id is required"};
@@ -286,16 +302,16 @@ Status StoreDaemonServiceImpl::QueryPersistenceStatus(
 
 Status StoreDaemonServiceImpl::UnloadReplica(
     grpc::ServerContext* ctx,
-    const v1::UnloadReplicaRequest* req,
-    v1::UnloadReplicaResponse* resp) {
+    const v2::UnloadReplicaRequest* req,
+    v2::UnloadReplicaResponse* resp) {
   RpcContext rctx{"UnloadReplica", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->unload(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ClearMem(
     grpc::ServerContext* ctx,
-    const v1::ClearMemRequest* /*req*/,
-    v1::ClearMemResponse* /*resp*/) {
+    const v2::ClearMemRequest* /*req*/,
+    v2::ClearMemResponse* /*resp*/) {
   RpcContext rctx{"ClearMem", *ctx, opts_.allow_high_card_attrs};
   const int rc = engine_->clear_mem();
   if (rc == 0) {
@@ -307,8 +323,8 @@ Status StoreDaemonServiceImpl::ClearMem(
 
 Status StoreDaemonServiceImpl::GetServerConfig(
     grpc::ServerContext* ctx,
-    const v1::GetServerConfigRequest* /*req*/,
-    v1::GetServerConfigResponse* resp) {
+    const v2::GetServerConfigRequest* /*req*/,
+    v2::GetServerConfigResponse* resp) {
   RpcContext rctx{"GetServerConfig", *ctx, opts_.allow_high_card_attrs};
   return status_controller_->get_server_config(rctx, *resp);
 }
@@ -327,56 +343,24 @@ StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
 
 Status StoreDaemonServiceImpl::WaitReplicaVerification(
     grpc::ServerContext* ctx,
-    const v1::WaitReplicaVerificationRequest* req,
-    v1::WaitReplicaVerificationResponse* resp) {
+    const v2::WaitReplicaVerificationRequest* req,
+    v2::WaitReplicaVerificationResponse* resp) {
   RpcContext rctx{"WaitReplicaVerification", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->wait_verification(rctx, *req, *resp);
 }
 
-Status StoreDaemonServiceV2Impl::MaterializeReplica(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeReplicaRequest* req,
-    v2::MaterializeReplicaResponse* resp) {
-  RpcContext rctx{"MaterializeReplicaV2", *ctx, allow_high_card_attrs_};
-  return materialization_controller_.materialize_replica_v2(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceV2Impl::MaterializeIntoTarget(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeIntoTargetRequest* req,
-    v2::MaterializeIntoTargetResponse* resp) {
-  RpcContext rctx{"MaterializeIntoTarget", *ctx, allow_high_card_attrs_};
-  return materialization_controller_.materialize_into_target(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceV2Impl::MaterializeByKey(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeByKeyRequest* req,
-    v2::MaterializeByKeyResponse* resp) {
-  RpcContext rctx{"MaterializeByKeyV2", *ctx, allow_high_card_attrs_};
-  return materialization_controller_.materialize_by_key_v2(rctx, *req, *resp);
-}
-
-Status StoreDaemonServiceV2Impl::ResolveArtifactFromDisk(
-    grpc::ServerContext* ctx,
-    const v2::ResolveArtifactFromDiskRequest* req,
-    v2::ResolveArtifactFromDiskResponse* resp) {
-  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, allow_high_card_attrs_};
-  return materialization_controller_.resolve_artifact_from_disk(rctx, *req, *resp);
-}
-
 Status StoreDaemonServiceImpl::LockTransportChunks(
     grpc::ServerContext* ctx,
-    const v1::LockTransportChunksRequest* req,
-    v1::LockTransportChunksResponse* resp) {
+    const v2::LockTransportChunksRequest* req,
+    v2::LockTransportChunksResponse* resp) {
   RpcContext rctx{"LockTransportChunks", *ctx, opts_.allow_high_card_attrs};
   return transport_controller_->lock(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RegisterVramRegion(
     grpc::ServerContext* ctx,
-    const v1::RegisterVramRegionRequest* req,
-    v1::RegisterVramRegionResponse* resp) {
+    const v2::RegisterVramRegionRequest* req,
+    v2::RegisterVramRegionResponse* resp) {
   RpcContext rctx{"RegisterVramRegion", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
@@ -434,8 +418,8 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
 
 Status StoreDaemonServiceImpl::UnregisterVramRegion(
     grpc::ServerContext* ctx,
-    const v1::UnregisterVramRegionRequest* req,
-    v1::UnregisterVramRegionResponse* resp) {
+    const v2::UnregisterVramRegionRequest* req,
+    v2::UnregisterVramRegionResponse* resp) {
   RpcContext rctx{"UnregisterVramRegion", *ctx, opts_.allow_high_card_attrs};
   auto& span = rctx.span();
   span->SetAttribute("tc.region.id", req->region_id());
@@ -459,8 +443,8 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
 
 Status StoreDaemonServiceImpl::DeregisterArtifact(
     grpc::ServerContext* ctx,
-    const v1::DeregisterArtifactRequest* req,
-    v1::DeregisterArtifactResponse* resp) {
+    const v2::DeregisterArtifactRequest* req,
+    v2::DeregisterArtifactResponse* resp) {
   RpcContext rctx{"DeregisterArtifact", *ctx, opts_.allow_high_card_attrs};
   if (!req->artifact_id().empty()) {
     rctx.span()->SetAttribute("tc.artifact.id", req->artifact_id());
@@ -524,33 +508,33 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
 
 Status StoreDaemonServiceImpl::UnlockTransportChunks(
     grpc::ServerContext* ctx,
-    const v1::UnlockTransportChunksRequest* req,
-    v1::UnlockTransportChunksResponse* /*resp*/) {
+    const v2::UnlockTransportChunksRequest* req,
+    v2::UnlockTransportChunksResponse* /*resp*/) {
   RpcContext rctx{"UnlockTransportChunks", *ctx, opts_.allow_high_card_attrs};
-  v1::UnlockTransportChunksResponse dummy;
+  v2::UnlockTransportChunksResponse dummy;
   return transport_controller_->unlock(rctx, *req, dummy);
 }
 
 Status StoreDaemonServiceImpl::BeginRegisterArtifact(
     grpc::ServerContext* ctx,
-    const v1::BeginRegisterArtifactRequest* req,
-    v1::BeginRegisterArtifactResponse* resp) {
+    const v2::BeginRegisterArtifactRequest* req,
+    v2::BeginRegisterArtifactResponse* resp) {
   RpcContext rctx{"BeginRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->begin(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
     grpc::ServerContext* ctx,
-    const v1::CommitRegisteredArtifactRequest* req,
-    v1::CommitRegisteredArtifactResponse* resp) {
+    const v2::CommitRegisteredArtifactRequest* req,
+    v2::CommitRegisteredArtifactResponse* resp) {
   RpcContext rctx{"CommitRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->commit(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
     grpc::ServerContext* ctx,
-    const v1::AbortRegisteredArtifactRequest* req,
-    v1::AbortRegisteredArtifactResponse* resp) {
+    const v2::AbortRegisteredArtifactRequest* req,
+    v2::AbortRegisteredArtifactResponse* resp) {
   RpcContext rctx{"AbortRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->abort(rctx, *req, *resp);
 }
@@ -559,29 +543,29 @@ Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
 
 Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
     grpc::ServerContext* ctx,
-    ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
-    v1::FeedRegisterArtifactStreamResponse* resp) {
+    ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>* reader,
+    v2::FeedRegisterArtifactStreamResponse* resp) {
   RpcContext rctx{"FeedRegisterArtifactStream", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->feed_stream(rctx, *reader, *resp);
 }
 
 grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
-    const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
+    const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs) {
   return registration_controller_->feed_vector(reqs);
 }
 
 Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
     grpc::ServerContext* ctx,
-    const v1::KeepAliveRegisterArtifactRequest* req,
-    v1::KeepAliveRegisterArtifactResponse* resp) {
+    const v2::KeepAliveRegisterArtifactRequest* req,
+    v2::KeepAliveRegisterArtifactResponse* resp) {
   RpcContext rctx{"KeepAliveRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->keep_alive(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
     grpc::ServerContext* ctx,
-    const v1::RevokeRegisteredArtifactRequest* req,
-    v1::RevokeRegisteredArtifactResponse* resp) {
+    const v2::RevokeRegisteredArtifactRequest* req,
+    v2::RevokeRegisteredArtifactResponse* resp) {
   RpcContext rctx{"RevokeRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
   return registration_controller_->revoke(rctx, *req, *resp);
 }
@@ -690,16 +674,16 @@ void StoreDaemonServiceImpl::stop_sweepers() {
 
 Status StoreDaemonServiceImpl::GetWorkerStatus(
     grpc::ServerContext* ctx,
-    const v1::GetWorkerStatusRequest* /*req*/,
-    v1::GetWorkerStatusResponse* resp) {
+    const v2::GetWorkerStatusRequest* /*req*/,
+    v2::GetWorkerStatusResponse* resp) {
   RpcContext rctx{"GetWorkerStatus", *ctx, opts_.allow_high_card_attrs};
   return status_controller_->get_worker_status(rctx, *resp);
 }
 
 Status StoreDaemonServiceImpl::GetDetailedStatus(
     grpc::ServerContext* ctx,
-    const v1::GetDetailedStatusRequest* /*req*/,
-    v1::GetDetailedStatusResponse* resp) {
+    const v2::GetDetailedStatusRequest* /*req*/,
+    v2::GetDetailedStatusResponse* resp) {
   RpcContext rctx{"GetDetailedStatus", *ctx, opts_.allow_high_card_attrs};
   return status_controller_->get_detailed_status(rctx, *resp);
 }
@@ -710,8 +694,8 @@ Status StoreDaemonServiceImpl::GetDetailedStatus(
 
 Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
     grpc::ServerContext* ctx,
-    const v1::GetLoadedReplicasV2Request* req,
-    v1::GetLoadedReplicasV2Response* resp) {
+    const v2::GetLoadedReplicasV2Request* req,
+    v2::GetLoadedReplicasV2Response* resp) {
   RpcContext rctx{"GetLoadedReplicasV2", *ctx, opts_.allow_high_card_attrs};
   return status_controller_->get_loaded_replicas_v2(rctx, *req, *resp, opts_.use_cursor_pagination);
 }

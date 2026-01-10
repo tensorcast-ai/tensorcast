@@ -3,7 +3,7 @@ slug: 0038-daemon-only-disk-materialization
 title: Daemon-Only Disk Materialization
 areas: ["sdk", "daemon"]
 related_code:
-  - proto/tensorcast/daemon/v1/store_daemon.proto
+  - proto/tensorcast/daemon/v2/store_daemon.proto
   - daemon/materialization/**
   - tensorcast/api/store/materialization.py
   - tensorcast/api/store/runtime.py
@@ -22,7 +22,7 @@ All disk materialization flows must traverse the Store daemon so that descriptor
 # Goals / Non-Goals
 
 ## Goals
-1. Extend the existing v1 `MaterializeReplicaRequest` with a `SourcePreference` enum field; reuse the existing `disk_path` field for disk hints without introducing new hint messages.
+1. Extend the v2 `MaterializeReplicaRequest` with `DiskFallbackHint` + `SourcePreference` so disk hints are explicit and typed.
 2. Update the daemon to respect `SourcePreference`: when set to `PREFER_DISK`, daemon reads canonical metadata from `disk_path`, performs checksum verification (always enabled), and chooses the optimal source (existing replica, remote peer, or local disk).
 3. Replace `_materialize_from_disk()` with a daemon RPC call inside `MaterializationPipeline`, ensuring `get()`, `get_into()`, `artifact.tensor_dict()`, and `tc.from_disk()` all share the iterator contract.
 4. Preserve observability (traces, metrics, structured logs) by running every disk load through the existing spans and counters while recording the actual source selected by the daemon.
@@ -61,9 +61,9 @@ The SDK now issues v2 disk hints to the daemon; the legacy bypass described belo
 
 ## RPC Surface Changes
 
-- `MaterializeReplicaRequest` (v1) gains:
+- `MaterializeReplicaRequest` (v2) includes:
   - `SourcePreference preference` enum with values `{UNSPECIFIED, AUTO, PREFER_P2P, PREFER_DISK}` (defaults to `AUTO` when unset). This is a hint—not a hard requirement. When `preference=PREFER_DISK`, the daemon should still prefer faster replicas if they exist and are healthy, falling back to disk only when other sources are unavailable.
-  - No new `DiskFallbackHint` message is needed. The existing `disk_path` field (tag 10) carries the on-disk path. All necessary metadata (`canonical_index`, `descriptor`, checksums) are derived by the daemon from `disk_path` contents. Checksum verification is always performed; no separate flag required.
+  - `DiskFallbackHint disk_fallback` carrying `disk_path` plus `verify_checksums` so disk routing is explicit and verified by default.
 - `MaterializeReplicaResponse` gains a `MaterializationSource source` enum field indicating the actual source selected so metrics/logs capture real behavior.
 
 ### Proto Additions
@@ -85,9 +85,15 @@ enum MaterializationSource {
   MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
 }
 
+message DiskFallbackHint {
+  string disk_path = 1;
+  bool verify_checksums = 2;
+}
+
 message MaterializeReplicaRequest {
   // ... existing fields ...
-  SourcePreference preference = 11;
+  DiskFallbackHint disk_fallback = 2;
+  SourcePreference preference = 9;
 }
 
 message MaterializeReplicaResponse {
@@ -109,7 +115,7 @@ The daemon also echoes the canonical `artifact_id` on `MaterializeReplicaRespons
 
 | Existing Field | Role After Change |
 |----------------|-------------------|
-| `disk_path` (tag 10) | Carries on-disk path for disk loads; unchanged semantics |
+| `disk_fallback.disk_path` | Carries on-disk path for disk loads; preferred path for disk hints |
 | `target_device_type` | Specifies target memory type (CPU/GPU); orthogonal to `SourcePreference` |
 | `DeviceType.DEVICE_TYPE_DISK` | Retained for compatibility; `SourcePreference` is the new hint mechanism |
 
@@ -271,4 +277,4 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 - `tensorcast/api/store/__init__.py`
 - `tensorcast/api/_io_disk.py`
 - `daemon/materialization/dataplane/loaders/disk_loader.h`
-- `proto/tensorcast/daemon/v1/store_daemon.proto`
+- `proto/tensorcast/daemon/v2/store_daemon.proto`
