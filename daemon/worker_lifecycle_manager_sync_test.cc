@@ -628,13 +628,15 @@ TEST_CASE("state_checksum_is_stable_and_availability_sensitive") {
   infos.push_back(cpu);
 
   const std::string node_id = "node-xyz";
-  const auto checksum1 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  const std::string node_address = "10.0.0.1";
+  const uint32_t node_port = 50050;
+  const auto checksum1 = WorkerLifecycleManager::compute_state_checksum(node_id, node_address, node_port, infos);
   std::reverse(infos.begin(), infos.end());
-  const auto checksum2 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  const auto checksum2 = WorkerLifecycleManager::compute_state_checksum(node_id, node_address, node_port, infos);
   REQUIRE(checksum1 == checksum2);
 
   infos.front().is_registered_for_comm = false;
-  const auto checksum3 = WorkerLifecycleManager::compute_state_checksum(node_id, infos);
+  const auto checksum3 = WorkerLifecycleManager::compute_state_checksum(node_id, node_address, node_port, infos);
   REQUIRE(checksum3 != checksum1);
 }
 

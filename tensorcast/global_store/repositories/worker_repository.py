@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for worker data access."""
 
@@ -109,7 +109,7 @@ class WorkerRepository(BaseRepository):
         result = cursor.execute(
             """
             UPDATE workers
-            SET node_id = ?, p2p_port = ?,
+            SET node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
                 mem_pool_total_size = ?, mem_pool_available_size = ?,
                 accepting_new_requests = ?,
                 last_heartbeat = CURRENT_TIMESTAMP
@@ -118,6 +118,8 @@ class WorkerRepository(BaseRepository):
             """,
             [
                 worker.node_id,
+                worker.node_address,
+                worker.grpc_port,
                 worker.p2p_port,
                 worker.mem_pool_total_size,
                 worker.mem_pool_available_size,

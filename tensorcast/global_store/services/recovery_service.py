@@ -328,18 +328,73 @@ class RecoveryService:
             current_available = global_replica.is_available
 
             availability_changed = desired_available != current_available
+            node_address_changed = False
+            node_port_changed = False
+            memory_size_changed = False
+            remote_keys_changed = False
+            buffer_sizes_changed = False
 
-            if not availability_changed:
+            local_node_address = local_replica.memory_info.node_address
+            local_node_port = local_replica.memory_info.node_port
+            local_memory_size = local_replica.memory_info.memory_size
+            local_remote_keys = list(local_replica.memory_info.remote_memory_keys)
+            local_buffer_sizes = list(local_replica.memory_info.buffer_sizes)
+
+            if local_node_address and local_node_address != global_replica.node_address:
+                node_address_changed = True
+            if local_node_port > 0 and local_node_port != global_replica.node_port:
+                node_port_changed = True
+            if (
+                local_memory_size > 0
+                and local_memory_size != global_replica.memory_size
+            ):
+                memory_size_changed = True
+            if local_remote_keys:
+                remote_keys_changed = local_remote_keys != list(
+                    global_replica.remote_memory_keys
+                )
+            if local_buffer_sizes:
+                buffer_sizes_changed = local_buffer_sizes != list(
+                    global_replica.buffer_sizes
+                )
+
+            if not any(
+                [
+                    availability_changed,
+                    node_address_changed,
+                    node_port_changed,
+                    memory_size_changed,
+                    remote_keys_changed,
+                    buffer_sizes_changed,
+                ]
+            ):
                 continue
 
             updated_proto = self._convert_replica_to_proto(global_replica)
+            reasons: list[str] = []
             if availability_changed:
                 updated_proto.stats.is_available = desired_available
+                reasons.append("availability")
+            if node_address_changed:
+                updated_proto.memory_info.node_address = local_node_address
+                reasons.append("node_address")
+            if node_port_changed:
+                updated_proto.memory_info.node_port = local_node_port
+                reasons.append("node_port")
+            if memory_size_changed:
+                updated_proto.memory_info.memory_size = local_memory_size
+                reasons.append("memory_size")
+            if remote_keys_changed:
+                updated_proto.memory_info.remote_memory_keys[:] = local_remote_keys
+                reasons.append("remote_memory_keys")
+            if buffer_sizes_changed:
+                updated_proto.memory_info.buffer_sizes[:] = local_buffer_sizes
+                reasons.append("buffer_sizes")
 
             change = global_store_pb2.StateChange(
                 type=global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA,
                 replica_info=updated_proto,
-                reason="Replica metadata changed (availability)",
+                reason="Replica metadata changed (" + ", ".join(reasons) + ")",
             )
             state_changes.append(change)
 
@@ -467,7 +522,7 @@ class RecoveryService:
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
         """Compute checksum of replica state for consistency checking."""
-        entries: list[tuple[str, str, int, str, bool]] = []
+        entries: list[tuple[str, str, str, int, int, str, bool]] = []
         for replica in replicas:
             mem_type = "DISK"
             device_id = 0
@@ -481,6 +536,8 @@ class RecoveryService:
                 (
                     replica.artifact_id,
                     replica.node_id or "",
+                    replica.node_address or "",
+                    replica.node_port or 0,
                     device_id,
                     mem_type,
                     replica.is_available,
@@ -488,12 +545,12 @@ class RecoveryService:
             )
 
         # Sort replicas by a stable key for consistent checksum
-        entries.sort(key=lambda e: (e[0], e[3], e[2]))
+        entries.sort(key=lambda e: (e[0], e[5], e[4]))
 
         # Create string representation of state
         state_parts = [
-            f"{artifact_id}:{node_id}:{device_id}:{memory_type}:{1 if available else 0};"
-            for artifact_id, node_id, device_id, memory_type, available in entries
+            f"{artifact_id}:{node_id}:{node_address}:{node_port}:{device_id}:{memory_type}:{1 if available else 0};"
+            for artifact_id, node_id, node_address, node_port, device_id, memory_type, available in entries
         ]
         state_str = "".join(state_parts)
 

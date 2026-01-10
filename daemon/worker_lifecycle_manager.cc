@@ -264,6 +264,7 @@ absl::Status WorkerLifecycleManager::start() {
   }
   const std::string node_addr = *node_addr_or;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
+  node_address_ = node_addr;
 
   if (grpc_port == 0) {
     return absl::InvalidArgumentError(
@@ -389,7 +390,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         registered_ids.push_back(i.artifact_id);
       }
       // Compute simple checksum over current snapshot
-      state_checksum_ = compute_state_checksum(node_id_, infos);
+      state_checksum_ = compute_state_checksum(node_id_, node_address_, opts_.p2p_port, infos);
       auto hb_or = global_store_->send_heartbeat_enhanced(
           worker_id_,
           engine_->get_available_memory(),
@@ -453,6 +454,8 @@ void WorkerLifecycleManager::heartbeat_loop() {
             rep->mutable_ref()->set_replica_id("");
             auto* mi = rep->mutable_memory_info();
             mi->set_node_id(node_id_);
+            mi->set_node_address(node_address_);
+            mi->set_node_port(opts_.p2p_port);
             mi->set_memory_size(i.size_bytes);
             if (i.gpu_state != common::memory::MemoryLocation::NONE) {
               mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
@@ -651,6 +654,7 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   }
   const std::string node_addr = *node_addr_or;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
+  node_address_ = node_addr;
   const bool recovery = preserve_identity && !worker_id_.empty();
   auto reg_or = global_store_->register_worker(
       node_id_,
@@ -910,9 +914,12 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
 
 std::string WorkerLifecycleManager::compute_state_checksum(
     std::string_view node_id,
+    std::string_view node_address,
+    uint32_t node_port,
     const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
   // Keep format aligned with Global Store's RecoveryService._compute_state_checksum:
-  // artifact_id:node_id:device_id:memory_type:available; sorted by (artifact_id, memory_type, device_id).
+  // artifact_id:node_id:node_address:node_port:device_id:memory_type:available; sorted by
+  // (artifact_id, memory_type, device_id).
   struct Entry {
     std::string artifact_id;
     std::string memory_type;
@@ -953,7 +960,15 @@ std::string WorkerLifecycleManager::compute_state_checksum(
   std::string state_str;
   for (const auto& e : entries) {
     absl::StrAppendFormat(
-        &state_str, "%s:%s:%d:%s:%d;", e.artifact_id, node_id, e.device_id, e.memory_type, e.available ? 1 : 0);
+        &state_str,
+        "%s:%s:%s:%u:%d:%s:%d;",
+        e.artifact_id,
+        node_id,
+        node_address,
+        node_port,
+        e.device_id,
+        e.memory_type,
+        e.available ? 1 : 0);
   }
 
   // FNV-1a 64-bit over the stable string; portable across languages.

@@ -64,7 +64,8 @@ When `state_sync_required` is returned (or the daemon detects its version/checks
 - Versions only advance when actual changes are applied; a no-op sync returns the existing version along with a recomputed checksum.
 - The daemon stores the returned version and checksum so subsequent heartbeats can short-circuit unnecessary syncs.
 - `StateChange` removals are applied per replica key `(artifact_id, memory_type, device_id)` so GPU/CPU tiers are reconciled independently.
-- Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, memory_type, device_id, node_id, availability)`. Order never changes the checksum, and availability flips (remote access enable/disable) intentionally mutate it to trigger reconciliation.
+- `StateChange` updates propagate endpoint metadata drift (node address/port, memory size, and transport keys when reported) so routing stays accurate.
+- Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, node_id, node_address, node_port, memory_type, device_id, availability)`. Order never changes the checksum, and availability or endpoint drift intentionally mutates it to trigger reconciliation.
 - Authoritative empties: when `high_availability.force_full_sync_on_empty_inventory=true`, an empty inventory is treated as authoritative and removals are applied (for drains/retirements). Default keeps the conservative behavior (empty = “unknown”, no removals).
 
 ## Full-State Sync

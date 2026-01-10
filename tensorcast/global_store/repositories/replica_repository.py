@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for artifact replica data access."""
 
@@ -372,6 +372,8 @@ class ReplicaRepository(BaseRepository):
             SET
                 updated_at = CURRENT_TIMESTAMP,
                 node_id = ?,
+                node_address = ?,
+                node_port = ?,
                 is_available = ?,
                 max_concurrency = ?,
                 remote_memory_keys = ?,
@@ -384,6 +386,8 @@ class ReplicaRepository(BaseRepository):
             """,
             [
                 replica.node_id,
+                replica.node_address,
+                replica.node_port,
                 replica.is_available,
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),

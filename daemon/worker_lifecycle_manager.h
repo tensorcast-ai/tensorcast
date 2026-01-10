@@ -1,9 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -52,6 +53,8 @@ class WorkerLifecycleManager {
   // Exposed for deterministic HA synchronization and unit tests.
   static std::string compute_state_checksum(
       std::string_view node_id,
+      std::string_view node_address,
+      uint32_t node_port,
       const std::vector<store::StoreEngine::ReplicaInfo>& infos);
 
  private:
@@ -93,6 +96,7 @@ class WorkerLifecycleManager {
   const gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> global_store_;
   const std::string node_id_;
   std::string worker_id_;
+  std::string node_address_;
 
   // HA state tracking
   uint64_t state_version_{0};
