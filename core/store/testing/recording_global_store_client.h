@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -43,7 +43,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<components::WorkerRegistrationInfo> register_worker(
       std::string_view,
       std::string_view,
       uint32_t,
@@ -53,10 +53,6 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       bool,
       std::string_view) override {
     return absl::UnimplementedError("register_worker not supported in test stub");
-  }
-
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not supported in test stub");
   }
 
   absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(

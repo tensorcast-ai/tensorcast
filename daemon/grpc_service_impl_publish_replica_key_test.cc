@@ -44,7 +44,7 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<tensorcast::store::components::WorkerRegistrationInfo> register_worker(
       std::string_view,
       std::string_view,
       uint32_t,
@@ -54,10 +54,6 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
       bool,
       std::string_view) override {
     return absl::UnimplementedError("register_worker not needed for key-mapping tests");
-  }
-
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not needed for key-mapping tests");
   }
 
   absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(

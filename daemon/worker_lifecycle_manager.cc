@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/worker_lifecycle_manager.h"
 
@@ -162,7 +162,8 @@ absl::Status WorkerLifecycleManager::start() {
       /*previous_worker_id=*/"");
   if (!reg_or.ok())
     return reg_or.status();
-  worker_id_ = *reg_or;
+  worker_id_ = reg_or->worker_id;
+  state_version_ = reg_or->expected_state_version;
   service_->set_worker_registered(worker_id_, node_id_);
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
@@ -171,7 +172,7 @@ absl::Status WorkerLifecycleManager::start() {
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
   std::vector<commonpb::ReplicaInfo> expected;
-  auto full_or = global_store_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
+  auto full_or = global_store_->request_full_state_sync(worker_id_, state_version_, &expected);
   if (full_or.ok()) {
     state_version_ = full_or->first;
     state_checksum_ = full_or->second;
@@ -529,16 +530,17 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
       /*previous_worker_id=*/recovery ? std::string_view(worker_id_) : std::string_view{});
   if (!reg_or.ok())
     return reg_or.status();
-  const std::string& new_worker_id = *reg_or;
+  const std::string& new_worker_id = reg_or->worker_id;
   if (recovery && new_worker_id != worker_id_) {
     LOG(INFO) << "Worker identity changed after recovery: old=" << worker_id_ << " new=" << new_worker_id;
   }
   worker_id_ = new_worker_id;
+  state_version_ = reg_or->expected_state_version;
   service_->set_worker_registered(worker_id_, node_id_);
   engine_->set_worker_identity(worker_id_, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Perform a best-effort full-state sync after re-registration
   std::vector<commonpb::ReplicaInfo> expected;
-  auto full_or = global_store_->request_full_state_sync(worker_id_, /*current_state_version=*/0, &expected);
+  auto full_or = global_store_->request_full_state_sync(worker_id_, state_version_, &expected);
   if (full_or.ok()) {
     state_version_ = full_or->first;
     state_checksum_ = full_or->second;

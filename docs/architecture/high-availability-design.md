@@ -44,13 +44,14 @@ On startup the Global Store runs a guarded recovery pass; state stays marked sta
 
 ## Enhanced Heartbeat
 
-Enhanced heartbeats (state_version > 0) include the daemon’s view of inventory and state so the Global Store can detect drift. Legacy heartbeats (state_version == 0) are still accepted for older daemons.
+Heartbeats are always enhanced and must include a non-zero `state_version` so the Global Store can detect drift. Legacy heartbeats (`state_version == 0`) are rejected.
 
 - Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids, last successful sync timestamp, and the daemon→Global Store connection status.
 - Global Store handling (`grpc_service._handle_enhanced_heartbeat`):
   - Compares the sent version with `RecoveryService`’s version and recomputes checksum when provided.
   - Marks `state_sync_required` when versions or checksums diverge, or when obsolete replicas are detected.
   - Returns the server timestamp, the expected version, and the list of obsolete replicas so the daemon can prune immediately.
+- Registration initializes each worker’s `state_version` to 1; the daemon seeds its local `state_version` from `RegisterWorkerResponse.expected_state_version` and treats missing/zero versions as an error.
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
   - Collects current replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
   - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a full-state sync before resuming heartbeats.

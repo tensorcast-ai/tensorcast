@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Recovery service for Global Store high availability.
@@ -203,7 +203,7 @@ class RecoveryService:
                 local_state, global_replicas, force_full_sync
             )
 
-            current_version = self.worker_state_versions.get(worker_id, 0)
+            current_version = self.ensure_worker_state_version(worker_id)
 
             if state_changes:
                 # Apply state changes and bump version
@@ -219,9 +219,6 @@ class RecoveryService:
             else:
                 # No-op sync: do not change version; recompute checksum from current global state
                 new_version = current_version
-                # Ensure dictionary has an entry for this worker
-                if worker_id not in self.worker_state_versions:
-                    self.worker_state_versions[worker_id] = current_version
                 new_checksum = self._compute_state_checksum(global_replicas)
 
             duration = time.time() - _start
@@ -509,6 +506,14 @@ class RecoveryService:
 
         return f"{hash_val:016x}"
 
+    def ensure_worker_state_version(self, worker_id: str) -> int:
+        """Ensure the worker has a non-zero state version."""
+        current_version = self.worker_state_versions.get(worker_id, 0)
+        if current_version <= 0:
+            current_version = 1
+            self.worker_state_versions[worker_id] = current_version
+        return current_version
+
     def get_worker_state_version(self, worker_id: str) -> int:
         """Get current state version for a worker."""
         return self.worker_state_versions.get(worker_id, 0)
@@ -533,7 +538,7 @@ class RecoveryService:
             ]
 
             # Full-state sync is informational; do NOT bump version.
-            current_version = self.worker_state_versions.get(worker_id, 0)
+            current_version = self.ensure_worker_state_version(worker_id)
 
             # Compute checksum for current global state
             new_checksum = self._compute_state_checksum(replicas)

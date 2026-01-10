@@ -179,7 +179,7 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<tensorcast::store::components::WorkerRegistrationInfo> register_worker(
       std::string_view,
       std::string_view,
       uint32_t,
@@ -189,10 +189,6 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       bool,
       std::string_view) override {
     return absl::UnimplementedError("register_worker not used in tests");
-  }
-
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not used in tests");
   }
 
   absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(

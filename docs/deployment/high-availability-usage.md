@@ -14,12 +14,13 @@ TensorCast HA keeps the single Global Store resilient and consistent with Store 
 
 ### Global Store
 - **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and resets per-worker state versions.
-- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts; incremental sync applies additions/removals with “addition over removal” semantics; full-state sync returns the expected set without bumping versions.
+- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts (heartbeats require `state_version >= 1`); incremental sync applies additions/removals with “addition over removal” semantics; full-state sync returns the expected set without bumping versions.
 - **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, listen endpoints, metrics port, and version.
 
 ### Store Daemon
 - **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
 - **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas not expected by the Global Store.
+- **Registration seeding**: initializes `state_version` from `RegisterWorkerResponse.expected_state_version` before the first heartbeat.
 - **Enhanced heartbeat loop**: sends version/checksum/inventory; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
 - **Incremental sync handling**: applies obsolete removals immediately and prefetches server-requested `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.
 - **Bounded retries**: all RPCs use jittered exponential backoff (`max_retries=3`, base 100ms).

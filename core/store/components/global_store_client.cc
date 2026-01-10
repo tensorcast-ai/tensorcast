@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/components/global_store_client.h"
 
@@ -368,7 +368,7 @@ absl::StatusOr<MemoryTierLeaseDescriptor> GlobalStoreClient::revoke_memory_tier_
   return from_proto_lease(response.lease());
 }
 
-absl::StatusOr<std::string> GlobalStoreClient::register_worker(
+absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
     std::string_view node_id,
     std::string_view node_address,
     uint32_t grpc_port,
@@ -435,6 +435,11 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
             request.grpc_port()));
   }
 
+  if (response.expected_state_version() == 0) {
+    return absl::FailedPreconditionError(
+        "RegisterWorker response missing expected_state_version; Global Store must return a non-zero state version.");
+  }
+
   {
     std::lock_guard<std::mutex> lock(mutex_);
     worker_id_ = response.worker_id();
@@ -445,37 +450,12 @@ absl::StatusOr<std::string> GlobalStoreClient::register_worker(
   }
 
   LOG(INFO) << "Registered worker with ID: " << response.worker_id();
-  return response.worker_id();
-}
-
-absl::Status GlobalStoreClient::send_heartbeat(
-    std::string_view worker_id,
-    uint64_t mem_pool_available_size,
-    bool accepting_new_requests) {
-  global_store::WorkerHeartbeatRequest request;
-  request.set_worker_id(std::string(worker_id));
-  request.set_mem_pool_available_size(mem_pool_available_size);
-  request.set_accepting_new_requests(accepting_new_requests);
-
-  global_store::WorkerHeartbeatResponse response;
-
-  auto status = execute_rpc_with_retry(
-      request,
-      &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WorkerHeartbeat(ctx, req, resp); },
-      "WorkerHeartbeat");
-
-  if (!status.ok()) {
-    return status;
-  }
-
-  if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(
-        absl::StrFormat(
-            "WorkerHeartbeat failed: %s (%d)", status_to_cstr(response.status()), static_cast<int>(response.status())));
-  }
-
-  return absl::OkStatus();
+  WorkerRegistrationInfo info;
+  info.worker_id = response.worker_id();
+  info.expected_state_version = response.expected_state_version();
+  info.state_sync_required = response.state_sync_required();
+  info.heartbeat_interval_ms = response.heartbeat_interval_ms();
+  return info;
 }
 
 absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_heartbeat_enhanced(

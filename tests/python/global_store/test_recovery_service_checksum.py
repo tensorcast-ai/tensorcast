@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -121,7 +121,7 @@ def test_force_full_sync_allows_empty_inventory_removal(repositories):
 
     local_state = global_store_pb2.WorkerLocalState(
         worker_id=worker_id,
-        state_version=0,
+        state_version=1,
         state_checksum="",
     )
 
@@ -171,7 +171,7 @@ def test_availability_drift_triggers_update(repositories):
 
     local_state = global_store_pb2.WorkerLocalState(
         worker_id=worker_id,
-        state_version=0,
+        state_version=1,
         state_checksum="",
     )
     local_replica = local_state.local_replicas.add()
@@ -188,7 +188,7 @@ def test_availability_drift_triggers_update(repositories):
     )
 
     assert success is True
-    assert new_version == 1
+    assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
         for change in changes
