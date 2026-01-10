@@ -99,6 +99,53 @@ Why “fully covered” matters:
 - It avoids a mixed mode where part of a storage would need a separate CUDA IPC
   handle (harder to reason about and easy to get wrong).
 
+## Region-Backed get_into (MaterializeIntoTarget)
+
+Region-backed `get_into` uses the same region registry but a different control
+path from LIP registration. The daemon writes directly into an existing CUDA
+region when the target layout is fully coalesced and matches the canonical
+index. No replica is allocated.
+
+### SDK preconditions
+
+The SDK enforces strict eligibility rules before invoking
+`MaterializeIntoTarget`:
+
+- `artifact_id` is required (key-based requests are rejected).
+- Full tensor set required (no subset).
+- All target tensors must be CUDA, contiguous, and match canonical dtype/shape/stride.
+- Canonical layout must be coalesced (segment offsets equal storage offsets).
+- The target tensors must map into a single registered region.
+
+These checks are implemented in `tensorcast/api/store/materialization.py` and
+`tensorcast/api/_region_cache.py`.
+
+### Daemon validation
+
+The daemon validates the request and the layout strictly:
+
+- `TargetLayout` must be `LAYOUT_KIND_COALESCED_UNSPECIFIED` with
+  `INDEX_KIND_CANONICAL_UNSPECIFIED`.
+- Exactly one storage entry, using `vram_region_id` and `mapping_base_offset`.
+- `tensor_spec_kind` must be offsets or alias format.
+- All canonical tensors must be present; offsets/lengths must match canonical
+  index entries, and `storage_offset` must equal canonical logical offset.
+- `storage_length` must cover the full logical size.
+- `device_uuid` and `pid` are required and must match the region device.
+
+### Execution
+
+Once validated, the daemon:
+
+1. Acquires the region from `IpcRegionRegistry` and maps its CUDA IPC handle.
+2. Computes the canonical index plan and materializes directly into the region
+   via `StoreEngine::materialize_into_target`.
+3. Skips verification (`MaterializeHints::Verify::NONE`) by design; metrics
+   record that verification was skipped.
+
+On transfer `DataLoss`, the daemon marks the region as poisoned to prevent
+reuse. The client then unregisters the region from its cache.
+
 ## Deregister Artifact
 
 `DeregisterArtifact` performs a quiesced teardown for LIP replicas:

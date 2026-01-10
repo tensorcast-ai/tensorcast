@@ -134,8 +134,48 @@ void record_disk_resolution_outcome(std::string_view outcome) {
   }
 }
 
+void record_lease_create_failed() {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+    ctr->Add(1.0);
+  } catch (...) {
+  }
+}
+
+void register_session_and_refs(
+    SessionsService& sessions,
+    RefTracker& refs,
+    SessionLifecycleManager* lifecycle,
+    const store::loading::ReplicaKey& replica_key,
+    std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal,
+    const std::string& replica_uuid,
+    int32_t pid,
+    std::string_view log_context) {
+  if (!replica_uuid.empty()) {
+    sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
+  }
+  if (pid <= 0) {
+    return;
+  }
+  refs.add_ref(replica_key, pid);
+  if (!lifecycle || replica_key.device.type != DeviceType::GPU) {
+    return;
+  }
+  SessionLifecycleManager::ReplicaSubject subj{
+      .artifact_id = replica_key.artifact_id, .device_id = replica_key.device.ordinal};
+  auto lid_or = lifecycle->create_use_lease(subj, pid);
+  if (!lid_or.ok()) {
+    LOG(WARNING) << "create_use_lease failed (" << log_context << "): artifact_id=" << replica_key.artifact_id
+                 << " dev=" << replica_key.device.ordinal << ": " << lid_or.status();
+    record_lease_create_failed();
+  }
+  // TTL prefetch pins via request flag removed; only UseLease is created.
+}
+
 struct DescriptorMetadata {
   bool found{false};
+  std::optional<std::string> schema_version;
   std::optional<std::string> artifact_id;
   std::optional<std::string> index_multihash;
   std::optional<std::string> data_multihash;
@@ -190,6 +230,7 @@ absl::StatusOr<DescriptorMetadata> load_descriptor_metadata(const std::filesyste
       return trimmed;
     };
     metadata.artifact_id = get_string("artifact_id");
+    metadata.schema_version = get_string("schema_version");
     metadata.index_multihash = get_string("index_multihash");
     metadata.data_multihash = get_string("data_multihash");
   } catch (const std::exception& ex) {
@@ -647,6 +688,66 @@ absl::StatusOr<std::string> resolve_layout_json_by_key(
   return absl::NotFoundError("canonical index JSON unavailable for key materialization");
 }
 
+template <typename ResponseT>
+absl::Status populate_materialize_payloads(
+    ResponseT& resp,
+    const std::string& layout_json,
+    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
+    const std::string& device_uuid,
+    const std::string& view_subset_hash,
+    bool wait_for_completion,
+    const std::string& replica_uuid,
+    const std::string* ticket_device_uuid,
+    const std::optional<store::loader::ViewPlan>& view_plan,
+    bool prefer_view_plan,
+    bool fill_view_index_bytes) {
+  const uint64_t generation = compute_generation_from_index(layout_json);
+  resp.set_canonical_index_bytes(layout_json);
+  resp.set_generation(generation);
+  if (fill_view_index_bytes && resp.view_index_bytes().empty()) {
+    resp.set_view_index_bytes(layout_json);
+  }
+
+  std::optional<DescriptorBuildResult> desc_result;
+  if (prefer_view_plan && view_plan.has_value() && !view_plan->is_identity) {
+    auto desc_or = build_descriptors_from_view_plan(*view_plan, tensor_names, device_uuid);
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    desc_result = std::move(*desc_or);
+  }
+  if (!desc_result.has_value()) {
+    auto desc_or = build_descriptors_from_index(layout_json, tensor_names, device_uuid);
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    desc_result = std::move(*desc_or);
+  }
+
+  for (auto& desc : desc_result->descriptors) {
+    *resp.add_payloads() = std::move(desc);
+  }
+  if (!view_subset_hash.empty() || !desc_result->included_names.empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!view_subset_hash.empty()) {
+      subset->set_subset_hash(view_subset_hash);
+    }
+    for (const auto& name : desc_result->included_names) {
+      subset->add_tensor_names(name);
+    }
+  }
+  if (!wait_for_completion && !replica_uuid.empty()) {
+    auto* ticket = resp.mutable_ticket();
+    ticket->set_replica_uuid(replica_uuid);
+    ticket->set_status(resp.status());
+    if (ticket_device_uuid != nullptr && !ticket_device_uuid->empty()) {
+      ticket->set_device_uuid(*ticket_device_uuid);
+    }
+    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  }
+  return absl::OkStatus();
+}
+
 } // namespace
 
 MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
@@ -721,6 +822,7 @@ grpc::Status MaterializationController::materialize_replica(
 
   DescriptorMetadata descriptor_meta;
   std::optional<store::loader::IndexInfo> disk_index;
+  std::optional<store::loading::DiskMetadata> disk_metadata;
   if (normalized_disk_path.has_value()) {
     auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
     if (!descriptor_or.ok()) {
@@ -751,6 +853,23 @@ grpc::Status MaterializationController::materialize_replica(
         return to_grpc_status(idx_status);
       }
     }
+
+    store::loading::DiskMetadata metadata;
+    metadata.descriptor_present = descriptor_meta.found;
+    metadata.schema_version = descriptor_meta.schema_version;
+    metadata.index_multihash = descriptor_meta.index_multihash;
+    metadata.data_multihash = descriptor_meta.data_multihash;
+    if (disk_index.has_value()) {
+      metadata.canonical_index_json = disk_index->canonical_index_json;
+      if (!disk_index->index_multihash.empty()) {
+        metadata.index_multihash = disk_index->index_multihash;
+      }
+      if (disk_index->total_size_bytes > 0) {
+        metadata.logical_total_size = disk_index->total_size_bytes;
+      }
+      metadata.is_safetensors = disk_index->is_safetensors;
+    }
+    disk_metadata = std::move(metadata);
   }
 
   std::optional<std::string> artifact_id =
@@ -838,47 +957,23 @@ grpc::Status MaterializationController::materialize_replica(
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
-    const uint64_t generation = compute_generation_from_index(*layout_or);
-    resp.set_canonical_index_bytes(*layout_or);
-    resp.set_generation(generation);
-
-    std::optional<DescriptorBuildResult> desc_result;
-    if (req.view_identity_case() == v2::MaterializeReplicaRequest::kView && resp.view_index_json().empty()) {
-      if (view_plan.has_value() && !view_plan->is_identity) {
-        auto desc_or = build_descriptors_from_view_plan(*view_plan, req.tensor_names(), req.device_uuid());
-        if (!desc_or.ok()) {
-          return to_grpc_status(desc_or.status());
-        }
-        desc_result = std::move(*desc_or);
-      }
-    }
-    if (!desc_result.has_value()) {
-      auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), req.device_uuid());
-      if (!desc_or.ok()) {
-        return to_grpc_status(desc_or.status());
-      }
-      desc_result = std::move(*desc_or);
-    }
-    for (auto& desc : desc_result->descriptors) {
-      *resp.add_payloads() = std::move(desc);
-    }
-    if (!req.view_subset_hash().empty() || !desc_result->included_names.empty()) {
-      auto* subset = resp.mutable_view_subset();
-      if (!req.view_subset_hash().empty()) {
-        subset->set_subset_hash(req.view_subset_hash());
-      }
-      for (const auto& name : desc_result->included_names) {
-        subset->add_tensor_names(name);
-      }
-    }
-    if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
-      auto* ticket = resp.mutable_ticket();
-      ticket->set_replica_uuid(req.replica_uuid());
-      ticket->set_status(resp.status());
-      if (!req.device_uuid().empty()) {
-        ticket->set_device_uuid(req.device_uuid());
-      }
-      *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+    const bool prefer_view_plan =
+        req.view_identity_case() == v2::MaterializeReplicaRequest::kView && resp.view_index_json().empty();
+    const std::string* ticket_device_uuid = req.device_uuid().empty() ? nullptr : &req.device_uuid();
+    absl::Status payload_status = populate_materialize_payloads(
+        resp,
+        *layout_or,
+        req.tensor_names(),
+        req.device_uuid(),
+        req.view_subset_hash(),
+        req.wait_for_completion(),
+        req.replica_uuid(),
+        ticket_device_uuid,
+        view_plan,
+        prefer_view_plan,
+        /*fill_view_index_bytes=*/false);
+    if (!payload_status.ok()) {
+      return to_grpc_status(payload_status);
     }
     rctx.mark_success();
     return Status::OK;
@@ -891,29 +986,8 @@ grpc::Status MaterializationController::materialize_replica(
         resolved_artifact_id,
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
-          if (!req.replica_uuid().empty()) {
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
-          }
-          if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid());
-            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
-              SessionLifecycleManager::ReplicaSubject subj{
-                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-              if (!lid_or.ok()) {
-                LOG(WARNING) << "create_use_lease failed (LIP path): artifact_id=" << rkey.artifact_id
-                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
-                try {
-                  static auto meter =
-                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-                  ctr->Add(1.0);
-                } catch (...) {
-                }
-              }
-              // TTL prefetch pins via request flag removed; only UseLease is created.
-            }
-          }
+          register_session_and_refs(
+              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP path");
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -942,6 +1016,9 @@ grpc::Status MaterializationController::materialize_replica(
     hints.artifact_id = resolved_artifact_id;
   if (has_disk)
     hints.disk_path = normalized_disk_path->string();
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = std::move(*disk_metadata);
+  }
   if (view_spec.has_value() || request_view_id.has_value()) {
     store::loading::VariantIdentity variant;
     if (has_artifact) {
@@ -973,29 +1050,15 @@ grpc::Status MaterializationController::materialize_replica(
   const auto& handle = *result;
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
-  }
-  if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid());
-    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
-      SessionLifecycleManager::ReplicaSubject subj{
-          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine path): artifact_id=" << handle.replica_key.artifact_id
-                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-          ctr->Add(1.0);
-        } catch (...) {
-        }
-      }
-      // TTL prefetch pins via request flag removed; only UseLease is created.
-    }
-  }
+  register_session_and_refs(
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      handle.replica_key,
+      handle.ready_signal,
+      req.replica_uuid(),
+      req.pid(),
+      "engine path");
   if (has_disk)
     resp.set_disk_path(normalized_disk_path->string());
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
@@ -1061,34 +1124,20 @@ grpc::Status MaterializationController::materialize_by_key(
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
-    const uint64_t generation = compute_generation_from_index(*layout_or);
-    resp.set_canonical_index_bytes(*layout_or);
-    resp.set_generation(generation);
-    if (resp.view_index_bytes().empty()) {
-      resp.set_view_index_bytes(*layout_or);
-    }
-
-    auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), /*device_uuid=*/"");
-    if (!desc_or.ok()) {
-      return to_grpc_status(desc_or.status());
-    }
-    for (auto& desc : desc_or->descriptors) {
-      *resp.add_payloads() = std::move(desc);
-    }
-    if (!req.view_subset_hash().empty() || !desc_or->included_names.empty()) {
-      auto* subset = resp.mutable_view_subset();
-      if (!req.view_subset_hash().empty()) {
-        subset->set_subset_hash(req.view_subset_hash());
-      }
-      for (const auto& name : desc_or->included_names) {
-        subset->add_tensor_names(name);
-      }
-    }
-    if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
-      auto* ticket = resp.mutable_ticket();
-      ticket->set_replica_uuid(req.replica_uuid());
-      ticket->set_status(resp.status());
-      *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+    absl::Status payload_status = populate_materialize_payloads(
+        resp,
+        *layout_or,
+        req.tensor_names(),
+        /*device_uuid=*/"",
+        req.view_subset_hash(),
+        req.wait_for_completion(),
+        req.replica_uuid(),
+        /*ticket_device_uuid=*/nullptr,
+        /*view_plan=*/std::nullopt,
+        /*prefer_view_plan=*/false,
+        /*fill_view_index_bytes=*/true);
+    if (!payload_status.ok()) {
+      return to_grpc_status(payload_status);
     }
     rctx.mark_success();
     return Status::OK;
@@ -1118,29 +1167,8 @@ grpc::Status MaterializationController::materialize_by_key(
         mapping.artifact_id,
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
-          if (!req.replica_uuid().empty()) {
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
-          }
-          if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid());
-            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
-              SessionLifecycleManager::ReplicaSubject subj{
-                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-              if (!lid_or.ok()) {
-                LOG(WARNING) << "create_use_lease failed (LIP by-key): artifact_id=" << rkey.artifact_id
-                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
-                try {
-                  static auto meter =
-                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-                  ctr->Add(1.0);
-                } catch (...) {
-                }
-              }
-              // MaterializeByKey: no TTL prefetch; only UseLease is created.
-            }
-          }
+          register_session_and_refs(
+              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP by-key");
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -1183,29 +1211,15 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
-  if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
-  }
-  if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid());
-    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
-      SessionLifecycleManager::ReplicaSubject subj{
-          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine by-key): artifact_id=" << handle.replica_key.artifact_id
-                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-          ctr->Add(1.0);
-        } catch (...) {
-        }
-      }
-      // MaterializeByKey: no TTL prefetch; only UseLease is created.
-    }
-  }
+  register_session_and_refs(
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      handle.replica_key,
+      handle.ready_signal,
+      req.replica_uuid(),
+      req.pid(),
+      "engine by-key");
   if (handle.cuda_ipc_handle.is_valid()) {
     auto handle_view = handle.cuda_ipc_handle.as_string_view();
     resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
@@ -1222,7 +1236,6 @@ grpc::Status MaterializationController::materialize_into_target(
     RpcContext& rctx,
     const v2::MaterializeIntoTargetRequest& req,
     v2::MaterializeIntoTargetResponse& resp) {
-  auto& span = rctx.span();
   if (d_.is_shutting_down.load()) {
     record_materialize_into_target(
         "error", "unavailable", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);

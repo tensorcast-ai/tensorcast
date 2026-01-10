@@ -1,9 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/source_adapter.h"
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <system_error>
 
 #include "absl/log/log.h"
@@ -61,34 +62,40 @@ absl::Status DiskSourceAdapter::prepare(const loading::DiskSource& source, Inges
         absl::StrCat("Expected artifact path to be a directory: ", artifact_path.string()));
   }
 
-  bool is_safetensors = false;
-  std::error_code dir_error;
-  std::filesystem::directory_iterator dir_it(artifact_path, dir_error);
-  if (dir_error) {
-    return absl::ErrnoToStatus(
-        dir_error.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
+  std::optional<bool> is_safetensors_hint;
+  if (ctx.hints.disk_metadata.has_value()) {
+    is_safetensors_hint = ctx.hints.disk_metadata->is_safetensors;
   }
-  const std::filesystem::directory_iterator dir_end;
-  while (dir_it != dir_end) {
-    std::error_code entry_error;
-    const auto& entry = *dir_it;
-    const bool is_regular_file = entry.is_regular_file(entry_error);
-    if (entry_error) {
-      return absl::ErrnoToStatus(
-          entry_error.value(),
-          absl::StrCat("Failed to inspect artifact directory entry '", entry.path().string(), "'"));
-    }
-    if (is_regular_file) {
-      const auto name = entry.path().filename().string();
-      if (name.ends_with(".safetensors")) {
-        is_safetensors = true;
-        break;
-      }
-    }
-    dir_it.increment(dir_error);
+  bool is_safetensors = is_safetensors_hint.value_or(false);
+  if (!is_safetensors_hint.has_value()) {
+    std::error_code dir_error;
+    std::filesystem::directory_iterator dir_it(artifact_path, dir_error);
     if (dir_error) {
       return absl::ErrnoToStatus(
-          dir_error.value(), absl::StrCat("Failed to traverse artifact directory '", artifact_path.string(), "'"));
+          dir_error.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_path.string(), "'"));
+    }
+    const std::filesystem::directory_iterator dir_end;
+    while (dir_it != dir_end) {
+      std::error_code entry_error;
+      const auto& entry = *dir_it;
+      const bool is_regular_file = entry.is_regular_file(entry_error);
+      if (entry_error) {
+        return absl::ErrnoToStatus(
+            entry_error.value(),
+            absl::StrCat("Failed to inspect artifact directory entry '", entry.path().string(), "'"));
+      }
+      if (is_regular_file) {
+        const auto name = entry.path().filename().string();
+        if (name.ends_with(".safetensors")) {
+          is_safetensors = true;
+          break;
+        }
+      }
+      dir_it.increment(dir_error);
+      if (dir_error) {
+        return absl::ErrnoToStatus(
+            dir_error.value(), absl::StrCat("Failed to traverse artifact directory '", artifact_path.string(), "'"));
+      }
     }
   }
 
@@ -97,32 +104,41 @@ absl::Status DiskSourceAdapter::prepare(const loading::DiskSource& source, Inges
   metadata.artifact_path = artifact_path;
   metadata.is_safetensors = is_safetensors;
 
-  const auto descriptor_path = artifact_path / "artifact_descriptor.json";
-  std::error_code descriptor_error;
-  const bool descriptor_exists = std::filesystem::exists(descriptor_path, descriptor_error);
-  if (descriptor_error) {
-    return absl::ErrnoToStatus(
-        descriptor_error.value(),
-        absl::StrCat("Failed to access artifact descriptor '", descriptor_path.string(), "'"));
-  }
-  if (descriptor_exists) {
-    metadata.descriptor_present = true;
-    std::ifstream descriptor_stream(descriptor_path);
-    if (descriptor_stream.is_open()) {
-      try {
-        nlohmann::json descriptor_json;
-        descriptor_stream >> descriptor_json;
-        if (descriptor_json.contains("schema_version") && descriptor_json["schema_version"].is_string()) {
-          metadata.schema_version = descriptor_json["schema_version"].get<std::string>();
+  const bool has_disk_metadata = ctx.hints.disk_metadata.has_value();
+  if (has_disk_metadata) {
+    const auto& disk_metadata = *ctx.hints.disk_metadata;
+    metadata.descriptor_present = disk_metadata.descriptor_present;
+    metadata.schema_version = disk_metadata.schema_version;
+    metadata.existing_index_multihash = disk_metadata.index_multihash;
+    metadata.existing_data_multihash = disk_metadata.data_multihash;
+  } else {
+    const auto descriptor_path = artifact_path / "artifact_descriptor.json";
+    std::error_code descriptor_error;
+    const bool descriptor_exists = std::filesystem::exists(descriptor_path, descriptor_error);
+    if (descriptor_error) {
+      return absl::ErrnoToStatus(
+          descriptor_error.value(),
+          absl::StrCat("Failed to access artifact descriptor '", descriptor_path.string(), "'"));
+    }
+    if (descriptor_exists) {
+      metadata.descriptor_present = true;
+      std::ifstream descriptor_stream(descriptor_path);
+      if (descriptor_stream.is_open()) {
+        try {
+          nlohmann::json descriptor_json;
+          descriptor_stream >> descriptor_json;
+          if (descriptor_json.contains("schema_version") && descriptor_json["schema_version"].is_string()) {
+            metadata.schema_version = descriptor_json["schema_version"].get<std::string>();
+          }
+          if (descriptor_json.contains("index_multihash") && descriptor_json["index_multihash"].is_string()) {
+            metadata.existing_index_multihash = descriptor_json["index_multihash"].get<std::string>();
+          }
+          if (descriptor_json.contains("data_multihash") && descriptor_json["data_multihash"].is_string()) {
+            metadata.existing_data_multihash = descriptor_json["data_multihash"].get<std::string>();
+          }
+        } catch (const std::exception& ex) {
+          LOG(WARNING) << "Ignoring malformed artifact_descriptor.json: " << ex.what();
         }
-        if (descriptor_json.contains("index_multihash") && descriptor_json["index_multihash"].is_string()) {
-          metadata.existing_index_multihash = descriptor_json["index_multihash"].get<std::string>();
-        }
-        if (descriptor_json.contains("data_multihash") && descriptor_json["data_multihash"].is_string()) {
-          metadata.existing_data_multihash = descriptor_json["data_multihash"].get<std::string>();
-        }
-      } catch (const std::exception& ex) {
-        LOG(WARNING) << "Ignoring malformed artifact_descriptor.json: " << ex.what();
       }
     }
   }

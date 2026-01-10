@@ -5,6 +5,7 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "absl/status/statusor.h"
@@ -14,6 +15,7 @@
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/contracts/materialization_request.h"
+#include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
 #include "gsl/pointers"
 
@@ -64,6 +66,14 @@ class MaterializationService {
   [[nodiscard]] absl::StatusOr<ReplicaHandle> copy_from_peer(const MaterializationRequest& request) const;
   [[nodiscard]] absl::StatusOr<ReplicaHandle> load_from_disk(const MaterializationRequest& request) const;
   [[nodiscard]] absl::StatusOr<ReplicaHandle> run_auto(const MaterializationRequest& request) const;
+  [[nodiscard]] replica::ReplicaConfig build_copy_replica_config(
+      const MaterializationRequest& request,
+      uint64_t expected_size,
+      const std::shared_ptr<replica::Replica>& src_replica,
+      std::optional<MemoryTierConfig> memory_tier_config) const;
+  [[nodiscard]] absl::StatusOr<ReplicaHandle> reuse_existing_replica(
+      const MaterializationRequest& request,
+      loading::MaterializationSource source) const;
   [[nodiscard]] ReplicaHandle build_handle(
       const MaterializationRequest& request,
       const std::shared_ptr<replica::Replica>& replica,

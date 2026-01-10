@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -70,6 +70,16 @@ enum class MaterializeMode : uint8_t { AUTO, COPY_ONLY, LOAD_ONLY };
 // Loading Configuration
 // ══════════════════════════════════════════════════════════════════════════
 
+struct DiskMetadata {
+  bool descriptor_present{false};
+  std::optional<std::string> schema_version;
+  std::optional<std::string> canonical_index_json;
+  std::optional<std::string> index_multihash;
+  std::optional<std::string> data_multihash;
+  std::optional<uint64_t> logical_total_size;
+  std::optional<bool> is_safetensors;
+};
+
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
@@ -77,6 +87,7 @@ struct MaterializeHints {
   std::string artifact_id;
   std::string disk_path;
   bool prefer_pageable_cpu{false};
+  std::optional<DiskMetadata> disk_metadata;
 
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
   Verify verify = Verify::CHECKSUM;

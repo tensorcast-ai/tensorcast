@@ -170,23 +170,8 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
       return sz_or.status();
     }
 
-    InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
-    replica::ReplicaConfig cfg{
-        .source = ib_source,
-        .artifact_identifier = request.canonical_artifact_id(),
-        .device_type = DeviceType::GPU,
-        .local_device_id = request.target_device().ordinal,
-        .pinned_buffer_pool = deps_.memory_pool,
-        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{deps_.async_runtime},
-        .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
-        .expected_artifact_size = expected_size,
-        .view_plan = src_replica->view_plan(),
-        .memory_tier_config = src_replica->get_memory_manager().memory_tier_config()};
-    cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
-    cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
-    cfg.view_id = request.requested_view_id();
-    cfg.transform_placement =
-        request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
+    replica::ReplicaConfig cfg = build_copy_replica_config(
+        request, expected_size, src_replica, src_replica->get_memory_manager().memory_tier_config());
 
     auto dst_or = replica::Replica::create(cfg);
     if (!dst_or.ok()) {
@@ -243,18 +228,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_local_cpu(const 
 
     absl::Status emplace_status = deps_.replica_registry->emplace(request.replica_key(), gsl::not_null{dst_replica});
     if (absl::IsAlreadyExists(emplace_status)) {
-      auto existing_or = deps_.replica_registry->find(request.replica_key());
-      if (!existing_or.ok()) {
-        return existing_or.status();
-      }
-      const auto& existing = existing_or.value();
-      (void)existing->ensure_loaded_async(
-          request.target_location(), deps_.num_threads, request.target_device().ordinal);
-      return build_handle(
-          request,
-          existing,
-          existing->ready_signal_for(request.target_location()),
-          loading::MaterializationSource::kLocalReplica);
+      return reuse_existing_replica(request, loading::MaterializationSource::kLocalReplica);
     }
     if (!emplace_status.ok()) {
       return emplace_status;
@@ -303,23 +277,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
       return sz_or.status();
     }
 
-    InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
-    replica::ReplicaConfig cfg{
-        .source = ib_source,
-        .artifact_identifier = request.canonical_artifact_id(),
-        .device_type = DeviceType::GPU,
-        .local_device_id = request.target_device().ordinal,
-        .pinned_buffer_pool = deps_.memory_pool,
-        .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{deps_.async_runtime},
-        .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
-        .expected_artifact_size = expected_size,
-        .view_plan = src_replica->view_plan(),
-        .memory_tier_config = std::nullopt};
-    cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
-    cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
-    cfg.view_id = request.requested_view_id();
-    cfg.transform_placement =
-        request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
+    replica::ReplicaConfig cfg = build_copy_replica_config(request, expected_size, src_replica, std::nullopt);
 
     auto dst_or = replica::Replica::create(cfg);
     if (!dst_or.ok()) {
@@ -331,7 +289,9 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
       if (absl::IsAlreadyExists(emplace_status)) {
         VLOG(1) << "Replica already present for COPY_ONLY dst_key (will reuse existing instance): "
                 << request.replica_key();
-      } else if (!emplace_status.ok()) {
+        return reuse_existing_replica(request, loading::MaterializationSource::kLocalReplica);
+      }
+      if (!emplace_status.ok()) {
         return emplace_status;
       }
     }
@@ -409,6 +369,44 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
 
   return absl::FailedPreconditionError(
       "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit hints.disk_path");
+}
+
+replica::ReplicaConfig MaterializationService::build_copy_replica_config(
+    const MaterializationRequest& request,
+    uint64_t expected_size,
+    const std::shared_ptr<replica::Replica>& src_replica,
+    std::optional<MemoryTierConfig> memory_tier_config) const {
+  InlineBufferSource ib_source{.data = nullptr, .size_bytes = expected_size};
+  replica::ReplicaConfig cfg{
+      .source = ib_source,
+      .artifact_identifier = request.canonical_artifact_id(),
+      .device_type = DeviceType::GPU,
+      .local_device_id = request.target_device().ordinal,
+      .pinned_buffer_pool = deps_.memory_pool,
+      .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{deps_.async_runtime},
+      .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
+      .expected_artifact_size = expected_size,
+      .view_plan = src_replica->view_plan(),
+      .memory_tier_config = std::move(memory_tier_config)};
+  cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
+  cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;
+  cfg.view_id = request.requested_view_id();
+  cfg.transform_placement = request.hints().variant ? request.hints().variant->placement : TransformPlacement::kServer;
+  return cfg;
+}
+
+absl::StatusOr<ReplicaHandle> MaterializationService::reuse_existing_replica(
+    const MaterializationRequest& request,
+    loading::MaterializationSource source) const {
+  auto existing_or = deps_.replica_registry->find(request.replica_key());
+  if (!existing_or.ok()) {
+    return existing_or.status();
+  }
+  const auto& existing = existing_or.value();
+  std::optional<int> gpu_device =
+      request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt;
+  (void)existing->ensure_loaded_async(request.target_location(), deps_.num_threads, gpu_device);
+  return build_handle(request, existing, existing->ready_signal_for(request.target_location()), source);
 }
 
 ReplicaHandle MaterializationService::build_handle(
