@@ -9,10 +9,12 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <optional>
 #include <utility>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/crc/crc32c.h"
+#include "absl/hash/hash.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -22,6 +24,7 @@
 #include "absl/time/clock.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/contracts/loading_spec.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -32,6 +35,127 @@ namespace commonpb = common::v1;
 using namespace std::chrono_literals;
 
 namespace {
+
+struct ReplicaSelector {
+  std::string artifact_id;
+  commonpb::MemoryType memory_type{commonpb::MEMORY_TYPE_UNSPECIFIED};
+  int device_id{0};
+
+  bool operator==(const ReplicaSelector&) const = default;
+};
+
+struct ReplicaSelectorHash {
+  size_t operator()(const ReplicaSelector& selector) const {
+    return absl::HashOf(selector.artifact_id, static_cast<int>(selector.memory_type), selector.device_id);
+  }
+};
+
+std::optional<ReplicaSelector> replica_selector_from_memory_info(
+    std::string_view artifact_id,
+    const commonpb::MemoryInfo& memory_info) {
+  switch (memory_info.memory_type()) {
+    case commonpb::MEMORY_TYPE_GPU:
+      return ReplicaSelector{
+          .artifact_id = std::string(artifact_id),
+          .memory_type = commonpb::MEMORY_TYPE_GPU,
+          .device_id = static_cast<int>(memory_info.device_id())};
+    case commonpb::MEMORY_TYPE_RAM:
+      return ReplicaSelector{
+          .artifact_id = std::string(artifact_id), .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0};
+    case commonpb::MEMORY_TYPE_DISK:
+    case commonpb::MEMORY_TYPE_UNSPECIFIED:
+    default:
+      return std::nullopt;
+  }
+}
+
+void append_local_replica_selectors(const store::StoreEngine::ReplicaInfo& info, std::vector<ReplicaSelector>* out) {
+  if (info.gpu_state != common::memory::MemoryLocation::NONE) {
+    if (info.gpu_device_id < 0) {
+      VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << info.artifact_id
+              << " device_uuid=" << info.gpu_device_uuid;
+    } else {
+      out->push_back(
+          ReplicaSelector{
+              .artifact_id = info.artifact_id,
+              .memory_type = commonpb::MEMORY_TYPE_GPU,
+              .device_id = info.gpu_device_id});
+    }
+    return;
+  }
+  if (info.cpu_state != common::memory::MemoryLocation::NONE) {
+    out->push_back(
+        ReplicaSelector{.artifact_id = info.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
+  }
+}
+
+void append_replica_keys_for_selector(
+    store::StoreEngine& engine,
+    const ReplicaSelector& selector,
+    std::vector<store::loading::ReplicaKey>* out) {
+  const auto devices = engine.get_resident_devices(selector.artifact_id);
+  for (const auto& dev : devices) {
+    if (selector.memory_type == commonpb::MEMORY_TYPE_GPU) {
+      if (dev.type != DeviceType::GPU || dev.ordinal != selector.device_id) {
+        continue;
+      }
+    } else if (selector.memory_type == commonpb::MEMORY_TYPE_RAM) {
+      if (dev.type != DeviceType::CPU) {
+        continue;
+      }
+    } else {
+      continue;
+    }
+    const auto device_replicas = engine.list_device_replicas(dev);
+    for (const auto& key : device_replicas) {
+      if (key.artifact_id == selector.artifact_id) {
+        out->push_back(key);
+      }
+    }
+  }
+}
+
+void append_replica_keys_for_artifact(
+    store::StoreEngine& engine,
+    std::string_view artifact_id,
+    std::vector<store::loading::ReplicaKey>* out) {
+  const auto devices = engine.get_resident_devices(artifact_id);
+  for (const auto& dev : devices) {
+    const auto device_replicas = engine.list_device_replicas(dev);
+    for (const auto& key : device_replicas) {
+      if (key.artifact_id == artifact_id) {
+        out->push_back(key);
+      }
+    }
+  }
+}
+
+void unload_replica_keys(
+    store::StoreEngine& engine,
+    absl::string_view context,
+    const std::vector<store::loading::ReplicaKey>& keys) {
+  if (keys.empty()) {
+    return;
+  }
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> unique;
+  unique.reserve(keys.size());
+  for (const auto& key : keys) {
+    unique.insert(key);
+  }
+  for (const auto& key : unique) {
+    int rc = engine.unload_replica(key);
+    if (rc != 0) {
+      LOG(WARNING) << context << ": unload failed rc=" << rc << " " << key;
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+        ctr->Add(1.0);
+      } catch (...) {
+      }
+    }
+  }
+}
 
 opentelemetry::metrics::Counter<uint64_t>* hb_success_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -364,12 +488,20 @@ void WorkerLifecycleManager::heartbeat_loop() {
               counter->Add(1);
             }
             // Apply server-suggested removals
-            std::vector<std::string> obsolete;
-            obsolete.reserve(changes.size());
+            std::vector<store::loading::ReplicaKey> obsolete_keys;
+            obsolete_keys.reserve(changes.size());
+            auto engine_for_unload = engine_.get();
             for (const auto& ch : changes) {
               switch (ch.type()) {
                 case global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA: {
-                  obsolete.push_back(ch.replica_info().ref().artifact_id());
+                  const auto& ri = ch.replica_info();
+                  auto selector_opt = replica_selector_from_memory_info(ri.ref().artifact_id(), ri.memory_info());
+                  if (selector_opt.has_value()) {
+                    append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &obsolete_keys);
+                  } else {
+                    VLOG(1) << "Skipping REMOVE for non-resident memory type: artifact_id=" << ri.ref().artifact_id()
+                            << " memory_type=" << ri.memory_info().memory_type();
+                  }
                   break;
                 }
                 case global_store::StateChange::CHANGE_TYPE_ADD_REPLICA: {
@@ -448,8 +580,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
                   break;
               }
             }
-            if (!obsolete.empty())
-              apply_obsolete_replicas(obsolete);
+            if (!obsolete_keys.empty()) {
+              unload_replica_keys(*engine_for_unload, "synchronize_worker_state", obsolete_keys);
+            }
             last_sync_success_ts_ = local_state.last_update_ts().seconds();
             last_sync_ts_s_.store(last_sync_success_ts_);
           } else {
@@ -734,61 +867,45 @@ void WorkerLifecycleManager::monitor_loop() {
 void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::string>& artifact_ids) {
   if (artifact_ids.empty())
     return;
-  auto infos = engine_->get_all_replicas_info();
+  absl::flat_hash_set<std::string> id_set;
+  id_set.reserve(artifact_ids.size());
   for (const auto& id : artifact_ids) {
-    for (const auto& info : infos) {
-      if (info.artifact_id != id)
-        continue;
-      // Unload both GPU and CPU replicas with id-match
-      if (info.gpu_state != common::memory::MemoryLocation::NONE) {
-        auto dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
-        store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
-        int rc = engine_->unload_replica(key);
-        if (rc != 0) {
-          LOG(WARNING) << "apply_obsolete_replicas: GPU unload failed rc=" << rc << " artifact_id=" << info.artifact_id
-                       << " dev=" << info.gpu_device_id;
-          try {
-            static auto meter =
-                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-            static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-            ctr->Add(1.0);
-          } catch (...) {
-          }
-        }
-      }
-      if (info.cpu_state != common::memory::MemoryLocation::NONE) {
-        store::DeviceKey cpu{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-        store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = cpu, .replica = 0};
-        int rc = engine_->unload_replica(key);
-        if (rc != 0) {
-          LOG(WARNING) << "apply_obsolete_replicas: CPU unload failed rc=" << rc << " artifact_id=" << info.artifact_id;
-          try {
-            static auto meter =
-                opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-            static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-            ctr->Add(1.0);
-          } catch (...) {
-          }
-        }
-      }
-    }
+    id_set.insert(id);
   }
+  std::vector<store::loading::ReplicaKey> keys;
+  auto engine = engine_.get();
+  for (const auto& id : id_set) {
+    append_replica_keys_for_artifact(*engine, id, &keys);
+  }
+  unload_replica_keys(*engine, "apply_obsolete_replicas", keys);
 }
 
 void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected) {
-  // Build a set of expected artifact_ids for quick lookup
-  absl::flat_hash_set<std::string> expected_ids;
-  expected_ids.reserve(expected.size());
-  for (const auto& r : expected)
-    expected_ids.insert(r.ref().artifact_id());
-
-  std::vector<std::string> obsolete;
-  for (const auto& info : engine_->get_all_replicas_info()) {
-    if (expected_ids.find(info.artifact_id) == expected_ids.end()) {
-      obsolete.push_back(info.artifact_id);
+  absl::flat_hash_set<ReplicaSelector, ReplicaSelectorHash> expected_keys;
+  expected_keys.reserve(expected.size());
+  for (const auto& r : expected) {
+    auto selector_opt = replica_selector_from_memory_info(r.ref().artifact_id(), r.memory_info());
+    if (selector_opt.has_value()) {
+      expected_keys.insert(std::move(*selector_opt));
     }
   }
-  apply_obsolete_replicas(obsolete);
+
+  absl::flat_hash_set<ReplicaSelector, ReplicaSelectorHash> obsolete_selectors;
+  std::vector<store::loading::ReplicaKey> obsolete_keys;
+  for (const auto& info : engine_->get_all_replicas_info()) {
+    std::vector<ReplicaSelector> local_selectors;
+    append_local_replica_selectors(info, &local_selectors);
+    for (const auto& selector : local_selectors) {
+      if (expected_keys.find(selector) == expected_keys.end()) {
+        obsolete_selectors.insert(selector);
+      }
+    }
+  }
+  auto engine = engine_.get();
+  for (const auto& selector : obsolete_selectors) {
+    append_replica_keys_for_selector(*engine, selector, &obsolete_keys);
+  }
+  unload_replica_keys(*engine, "apply_full_state", obsolete_keys);
 }
 
 std::string WorkerLifecycleManager::compute_state_checksum(

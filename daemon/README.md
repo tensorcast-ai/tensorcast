@@ -111,7 +111,7 @@ Contract highlights:
 - `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
 - `ipc_region_registry.{h,cc}`: tracks client-registered CUDA IPC regions with TTL, refcounts, and poison state.
 - `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
-- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; `start()` just performs the handshake and initial registration, and shutdown signals interruptible waits so stop exits promptly.
+- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; full-state sync and REMOVE changes prune replicas per `(artifact_id, memory_type, device_id)` to avoid cross-tier deletions, `start()` just performs the handshake and initial registration, and shutdown signals interruptible waits so stop exits promptly.
 - `server_main.cc`: flags/bootstrap and service registration.
 
 ## Build, Run, Test

@@ -19,7 +19,7 @@ TensorCast HA keeps the single Global Store resilient and consistent with Store 
 
 ### Store Daemon
 - **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
-- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas not expected by the Global Store.
+- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas (keyed by `(artifact_id, memory_type, device_id)`) not expected by the Global Store.
 - **Registration seeding**: initializes `state_version` from `RegisterWorkerResponse.expected_state_version` before the first heartbeat.
 - **Enhanced heartbeat loop**: sends version/checksum/inventory; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
 - **Incremental sync handling**: applies obsolete removals immediately and prefetches server-requested `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.

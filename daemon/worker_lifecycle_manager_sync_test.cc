@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <string_view>
 #include <thread>
 
 #include "absl/strings/match.h"
@@ -30,6 +31,7 @@ using tensorcast::daemon::WorkerLifecycleManager;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+namespace commonpb = tensorcast::common::v1;
 namespace global_store = tensorcast::global_store::v1;
 namespace memory_tier = tensorcast::memory_tier::v1;
 
@@ -47,6 +49,12 @@ struct ArtifactFixture {
   std::string logical_name;
   std::string artifact_id;
   fs::path dir;
+};
+
+struct RemoveSpec {
+  std::string artifact_id;
+  commonpb::MemoryType memory_type{commonpb::MEMORY_TYPE_GPU};
+  uint32_t device_id{0};
 };
 
 static std::string read_artifact_id_from_descriptor(const fs::path& artifact_dir) {
@@ -80,6 +88,19 @@ static ArtifactFixture make_standard_artifact(
   return fixture;
 }
 
+static commonpb::ReplicaInfo make_expected_replica(
+    std::string_view artifact_id,
+    commonpb::MemoryType memory_type,
+    uint32_t device_id) {
+  commonpb::ReplicaInfo info;
+  info.mutable_ref()->set_artifact_id(std::string(artifact_id));
+  auto* mi = info.mutable_memory_info();
+  mi->set_memory_type(memory_type);
+  mi->set_device_id(device_id);
+  mi->set_memory_size(0);
+  return info;
+}
+
 // Minimal in-process fake Global Store service
 class FakeGlobalStoreService final : public global_store::GlobalStoreService::Service,
                                      public memory_tier::MemoryTierService::Service {
@@ -101,11 +122,24 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
   }
 
   void set_sync_remove_ids(std::vector<std::string> ids) {
-    sync_remove_ids_ = std::move(ids);
+    std::vector<RemoveSpec> specs;
+    specs.reserve(ids.size());
+    for (const auto& id : ids) {
+      specs.push_back(RemoveSpec{.artifact_id = id});
+    }
+    set_sync_remove_specs(std::move(specs));
+  }
+
+  void set_sync_remove_specs(std::vector<RemoveSpec> specs) {
+    sync_remove_specs_ = std::move(specs);
   }
 
   void set_sync_should_fail(bool v) {
     sync_should_fail_ = v;
+  }
+
+  void set_expected_replicas(std::vector<commonpb::ReplicaInfo> replicas) {
+    expected_replicas_ = std::move(replicas);
   }
 
   void set_outstanding_leases(std::vector<memory_tier::MemoryTierLease> leases) {
@@ -181,14 +215,20 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
     resp->set_status(global_store::STATUS_OK);
     resp->set_new_state_version(1);
     resp->set_new_state_checksum("v1");
-    for (const auto& id : expected_ids_) {
-      auto* rep = resp->add_expected_replicas();
-      rep->mutable_ref()->set_artifact_id(id);
-      // Minimal MemoryInfo; the daemon only inspects artifact_id in apply_full_state()
-      auto* mi = rep->mutable_memory_info();
-      mi->set_memory_type(tensorcast::common::v1::MEMORY_TYPE_GPU);
-      mi->set_device_id(0);
-      mi->set_memory_size(0);
+    if (!expected_replicas_.empty()) {
+      for (const auto& rep : expected_replicas_) {
+        *resp->add_expected_replicas() = rep;
+      }
+    } else {
+      for (const auto& id : expected_ids_) {
+        auto* rep = resp->add_expected_replicas();
+        rep->mutable_ref()->set_artifact_id(id);
+        // Default to GPU replicas when tests don't provide memory specs.
+        auto* mi = rep->mutable_memory_info();
+        mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
+        mi->set_device_id(0);
+        mi->set_memory_size(0);
+      }
     }
     return ::grpc::Status::OK;
   }
@@ -205,10 +245,15 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
     resp->set_status(global_store::STATUS_OK);
     resp->set_new_state_version(2);
     resp->set_new_state_checksum("v2");
-    for (const auto& id : sync_remove_ids_) {
+    for (const auto& spec : sync_remove_specs_) {
       auto* ch = resp->add_state_changes();
       ch->set_type(global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA);
-      ch->mutable_replica_info()->mutable_ref()->set_artifact_id(id);
+      auto* rep = ch->mutable_replica_info();
+      rep->mutable_ref()->set_artifact_id(spec.artifact_id);
+      auto* mi = rep->mutable_memory_info();
+      mi->set_memory_type(spec.memory_type);
+      mi->set_device_id(spec.device_id);
+      mi->set_memory_size(0);
     }
     return ::grpc::Status::OK;
   }
@@ -319,8 +364,9 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
   std::vector<std::string> hb_obsolete_ids_;
   bool hb_state_sync_required_{false};
   uint64_t hb_expected_state_version_{0};
-  std::vector<std::string> sync_remove_ids_;
+  std::vector<RemoveSpec> sync_remove_specs_;
   bool sync_should_fail_{false};
+  std::vector<commonpb::ReplicaInfo> expected_replicas_;
   mutable absl::Mutex mu_;
   uint32_t total_chunk_updates_{0};
   std::vector<memory_tier::MemoryTierLease> outstanding_leases_ ABSL_GUARDED_BY(mu_);
@@ -420,6 +466,7 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   opts.pinned_memory_timeout = std::chrono::milliseconds(0);
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
   load_artifact_gpu(*engine_ptr, keep);
+  load_artifact_cpu(*engine_ptr, keep);
   load_artifact_gpu(*engine_ptr, remove);
   // Sanity: both present
   {
@@ -453,34 +500,29 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   REQUIRE(st.ok());
 
   // Initial full-state sync happens in start(); poll until removal applied
-  bool removed = false;
-  bool kept = false;
+  bool keep_gpu_present = false;
+  bool keep_cpu_present = false;
+  bool remove_present = false;
   for (int i = 0; i < 200; ++i) { // up to ~2s
-    auto infos = engine_ptr->get_all_replicas_info();
-    kept = false;
-    bool remove_present = false;
-    for (const auto& in : infos) {
-      if (in.artifact_id == keep.artifact_id) {
-        // kept means still has any residency on CPU/GPU
-        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
-          kept = true;
-        }
-      }
-      if (in.artifact_id == remove.artifact_id) {
-        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
-          remove_present = true;
-        }
+    keep_gpu_present = false;
+    keep_cpu_present = false;
+    remove_present = false;
+    const auto keep_devices = engine_ptr->get_resident_devices(keep.artifact_id);
+    for (const auto& dev : keep_devices) {
+      if (dev.type == DeviceType::GPU) {
+        keep_gpu_present = true;
+      } else if (dev.type == DeviceType::CPU) {
+        keep_cpu_present = true;
       }
     }
-    removed = !remove_present;
-    if (kept && removed)
+    remove_present = !engine_ptr->get_resident_devices(remove.artifact_id).empty();
+    if (keep_gpu_present && !keep_cpu_present && !remove_present)
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(kept);
-  REQUIRE(removed);
+  REQUIRE(keep_gpu_present);
+  REQUIRE_FALSE(keep_cpu_present);
+  REQUIRE_FALSE(remove_present);
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -612,7 +654,12 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   // for remove_id
   auto test_server = start_fake_server({keep.artifact_id, remove.artifact_id}, /*obsolete_id=*/"");
   test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
-  test_server.service->set_sync_remove_ids({remove.artifact_id});
+  test_server.service->set_expected_replicas(
+      {make_expected_replica(keep.artifact_id, commonpb::MEMORY_TYPE_GPU, 0),
+       make_expected_replica(remove.artifact_id, commonpb::MEMORY_TYPE_GPU, 0),
+       make_expected_replica(remove.artifact_id, commonpb::MEMORY_TYPE_RAM, 0)});
+  test_server.service->set_sync_remove_specs(
+      {RemoveSpec{.artifact_id = remove.artifact_id, .memory_type = commonpb::MEMORY_TYPE_GPU, .device_id = 0}});
   REQUIRE(test_server.selected_port > 0);
 
   // Build engine and load both replicas locally (A+B)
@@ -625,6 +672,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
   load_artifact_gpu(*engine_ptr, keep);
   load_artifact_gpu(*engine_ptr, remove);
+  load_artifact_cpu(*engine_ptr, remove);
 
   tensorcast::daemon::StoreDaemonServiceImpl dummy_service(engine_ptr);
   WorkerLifecycleManager::Options wopts;
@@ -642,31 +690,28 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   REQUIRE(st.ok());
 
   // Poll until REMOVE applied
-  bool removed = false;
-  bool kept = false;
+  bool keep_present = false;
+  bool remove_gpu_present = false;
+  bool remove_cpu_present = false;
   for (int i = 0; i < 200; ++i) {
-    auto infos = engine_ptr->get_all_replicas_info();
-    kept = false;
-    bool remove_present = false;
-    for (const auto& in : infos) {
-      if (in.artifact_id == keep.artifact_id) {
-        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
-          kept = true;
-      }
-      if (in.artifact_id == remove.artifact_id) {
-        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
-            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE)
-          remove_present = true;
+    keep_present = !engine_ptr->get_resident_devices(keep.artifact_id).empty();
+    remove_gpu_present = false;
+    remove_cpu_present = false;
+    const auto remove_devices = engine_ptr->get_resident_devices(remove.artifact_id);
+    for (const auto& dev : remove_devices) {
+      if (dev.type == DeviceType::GPU) {
+        remove_gpu_present = true;
+      } else if (dev.type == DeviceType::CPU) {
+        remove_cpu_present = true;
       }
     }
-    removed = !remove_present;
-    if (kept && removed)
+    if (keep_present && remove_cpu_present && !remove_gpu_present)
       break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
-  REQUIRE(kept);
-  REQUIRE(removed);
+  REQUIRE(keep_present);
+  REQUIRE(remove_cpu_present);
+  REQUIRE_FALSE(remove_gpu_present);
 
   wlm.stop();
   test_server.server->Shutdown();

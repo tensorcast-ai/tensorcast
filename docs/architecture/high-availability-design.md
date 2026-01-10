@@ -63,6 +63,7 @@ When `state_sync_required` is returned (or the daemon detects its version/checks
 - Global Store computes diffs with “addition over removal” semantics: additions are always applied, removals are only applied when the daemon provided a non-empty inventory to avoid deleting during partial reports.
 - Versions only advance when actual changes are applied; a no-op sync returns the existing version along with a recomputed checksum.
 - The daemon stores the returned version and checksum so subsequent heartbeats can short-circuit unnecessary syncs.
+- `StateChange` removals are applied per replica key `(artifact_id, memory_type, device_id)` so GPU/CPU tiers are reconciled independently.
 - Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, memory_type, device_id, node_id, availability)`. Order never changes the checksum, and availability flips (remote access enable/disable) intentionally mutate it to trigger reconciliation.
 - Authoritative empties: when `high_availability.force_full_sync_on_empty_inventory=true`, an empty inventory is treated as authoritative and removals are applied (for drains/retirements). Default keeps the conservative behavior (empty = “unknown”, no removals).
 
@@ -71,7 +72,7 @@ When `state_sync_required` is returned (or the daemon detects its version/checks
 The daemon requests the authoritative replica set after cold start, re-registration, or when drift is suspected. Full-state sync returns the current checksum and expected set without bumping versions.
 
 - `request_full_state_sync` provides a complete snapshot the daemon treats as source of truth.
-- During startup, `WorkerLifecycleManager::start` performs this call once, prunes any local replicas not present in the expected set, and only then starts serving traffic.
+- During startup, `WorkerLifecycleManager::start` performs this call once, prunes any local replicas not present in the expected set (keyed by `(artifact_id, memory_type, device_id)`), and only then starts serving traffic.
 
 ## Connection Management & Retries (Daemon)
 
