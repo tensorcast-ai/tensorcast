@@ -383,6 +383,42 @@ SourcePreference to_hint_preference(v2::SourcePreference preference) {
   }
 }
 
+struct ResolvedSourcePolicy {
+  v2::SourcePreference preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
+  bool allow_p2p{true};
+  bool allow_disk{true};
+};
+
+ResolvedSourcePolicy resolve_source_policy(const v2::SourcePolicy* policy, v2::SourcePreference legacy_preference) {
+  ResolvedSourcePolicy resolved;
+  resolved.preference = legacy_preference;
+  if (policy != nullptr) {
+    if (policy->preference() != v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
+      resolved.preference = policy->preference();
+    }
+    if (policy->has_allow_p2p()) {
+      resolved.allow_p2p = policy->allow_p2p();
+    }
+    if (policy->has_allow_disk()) {
+      resolved.allow_disk = policy->allow_disk();
+    }
+  }
+  if (resolved.preference == v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
+    resolved.preference = v2::SourcePreference::SOURCE_PREFERENCE_AUTO;
+  }
+  return resolved;
+}
+
+absl::Status validate_source_policy(const ResolvedSourcePolicy& policy) {
+  if (!policy.allow_p2p && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P) {
+    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
+  }
+  if (!policy.allow_disk && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK) {
+    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
+  }
+  return absl::OkStatus();
+}
+
 v2::MaterializationSource to_proto_source(MaterializationSource source) {
   switch (source) {
     case MaterializationSource::kDisk:
@@ -766,9 +802,9 @@ grpc::Status MaterializationController::materialize_replica(
     const v2::MaterializeReplicaRequest& req,
     v2::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  const v2::SourcePreference preference = req.preference();
-  const bool prefer_disk = preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
-  const bool prefer_p2p = preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  const bool prefer_disk = policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
+  const bool prefer_p2p = policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
   bool verify_checksums = true;
   std::string disk_path;
   const bool has_disk_fallback = req.has_disk_fallback() && !req.disk_fallback().disk_path().empty();
@@ -787,7 +823,9 @@ grpc::Status MaterializationController::materialize_replica(
     span->SetAttribute("tc.device.uuid", req.device_uuid());
   }
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.size_bytes()));
-  span->SetAttribute("tc.store.preference", static_cast<int64_t>(preference));
+  span->SetAttribute("tc.store.preference", static_cast<int64_t>(policy.preference));
+  span->SetAttribute("tc.store.allow_p2p", policy.allow_p2p);
+  span->SetAttribute("tc.store.allow_disk", policy.allow_disk);
 
   using v2::MaterializeReplicaStatus;
   if (d_.is_shutting_down.load()) {
@@ -795,10 +833,20 @@ grpc::Status MaterializationController::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_status);
+  }
+
   const bool request_has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
   const bool request_has_disk = has_disk_fallback || has_legacy_disk;
   if (!request_has_artifact && !request_has_disk) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id or disk_fallback.disk_path is required"};
+  }
+  if (request_has_disk && !policy.allow_disk) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
   }
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
@@ -1011,7 +1059,9 @@ grpc::Status MaterializationController::materialize_replica(
   }
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
-  hints.source_preference = to_hint_preference(preference);
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
   if (has_disk)
@@ -1107,13 +1157,20 @@ grpc::Status MaterializationController::materialize_by_key(
     v2::MaterializeByKeyResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req.key());
-  const v2::SourcePreference preference = req.preference();
-  span->SetAttribute("tc.store.preference", static_cast<int64_t>(preference));
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  span->SetAttribute("tc.store.preference", static_cast<int64_t>(policy.preference));
+  span->SetAttribute("tc.store.allow_p2p", policy.allow_p2p);
+  span->SetAttribute("tc.store.allow_disk", policy.allow_disk);
 
   using v2::MaterializeReplicaStatus;
   if (d_.is_shutting_down.load()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_status);
   }
   if (req.key().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "key is required"};
@@ -1151,7 +1208,7 @@ grpc::Status MaterializationController::materialize_by_key(
   const auto& mapping = *mapping_or;
   span->SetAttribute("tc.artifact.id", mapping.artifact_id);
   std::string used_disk_path;
-  if (!mapping.disk_path.empty()) {
+  if (!mapping.disk_path.empty() && policy.allow_disk) {
     auto normalized_or = normalize_disk_path(mapping.disk_path, storage_path_);
     if (!normalized_or.ok()) {
       record_disk_path_denied();
@@ -1203,7 +1260,9 @@ grpc::Status MaterializationController::materialize_by_key(
   if (!used_disk_path.empty()) {
     hints.disk_path = used_disk_path;
   }
-  hints.source_preference = to_hint_preference(preference);
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
 
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
   if (!result.ok()) {
@@ -1240,6 +1299,14 @@ grpc::Status MaterializationController::materialize_into_target(
     record_materialize_into_target(
         "error", "unavailable", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    record_materialize_into_target(
+        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(policy_status);
   }
 
   const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
@@ -1440,6 +1507,11 @@ grpc::Status MaterializationController::materialize_into_target(
   store::loading::MaterializeHints hints;
   hints.artifact_id = req.artifact_id();
   if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
+    if (!policy.allow_disk) {
+      record_materialize_into_target(
+          "error", "disk_fallback_disallowed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
+    }
     auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
     if (!normalized_or.ok()) {
       record_disk_path_denied();
@@ -1449,7 +1521,9 @@ grpc::Status MaterializationController::materialize_into_target(
     }
     hints.disk_path = normalized_or->string();
   }
-  hints.source_preference = to_hint_preference(req.preference());
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
 
   record_materialize_into_target_verification_skipped();

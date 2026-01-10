@@ -70,6 +70,18 @@ def _source_label(
     return mapping.get(source)
 
 
+def _build_source_policy(
+    *,
+    preference: store_daemon_pb2.SourcePreference,
+    allow_p2p: bool,
+    allow_disk: bool,
+) -> store_daemon_pb2.SourcePolicy:
+    policy = store_daemon_pb2.SourcePolicy(preference=preference)
+    policy.allow_p2p = bool(allow_p2p)
+    policy.allow_disk = bool(allow_disk)
+    return policy
+
+
 class FallbackResolver:
     """Disk/P2P fallback utilities shared by materialization flows."""
 
@@ -979,6 +991,7 @@ class MaterializationPipeline:
             device_id=device_id,
         )
 
+        effective_prefer = fallback.prefer if fallback is not None else "auto"
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         disk_path: str | None = None
         if fallback is not None:
@@ -997,6 +1010,16 @@ class MaterializationPipeline:
         ):
             preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
+        allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
+        if effective_prefer == "local":
+            allow_p2p = False
+        allow_disk = effective_prefer != "local" or bool(disk_path)
+        source_policy = _build_source_policy(
+            preference=preference,
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
+        )
+
         client = self._runtime.ensure_client()
         if mark_started is not None:
             mark_started()
@@ -1006,6 +1029,7 @@ class MaterializationPipeline:
                 target_layout=layout,
                 device_uuid=device_uuid_for(device_id),
                 preference=preference,
+                source_policy=source_policy,
                 disk_path=disk_path,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1321,6 +1345,13 @@ class MaterializationPipeline:
                     exc_info=exc,
                 )
 
+        allow_disk = effective_prefer != "local" or requested_disk
+        source_policy = _build_source_policy(
+            preference=preference,
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
+        )
+
         request_artifact_id = resolved_artifact_id or artifact_id
         view_subset_hash = view_data_hash.encode("utf-8") if view_data_hash else None
         index_hint = view_index_hint or canonical_hint
@@ -1337,6 +1368,7 @@ class MaterializationPipeline:
             canonical_index_hint=index_hint,
             disk_path_hint=disk_path,
             preference=preference,
+            source_policy=source_policy,
             tensor_names=tensor_names,
             verify_checksums=verify_checksums,
             view_subset_hash=view_subset_hash,
@@ -1344,15 +1376,21 @@ class MaterializationPipeline:
             view_index_hint=view_index_hint,
             generation_hint=generation_hint,
         )
-        if fallback_opts and not allow_p2p:
-            disallowed_sources = {
-                store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
-            }
+        if fallback_opts:
+            disallowed_sources: set[store_daemon_pb2.MaterializationSource] = set()
+            if not allow_p2p:
+                disallowed_sources.add(
+                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
+                )
+            if not allow_disk:
+                disallowed_sources.add(
+                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
+                )
             if requested_disk:
                 disallowed_sources.add(
                     store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA
                 )
-            if result.source in disallowed_sources:
+            if disallowed_sources and result.source in disallowed_sources:
                 source_label = _source_label(result.source) or "non-disk"
                 self._release_materialized(result, client)
                 raise ArtifactError(
@@ -1368,6 +1406,7 @@ class MaterializationPipeline:
             detail={
                 "disk_requested": bool(requested_disk),
                 "allow_p2p": bool(allow_p2p),
+                "allow_disk": bool(allow_disk),
                 "source": source_label,
             },
         )
@@ -1385,6 +1424,7 @@ class MaterializationPipeline:
                     "tc.artifact.id": result.artifact_id or artifact_id or "",
                     "tc.store.disk_requested": bool(requested_disk),
                     "tc.store.allow_p2p": bool(allow_p2p),
+                    "tc.store.allow_disk": bool(allow_disk),
                     "tc.store.preference": effective_prefer,
                     "tc.store.source": source_label,
                 },

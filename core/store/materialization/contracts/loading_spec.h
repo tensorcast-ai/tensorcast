@@ -92,6 +92,8 @@ struct MaterializeHints {
   enum class Verify : std::uint8_t { NONE, CHECKSUM, FULL_DIGEST };
   Verify verify = Verify::CHECKSUM;
   SourcePreference source_preference{SourcePreference::kAuto};
+  bool allow_p2p{true};
+  bool allow_disk{true};
 
   std::optional<VariantIdentity> variant;
 };

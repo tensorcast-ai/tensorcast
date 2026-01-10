@@ -119,6 +119,13 @@ enum SourcePreference {
   SOURCE_PREFERENCE_PREFER_DISK = 3;
 }
 
+// Source selection policy that can further gate which sources are allowed.
+message SourcePolicy {
+  SourcePreference preference = 1;
+  optional bool allow_p2p = 2;
+  optional bool allow_disk = 3;
+}
+
 // Actual source used to serve a materialization request.
 enum MaterializationSource {
   MATERIALIZATION_SOURCE_UNSPECIFIED = 0;
@@ -323,6 +330,7 @@ message MaterializeReplicaRequest {
   int64 size_bytes = 8; // Artifact size in bytes (for reference tracking)
 
   SourcePreference preference = 9;
+  SourcePolicy source_policy = 14;
 
   // Selective materialization
   repeated string tensor_names = 10;
@@ -379,6 +387,7 @@ message MaterializeIntoTargetRequest {
   string device_uuid = 6;
 
   SourcePreference preference = 7;
+  SourcePolicy source_policy = 12;
 
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
@@ -871,6 +880,7 @@ message MaterializeByKeyRequest {
   bytes view_subset_hash = 11;
 
   SourcePreference preference = 12;
+  SourcePolicy source_policy = 13;
   bool wait_for_completion = 20;
 }
 message MaterializeByKeyResponse {

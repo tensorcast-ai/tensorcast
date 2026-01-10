@@ -315,10 +315,19 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool gs_connected = gs_client && gs_client->is_connected();
   const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
+  const bool allow_p2p = hints.allow_p2p;
+  const bool allow_disk = hints.allow_disk;
   const bool has_disk_path = !hints.disk_path.empty();
   const auto& local_identity = config_.runtime_context->worker_identity();
 
-  if (prefer_disk && has_disk_path) {
+  if (prefer_disk && !allow_disk) {
+    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
+  }
+  if (prefer_p2p && !allow_p2p) {
+    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
+  }
+
+  if (prefer_disk && has_disk_path && allow_disk) {
     loading::DiskSource disk_src;
     disk_src.path = std::filesystem::path(hints.disk_path);
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
@@ -326,16 +335,16 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     if (disk_or.ok()) {
       return disk_or;
     }
-    if (!gs_connected) {
+    if (!gs_connected || !allow_p2p) {
       return disk_or.status();
     }
   }
 
-  if (!gs_connected && !has_disk_path) {
+  if (!gs_connected && (!has_disk_path || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
-  if (gs_connected && !hints.artifact_id.empty()) {
+  if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
     auto transport_or = gs_client->request_replica_transport(
         hints.artifact_id,
         local_identity.node_id,
@@ -375,20 +384,24 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (p2p_or.ok()) {
           return p2p_or;
         }
-        if (!has_disk_path || prefer_p2p) {
+        if (!allow_disk || !has_disk_path || prefer_p2p) {
           return p2p_or.status();
         }
       }
-    } else if (!has_disk_path) {
+    } else if (!allow_disk || !has_disk_path) {
       return transport_or.status();
     }
   }
 
-  if (has_disk_path) {
+  if (allow_disk && has_disk_path) {
     loading::DiskSource disk_src;
     disk_src.path = std::filesystem::path(hints.disk_path);
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+  }
+
+  if (!allow_p2p && !allow_disk) {
+    return absl::FailedPreconditionError("source_policy disallows P2P and disk for materialize_into_target");
   }
 
   return absl::FailedPreconditionError("materialize_into_target requires disk_path or Global Store connectivity");

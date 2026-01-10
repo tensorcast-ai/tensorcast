@@ -312,6 +312,9 @@ absl::StatusOr<ReplicaHandle> MaterializationService::copy_from_peer(const Mater
 }
 
 absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const MaterializationRequest& request) const {
+  if (!request.hints().allow_disk) {
+    return absl::InvalidArgumentError("source_policy disallows disk ingestion");
+  }
   if (!request.has_disk_path()) {
     return absl::InvalidArgumentError(
         "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
@@ -352,19 +355,23 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
               id_kind_or.status().message()));
     }
   }
+  const bool allow_disk = request.hints().allow_disk;
   if (deps_.run_auto) {
     auto orchestrated_or = deps_.run_auto(request);
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
-    if (!request.has_disk_path()) {
+    if (!allow_disk || !request.has_disk_path()) {
       return orchestrated_or.status();
     }
     LOG(WARNING) << "Materialize AUTO callback failed: " << orchestrated_or.status() << "; falling back to disk load";
   }
 
-  if (request.has_disk_path()) {
+  if (allow_disk && request.has_disk_path()) {
     return load_from_disk(request);
+  }
+  if (!allow_disk && request.has_disk_path()) {
+    return absl::FailedPreconditionError("source_policy disallows disk fallback");
   }
 
   return absl::FailedPreconditionError(

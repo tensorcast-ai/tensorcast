@@ -516,6 +516,7 @@ class DaemonCtl:
         target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
         pid: int | None = None,
         return_response: bool = True,
@@ -526,15 +527,27 @@ class DaemonCtl:
             raise ValueError("device_uuid is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
             request = store_daemon_pb2.MaterializeIntoTargetRequest(
                 artifact_id=artifact_id,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = True
@@ -619,6 +632,7 @@ class DaemonCtl:
         return_response: Literal[True],
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -639,6 +653,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -659,6 +674,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -677,6 +693,7 @@ class DaemonCtl:
         return_response: bool = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -695,6 +712,18 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeReplicaV2") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 artifact_id=artifact_id,
@@ -702,10 +731,10 @@ class DaemonCtl:
                 device_uuid=device_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = bool(verify_checksums)
@@ -786,6 +815,7 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
@@ -801,6 +831,7 @@ class DaemonCtl:
         wait_for_completion: Literal[False],
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
@@ -816,6 +847,7 @@ class DaemonCtl:
         wait_for_completion: Literal[True] = True,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, str, str]: ...
@@ -829,6 +861,7 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> (
@@ -844,16 +877,28 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeByKeyV2") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
             request = store_daemon_pb2.MaterializeByKeyRequest(
                 key=key,
                 device_id=int(device_id),
                 pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
                 pid=pid,
                 replica_uuid=replica_uuid,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
             if view_subset_hash:

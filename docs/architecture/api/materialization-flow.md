@@ -68,14 +68,14 @@ Key controller behavior lives in `daemon/service/controllers/materialization_con
 
 ### SDK preference mapping
 
-`FallbackOptions` in the SDK drives the daemon `SourcePreference` hint and
-availability rules:
+`FallbackOptions` in the SDK drives a daemon `SourcePolicy` (preference +
+allow flags) so local-only requests are enforced server-side:
 
-- `prefer=auto` -> daemon chooses best source.
-- `prefer=local` -> disables P2P, but does not force disk.
-- `prefer=p2p` -> `SOURCE_PREFERENCE_PREFER_P2P` (requires `artifact_id`).
-- `prefer=disk` -> `SOURCE_PREFERENCE_PREFER_DISK` (requires disk path or key mapping).
-- `allow_p2p=False` disables P2P but still allows local replica reuse.
+- `prefer=auto` -> `SourcePreference=AUTO`, `allow_p2p=true`, `allow_disk=true`.
+- `prefer=local` -> `allow_p2p=false`, `allow_disk=false` unless an explicit disk path is provided.
+- `prefer=p2p` -> `SourcePreference=PREFER_P2P` (requires `artifact_id`).
+- `prefer=disk` -> `SourcePreference=PREFER_DISK` (requires disk path or key mapping).
+- `allow_p2p=False` disables P2P but still allows local replica reuse; disk is allowed unless `prefer=local`.
 
 See `tensorcast/api/store/materialization.py` for the exact decision logic.
 
@@ -100,7 +100,7 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
-     disk_path, variant/view info).
+     disk_path, source policy allow flags, variant/view info).
    - Determine materialize mode:
      - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
      - Otherwise -> `AUTO`.
@@ -119,9 +119,9 @@ chain:
 5. **AUTO orchestrator**: uses Global Store routing to request P2P transport, then
    falls back to disk if allowed (`core/store/materialization/control/materialize_orchestrator.cc`).
 
-The orchestrator decides between disk/P2P using `SourcePreference` and
-Global Store connectivity. It requests a transport session, ingests P2P, then
-registers the replica back with Global Store.
+The orchestrator decides between disk/P2P using `SourcePreference`, allow flags,
+and Global Store connectivity. It requests a transport session, ingests P2P when
+allowed, then registers the replica back with Global Store.
 
 ## Ingestion Pipeline (Disk/P2P)
 

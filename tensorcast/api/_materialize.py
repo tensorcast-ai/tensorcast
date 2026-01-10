@@ -89,6 +89,7 @@ def materialize_artifact_v2(
     canonical_index_hint: bytes | None = None,
     disk_path_hint: str | None = None,
     preference: store_daemon_pb2.SourcePreference | None = None,
+    source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
     verify_checksums: bool = True,
     view_subset_hash: bytes | None = None,
@@ -138,11 +139,17 @@ def materialize_artifact_v2(
     with tracer.start_as_current_span(
         "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
     ):
-        preference_value = (
-            preference
-            if preference is not None
-            else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        )
+        if preference is not None:
+            preference_value = preference
+        elif source_policy is not None:
+            preference_value = (
+                source_policy.preference
+                if source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+            )
+        else:
+            preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         response: (
             store_daemon_pb2.MaterializeReplicaResponse
             | store_daemon_pb2.MaterializeByKeyResponse
@@ -160,6 +167,7 @@ def materialize_artifact_v2(
                 return_response=True,
                 disk_path=disk_path_hint,
                 preference=preference_value,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
@@ -178,6 +186,8 @@ def materialize_artifact_v2(
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 return_response=True,
+                preference=preference_value,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
             )
@@ -202,6 +212,7 @@ def materialize_artifact_v2(
                 return_response=True,
                 disk_path=disk_path_hint,
                 preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,

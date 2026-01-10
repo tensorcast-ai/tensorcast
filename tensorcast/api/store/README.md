@@ -72,8 +72,8 @@ managing clients manually.
 `FallbackOptions` now supports explicit source preferences:
 
 - `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P; prefer an existing local replica without
-  requiring a disk fallback path
+- `prefer="local"` — disallow P2P and disk unless an explicit `disk_path` is provided;
+  daemon enforces this via `SourcePolicy` gating
 - `prefer="p2p"` — allow remote transfer
 - `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
   mapping

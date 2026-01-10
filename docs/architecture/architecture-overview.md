@@ -64,7 +64,7 @@ graph TD
 - **Runtime wiring**: `RuntimeEnv` boots a `RuntimeContext` that owns the device manager, pinned buffer pool, communication manager, metrics collector, Global Store client, and ingestion event hub. The gRPC surface stays thin; lifecycle/telemetry is driven by the runtime modules rather than ad‑hoc engine wiring.
 - **Ingestion pipeline**: `IngestionRuntime` delegates to `MaterializationFacade`, which runs the staged `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). MetadataStage rebuilds or fetches canonical indices (from disk or Global Store for variants), plans views, and enforces descriptor schema v3. AllocationStage handles eviction and retries for P2P GPU loads; VerificationStage enforces `verification_json` key‑point checks and optional full digests, and computes view hashes when configured.
 - **P2P orchestration**: `MaterializationService` invokes `MaterializeOrchestrator` for `AUTO` mode. The orchestrator:
-  - Respects `SourcePreference` (disk‑first only when a disk path is provided; `PREFER_P2P` requires a canonical `artifact_id`).
+  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first requires a disk path; `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
   - Tries view-aware transports first (`request_view_transport`) and falls back to canonical transport when unsupported.
   - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present.
   - Builds `P2PSource` with remote `verification_json` and memory registration info so VerificationStage can validate the transfer.
