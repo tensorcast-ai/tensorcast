@@ -46,14 +46,14 @@ On startup the Global Store runs a guarded recovery pass; state stays marked sta
 
 Heartbeats are always enhanced and must include a non-zero `state_version` so the Global Store can detect drift. Legacy heartbeats (`state_version == 0`) are rejected.
 
-- Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids, last successful sync timestamp, and the daemon→Global Store connection status.
+- Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids (publishable + resident only), last successful sync timestamp, and the daemon→Global Store connection status.
 - Global Store handling (`grpc_service._handle_enhanced_heartbeat`):
   - Compares the sent version with the persisted `state_version` and compares the worker checksum with the cached global checksum (recomputed only when missing).
   - Marks `state_sync_required` when versions or checksums diverge, or when obsolete replicas are detected.
-  - Returns the server timestamp, the expected version, and the list of obsolete replicas so the daemon can prune immediately.
+  - Returns the server timestamp, the expected version, and the list of obsolete replicas (diagnostic only; daemons use it to request a sync, not to unload directly).
 - Registration initializes each worker’s `state_version` to 1; the daemon seeds its local `state_version` from `RegisterWorkerResponse.expected_state_version` and treats missing/zero versions as an error.
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
-  - Collects current replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
+  - Collects publishable, resident replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
   - Heartbeat is lightweight and only queues sync work; state synchronization runs in a separate loop that the monitor can restart by epoch without blocking.
   - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a full-state sync before resuming heartbeats.
 
@@ -66,6 +66,8 @@ When `state_sync_required` is returned (or the daemon detects its version/checks
 - No-op sync keeps the version and refreshes the persisted checksum if it is stale.
 - The daemon stores the returned version and checksum so subsequent heartbeats can short-circuit unnecessary syncs.
 - `StateChange` removals are applied per replica key `(artifact_id, memory_type, device_id)` so GPU/CPU tiers are reconciled independently.
+- The daemon’s inventory is publishable + resident only; non-resident replicas are never mapped to DISK.
+- `StateChange` removals enqueue a safe-retire flow; unload happens only after ref counts, use leases, placement pins, and transport locks clear.
 - `StateChange` updates propagate endpoint metadata drift (node address/port, memory size, and transport keys when reported) so routing stays accurate.
 - Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, node_id, node_address, node_port, memory_type, device_id, availability)`. Order never changes the checksum, and availability or endpoint drift intentionally mutates it to trigger reconciliation.
 - Authoritative empties: when `high_availability.force_full_sync_on_empty_inventory=true`, an empty inventory is treated as authoritative and removals are applied (for drains/retirements). Default keeps the conservative behavior (empty = “unknown”, no removals).
@@ -75,7 +77,7 @@ When `state_sync_required` is returned (or the daemon detects its version/checks
 The daemon requests the authoritative replica set after cold start, re-registration, or when drift is suspected. Full-state sync returns the current checksum and expected set without bumping versions (and refreshes the cached checksum if stale).
 
 - `request_full_state_sync` provides a complete snapshot the daemon treats as source of truth.
-- During startup, `WorkerLifecycleManager::start` performs this call once, prunes any local replicas not present in the expected set (keyed by `(artifact_id, memory_type, device_id)`), and only then starts serving traffic.
+- During startup, `WorkerLifecycleManager::start` performs this call once, enqueues retire for any local replicas not present in the expected set (keyed by `(artifact_id, memory_type, device_id)`), and only then starts serving traffic.
 
 ## Connection Management & Retries (Daemon)
 
@@ -90,7 +92,7 @@ All Global Store RPCs use bounded retries with exponential backoff and jitter (`
 ## Responsibilities
 
 - Global Store: persist registry; accept heartbeats and synchronize state; compute/apply changes; serve expected state for full sync; reject ambiguous loopback registrations; expose cluster token via HealthCheck.
-- Store Daemon: maintain authoritative local inventory; send enhanced heartbeats; perform incremental/full syncs; prune drift; re-register on desync; apply obsolete removals and prefetch adds returned by sync.
+- Store Daemon: maintain authoritative publishable inventory; send enhanced heartbeats; perform incremental/full syncs; enqueue safe retire for drift/removals; re-register on desync; prefetch adds returned by sync; never unload directly from heartbeat obsolete hints.
 
 ## Failure Modes and Recovery Behavior
 
@@ -186,6 +188,8 @@ From `proto/tensorcast/global_store/v1/global_store.proto`:
 - Authoritative inventory: daemon’s `local_replicas` is the source of truth for local presence.
 - Addition over removal: removals are suppressed if the daemon provides no inventory; only add/remove based on explicit differences, and state versions bump only when changes are applied.
 - Idempotency: repeated adds resolve to the same replica logically; full-state sync is informational and does not mutate versions.
+- Publishable-only visibility: only resident replicas marked publishable are advertised; non-resident replicas are never mapped to DISK.
+- Safe retire: unload only after ref counts, use leases, placement pins, and transport locks clear; heartbeat obsolete hints never trigger unload directly.
 
 ## Configuration
 

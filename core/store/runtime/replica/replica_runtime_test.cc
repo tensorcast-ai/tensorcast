@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <chrono>
 #include <memory>
@@ -34,6 +34,7 @@ using tensorcast::store::replica::ReplicaConfig;
 using tensorcast::store::runtime::IngestionResultEvent;
 using tensorcast::store::runtime::RemoteAccessEvent;
 using tensorcast::store::runtime::ReplicaLifecycleEvent;
+using tensorcast::store::runtime::ReplicaPublishState;
 using tensorcast::store::runtime::ReplicaRuntime;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::RuntimeEvent;
@@ -210,6 +211,63 @@ TEST_CASE("ReplicaRuntime publishes lifecycle events", "[runtime][replica_runtim
     saw_evicted = true;
   }
   CHECK(saw_evicted);
+
+  CHECK(runtime.clear_mem() == 0);
+  catalog.shutdown();
+}
+
+TEST_CASE("ReplicaRuntime tracks publish state for HA inventory", "[runtime][replica_runtime][ha]") {
+  SKIP_IF_NO_CUDA();
+
+  auto opts = MakeTestOptions();
+  RuntimeContext catalog(opts);
+  CHECK_OK(catalog.start());
+  ReplicaRuntime runtime(ReplicaRuntime::Config{.runtime_context = &catalog});
+
+  constexpr size_t kCpuBytes = 4096;
+  auto cpu_backing = std::make_shared<std::vector<uint8_t>>(kCpuBytes, 0x11);
+  auto cpu_view = std::shared_ptr<const void>(cpu_backing, static_cast<const void*>(cpu_backing->data()));
+  auto cpu_config = MakeInlineReplicaConfig(catalog, "cpu_publish_state", DeviceType::CPU, -1, cpu_view, kCpuBytes);
+  auto cpu_replica = runtime.get_or_create_replica("cpu_publish_state", cpu_config);
+  REQUIRE(cpu_replica != nullptr);
+
+  DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  ReplicaKey cpu_key = MakeReplicaKey("cpu_publish_state", cpu_device);
+
+  auto inventory = runtime.get_ha_inventory();
+  CHECK(inventory.empty());
+
+  IngestionResultEvent result_event;
+  result_event.source = tensorcast::store::runtime::IngestionSource::kDisk;
+  result_event.artifact_id = "cpu_publish_state";
+  result_event.target_device = cpu_device;
+  result_event.target_location = MemoryLocation::CPU;
+  result_event.bytes_transferred = kCpuBytes;
+  result_event.duration_seconds = 0.01;
+  result_event.status = absl::OkStatus();
+  result_event.replica_key = cpu_key;
+  result_event.publish_to_global_store = true;
+  runtime.record_ingestion_result(result_event);
+
+  inventory = runtime.get_ha_inventory();
+  REQUIRE(inventory.size() == 1);
+  CHECK(inventory.front().key == cpu_key);
+  CHECK(inventory.front().memory_location == MemoryLocation::CPU);
+  CHECK(inventory.front().publish_state == ReplicaPublishState::kPublishPending);
+
+  runtime.set_replica_publish_state(cpu_key, ReplicaPublishState::kPublished);
+  inventory = runtime.get_ha_inventory();
+  REQUIRE(inventory.size() == 1);
+  CHECK(inventory.front().publish_state == ReplicaPublishState::kPublished);
+
+  runtime.set_replica_publish_state(cpu_key, ReplicaPublishState::kRetiring);
+  inventory = runtime.get_ha_inventory();
+  CHECK(inventory.empty());
+
+  runtime.set_replica_publish_state(cpu_key, ReplicaPublishState::kPublished);
+  CHECK(runtime.unload_replica(cpu_key) == 0);
+  inventory = runtime.get_ha_inventory();
+  CHECK(inventory.empty());
 
   CHECK(runtime.clear_mem() == 0);
   catalog.shutdown();
