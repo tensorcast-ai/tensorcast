@@ -61,7 +61,7 @@ flowchart LR
   - Coalesce requests so only the latest sync request executes when multiple are queued.
   - Bound concurrency to one in-flight sync per worker.
 - Monitor loop
-  - Detect stalls via tick deltas.
+  - Detect stalls via progress budget derived from RPC timeouts.
   - Request cancellation and restart without blocking the monitor thread on `join`.
 
 ## RPC policy support
@@ -91,6 +91,7 @@ Defaults preserve existing behavior unless explicitly set.
 
 - Heartbeat loop must not block on sync work.
 - At most one sync operation runs at a time per worker.
+- Sync RPCs carry a monotonic `(sync_epoch, sync_request_id)` token; stale tokens are ignored.
 - Restart requests must not block the monitor loop; cancellations are best-effort and bounded by RPC deadlines.
 - Heartbeat RPCs must always have a deadline; retry count must be explicit and low.
 - Sync failures do not change local state version or checksum and are logged with context.

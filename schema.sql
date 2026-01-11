@@ -29,15 +29,29 @@ CREATE TABLE IF NOT EXISTS workers (
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     state_version BIGINT NOT NULL DEFAULT 1,
     state_checksum TEXT NOT NULL DEFAULT '',
+    state_sync_epoch BIGINT NOT NULL DEFAULT 0,
+    state_sync_request_id BIGINT NOT NULL DEFAULT 0,
 
     -- Prevent duplicate registration for the same address:port
     UNIQUE(node_address, grpc_port)
 );
 
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_version BIGINT;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_checksum TEXT;
-UPDATE workers SET state_version = 1 WHERE state_version IS NULL;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_version BIGINT DEFAULT 1;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_checksum TEXT DEFAULT '';
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_sync_epoch BIGINT DEFAULT 0;
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_sync_request_id BIGINT DEFAULT 0;
+UPDATE workers SET state_version = 1 WHERE state_version IS NULL OR state_version < 1;
 UPDATE workers SET state_checksum = '' WHERE state_checksum IS NULL;
+UPDATE workers SET state_sync_epoch = 0 WHERE state_sync_epoch IS NULL;
+UPDATE workers SET state_sync_request_id = 0 WHERE state_sync_request_id IS NULL;
+ALTER TABLE workers ALTER COLUMN state_version SET DEFAULT 1;
+ALTER TABLE workers ALTER COLUMN state_version SET NOT NULL;
+ALTER TABLE workers ALTER COLUMN state_checksum SET DEFAULT '';
+ALTER TABLE workers ALTER COLUMN state_checksum SET NOT NULL;
+ALTER TABLE workers ALTER COLUMN state_sync_epoch SET DEFAULT 0;
+ALTER TABLE workers ALTER COLUMN state_sync_epoch SET NOT NULL;
+ALTER TABLE workers ALTER COLUMN state_sync_request_id SET DEFAULT 0;
+ALTER TABLE workers ALTER COLUMN state_sync_request_id SET NOT NULL;
 
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);

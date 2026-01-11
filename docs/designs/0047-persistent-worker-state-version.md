@@ -8,7 +8,6 @@ related_code:
   - tensorcast/global_store/repositories/worker_repository.py
   - tensorcast/global_store/models/worker.py
   - tensorcast/global_store/grpc_service.py
-  - tensorcast/global_store/init.sql
   - schema.sql
 links:
   plan: ../plans/0047-persistent-worker-state-version.md
@@ -70,7 +69,7 @@ Store state version and checksum in the `workers` table. This keeps identity and
 
 # Schema Changes
 
-Add columns to the canonical schema and keep init SQL in sync.
+Add columns to the canonical schema.
 
 ```sql
 ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_version BIGINT NOT NULL DEFAULT 1;

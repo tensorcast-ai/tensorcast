@@ -54,7 +54,7 @@ Heartbeats are always enhanced and must include a non-zero `state_version` so th
 - Registration initializes each worker’s `state_version` to 1; the daemon seeds its local `state_version` from `RegisterWorkerResponse.expected_state_version` and treats missing/zero versions as an error.
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
   - Collects publishable, resident replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
-  - Heartbeat is lightweight and only queues sync work; state synchronization runs in a separate loop that the monitor can restart by epoch without blocking.
+- Heartbeat is lightweight and only queues sync work; state synchronization runs in a separate loop with a single in-flight sync, and the monitor requests cancel only when progress exceeds the configured RPC-timeout budget, restarting after the thread exits to avoid overlap.
   - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a full-state sync before resuming heartbeats.
 
 ## State Synchronization
@@ -173,7 +173,7 @@ flowchart TD
 From `proto/tensorcast/global_store/v1/global_store.proto`:
 
 - `WorkerLocalState`: worker id, state version, checksum, full `ReplicaInfo` list, and last update timestamp.
-- `SynchronizeWorkerStateRequest`: worker id plus `WorkerLocalState`, with `force_full_sync` to bypass diffing if needed.
+- `SynchronizeWorkerStateRequest`: worker id plus `WorkerLocalState`, with `force_full_sync` to bypass diffing if needed; `sync_epoch` and `sync_request_id` must be monotonic per worker to reject stale updates.
 - `SynchronizeWorkerStateResponse`: status, new state version, new checksum, and a list of `StateChange` entries describing applied add/update/remove operations (with reasons).
 
 ## End-to-End Flows
@@ -181,13 +181,13 @@ From `proto/tensorcast/global_store/v1/global_store.proto`:
 - Startup recovery: validate DB, mark stale, preserve persisted versions/checksums → workers re-register/heartbeat → server may request sync.
 - Heartbeat loop: daemon sends enhanced heartbeat → server compares version/checksum and obsolete set → may request sync.
 - Incremental sync: daemon sends `WorkerLocalState.local_replicas` snapshot → server computes StateChange list and applies → returns new version/checksum.
-- Full-state sync: daemon requests expected replicas → prunes drift locally → resumes incremental syncs.
+- Full-state sync: daemon requests expected replicas (also carrying sync tokens) → prunes drift locally → resumes incremental syncs.
 
 ## Reconciliation Invariants
 
 - Authoritative inventory: daemon’s `local_replicas` is the source of truth for local presence.
 - Addition over removal: removals are suppressed if the daemon provides no inventory; only add/remove based on explicit differences, and state versions bump only when changes are applied.
-- Idempotency: repeated adds resolve to the same replica logically; full-state sync is informational and does not mutate versions.
+- Idempotency: repeated adds resolve to the same replica logically; sync tokens ensure stale requests are ignored; full-state sync is informational and does not mutate versions.
 - Publishable-only visibility: only resident replicas marked publishable are advertised; non-resident replicas are never mapped to DISK.
 - Safe retire: unload only after ref counts, use leases, placement pins, and transport locks clear; heartbeat obsolete hints never trigger unload directly.
 

@@ -43,6 +43,25 @@ struct RpcOptions {
   std::optional<absl::Duration> retry_backoff;
 };
 
+struct StateSyncToken {
+  uint64_t epoch{0};
+  uint64_t request_id{0};
+};
+
+struct StateSyncResult {
+  uint64_t new_state_version{0};
+  std::string new_state_checksum;
+  std::vector<global_store::StateChange> state_changes;
+  bool ignored{false};
+};
+
+struct FullStateSyncResult {
+  uint64_t new_state_version{0};
+  std::string new_state_checksum;
+  std::vector<common::v1::ReplicaInfo> expected_replicas;
+  bool ignored{false};
+};
+
 struct WorkerRegistrationInfo {
   std::string worker_id;
   uint64_t expected_state_version{0};
@@ -301,16 +320,16 @@ class IGlobalStoreClient {
       std::string_view artifact_id,
       const std::vector<uint32_t>& chunk_indices) = 0;
 
-  virtual absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
+  virtual absl::StatusOr<StateSyncResult> synchronize_worker_state(
       const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::StateChange>* out_changes,
+      const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
-  virtual absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
+  virtual absl::StatusOr<FullStateSyncResult> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<common::v1::ReplicaInfo>* out_expected_replicas,
+      const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual bool is_connected() const = 0;
@@ -471,16 +490,16 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<uint32_t>& chunk_indices) override;
 
   // HA State Synchronization
-  absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
+  absl::StatusOr<StateSyncResult> synchronize_worker_state(
       const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::StateChange>* out_changes,
+      const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) override;
 
-  absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
+  absl::StatusOr<FullStateSyncResult> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<common::v1::ReplicaInfo>* out_expected_replicas,
+      const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) override;
 
   bool is_connected() const override;

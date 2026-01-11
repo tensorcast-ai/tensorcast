@@ -1240,15 +1240,17 @@ absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_lo
   return locations;
 }
 
-absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_worker_state(
+absl::StatusOr<StateSyncResult> GlobalStoreClient::synchronize_worker_state(
     const global_store::WorkerLocalState& local_state,
     bool force_full_sync,
-    std::vector<global_store::StateChange>* out_changes,
+    const StateSyncToken& token,
     const RpcOptions& rpc_options) {
   global_store::SynchronizeWorkerStateRequest request;
   request.set_worker_id(local_state.worker_id());
   *request.mutable_local_state() = local_state;
   request.set_force_full_sync(force_full_sync);
+  request.set_sync_epoch(token.epoch);
+  request.set_sync_request_id(token.request_id);
 
   global_store::SynchronizeWorkerStateResponse response;
   auto status = execute_rpc_with_retry(
@@ -1266,22 +1268,27 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
             status_to_cstr(response.status()),
             static_cast<int>(response.status())));
   }
-  out_changes->clear();
-  out_changes->reserve(response.state_changes_size());
+  StateSyncResult result;
+  result.new_state_version = response.new_state_version();
+  result.new_state_checksum = response.new_state_checksum();
+  result.ignored = response.ignored();
+  result.state_changes.reserve(response.state_changes_size());
   for (const auto& ch : response.state_changes()) {
-    out_changes->push_back(ch);
+    result.state_changes.push_back(ch);
   }
-  return std::make_pair(response.new_state_version(), response.new_state_checksum());
+  return result;
 }
 
-absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full_state_sync(
+absl::StatusOr<FullStateSyncResult> GlobalStoreClient::request_full_state_sync(
     std::string_view worker_id,
     uint64_t current_state_version,
-    std::vector<tensorcast::common::v1::ReplicaInfo>* out_expected_replicas,
+    const StateSyncToken& token,
     const RpcOptions& rpc_options) {
   global_store::RequestFullStateSyncRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_current_state_version(current_state_version);
+  request.set_sync_epoch(token.epoch);
+  request.set_sync_request_id(token.request_id);
 
   global_store::RequestFullStateSyncResponse response;
   auto status = execute_rpc_with_retry(
@@ -1299,12 +1306,15 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
             status_to_cstr(response.status()),
             static_cast<int>(response.status())));
   }
-  out_expected_replicas->clear();
-  out_expected_replicas->reserve(response.expected_replicas_size());
+  FullStateSyncResult result;
+  result.new_state_version = response.new_state_version();
+  result.new_state_checksum = response.new_state_checksum();
+  result.ignored = response.ignored();
+  result.expected_replicas.reserve(response.expected_replicas_size());
   for (const auto& rep : response.expected_replicas()) {
-    out_expected_replicas->push_back(rep);
+    result.expected_replicas.push_back(rep);
   }
-  return std::make_pair(response.new_state_version(), response.new_state_checksum());
+  return result;
 }
 
 // ========== Key Mapping ==========
