@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <unistd.h>
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -29,8 +30,10 @@ using tensorcast::DeviceType;
 using tensorcast::daemon::StoreDaemonServiceImpl;
 using tensorcast::daemon::WorkerLifecycleManager;
 using tensorcast::store::DeviceKey;
+using tensorcast::store::DeviceRegistry;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::ReplicaKey;
 namespace commonpb = tensorcast::common::v1;
 namespace global_store = tensorcast::global_store::v1;
 namespace memory_tier = tensorcast::memory_tier::v1;
@@ -403,7 +406,7 @@ static void require_replica_registered(const StoreEngine& store, const ArtifactF
   FAIL("Replica not registered with canonical artifact_id=" << artifact.artifact_id);
 }
 
-static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifact) {
+static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
   hints.disk_path = artifact.dir.string();
@@ -420,9 +423,12 @@ static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifac
   INFO("wait_replica_ready(gpu) rc=" << rc);
   REQUIRE(rc == 0);
   require_replica_registered(store, artifact);
+  if (publish) {
+    store.set_replica_publish_state(key, StoreEngine::ReplicaPublishState::kPublishPending);
+  }
 }
 
-static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifact) {
+static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
   hints.disk_path = artifact.dir.string();
@@ -439,6 +445,9 @@ static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifac
   INFO("wait_replica_ready(cpu) rc=" << rc);
   REQUIRE(rc == 0);
   require_replica_registered(store, artifact);
+  if (publish) {
+    store.set_replica_publish_state(key, StoreEngine::ReplicaPublishState::kPublishPending);
+  }
 }
 
 TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daemon][ha][sync]") {
@@ -574,13 +583,13 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   auto st = wlm.start();
   REQUIRE(st.ok());
 
-  // Poll until heartbeat-applied obsolete removal happens
-  bool removed = false;
+  // Poll to ensure heartbeat obsolete hints do not trigger unloads.
   bool kept = false;
+  bool remove_present = false;
   for (int i = 0; i < 200; ++i) { // up to ~2s
     auto infos = engine_ptr->get_all_replicas_info();
     kept = false;
-    bool remove_present = false;
+    remove_present = false;
     for (const auto& in : infos) {
       if (in.artifact_id == keep.artifact_id) {
         if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
@@ -595,13 +604,10 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
         }
       }
     }
-    removed = !remove_present;
-    if (kept && removed)
-      break;
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
   REQUIRE(kept);
-  REQUIRE(removed);
+  REQUIRE(remove_present);
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -610,21 +616,25 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
 }
 
 TEST_CASE("state_checksum_is_stable_and_availability_sensitive") {
-  std::vector<StoreEngine::ReplicaInfo> infos;
-  StoreEngine::ReplicaInfo gpu;
-  gpu.artifact_id = "artifact-a";
-  gpu.gpu_state = tensorcast::common::memory::MemoryLocation::GPU;
-  gpu.cpu_state = tensorcast::common::memory::MemoryLocation::NONE;
-  gpu.gpu_device_id = 1;
-  gpu.is_registered_for_comm = true;
+  std::vector<StoreEngine::ReplicaInventoryEntry> infos;
+  StoreEngine::ReplicaInventoryEntry gpu;
+  gpu.key = ReplicaKey{
+      .artifact_id = "artifact-a",
+      .view_id = std::nullopt,
+      .device = DeviceRegistry::instance().gpu_key(1),
+      .replica = 0};
+  gpu.memory_location = tensorcast::common::memory::MemoryLocation::GPU;
+  gpu.is_available = true;
   infos.push_back(gpu);
 
-  StoreEngine::ReplicaInfo cpu;
-  cpu.artifact_id = "artifact-b";
-  cpu.gpu_state = tensorcast::common::memory::MemoryLocation::NONE;
-  cpu.cpu_state = tensorcast::common::memory::MemoryLocation::CPU;
-  cpu.gpu_device_id = -1;
-  cpu.is_registered_for_comm = true;
+  StoreEngine::ReplicaInventoryEntry cpu;
+  cpu.key = ReplicaKey{
+      .artifact_id = "artifact-b",
+      .view_id = std::nullopt,
+      .device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0};
+  cpu.memory_location = tensorcast::common::memory::MemoryLocation::CPU;
+  cpu.is_available = true;
   infos.push_back(cpu);
 
   const std::string node_id = "node-xyz";
@@ -635,7 +645,7 @@ TEST_CASE("state_checksum_is_stable_and_availability_sensitive") {
   const auto checksum2 = WorkerLifecycleManager::compute_state_checksum(node_id, node_address, node_port, infos);
   REQUIRE(checksum1 == checksum2);
 
-  infos.front().is_registered_for_comm = false;
+  infos.front().is_available = false;
   const auto checksum3 = WorkerLifecycleManager::compute_state_checksum(node_id, node_address, node_port, infos);
   REQUIRE(checksum3 != checksum1);
 }
@@ -714,6 +724,141 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   REQUIRE(keep_present);
   REQUIRE(remove_cpu_present);
   REQUIRE_FALSE(remove_gpu_present);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager retire waits for refs", "[daemon][ha][retire]") {
+  if (!tensorcast::testing::is_cuda_available()) {
+    WARN("CUDA not available – skipping HA retire test.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_retire_ref";
+  fs::create_directories(temp_root);
+  const auto remove = make_standard_artifact(temp_root, "artifact_remove_ref", 1ULL * 1024 * 1024, 'R');
+
+  auto test_server = start_fake_server({remove.artifact_id}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_sync_remove_specs(
+      {RemoveSpec{.artifact_id = remove.artifact_id, .memory_type = commonpb::MEMORY_TYPE_GPU, .device_id = 0}});
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+  load_artifact_gpu(*engine_ptr, remove);
+
+  tensorcast::daemon::StoreDaemonServiceImpl dummy_service(engine_ptr);
+  ReplicaKey key{.artifact_id = remove.artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
+  const int32_t live_pid = static_cast<int32_t>(::getpid());
+  dummy_service.add_ref_for_testing(key, live_pid);
+
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  bool still_present = false;
+  for (int i = 0; i < 200; ++i) {
+    still_present = !engine_ptr->get_resident_devices(remove.artifact_id).empty();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(still_present);
+
+  dummy_service.drop_ref_for_testing(key, live_pid);
+  bool removed = false;
+  for (int i = 0; i < 200; ++i) {
+    removed = engine_ptr->get_resident_devices(remove.artifact_id).empty();
+    if (removed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(removed);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager retire waits for transport locks", "[daemon][ha][retire]") {
+  if (!tensorcast::testing::is_cuda_available()) {
+    WARN("CUDA not available – skipping HA retire test.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_retire_lock";
+  fs::create_directories(temp_root);
+  const auto remove = make_standard_artifact(temp_root, "artifact_remove_lock", 1ULL * 1024 * 1024, 'L');
+
+  auto test_server = start_fake_server({remove.artifact_id}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_sync_remove_specs(
+      {RemoveSpec{.artifact_id = remove.artifact_id, .memory_type = commonpb::MEMORY_TYPE_GPU, .device_id = 0}});
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+  load_artifact_gpu(*engine_ptr, remove);
+
+  tensorcast::daemon::StoreDaemonServiceImpl dummy_service(engine_ptr);
+  ReplicaKey key{.artifact_id = remove.artifact_id, .view_id = std::nullopt, .device = make_gpu_key(0), .replica = 0};
+  auto& locks = dummy_service.transport_lock_manager_for_testing();
+  const std::string token = locks.mint_token();
+  locks.put(token, key, {0});
+
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+
+  WorkerLifecycleManager wlm(
+      gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr},
+      gsl::not_null<StoreDaemonServiceImpl*>{&dummy_service},
+      wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  bool still_present = false;
+  for (int i = 0; i < 200; ++i) {
+    still_present = !engine_ptr->get_resident_devices(remove.artifact_id).empty();
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(still_present);
+
+  locks.erase(token);
+  bool removed = false;
+  for (int i = 0; i < 200; ++i) {
+    removed = engine_ptr->get_resident_devices(remove.artifact_id).empty();
+    if (removed)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(removed);
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -868,7 +1013,7 @@ TEST_CASE("WorkerLifecycleManager publishes memory tier status and reconciles le
   opts.memory_tier_config = tiers;
 
   auto engine_ptr = std::make_shared<StoreEngine>(opts);
-  load_artifact_cpu(*engine_ptr, artifact);
+  load_artifact_cpu(*engine_ptr, artifact, /*publish=*/false);
   auto infos = engine_ptr->get_all_replicas_info();
   for (const auto& info : infos) {
     INFO(

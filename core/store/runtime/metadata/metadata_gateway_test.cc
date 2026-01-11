@@ -36,6 +36,7 @@ using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::replica::Replica;
 using tensorcast::store::replica::ReplicaConfig;
 using tensorcast::store::runtime::IngestionResultEvent;
+using tensorcast::store::runtime::ReplicaPublishState;
 using tensorcast::store::runtime::ReplicaRuntime;
 using tensorcast::store::runtime::RuntimeContext;
 using tensorcast::store::runtime::metadata::ArtifactRegistration;
@@ -455,4 +456,36 @@ TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][r
   auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-2");
   CHECK(second_status.ok());
   CHECK(harness.client->register_calls == 2);
+}
+
+TEST_CASE("MetadataGateway keeps publish pending on registration failure", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_publish_state");
+
+  IngestionResultEvent event;
+  event.request_id = "req-2";
+  event.source = tensorcast::store::runtime::IngestionSource::kDisk;
+  event.materialize_mode = tensorcast::store::loading::MaterializeMode::LOAD_ONLY;
+  event.artifact_id = replica_key.artifact_id;
+  event.target_device = replica_key.device;
+  event.target_location = MemoryLocation::CPU;
+  event.bytes_transferred = 4096;
+  event.duration_seconds = 0.01;
+  event.status = absl::OkStatus();
+  event.replica_key = replica_key;
+  event.publish_to_global_store = true;
+  event.publish_context_id = "ctx-publish-state";
+
+  harness.replica_runtime.record_ingestion_result(event);
+  CHECK(harness.replica_runtime.get_replica_publish_state(replica_key) == ReplicaPublishState::kPublishPending);
+
+  harness.client->next_register_status = absl::UnavailableError("GS unavailable");
+  harness.gateway->handle_ingestion_result(event);
+  CHECK(harness.replica_runtime.get_replica_publish_state(replica_key) == ReplicaPublishState::kPublishPending);
+
+  harness.client->next_register_status = absl::OkStatus();
+  harness.gateway->handle_ingestion_result(event);
+  CHECK(harness.replica_runtime.get_replica_publish_state(replica_key) == ReplicaPublishState::kPublished);
 }

@@ -160,6 +160,7 @@ absl::Status MetadataGateway::register_replica(
   if (should_skip_publish_for_context(publish_context_id, key)) {
     VLOG(1) << "Publish context " << publish_context_id << " already registered for artifact=" << key.artifact_id
             << " device=" << key.device.to_string();
+    replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
     return absl::OkStatus();
   }
 
@@ -210,6 +211,9 @@ absl::Status MetadataGateway::register_replica(
     }
   }
   record_publish_context_result(publish_context_id, key, register_status);
+  if (register_status.ok()) {
+    replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+  }
   return register_status;
 }
 
@@ -279,6 +283,13 @@ absl::StatusOr<RegistrationCommitResult> MetadataGateway::commit_registration(st
   publish_registration_event(
       RuntimeEventType::kRegistrationCommitted, registration_id, &result_or.value(), absl::OkStatus());
   replica_runtime_->update_memory_pool_metrics();
+  const auto publish_state = is_connected() ? ReplicaPublishState::kPublished : ReplicaPublishState::kPublishPending;
+  const auto keys = replica_runtime_->registry().find_by_artifact(result_or->artifact_id);
+  for (const auto& key : keys) {
+    if (key.device == result_or->device) {
+      replica_runtime_->set_replica_publish_state(key, publish_state);
+    }
+  }
   return result_or;
 }
 

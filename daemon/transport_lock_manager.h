@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -55,6 +55,19 @@ class TransportLockManager {
     return locks_.erase(token) > 0;
   }
 
+  bool has_lock_for_key(const store::loading::ReplicaKey& key) const {
+    absl::MutexLock l(&mu_);
+    for (const auto& entry : locks_) {
+      if (expired(entry.second)) {
+        continue;
+      }
+      if (entry.second.key == key) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Enumerate tokens for sweeping
   std::vector<std::string> tokens() {
     absl::MutexLock l(&mu_);
@@ -88,7 +101,7 @@ class TransportLockManager {
     return now() >= e.expiry;
   }
 
-  absl::Mutex mu_;
+  mutable absl::Mutex mu_;
   absl::flat_hash_map<std::string, LockEntry> locks_ ABSL_GUARDED_BY(mu_);
   std::chrono::seconds ttl_;
   std::mt19937_64 rng_{std::random_device{}()};

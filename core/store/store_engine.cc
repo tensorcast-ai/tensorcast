@@ -457,6 +457,10 @@ std::vector<DeviceKey> StoreEngine::get_resident_devices(std::string_view artifa
   return replica_runtime_->get_resident_devices(artifact_id);
 }
 
+std::vector<StoreEngine::ReplicaInventoryEntry> StoreEngine::get_ha_inventory() const {
+  return replica_runtime_->get_ha_inventory();
+}
+
 std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& device) const {
   return replica_runtime_->list_device_replicas(device);
 }
@@ -483,6 +487,19 @@ absl::StatusOr<uint64_t> StoreEngine::get_replica_gpu_ptr(const ReplicaKey& key)
 
 absl::StatusOr<uint64_t> StoreEngine::get_replica_size(const ReplicaKey& key) {
   return replica_runtime_->get_replica_size(key);
+}
+
+void StoreEngine::set_replica_publish_state(const ReplicaKey& key, ReplicaPublishState state) {
+  replica_runtime_->set_replica_publish_state(key, state);
+}
+
+StoreEngine::ReplicaPublishState StoreEngine::get_replica_publish_state(const ReplicaKey& key) const {
+  return replica_runtime_->get_replica_publish_state(key);
+}
+
+std::unique_ptr<runtime::RuntimeContextEvents::Subscription> StoreEngine::subscribe_to_runtime_events(
+    runtime::RuntimeContextEvents::Callback callback) {
+  return runtime_env_->runtime_context().subscribe_to_events(std::move(callback));
 }
 
 absl::StatusOr<ExportRegistration> StoreEngine::enable_remote_replica_access(

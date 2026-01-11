@@ -11,6 +11,7 @@
 #include <exception>
 #include <optional>
 #include <utility>
+#include <variant>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_set.h"
@@ -23,9 +24,11 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "folly/futures/Future.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -51,6 +54,17 @@ struct ReplicaSelectorHash {
   }
 };
 
+struct RetireGateSnapshot {
+  size_t ref_count{0};
+  size_t use_count{0};
+  size_t placement_pins{0};
+  bool has_transport_lock{false};
+
+  bool ready() const {
+    return ref_count == 0 && use_count == 0 && placement_pins == 0 && !has_transport_lock;
+  }
+};
+
 std::optional<ReplicaSelector> replica_selector_from_memory_info(
     std::string_view artifact_id,
     const commonpb::MemoryInfo& memory_info) {
@@ -70,23 +84,25 @@ std::optional<ReplicaSelector> replica_selector_from_memory_info(
   }
 }
 
-void append_local_replica_selectors(const store::StoreEngine::ReplicaInfo& info, std::vector<ReplicaSelector>* out) {
-  if (info.gpu_state != common::memory::MemoryLocation::NONE) {
-    if (info.gpu_device_id < 0) {
-      VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << info.artifact_id
-              << " device_uuid=" << info.gpu_device_uuid;
+void append_local_replica_selectors(
+    const store::StoreEngine::ReplicaInventoryEntry& entry,
+    std::vector<ReplicaSelector>* out) {
+  if (entry.memory_location == common::memory::MemoryLocation::GPU) {
+    if (entry.key.device.ordinal < 0) {
+      VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << entry.key.artifact_id;
     } else {
       out->push_back(
           ReplicaSelector{
-              .artifact_id = info.artifact_id,
+              .artifact_id = entry.key.artifact_id,
               .memory_type = commonpb::MEMORY_TYPE_GPU,
-              .device_id = info.gpu_device_id});
+              .device_id = entry.key.device.ordinal});
     }
     return;
   }
-  if (info.cpu_state != common::memory::MemoryLocation::NONE) {
+  if (entry.memory_location == common::memory::MemoryLocation::CPU) {
     out->push_back(
-        ReplicaSelector{.artifact_id = info.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
+        ReplicaSelector{
+            .artifact_id = entry.key.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
   }
 }
 
@@ -111,48 +127,6 @@ void append_replica_keys_for_selector(
     for (const auto& key : device_replicas) {
       if (key.artifact_id == selector.artifact_id) {
         out->push_back(key);
-      }
-    }
-  }
-}
-
-void append_replica_keys_for_artifact(
-    store::StoreEngine& engine,
-    std::string_view artifact_id,
-    std::vector<store::loading::ReplicaKey>* out) {
-  const auto devices = engine.get_resident_devices(artifact_id);
-  for (const auto& dev : devices) {
-    const auto device_replicas = engine.list_device_replicas(dev);
-    for (const auto& key : device_replicas) {
-      if (key.artifact_id == artifact_id) {
-        out->push_back(key);
-      }
-    }
-  }
-}
-
-void unload_replica_keys(
-    store::StoreEngine& engine,
-    absl::string_view context,
-    const std::vector<store::loading::ReplicaKey>& keys) {
-  if (keys.empty()) {
-    return;
-  }
-  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> unique;
-  unique.reserve(keys.size());
-  for (const auto& key : keys) {
-    unique.insert(key);
-  }
-  for (const auto& key : unique) {
-    int rc = engine.unload_replica(key);
-    if (rc != 0) {
-      LOG(WARNING) << context << ": unload failed rc=" << rc << " " << key;
-      try {
-        static auto meter =
-            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-        static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-        ctr->Add(1.0);
-      } catch (...) {
       }
     }
   }
@@ -301,6 +275,25 @@ absl::Status WorkerLifecycleManager::start() {
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(reg_or->worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
 
+  runtime_event_subscription_ = engine_->subscribe_to_runtime_events([this](const store::runtime::RuntimeEvent& event) {
+    if (stop_.load()) {
+      return;
+    }
+    if (event.type != store::runtime::RuntimeEventType::kReplicaLoaded &&
+        event.type != store::runtime::RuntimeEventType::kReplicaEvicted) {
+      return;
+    }
+    const auto* payload = std::get_if<store::runtime::ReplicaLifecycleEvent>(&event.payload);
+    if (!payload) {
+      return;
+    }
+    const auto state = engine_->get_replica_publish_state(payload->key);
+    if (state == store::StoreEngine::ReplicaPublishState::kLocalOnly) {
+      return;
+    }
+    request_state_sync();
+  });
+
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
   std::vector<commonpb::ReplicaInfo> expected;
@@ -352,6 +345,7 @@ void WorkerLifecycleManager::stop() {
   stop_.store(true);
   stop_cv_.notify_all();
   state_sync_cv_.notify_all();
+  runtime_event_subscription_.reset();
   if (hb_thread_.joinable())
     hb_thread_.join();
   if (state_sync_thread_.joinable())
@@ -454,11 +448,16 @@ void WorkerLifecycleManager::heartbeat_loop() {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
       const bool accepting = !service_->is_shutting_down();
-      const auto infos = engine_->get_all_replicas_info();
+      const auto inventory = engine_->get_ha_inventory();
+      absl::flat_hash_set<std::string> registered_set;
+      registered_set.reserve(inventory.size());
+      for (const auto& entry : inventory) {
+        registered_set.insert(entry.key.artifact_id);
+      }
       std::vector<std::string> registered_ids;
-      registered_ids.reserve(infos.size());
-      for (const auto& i : infos) {
-        registered_ids.push_back(i.artifact_id);
+      registered_ids.reserve(registered_set.size());
+      for (const auto& id : registered_set) {
+        registered_ids.push_back(id);
       }
       // Compute simple checksum over current snapshot
       std::string worker_id;
@@ -472,7 +471,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         state_version = state_version_;
         last_sync_success_ts = last_sync_success_ts_;
       }
-      const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, infos);
+      const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, inventory);
       {
         std::lock_guard<std::mutex> lock(state_mu_);
         state_checksum_ = checksum;
@@ -564,7 +563,7 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         std::unique_lock<std::mutex> lock(state_sync_mu_);
         state_sync_cv_.wait_until(lock, next_maintenance, [this, epoch]() {
           return stop_.load() || state_sync_epoch_.load() != epoch || state_sync_requests_.load() > 0 ||
-              obsolete_pending_.load();
+              obsolete_pending_.load() || retire_pending_.load();
         });
       }
       if (stop_.load() || state_sync_epoch_.load() != epoch) {
@@ -586,6 +585,8 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         perform_state_sync(epoch);
         state_sync_ticks_.fetch_add(1);
       }
+
+      process_retire_queue();
 
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_maintenance) {
@@ -637,7 +638,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   }
   state_sync_inflight_.store(true);
   absl::Cleanup inflight_guard([this]() { state_sync_inflight_.store(false); });
-  const auto infos = engine_->get_all_replicas_info();
+  const auto inventory = engine_->get_ha_inventory();
   std::string worker_id;
   std::string node_address;
   uint64_t state_version = 0;
@@ -651,7 +652,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     VLOG(1) << "Skipping state sync without registered worker_id";
     return;
   }
-  const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, infos);
+  const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, inventory);
   if (state_sync_epoch_.load() == epoch) {
     std::lock_guard<std::mutex> lock(state_mu_);
     if (state_sync_epoch_.load() == epoch) {
@@ -671,40 +672,35 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
                 .count()));
     ts->set_nanos(0);
   }
-  for (const auto& i : infos) {
+  for (const auto& entry : inventory) {
+    if (entry.memory_location != common::memory::MemoryLocation::GPU &&
+        entry.memory_location != common::memory::MemoryLocation::CPU) {
+      continue;
+    }
     auto* rep = local_state.add_local_replicas();
-    rep->mutable_ref()->set_artifact_id(i.artifact_id);
+    rep->mutable_ref()->set_artifact_id(entry.key.artifact_id);
     rep->mutable_ref()->set_replica_id("");
     auto* mi = rep->mutable_memory_info();
     mi->set_node_id(node_id_);
     mi->set_node_address(node_address);
     mi->set_node_port(opts_.p2p_port);
-    mi->set_memory_size(i.size_bytes);
-    if (i.gpu_state != common::memory::MemoryLocation::NONE) {
+    mi->set_memory_size(entry.size_bytes);
+    if (entry.memory_location == common::memory::MemoryLocation::GPU) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
-      mi->set_device_id(i.gpu_device_id);
-    } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
+      mi->set_device_id(entry.key.device.ordinal);
+    } else if (entry.memory_location == common::memory::MemoryLocation::CPU) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_RAM);
-      mi->set_device_id(0);
-    } else {
-      mi->set_memory_type(commonpb::MEMORY_TYPE_DISK);
       mi->set_device_id(0);
     }
     rep->mutable_stats()->set_max_concurrency(1);
     // Reconcile current_requests with active PID refs tracked by the service
-    store::loading::ReplicaKey rkey{
-        .artifact_id = i.artifact_id,
-        .device = (i.gpu_state != common::memory::MemoryLocation::NONE)
-            ? store::DeviceRegistry::instance().gpu_key(i.gpu_device_id)
-            : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-        .replica = 0};
-    rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
-    rep->mutable_stats()->set_is_available(i.is_registered_for_comm);
+    rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(entry.key)));
+    rep->mutable_stats()->set_is_available(entry.is_available);
     rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
   }
 
   std::vector<global_store::StateChange> changes;
-  const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && infos.empty();
+  const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && inventory.empty();
   auto sync_or = global_store_->synchronize_worker_state(
       local_state,
       force_full_sync,
@@ -733,9 +729,14 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     if (stop_.load() || state_sync_epoch_.load() != epoch) {
       return;
     }
+    for (const auto& entry : inventory) {
+      if (entry.publish_state == store::StoreEngine::ReplicaPublishState::kPublishPending) {
+        engine_->set_replica_publish_state(entry.key, store::StoreEngine::ReplicaPublishState::kPublished);
+      }
+    }
     // Apply server-suggested removals
-    std::vector<store::loading::ReplicaKey> obsolete_keys;
-    obsolete_keys.reserve(changes.size());
+    std::vector<store::loading::ReplicaKey> retire_keys;
+    retire_keys.reserve(changes.size());
     auto engine_for_unload = engine_.get();
     for (const auto& ch : changes) {
       switch (ch.type()) {
@@ -743,7 +744,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           const auto& ri = ch.replica_info();
           auto selector_opt = replica_selector_from_memory_info(ri.ref().artifact_id(), ri.memory_info());
           if (selector_opt.has_value()) {
-            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &obsolete_keys);
+            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &retire_keys);
           } else {
             VLOG(1) << "Skipping REMOVE for non-resident memory type: artifact_id=" << ri.ref().artifact_id()
                     << " memory_type=" << ri.memory_info().memory_type();
@@ -826,8 +827,8 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           break;
       }
     }
-    if (!obsolete_keys.empty()) {
-      unload_replica_keys(*engine_for_unload, "synchronize_worker_state", obsolete_keys);
+    if (!retire_keys.empty()) {
+      enqueue_retire_keys(std::move(retire_keys), "synchronize_worker_state");
     }
     last_sync_ts_s_.store(last_sync_success);
   } else {
@@ -1128,19 +1129,12 @@ void WorkerLifecycleManager::monitor_loop() {
 }
 
 void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::string>& artifact_ids) {
-  if (artifact_ids.empty())
+  if (artifact_ids.empty()) {
     return;
-  absl::flat_hash_set<std::string> id_set;
-  id_set.reserve(artifact_ids.size());
-  for (const auto& id : artifact_ids) {
-    id_set.insert(id);
   }
-  std::vector<store::loading::ReplicaKey> keys;
-  auto engine = engine_.get();
-  for (const auto& id : id_set) {
-    append_replica_keys_for_artifact(*engine, id, &keys);
-  }
-  unload_replica_keys(*engine, "apply_obsolete_replicas", keys);
+  LOG(INFO) << "Heartbeat reported " << artifact_ids.size()
+            << " obsolete artifacts; requesting state sync for confirmation.";
+  request_state_sync();
 }
 
 void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected) {
@@ -1154,10 +1148,10 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
   }
 
   absl::flat_hash_set<ReplicaSelector, ReplicaSelectorHash> obsolete_selectors;
-  std::vector<store::loading::ReplicaKey> obsolete_keys;
-  for (const auto& info : engine_->get_all_replicas_info()) {
+  std::vector<store::loading::ReplicaKey> retire_keys;
+  for (const auto& entry : engine_->get_ha_inventory()) {
     std::vector<ReplicaSelector> local_selectors;
-    append_local_replica_selectors(info, &local_selectors);
+    append_local_replica_selectors(entry, &local_selectors);
     for (const auto& selector : local_selectors) {
       if (expected_keys.find(selector) == expected_keys.end()) {
         obsolete_selectors.insert(selector);
@@ -1166,16 +1160,147 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
   }
   auto engine = engine_.get();
   for (const auto& selector : obsolete_selectors) {
-    append_replica_keys_for_selector(*engine, selector, &obsolete_keys);
+    append_replica_keys_for_selector(*engine, selector, &retire_keys);
   }
-  unload_replica_keys(*engine, "apply_full_state", obsolete_keys);
+  if (!retire_keys.empty()) {
+    enqueue_retire_keys(std::move(retire_keys), "apply_full_state");
+  }
+}
+
+void WorkerLifecycleManager::enqueue_retire_keys(
+    std::vector<store::loading::ReplicaKey> keys,
+    std::string_view context) {
+  if (keys.empty()) {
+    return;
+  }
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> unique;
+  unique.reserve(keys.size());
+  for (const auto& key : keys) {
+    unique.insert(key);
+  }
+
+  std::vector<store::loading::ReplicaKey> newly_added;
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    for (const auto& key : unique) {
+      if (retire_queue_.find(key) != retire_queue_.end()) {
+        continue;
+      }
+      retire_queue_.emplace(key, RetireEntry{});
+      newly_added.push_back(key);
+    }
+  }
+
+  if (newly_added.empty()) {
+    return;
+  }
+
+  for (const auto& key : newly_added) {
+    engine_->set_replica_publish_state(key, store::StoreEngine::ReplicaPublishState::kRetiring);
+    if (key.device.type == DeviceType::GPU) {
+      auto st = engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+      if (!st.ok()) {
+        LOG(WARNING) << context << ": disable_remote_replica_access failed for " << key << ": " << st;
+      }
+    }
+  }
+  retire_pending_.store(true);
+  state_sync_cv_.notify_all();
+  VLOG(1) << context << ": queued retire for " << newly_added.size() << " replicas";
+}
+
+void WorkerLifecycleManager::process_retire_queue() {
+  std::vector<store::loading::ReplicaKey> keys;
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    if (retire_queue_.empty()) {
+      retire_pending_.store(false);
+      return;
+    }
+    retire_pending_.store(false);
+    keys.reserve(retire_queue_.size());
+    for (const auto& entry : retire_queue_) {
+      keys.push_back(entry.first);
+    }
+  }
+
+  for (const auto& key : keys) {
+    RetireGateSnapshot snapshot;
+    snapshot.ref_count = service_->ref_count_for(key);
+    snapshot.use_count = service_->use_count_for(key);
+    snapshot.placement_pins = service_->placement_pin_count_for(key);
+    snapshot.has_transport_lock = service_->has_transport_lock_for(key);
+
+    if (!snapshot.ready()) {
+      bool should_log = false;
+      const int64_t now_s = absl::ToUnixSeconds(absl::Now());
+      {
+        std::lock_guard<std::mutex> lock(retire_mu_);
+        auto it = retire_queue_.find(key);
+        if (it == retire_queue_.end()) {
+          continue;
+        }
+        it->second.attempts += 1;
+        if (now_s - it->second.last_log_ts_s >= 30) {
+          it->second.last_log_ts_s = now_s;
+          should_log = true;
+        }
+      }
+      if (should_log) {
+        LOG(WARNING) << "Retire blocked for " << key << " refs=" << snapshot.ref_count << " uses=" << snapshot.use_count
+                     << " pins=" << snapshot.placement_pins
+                     << " transport_lock=" << (snapshot.has_transport_lock ? 1 : 0);
+      }
+      continue;
+    }
+
+    int rc = 1;
+    try {
+      auto async_runtime = service_->async_runtime_shared();
+      if (async_runtime && !async_runtime->is_shutting_down()) {
+        auto executor = async_runtime->blocking_executor();
+        rc = folly::via(std::move(executor), [engine = engine_.get(), key]() {
+               return engine->unload_replica(key);
+             }).get();
+      } else {
+        rc = engine_->unload_replica(key);
+      }
+    } catch (const std::exception& ex) {
+      LOG(WARNING) << "Retire unload threw exception for " << key << ": " << ex.what();
+      rc = 1;
+    } catch (...) {
+      LOG(WARNING) << "Retire unload threw unknown exception for " << key;
+      rc = 1;
+    }
+
+    bool retired = (rc == 0 || rc == -1);
+    if (!retired) {
+      const auto state = engine_->get_replica_state(key, key.device.type);
+      if (state <= store::replica::MemoryState::UNALLOCATED) {
+        retired = true;
+      }
+    }
+    if (retired) {
+      std::lock_guard<std::mutex> lock(retire_mu_);
+      retire_queue_.erase(key);
+    } else {
+      LOG(WARNING) << "Retire unload failed rc=" << rc << " for " << key;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    if (retire_queue_.empty()) {
+      retire_pending_.store(false);
+    }
+  }
 }
 
 std::string WorkerLifecycleManager::compute_state_checksum(
     std::string_view node_id,
     std::string_view node_address,
     uint32_t node_port,
-    const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
+    const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory) {
   // Keep format aligned with Global Store's RecoveryService._compute_state_checksum:
   // artifact_id:node_id:node_address:node_port:device_id:memory_type:available; sorted by
   // (artifact_id, memory_type, device_id).
@@ -1187,24 +1312,29 @@ std::string WorkerLifecycleManager::compute_state_checksum(
   };
 
   std::vector<Entry> entries;
-  entries.reserve(infos.size());
+  entries.reserve(inventory.size());
 
-  for (const auto& i : infos) {
-    std::string mem_type = "DISK";
+  for (const auto& entry : inventory) {
+    std::string mem_type;
     int device_id = 0;
-    if (i.gpu_state != common::memory::MemoryLocation::NONE) {
+    if (entry.memory_location == common::memory::MemoryLocation::GPU) {
+      if (entry.key.device.ordinal < 0) {
+        continue;
+      }
       mem_type = "GPU";
-      device_id = i.gpu_device_id;
-    } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
+      device_id = entry.key.device.ordinal;
+    } else if (entry.memory_location == common::memory::MemoryLocation::CPU) {
       mem_type = "RAM";
       device_id = 0;
+    } else {
+      continue;
     }
     entries.push_back(
         Entry{
-            .artifact_id = i.artifact_id,
+            .artifact_id = entry.key.artifact_id,
             .memory_type = std::move(mem_type),
             .device_id = device_id,
-            .available = i.is_registered_for_comm,
+            .available = entry.is_available,
         });
   }
 

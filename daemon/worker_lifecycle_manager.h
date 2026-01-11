@@ -12,7 +12,9 @@
 #include <thread>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
 #include "gsl/pointers"
@@ -63,7 +65,7 @@ class WorkerLifecycleManager {
       std::string_view node_id,
       std::string_view node_address,
       uint32_t node_port,
-      const std::vector<store::StoreEngine::ReplicaInfo>& infos);
+      const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory);
 
  private:
   static absl::StatusOr<std::string> resolve_advertised_address(const WorkerLifecycleManager::Options& opts);
@@ -90,6 +92,8 @@ class WorkerLifecycleManager {
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
+  void enqueue_retire_keys(std::vector<store::loading::ReplicaKey> keys, std::string_view context);
+  void process_retire_queue();
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
@@ -156,6 +160,16 @@ class WorkerLifecycleManager {
   std::mutex obsolete_mu_;
   std::vector<std::string> pending_obsolete_replicas_;
   std::atomic<bool> obsolete_pending_{false};
+
+  struct RetireEntry {
+    size_t attempts{0};
+    int64_t last_log_ts_s{0};
+  };
+
+  std::mutex retire_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, RetireEntry, store::loading::ReplicaKeyHash> retire_queue_;
+  std::atomic<bool> retire_pending_{false};
+  std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
   bool memory_tier_enabled_{false};
 
  public:
