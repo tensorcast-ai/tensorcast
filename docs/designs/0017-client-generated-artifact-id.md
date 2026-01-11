@@ -111,7 +111,7 @@ Identity recognition
 - gRPC handlers use `infer_artifact_id_kind()` to classify ids and reject invalid prefixes. Repository/service layers persist the explicit kind so policies and queries can pivot on `id_kind`.
 
 Persistence model
-- `schema.sql` and `tensorcast/global_store/init.sql` add `artifacts.id_kind TEXT NOT NULL DEFAULT 'MI2'`, relax the digest columns to accept `NULL`, and extend `artifact_replicas` with an optional `expires_at` timestamp.
+- `schema.sql` adds `artifacts.id_kind TEXT NOT NULL DEFAULT 'MI2'`, relaxes the digest columns to accept `NULL`, and extends `artifact_replicas` with an optional `expires_at` timestamp.
 - Migration `tensorcast/global_store/migrations/0017_cgid.py` applies the same DDL for existing deployments; it is reversible.
 - `ArtifactRepository` upserts descriptors with explicit `id_kind`. `mi2:` records retain digests; `cgid:` records store `NULL` digests.
 - `ReplicaRepository` persists `expires_at` when supplied (favoring short-lived CGID replicas) while keeping existing write paths for MI2 replicas untouched.

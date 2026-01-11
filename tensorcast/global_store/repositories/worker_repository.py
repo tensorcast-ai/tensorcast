@@ -285,14 +285,7 @@ class WorkerRepository(BaseRepository):
         self, worker_id: str, cursor: DuckDBPyConnection | None = None
     ) -> int:
         """Return the persisted state version for the worker."""
-        cursor = cursor if cursor is not None else self.get_cursor()
-        result = cursor.execute(
-            "SELECT state_version FROM workers WHERE worker_id = ?",
-            [worker_id],
-        ).fetchone()
-        if not result:
-            raise ValueError(f"Worker {worker_id} not found")
-        return int(result[0])
+        return self.ensure_state_version(worker_id, cursor)
 
     def get_state_checksum(
         self, worker_id: str, cursor: DuckDBPyConnection | None = None
@@ -300,7 +293,7 @@ class WorkerRepository(BaseRepository):
         """Return the persisted state checksum for the worker."""
         cursor = cursor if cursor is not None else self.get_cursor()
         result = cursor.execute(
-            "SELECT state_checksum FROM workers WHERE worker_id = ?",
+            "SELECT COALESCE(state_checksum, '') FROM workers WHERE worker_id = ?",
             [worker_id],
         ).fetchone()
         if not result:
@@ -367,6 +360,46 @@ class WorkerRepository(BaseRepository):
         ).fetchone()
         if result is None:
             raise ValueError(f"Worker {worker_id} not found")
+
+    def try_advance_state_sync_token(
+        self,
+        worker_id: str,
+        sync_epoch: int,
+        sync_request_id: int,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> bool:
+        """Advance the sync token if the incoming token is newer."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            """
+            UPDATE workers
+            SET state_sync_epoch = ?, state_sync_request_id = ?
+            WHERE worker_id = ?
+              AND (
+                state_sync_epoch < ?
+                OR (state_sync_epoch = ? AND state_sync_request_id < ?)
+              )
+            RETURNING worker_id
+            """,
+            [
+                sync_epoch,
+                sync_request_id,
+                worker_id,
+                sync_epoch,
+                sync_epoch,
+                sync_request_id,
+            ],
+        ).fetchone()
+        if result is not None:
+            return True
+
+        exists = cursor.execute(
+            "SELECT 1 FROM workers WHERE worker_id = ?",
+            [worker_id],
+        ).fetchone()
+        if not exists:
+            raise ValueError(f"Worker {worker_id} not found")
+        return False
 
     def mark_as_stale(self, worker_id: str) -> bool:
         """Mark a worker as stale (for recovery purposes)."""

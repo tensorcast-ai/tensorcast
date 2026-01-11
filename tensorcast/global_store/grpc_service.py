@@ -1744,9 +1744,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.SynchronizeWorkerStateResponse:
         """Synchronize worker state for high availability."""
         try:
-            success, state_changes, new_version, new_checksum = (
+            success, state_changes, new_version, new_checksum, ignored = (
                 self.recovery_service.synchronize_worker_state(
-                    request.worker_id, request.local_state, request.force_full_sync
+                    request.worker_id,
+                    request.local_state,
+                    request.sync_epoch,
+                    request.sync_request_id,
+                    request.force_full_sync,
                 )
             )
 
@@ -1756,6 +1760,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     new_state_version=new_version,
                     state_changes=state_changes,
                     new_state_checksum=new_checksum,
+                    ignored=ignored,
                 )
             else:
                 return global_store_pb2.SynchronizeWorkerStateResponse(
@@ -1779,8 +1784,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.RequestFullStateSyncResponse:
         """Request full state synchronization for a worker."""
         try:
-            success, expected_replicas, new_version, new_checksum = (
-                self.recovery_service.request_full_state_sync(request.worker_id)
+            success, expected_replicas, new_version, new_checksum, ignored = (
+                self.recovery_service.request_full_state_sync(
+                    request.worker_id,
+                    request.sync_epoch,
+                    request.sync_request_id,
+                )
             )
 
             if success:
@@ -1789,6 +1798,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     new_state_version=new_version,
                     expected_replicas=expected_replicas,
                     new_state_checksum=new_checksum,
+                    ignored=ignored,
                 )
             else:
                 return global_store_pb2.RequestFullStateSyncResponse(

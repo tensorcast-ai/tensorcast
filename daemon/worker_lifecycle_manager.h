@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -102,6 +103,9 @@ class WorkerLifecycleManager {
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
+  store::components::StateSyncToken next_state_sync_token(uint64_t epoch);
+  void mark_state_sync_progress();
+  std::optional<std::chrono::milliseconds> state_sync_stall_budget() const;
 
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
@@ -155,6 +159,9 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> hb_epoch_{0};
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
+  std::atomic<uint64_t> state_sync_request_id_{0};
+  std::atomic<int64_t> state_sync_last_progress_ns_{0};
+  std::atomic<bool> state_sync_restart_pending_{false};
   std::mutex state_sync_mu_;
   std::condition_variable state_sync_cv_;
   std::mutex obsolete_mu_;
