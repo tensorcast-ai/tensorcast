@@ -39,7 +39,6 @@ class RecoveryService:
         # Recovery state tracking
         self.recovery_in_progress = False
         self.last_recovery_time = 0
-        self.worker_state_versions: dict[str, int] = {}
 
     def initiate_recovery(self) -> bool:
         """
@@ -64,9 +63,6 @@ class RecoveryService:
 
             # Step 3: Mark all replicas as potentially unavailable
             self._mark_replicas_as_stale()
-
-            # Step 4: Reset state versions
-            self.worker_state_versions.clear()
 
             self.last_recovery_time = int(time.time())
             logger.info("Global Store recovery completed successfully")
@@ -129,8 +125,8 @@ class RecoveryService:
             # Register new worker
             registered_worker = self.worker_repository.create_or_update(worker)
 
-            # Set initial state version
-            self.worker_state_versions[registered_worker.worker_id] = 1
+            # Ensure persisted state version is initialized
+            self.worker_repository.ensure_state_version(registered_worker.worker_id)
 
             # Always require state sync during recovery
             state_sync_required = True
@@ -195,31 +191,46 @@ class RecoveryService:
         """
         _start = time.time()
         try:
-            # Get current global state for this worker
-            global_replicas = self.replica_repository.get_replicas_by_worker(worker_id)
-
-            # Compare states and generate changes
-            state_changes = self._compute_state_changes(
-                local_state, global_replicas, force_full_sync
-            )
-
-            current_version = self.ensure_worker_state_version(worker_id)
-
-            if state_changes:
-                # Apply state changes and bump version
-                self._apply_state_changes(worker_id, state_changes)
-
-                updated_replicas = self.replica_repository.get_replicas_by_worker(
-                    worker_id
+            with self.worker_repository.transaction() as cursor:
+                # Get current global state for this worker
+                global_replicas = self.replica_repository.get_replicas_by_worker_atomic(
+                    worker_id, cursor
                 )
-                new_checksum = self._compute_state_checksum(updated_replicas)
 
-                new_version = current_version + 1
-                self.worker_state_versions[worker_id] = new_version
-            else:
-                # No-op sync: do not change version; recompute checksum from current global state
-                new_version = current_version
-                new_checksum = self._compute_state_checksum(global_replicas)
+                # Compare states and generate changes
+                state_changes = self._compute_state_changes(
+                    local_state, global_replicas, force_full_sync
+                )
+
+                current_version = self.worker_repository.ensure_state_version(
+                    worker_id, cursor
+                )
+
+                if state_changes:
+                    # Apply state changes and bump version
+                    self._apply_state_changes(worker_id, state_changes, cursor)
+
+                    updated_replicas = (
+                        self.replica_repository.get_replicas_by_worker_atomic(
+                            worker_id, cursor
+                        )
+                    )
+                    new_checksum = self._compute_state_checksum(updated_replicas)
+                    new_version = current_version + 1
+                    self.worker_repository.update_state_version_and_checksum(
+                        worker_id, new_version, new_checksum, cursor
+                    )
+                else:
+                    # No-op sync: do not change version; reconcile checksum in-place.
+                    new_version = current_version
+                    new_checksum = self._compute_state_checksum(global_replicas)
+                    stored_checksum = self.worker_repository.get_state_checksum(
+                        worker_id, cursor
+                    )
+                    if stored_checksum != new_checksum:
+                        self.worker_repository.update_state_checksum(
+                            worker_id, new_checksum, cursor
+                        )
 
             duration = time.time() - _start
             observe_state_sync(duration, success=True)
@@ -401,44 +412,37 @@ class RecoveryService:
         return state_changes
 
     def _apply_state_changes(
-        self, worker_id: str, state_changes: list[global_store_pb2.StateChange]
+        self,
+        worker_id: str,
+        state_changes: list[global_store_pb2.StateChange],
+        cursor,
     ) -> None:
-        """Apply state changes to global state."""
+        """Apply state changes to global state atomically."""
         for change in state_changes:
-            try:
-                if change.type == global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA:
-                    # Register new replica
-                    replica = self._convert_proto_to_replica(
-                        change.replica_info, worker_id
+            if change.type == global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA:
+                # Register new replica
+                replica = self._convert_proto_to_replica(change.replica_info, worker_id)
+                self.replica_repository.create_or_update_atomic(replica, cursor)
+                logger.debug(f"Added replica: {replica.artifact_id}")
+
+            elif change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA:
+                # Remove replica
+                replica_id_value = change.replica_info.ref.replica_id
+                if not replica_id_value:
+                    raise ValueError(
+                        f"Missing replica_id for removal (artifact_id={change.replica_info.ref.artifact_id})"
                     )
-                    self.replica_repository.create_or_update(replica)
-                    logger.debug(f"Added replica: {replica.artifact_id}")
+                replica_id = UUID(replica_id_value)
+                deleted = self.replica_repository.delete_atomic(replica_id, cursor)
+                if not deleted:
+                    raise NotFoundError(f"Replica {replica_id} not found")
+                logger.debug(f"Removed replica: {change.replica_info.ref.artifact_id}")
 
-                elif (
-                    change.type
-                    == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
-                ):
-                    # Remove replica
-                    if change.replica_info.replica_id:
-                        replica_id = UUID(change.replica_info.replica_id)
-                        self.replica_repository.delete(replica_id)
-                        logger.debug(
-                            f"Removed replica: {change.replica_info.artifact_id}"
-                        )
-
-                elif (
-                    change.type
-                    == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
-                ):
-                    # Update replica
-                    replica = self._convert_proto_to_replica(
-                        change.replica_info, worker_id
-                    )
-                    self.replica_repository.update(replica)
-                    logger.debug(f"Updated replica: {replica.artifact_id}")
-
-            except Exception as e:
-                logger.error(f"Failed to apply state change {change.type}: {e}")
+            elif change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA:
+                # Update replica
+                replica = self._convert_proto_to_replica(change.replica_info, worker_id)
+                self.replica_repository.update_atomic(replica, cursor)
+                logger.debug(f"Updated replica: {replica.artifact_id}")
 
     def _convert_replica_to_proto(self, replica: Replica) -> common_pb2.ReplicaInfo:
         """Convert Replica to proto format."""
@@ -565,15 +569,11 @@ class RecoveryService:
 
     def ensure_worker_state_version(self, worker_id: str) -> int:
         """Ensure the worker has a non-zero state version."""
-        current_version = self.worker_state_versions.get(worker_id, 0)
-        if current_version <= 0:
-            current_version = 1
-            self.worker_state_versions[worker_id] = current_version
-        return current_version
+        return self.worker_repository.ensure_state_version(worker_id)
 
     def get_worker_state_version(self, worker_id: str) -> int:
         """Get current state version for a worker."""
-        return self.worker_state_versions.get(worker_id, 0)
+        return self.worker_repository.get_state_version(worker_id)
 
     def request_full_state_sync(
         self, worker_id: str
@@ -586,19 +586,31 @@ class RecoveryService:
         """
         _start = time.time()
         try:
-            # Get all replicas for this worker
-            replicas = self.replica_repository.get_replicas_by_worker(worker_id)
+            with self.worker_repository.transaction() as cursor:
+                # Get all replicas for this worker
+                replicas = self.replica_repository.get_replicas_by_worker_atomic(
+                    worker_id, cursor
+                )
 
-            # Convert to proto format
-            proto_replicas = [
-                self._convert_replica_to_proto(replica) for replica in replicas
-            ]
+                # Convert to proto format
+                proto_replicas = [
+                    self._convert_replica_to_proto(replica) for replica in replicas
+                ]
 
-            # Full-state sync is informational; do NOT bump version.
-            current_version = self.ensure_worker_state_version(worker_id)
+                # Full-state sync is informational; do NOT bump version.
+                current_version = self.worker_repository.ensure_state_version(
+                    worker_id, cursor
+                )
 
-            # Compute checksum for current global state
-            new_checksum = self._compute_state_checksum(replicas)
+                # Recompute checksum for current global state and persist if stale.
+                new_checksum = self._compute_state_checksum(replicas)
+                stored_checksum = self.worker_repository.get_state_checksum(
+                    worker_id, cursor
+                )
+                if stored_checksum != new_checksum:
+                    self.worker_repository.update_state_checksum(
+                        worker_id, new_checksum, cursor
+                    )
 
             duration = time.time() - _start
             observe_state_sync(duration, success=True)
@@ -622,8 +634,14 @@ class RecoveryService:
 
     def get_worker_state_checksum(self, worker_id: str) -> str:
         """Get checksum for the given worker's replica state."""
+        checksum = self.worker_repository.get_state_checksum(worker_id)
+        if checksum:
+            return checksum
+
         replicas = self.replica_repository.get_replicas_by_worker(worker_id)
-        return self._compute_state_checksum(replicas)
+        checksum = self._compute_state_checksum(replicas)
+        self.worker_repository.update_state_checksum(worker_id, checksum)
+        return checksum
 
     def get_obsolete_artifacts(
         self, worker_id: str, registered_artifact_ids: list[str] | tuple[str, ...]
@@ -642,5 +660,7 @@ class RecoveryService:
             global_artifacts = {replica.artifact_id for replica in replicas}
             return [a for a in registered_artifact_ids if a not in global_artifacts]
         except Exception as e:
-            logger.error(f"Failed to compute obsolete artifacts for {worker_id}: {e}")
+            logger.exception(
+                f"Failed to compute obsolete artifacts for {worker_id}: {e}"
+            )
             return []

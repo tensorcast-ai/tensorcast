@@ -339,6 +339,7 @@ IO helpers (`write_at`, `map_file_segments`).
   - Owns `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, optional `GlobalStoreClient`, and optional `CommunicationManager`
   - When Global Store is configured, store registrations now fail if the daemon cannot determine a routable (non-loopback) IP to advertise; operators must set `--advertise_host` or a non-loopback `listen_addr`
   - The `GlobalStoreClient` channel and stub are constructed once at engine bring-up; `initialize()` performs only the health-check handshake so retry/backoff state stays immutable at runtime
+  - Per-RPC overrides in `GlobalStoreClient::RpcOptions` allow HA call sites to bound heartbeat/sync timeouts and retries without changing the shared client defaults
   - Implements helpers for VS chunk locks, remote access registration, and Global Store registration
 
 - Replica

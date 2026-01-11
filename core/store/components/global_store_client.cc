@@ -466,7 +466,8 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
     std::string_view state_checksum,
     const std::vector<std::string>& registered_artifact_ids,
     int64_t last_successful_sync,
-    global_store::ConnectionStatus connection_status) {
+    global_store::ConnectionStatus connection_status,
+    const RpcOptions& rpc_options) {
   global_store::WorkerHeartbeatRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_mem_pool_available_size(mem_pool_available_size);
@@ -484,7 +485,8 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
       request,
       &response,
       [this](auto* ctx, const auto& req, auto* resp) { return stub_->WorkerHeartbeat(ctx, req, resp); },
-      "WorkerHeartbeat(enhanced)");
+      "WorkerHeartbeat(enhanced)",
+      rpc_options);
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_STATE_SYNC_REQUIRED) {
@@ -1118,12 +1120,15 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     const Request& request,
     Response* response,
     RpcMethod method,
-    const std::string& method_name) {
+    const std::string& method_name,
+    const RpcOptions& rpc_options) {
+  const absl::Duration timeout = rpc_options.timeout.value_or(config_.rpc_timeout);
+  const uint32_t max_retries = rpc_options.max_retries.value_or(config_.max_retries);
+  const absl::Duration retry_backoff = rpc_options.retry_backoff.value_or(config_.retry_backoff);
   static thread_local std::mt19937_64 rng{std::random_device{}()};
-  for (uint32_t attempt = 0; attempt <= config_.max_retries; ++attempt) {
+  for (uint32_t attempt = 0; attempt <= max_retries; ++attempt) {
     grpc::ClientContext context;
-    context.set_deadline(
-        std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(config_.rpc_timeout)));
+    context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(timeout)));
     if (!config_.cluster_token.empty()) {
       context.AddMetadata("x-tensorcast-cluster-token", config_.cluster_token);
     }
@@ -1150,20 +1155,19 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
       return absl::OkStatus();
     }
 
-    if (attempt < config_.max_retries) {
-      auto base = config_.retry_backoff * (1 << attempt);
+    if (attempt < max_retries) {
+      auto base = retry_backoff * (1 << attempt);
       // Jitter within +/- 50%
       double jitter = std::uniform_real_distribution<double>(0.5, 1.5)(rng);
       auto jittered = absl::Milliseconds(static_cast<int64_t>(absl::ToInt64Milliseconds(base) * jitter));
-      LOG(WARNING) << "RPC " << method_name << " failed (attempt " << attempt + 1 << "/" << config_.max_retries + 1
+      LOG(WARNING) << "RPC " << method_name << " failed (attempt " << attempt + 1 << "/" << max_retries + 1
                    << "): " << status.error_message() << ". Retrying in " << absl::ToInt64Milliseconds(jittered)
                    << "ms";
       std::this_thread::sleep_for(std::chrono::milliseconds(absl::ToInt64Milliseconds(jittered)));
     }
   }
 
-  return absl::UnavailableError(
-      absl::StrFormat("RPC %s failed after %d retries", method_name, config_.max_retries + 1));
+  return absl::UnavailableError(absl::StrFormat("RPC %s failed after %d retries", method_name, max_retries + 1));
 }
 
 absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_locations(
@@ -1239,7 +1243,8 @@ absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_lo
 absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_worker_state(
     const global_store::WorkerLocalState& local_state,
     bool force_full_sync,
-    std::vector<global_store::StateChange>* out_changes) {
+    std::vector<global_store::StateChange>* out_changes,
+    const RpcOptions& rpc_options) {
   global_store::SynchronizeWorkerStateRequest request;
   request.set_worker_id(local_state.worker_id());
   *request.mutable_local_state() = local_state;
@@ -1250,7 +1255,8 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
       request,
       &response,
       [this](auto* ctx, const auto& req, auto* resp) { return stub_->SynchronizeWorkerState(ctx, req, resp); },
-      "SynchronizeWorkerState");
+      "SynchronizeWorkerState",
+      rpc_options);
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK) {
@@ -1271,7 +1277,8 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::synchronize_
 absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full_state_sync(
     std::string_view worker_id,
     uint64_t current_state_version,
-    std::vector<tensorcast::common::v1::ReplicaInfo>* out_expected_replicas) {
+    std::vector<tensorcast::common::v1::ReplicaInfo>* out_expected_replicas,
+    const RpcOptions& rpc_options) {
   global_store::RequestFullStateSyncRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_current_state_version(current_state_version);
@@ -1281,7 +1288,8 @@ absl::StatusOr<std::pair<uint64_t, std::string>> GlobalStoreClient::request_full
       request,
       &response,
       [this](auto* ctx, const auto& req, auto* resp) { return stub_->RequestFullStateSync(ctx, req, resp); },
-      "RequestFullStateSync");
+      "RequestFullStateSync",
+      rpc_options);
   if (!status.ok())
     return status;
   if (response.status() != global_store::STATUS_OK) {

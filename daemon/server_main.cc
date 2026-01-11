@@ -436,9 +436,30 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().heartbeat_interval();
       lopts.heartbeat_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
+    if (cfg.high_availability().has_heartbeat_rpc_timeout()) {
+      const auto& d = cfg.high_availability().heartbeat_rpc_timeout();
+      lopts.heartbeat_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
+    if (cfg.high_availability().has_heartbeat_rpc_max_retries()) {
+      lopts.heartbeat_rpc_max_retries = cfg.high_availability().heartbeat_rpc_max_retries();
+    }
     if (cfg.high_availability().has_periodic_sync_interval()) {
       const auto& d = cfg.high_availability().periodic_sync_interval();
       lopts.chunk_sync_interval_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
+    if (cfg.high_availability().has_state_sync_rpc_timeout()) {
+      const auto& d = cfg.high_availability().state_sync_rpc_timeout();
+      lopts.state_sync_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
+    if (cfg.high_availability().has_state_sync_rpc_max_retries()) {
+      lopts.state_sync_rpc_max_retries = cfg.high_availability().state_sync_rpc_max_retries();
+    }
+    if (cfg.high_availability().has_full_sync_rpc_timeout()) {
+      const auto& d = cfg.high_availability().full_sync_rpc_timeout();
+      lopts.full_sync_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
+    }
+    if (cfg.high_availability().has_full_sync_rpc_max_retries()) {
+      lopts.full_sync_rpc_max_retries = cfg.high_availability().full_sync_rpc_max_retries();
     }
     lopts.force_full_sync_on_empty_inventory = cfg.high_availability().force_full_sync_on_empty_inventory();
     lopts.cluster_token = cfg.meta().cluster_token();

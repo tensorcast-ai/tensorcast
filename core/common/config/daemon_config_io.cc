@@ -285,7 +285,13 @@ void normalize_duration_fields(nlohmann::json& root) {
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {
     auto& ha = root["high_availability"];
-    const char* ha_fields[] = {"heartbeat_interval", "periodic_sync_interval", "registration_retry_delay"};
+    const char* ha_fields[] = {
+        "heartbeat_interval",
+        "periodic_sync_interval",
+        "registration_retry_delay",
+        "heartbeat_rpc_timeout",
+        "state_sync_rpc_timeout",
+        "full_sync_rpc_timeout"};
     for (const char* f : ha_fields) {
       if (ha.contains(f))
         to_duration(ha[f]);

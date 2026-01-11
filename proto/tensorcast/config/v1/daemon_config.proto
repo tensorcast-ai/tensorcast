@@ -61,6 +61,15 @@ message HighAvailability {
   google.protobuf.Duration periodic_sync_interval = 4;
   int32 max_retries = 5;
   google.protobuf.Duration registration_retry_delay = 6;
+  // Heartbeat RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration heartbeat_rpc_timeout = 7;
+  optional int32 heartbeat_rpc_max_retries = 8;
+  // State sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration state_sync_rpc_timeout = 9;
+  optional int32 state_sync_rpc_max_retries = 12;
+  // Full-state sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration full_sync_rpc_timeout = 13;
+  optional int32 full_sync_rpc_max_retries = 14;
   // When true, an empty local inventory is treated as authoritative and will
   // remove replicas during sync (intended for drain/retire workflows).
   bool force_full_sync_on_empty_inventory = 11;

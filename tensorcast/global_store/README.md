@@ -187,6 +187,8 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - On Global Store startup, marks all workers/replicas as stale until they re-confirm
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
+- Persists `state_version` and `state_checksum` per worker; heartbeats use cached checksum to avoid full-table scans
+- Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
 - Applies endpoint/metadata drift updates (node address/port, memory size, transport keys when reported) during sync
 - HA checksum format is `artifact_id:node_id:node_address:node_port:device_id:memory_type:available;` (FNV-1a 64-bit).
