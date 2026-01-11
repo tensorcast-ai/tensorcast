@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -43,7 +43,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<components::WorkerRegistrationInfo> register_worker(
       std::string_view,
       std::string_view,
       uint32_t,
@@ -55,10 +55,6 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("register_worker not supported in test stub");
   }
 
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not supported in test stub");
-  }
-
   absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view,
       uint64_t,
@@ -67,7 +63,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       const std::vector<std::string>&,
       int64_t,
-      tensorcast::global_store::v1::ConnectionStatus) override {
+      tensorcast::global_store::v1::ConnectionStatus,
+      const components::RpcOptions&) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not supported in test stub");
   }
 
@@ -179,14 +176,16 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const tensorcast::global_store::v1::WorkerLocalState&,
       bool,
-      std::vector<tensorcast::global_store::v1::StateChange>*) override {
+      std::vector<tensorcast::global_store::v1::StateChange>*,
+      const components::RpcOptions&) override {
     return absl::UnimplementedError("synchronize_worker_state not supported in test stub");
   }
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view,
       uint64_t,
-      std::vector<tensorcast::common::v1::ReplicaInfo>*) override {
+      std::vector<tensorcast::common::v1::ReplicaInfo>*,
+      const components::RpcOptions&) override {
     return absl::UnimplementedError("request_full_state_sync not supported in test stub");
   }
 

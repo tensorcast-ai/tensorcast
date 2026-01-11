@@ -8,7 +8,7 @@ proto_library(
     strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],
     deps = [
-        "//proto/tensorcast/daemon/v1:daemon_proto_lib",
+        "//proto/tensorcast/common/v1:common_proto",
         "@protobuf//:timestamp_proto",
     ],
 )
@@ -18,7 +18,7 @@ cpp_grpc_library(
     protos = [":daemon_proto_lib"],
     visibility = ["//visibility:public"],
     deps = [
-        "//proto/tensorcast/daemon/v1:daemon_grpc_cc",
+        "//proto/tensorcast/common/v1:common_cc",
     ],
 )
 

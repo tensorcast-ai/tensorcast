@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <chrono>
 #include <cstring>
@@ -8,8 +8,8 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 
-#include "core/common/cuda_api.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/test_helpers.h"
 
 using namespace tensorcast::communicator;
@@ -187,31 +187,31 @@ TEST_CASE("TCP Mode Large Transfer Tests", "[communicator][tcp][gpu][stress]") {
     constexpr uint32_t kBuffersPerFlow = 4;
     constexpr uint32_t kTcpConnCount = 2;
     const uint64_t chunk_bytes = static_cast<uint64_t>(kStageChunkMiB) * 1024ULL * 1024ULL;
-    const uint64_t pool_buffers = static_cast<uint64_t>(kBuffersPerFlow) * (static_cast<uint64_t>(kTcpConnCount) + 1);
-    const uint64_t pool_size_bytes = chunk_bytes * pool_buffers;
 
-    auto cfg5 = make_tcp_communicator_config(
-        /*enable_rdma=*/false,
-        /*gpu_chunk_mb=*/kStageChunkMiB,
-        /*cpu_chunk_mb=*/4,
-        /*buffers_per_flow=*/kBuffersPerFlow);
+    auto cfg5 = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/kBuffersPerFlow);
     cfg5.mutable_transport()->set_tcp_conn_count(kTcpConnCount);
-    cfg5.mutable_pool()->set_chunk_bytes(chunk_bytes);
-    cfg5.mutable_pool()->set_pool_size_bytes(pool_size_bytes);
-    auto source_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg5);
+    auto source_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg5.stager().buffers_per_flow(),
+        cfg5.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/chunk_bytes,
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto source_engine =
+        std::make_shared<tensorcast::communicator::engine::Communicator>(cfg5, std::move(source_pools));
     auto source_init_status = source_engine->init("127.0.0.1", source_port);
     CAPTURE(source_port, source_init_status.message());
     REQUIRE(source_init_status.ok());
 
-    auto cfg6 = make_tcp_communicator_config(
-        /*enable_rdma=*/false,
-        /*gpu_chunk_mb=*/kStageChunkMiB,
-        /*cpu_chunk_mb=*/4,
-        /*buffers_per_flow=*/kBuffersPerFlow);
+    auto cfg6 = make_tcp_communicator_config(/*enable_rdma=*/false, /*buffers_per_flow=*/kBuffersPerFlow);
     cfg6.mutable_transport()->set_tcp_conn_count(kTcpConnCount);
-    cfg6.mutable_pool()->set_chunk_bytes(chunk_bytes);
-    cfg6.mutable_pool()->set_pool_size_bytes(pool_size_bytes);
-    auto target_engine = std::make_shared<tensorcast::communicator::engine::Communicator>(cfg6);
+    auto target_pools = tensorcast::testing::make_test_pinned_staging_pools(
+        cfg6.stager().buffers_per_flow(),
+        cfg6.transport().tcp_conn_count(),
+        /*gpu_slice_bytes=*/chunk_bytes,
+        /*cpu_slice_bytes=*/(4ULL << 20),
+        /*enable_rdma=*/false);
+    auto target_engine =
+        std::make_shared<tensorcast::communicator::engine::Communicator>(cfg6, std::move(target_pools));
     auto target_init_status = target_engine->init("127.0.0.1", target_port);
     CAPTURE(target_port, target_init_status.message());
     REQUIRE(target_init_status.ok());

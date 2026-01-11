@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -34,11 +34,11 @@
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
-#include "core/common/cuda_api.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/contracts/buffer_pool.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"

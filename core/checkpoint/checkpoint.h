@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -55,6 +55,7 @@ class Tensor {
 #endif // Disabled section
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -126,6 +127,13 @@ std::uint64_t allocate_cuda_memory(int device_id, size_t tensor_size);
 
 // Obtain a CUDA-IPC handle for a single allocation.
 std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr);
+
+// Obtain a CUDA-IPC handle for the allocation that backs memory_ptr and return
+// (handle_bytes, base_offset_bytes) where base_offset_bytes is the byte offset
+// of memory_ptr into the exported allocation.
+absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
+    int device_id,
+    std::uint64_t memory_ptr);
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle);
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/metadata_stage.h"
 
@@ -218,6 +218,21 @@ absl::Status build_canonical_index_from_tensor_index(IngestionContext& ctx) {
 absl::Status MetadataStage::process(IngestionContext& ctx) {
   if (ctx.hints.variant.has_value() && ctx.hints.variant->canonical_index_json.has_value()) {
     ctx.verification.canonical_index_json = ctx.hints.variant->canonical_index_json;
+  }
+  if (!ctx.verification.canonical_index_json.has_value() && ctx.hints.disk_metadata.has_value()) {
+    const auto& disk_metadata = *ctx.hints.disk_metadata;
+    if (disk_metadata.canonical_index_json.has_value()) {
+      ctx.verification.canonical_index_json = disk_metadata.canonical_index_json;
+    }
+  }
+  if (ctx.hints.disk_metadata.has_value()) {
+    const auto& disk_metadata = *ctx.hints.disk_metadata;
+    if (!ctx.verification.computed_index_multihash.has_value() && disk_metadata.index_multihash.has_value()) {
+      ctx.verification.computed_index_multihash = disk_metadata.index_multihash;
+    }
+    if (disk_metadata.logical_total_size.has_value()) {
+      update_logical_size(*disk_metadata.logical_total_size, ctx.verification);
+    }
   }
 
   if (ctx.source_type == SourceType::kDisk) {

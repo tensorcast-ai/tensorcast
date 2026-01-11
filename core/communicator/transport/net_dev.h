@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_TRANSPORT_NET_DEV_H_
 #define CORE_COMMUNICATOR_TRANSPORT_NET_DEV_H_
@@ -12,6 +12,7 @@
 
 #include "core/communicator/misc/common.h"
 #include "core/communicator/misc/ibv_wrap.h"
+#include "core/communicator/misc/mlx5_warp.h"
 #include "core/communicator/misc/queue.h"
 
 namespace tensorcast::communicator::transport {

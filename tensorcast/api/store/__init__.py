@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ from tensorcast.api.store.types import (
 )
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
 from tensorcast.daemon_ctl import get_daemon_client
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import DeregisterArtifactOutcome, VramRegionHandle
 
 

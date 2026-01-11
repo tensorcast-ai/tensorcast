@@ -1,10 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_ipc.h"
 
 namespace tensorcast::common::memory {
 
@@ -100,6 +100,7 @@ class GpuDeviceMemory {
   size_t size_ = 0;
   int device_id_ = -1;
   cudaIpcMemHandle_t handle_{}; // Initialize to zero/default
+  cuda::IpcMapping ipc_mapping_;
   AllocationType allocation_type_ = AllocationType::UNINITIALIZED;
 };
 } // namespace tensorcast::common::memory

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 @dataclass(frozen=True)
@@ -59,7 +58,7 @@ class MaterializationPayload:
 
 
 def _tensor_payload_from_proto(
-    proto: store_daemon_v2_pb2.TensorPayloadDescriptor,
+    proto: store_daemon_pb2.TensorPayloadDescriptor,
     *,
     default_device_uuid: str | None,
 ) -> TensorPayloadDescriptor:
@@ -90,6 +89,7 @@ def materialize_artifact_v2(
     canonical_index_hint: bytes | None = None,
     disk_path_hint: str | None = None,
     preference: store_daemon_pb2.SourcePreference | None = None,
+    source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
     verify_checksums: bool = True,
     view_subset_hash: bytes | None = None,
@@ -139,14 +139,20 @@ def materialize_artifact_v2(
     with tracer.start_as_current_span(
         "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
     ):
-        preference_value = (
-            preference
-            if preference is not None
-            else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        )
+        if preference is not None:
+            preference_value = preference
+        elif source_policy is not None:
+            preference_value = (
+                source_policy.preference
+                if source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+            )
+        else:
+            preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         response: (
-            store_daemon_v2_pb2.MaterializeReplicaResponse
-            | store_daemon_v2_pb2.MaterializeByKeyResponse
+            store_daemon_pb2.MaterializeReplicaResponse
+            | store_daemon_pb2.MaterializeByKeyResponse
         )
         if artifact_id is not None:
             response = client.materialize_by_artifact_id_v2(
@@ -161,11 +167,12 @@ def materialize_artifact_v2(
                 return_response=True,
                 disk_path=disk_path_hint,
                 preference=preference_value,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
             )
-            if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
+            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
                     "Daemon returned unexpected response type for materialization v2"
                 )
@@ -179,10 +186,12 @@ def materialize_artifact_v2(
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 return_response=True,
+                preference=preference_value,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
             )
-            if not isinstance(response, store_daemon_v2_pb2.MaterializeByKeyResponse):
+            if not isinstance(response, store_daemon_pb2.MaterializeByKeyResponse):
                 raise DaemonUnavailable(
                     "Daemon returned unexpected response type for key materialization v2"
                 )
@@ -203,11 +212,12 @@ def materialize_artifact_v2(
                 return_response=True,
                 disk_path=disk_path_hint,
                 preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
+                source_policy=source_policy,
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
             )
-            if not isinstance(response, store_daemon_v2_pb2.MaterializeReplicaResponse):
+            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
                     "Daemon returned unexpected response type for disk materialization v2"
                 )
@@ -303,25 +313,26 @@ def materialize_artifact_v2(
             raise DaemonUnavailable(
                 "Materialization payload is missing a mem_handle; tensor data is not available"
             )
-        for desc in descriptors:
-            meta_state_dict = {
-                desc.name: (
-                    list(desc.shape),
-                    list(desc.stride),
-                    desc.dtype,
-                    int(desc.storage_offset),
-                )
-            }
-            tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
-                dev_id: {desc.name: int(desc.buffer_offset)}
-            }
-            memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
-            tensors = restore_tensors(
-                meta_state_dict,
-                memory_ptrs,
-                tensor_offsets,
-                True,
+        meta_state_dict = {
+            desc.name: (
+                list(desc.shape),
+                list(desc.stride),
+                desc.dtype,
+                int(desc.storage_offset),
             )
+            for desc in descriptors
+        }
+        tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
+            dev_id: {desc.name: int(desc.buffer_offset) for desc in descriptors}
+        }
+        memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
+        tensors = restore_tensors(
+            meta_state_dict,
+            memory_ptrs,
+            tensor_offsets,
+            True,
+        )
+        for desc in descriptors:
             yield desc, tensors[desc.name]
 
     if opts.enable_verification:

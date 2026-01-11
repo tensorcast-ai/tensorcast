@@ -91,7 +91,7 @@ Canonical index fields are standardized as `canonical_index_bytes` / `view_index
 
 `TensorPayloadDescriptor` is a thin schema containing `{ string name, string dtype, string device_uuid, uint64 buffer_offset, uint64 byte_length, uint64 storage_offset, repeated int64 shape, repeated int64 stride }`. The daemon uses UMA layout information to only emit descriptors for requested tensors and writes contiguous slices into the exported IPC buffer. Disk loaders use the same message to describe byte ranges in POSIX files.
 
-The daemon keeps the existing v1 RPCs alive until all SDKs upgrade, but the Python client switches entirely to v2 because the new iterator contract depends on descriptors.
+The daemon and SDK use the v2 RPCs end-to-end; legacy v1 RPCs are no longer part of the supported surface.
 
 ## Python pipeline changes
 
@@ -194,7 +194,7 @@ All newly introduced Python names follow the SDK naming rules in `AGENTS.md`. Pr
 
 # Trade-offs & Risks
 
-- **Proto compatibility**: Requires synchronized rollout of daemon binaries before the SDK flips to v2. We mitigate by shipping the daemon changes behind a feature flag and keeping v1 RPCs for legacy clients.
+- **Proto compatibility**: Requires synchronized rollout of daemon binaries and SDK so v2 is available end-to-end (no v1 fallback).
 - **Iterator misuse**: A bug in draining the iterator could leak CUDA IPC handles. We add unit tests that intentionally stop consuming early and assert `_release_materialized` cleans up.
 - **Daemon dependency for disk loading**: All disk operations now require a running daemon. This is intentional—it ensures unified observability and code paths. For offline scenarios without daemon, the legacy `restore_tensors_from_disk()` C++ API remains available but is not exposed through the new pipeline.
 - **Performance regressions**: Descriptor bookkeeping adds per-tensor overhead. We benchmark single tensor fetches vs. baseline to ensure <5% regression when `names=None`, and significantly better results for `names=[one tensor]`.
@@ -206,10 +206,10 @@ All newly introduced Python names follow the SDK naming rules in `AGENTS.md`. Pr
    - `FallbackOptions.for_disk(path)` with `tensor_names=["a"]` returns only tensor "a"
    - View-based slicing on disk artifacts works identically to P2P artifacts
    - Results match canonical disk artifacts for full loads
-3. **Daemon DiskLoader tests**: `bazel test //daemon:disk_loader_materialization_test --define=use_fake_cuda=true` confirms daemon correctly uses `DiskLoader` + `SelectionPlan` for disk-backed materialization.
-4. **Daemon soak**: Run `bazel test //daemon:materialization_v2_test --define=use_fake_cuda=true` to validate the new RPC struct.
+3. **Daemon DiskLoader tests**: `bazel test //daemon:disk_loader_materialization_test --test_env=TENSORCAST_CUDA_BACKEND=fake` confirms daemon correctly uses `DiskLoader` + `SelectionPlan` for disk-backed materialization.
+4. **Daemon soak**: Run `bazel test //daemon:materialization_v2_test --test_env=TENSORCAST_CUDA_BACKEND=fake` to validate the new RPC struct.
 5. **Tracing verification**: Observability smoke test ensures the new span attributes are emitted (checked via OTLP fixture).
-6. **Rollout sequencing**: Documented runbook that lands daemon/proto first, then SDK toggle, then removal of v1 RPC usage.
+6. **Rollout sequencing**: Documented runbook that lands daemon/proto and SDK together so the v2-only surface is consistent.
 
 # References
 

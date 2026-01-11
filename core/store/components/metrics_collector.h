@@ -1,13 +1,16 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 // OpenTelemetry Metrics API (types used in member declarations)
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/pinned_memory_authority.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 // Prefer explicit includes over forward declarations
@@ -44,6 +47,12 @@ class MetricsCollector {
    * @param memory_pool Reference to the memory pool
    */
   void update_memory_pool_metrics(const common::memory::PinnedBufferPool& memory_pool);
+
+  /**
+   * @brief Update daemon-wide pinned memory authority metrics.
+   * @param authority Reference to the pinned memory authority
+   */
+  void update_pinned_authority_metrics(const common::memory::PinnedMemoryAuthority& authority);
 
   /**
    * @brief Update replica-related metrics.
@@ -113,6 +122,14 @@ class MetricsCollector {
   // ObservableGauge callback trampoline
   static void cpu_mem_available_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
   static void registration_pending_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_class_capacity_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_class_in_use_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_class_free_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_class_waiters_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_class_timeouts_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_total_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_committed_bytes_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
+  static void pinned_budget_exhausted_callback(opentelemetry::metrics::ObserverResult result, void* state) noexcept;
 
   // OTel Meter
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;
@@ -128,6 +145,31 @@ class MetricsCollector {
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> cpu_memory_available_gauge_;
   double registration_pending_last_ = 0.0;
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> registration_pending_gauge_;
+
+  struct PinnedClassSnapshot {
+    std::string name;
+    double capacity_slices = 0.0;
+    double in_use_slices = 0.0;
+    double free_slices = 0.0;
+    double waiters = 0.0;
+    double acquire_timeouts_total = 0.0;
+  };
+
+  std::mutex pinned_snapshot_mutex_;
+  std::vector<PinnedClassSnapshot> pinned_classes_last_;
+  double pinned_total_bytes_last_ = 0.0;
+  double pinned_committed_bytes_last_ = 0.0;
+  double pinned_budget_exhausted_total_last_ = 0.0;
+
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_class_capacity_slices_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_class_in_use_slices_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_class_free_slices_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_class_waiters_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument>
+      pinned_class_acquire_timeouts_total_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_total_bytes_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_committed_bytes_gauge_;
+  opentelemetry::nostd::shared_ptr<opentelemetry::metrics::ObservableInstrument> pinned_budget_exhausted_total_gauge_;
 };
 
 } // namespace tensorcast::store::components

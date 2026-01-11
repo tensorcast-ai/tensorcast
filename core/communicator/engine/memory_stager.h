@@ -1,10 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -13,9 +14,9 @@
 
 namespace tensorcast::communicator::engine {
 
-// Unified interface for staging memory into host-pinned buffers suitable
-// for network transport. Implementations may perform memcpy (CPU) or
-// cudaMemcpyAsync (GPU) and must provide a way to release buffers.
+// Unified interface for staging memory into RDMA/MTCP-exposed buffers.
+// Implementations may return host-pinned or device pointers; callers must
+// treat the returned pointer as an exposed address for transport.
 class MemoryStager {
  public:
   virtual ~MemoryStager() = default;
@@ -26,7 +27,7 @@ class MemoryStager {
   };
 
   // Stage a view from the given tensor starting at offset for bytes.
-  // Returns a host pointer valid until release_staged_buffer() is called.
+  // Returns an exposed pointer valid until release_staged_buffer() is called.
   // Implementations must ensure bytes <= get_chunk_size().
   virtual absl::StatusOr<void*> stage(
       const std::shared_ptr<transport::PartitionTensor>& tensor,
@@ -35,7 +36,18 @@ class MemoryStager {
       StageMode mode = StageMode::kBlocking) = 0;
 
   // Release a previously staged buffer. Must be called once per stage().
-  virtual absl::Status release_staged_buffer(gsl::not_null<void*> host_ptr) = 0;
+  virtual absl::Status release_staged_buffer(gsl::not_null<void*> exposed_ptr) = 0;
+
+  struct MrSlab {
+    gsl::not_null<void*> base;
+    size_t bytes = 0;
+  };
+
+  // Optional MR slab lookup for preregistered staging pools. When present,
+  // callers may normalize MR registrations to the slab base.
+  virtual std::optional<MrSlab> mr_slab_for_ptr(gsl::not_null<void*> /*exposed_ptr*/) const {
+    return std::nullopt;
+  }
 
   // Size of a single staging chunk (bytes). Callers should not request
   // more than this in a single stage() call.
@@ -44,5 +56,15 @@ class MemoryStager {
   // Hint for how many buffers are available for pipelining per flow.
   [[nodiscard]] virtual size_t get_num_buffers() const = 0;
 };
+
+inline MemoryStager::MrSlab NormalizeMrRegion(
+    const MemoryStager& stager,
+    gsl::not_null<void*> exposed_ptr,
+    size_t bytes) {
+  if (auto slab = stager.mr_slab_for_ptr(exposed_ptr); slab.has_value()) {
+    return *slab;
+  }
+  return MemoryStager::MrSlab{exposed_ptr, bytes};
+}
 
 } // namespace tensorcast::communicator::engine

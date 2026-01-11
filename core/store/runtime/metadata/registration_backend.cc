@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/metadata/registration_backend.h"
 
@@ -16,9 +16,9 @@
 #include "absl/time/clock.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_verification.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/common/trace/trace_macros.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/components/eviction_service.h"
 #include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/device_registry.h"
@@ -147,6 +147,7 @@ RegistrationBackend::RegistrationBackend(
     ReplicaFactory replica_factory,
     size_t artifact_chunk_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
+    size_t streaming_buffer_chunks,
     RegistrationPublisher* publisher)
     : device_manager_(resources.device_manager),
       replica_registry_(resources.replica_registry),
@@ -160,6 +161,7 @@ RegistrationBackend::RegistrationBackend(
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
+      streaming_buffer_chunks_(std::max<size_t>(1, streaming_buffer_chunks)),
       publisher_(publisher) {
   ABSL_CHECK(replica_factory_) << "ReplicaFactory must be provided";
   ABSL_CHECK(async_runtime_ != nullptr) << "RegistrationResources.async_runtime is required";
@@ -267,6 +269,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
+  cfg.streaming_buffer_chunks = streaming_buffer_chunks_;
   if (memory_tier_config_.has_value()) {
     cfg.memory_tier_config = memory_tier_config_;
   }
@@ -414,7 +417,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   out.registration_id = entry->registration_id;
   out.device_id = reg.device_id;
   out.size_bytes = reg.total_size_bytes;
-  std::memcpy(out.cuda_ipc_handle_bytes.data(), &ipc_handle, sizeof(cudaIpcMemHandle_t));
+  out.cuda_ipc_handle_bytes = cuda::IpcHandleBytes::from_native(ipc_handle);
   return out;
 }
 

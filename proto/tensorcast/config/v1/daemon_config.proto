@@ -61,15 +61,23 @@ message HighAvailability {
   google.protobuf.Duration periodic_sync_interval = 4;
   int32 max_retries = 5;
   google.protobuf.Duration registration_retry_delay = 6;
+  // Heartbeat RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration heartbeat_rpc_timeout = 7;
+  optional int32 heartbeat_rpc_max_retries = 8;
+  // State sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration state_sync_rpc_timeout = 9;
+  optional int32 state_sync_rpc_max_retries = 12;
+  // Full-state sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
+  google.protobuf.Duration full_sync_rpc_timeout = 13;
+  optional int32 full_sync_rpc_max_retries = 14;
   // When true, an empty local inventory is treated as authoritative and will
   // remove replicas during sync (intended for drain/retire workflows).
   bool force_full_sync_on_empty_inventory = 11;
 }
 
 message Engine {
-  uint64 mem_pool_size_bytes = 1;
-  // Renamed: chunk_bytes -> tx_slice_bytes (field number unchanged)
-  uint64 tx_slice_bytes = 2;
+  reserved 1, 2, 4, 5;
+  reserved "mem_pool_size_bytes", "tx_slice_bytes", "streaming_buffer_max_concurrent_sessions", "pinned_allocation_timeout";
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
   uint64 artifact_chunk_bytes = 3;
   message MemoryTiers {
@@ -84,17 +92,30 @@ message Engine {
   }
   // Reserve legacy identifiers to avoid accidental reuse
   reserved "chunk_bytes", "cpu_chunk_size_bytes";
-  uint32 streaming_buffer_max_concurrent_sessions = 4;
-  google.protobuf.Duration pinned_allocation_timeout = 5;
+  // Depth (in slices) for engine-owned StreamingPinnedBuffer instances used for
+  // streaming CPU<->GPU transfers and disk/p2p pipelines.
+  uint32 streaming_buffer_chunks = 8;
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;
 }
 
-message CheckpointStreaming {
-  uint32 num_buffers = 1;
-  uint64 io_chunk_bytes = 2; // Renamed to avoid confusion with engine.chunk_bytes
-  uint64 pinned_pool_bytes = 3; // Clarify this is a streaming pinned pool
+message PinnedMemory {
+  message PinnedClass {
+    string name = 1;
+    uint64 slice_bytes = 2;
+    // Phase 1 fixed-allocation: pool_bytes is the full preallocated capacity
+    // for the class. Total pinned reservation is derived as sum(classes[].pool_bytes).
+    uint64 pool_bytes = 3;
+    reserved 4;
+    reserved "min_bytes", "max_bytes";
+    bool rdma_preregister = 5;
+  }
+
+  reserved 1;
+  reserved "total_bytes";
+  google.protobuf.Duration allocation_timeout = 2;
+  repeated PinnedClass classes = 3;
 }
 
 message DaemonConfig {
@@ -114,10 +135,9 @@ message DaemonConfig {
   }
   Compatibility compatibility = 7;
 
-  message Checkpoint {
-    CheckpointStreaming streaming = 1;
-  }
-  Checkpoint checkpoint = 8;
+  reserved 8;
+  reserved "checkpoint";
+  PinnedMemory pinned_memory = 20;
 
   message Debug {
     message Cuda {

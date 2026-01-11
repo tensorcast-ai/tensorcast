@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -6,8 +6,8 @@
 #include <string>
 
 #include "absl/status/status.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"

@@ -1,11 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
 #include <catch2/catch_test_macros.hpp>
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -24,8 +24,8 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
   svc.set_worker_registered("worker-1");
 
   {
-    tensorcast::daemon::v1::GetWorkerStatusRequest req;
-    tensorcast::daemon::v1::GetWorkerStatusResponse resp;
+    tensorcast::daemon::v2::GetWorkerStatusRequest req;
+    tensorcast::daemon::v2::GetWorkerStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetWorkerStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());
@@ -35,8 +35,8 @@ TEST_CASE("Status RPCs reflect worker registration", "[daemon][status]") {
   }
 
   {
-    tensorcast::daemon::v1::GetDetailedStatusRequest req;
-    tensorcast::daemon::v1::GetDetailedStatusResponse resp;
+    tensorcast::daemon::v2::GetDetailedStatusRequest req;
+    tensorcast::daemon::v2::GetDetailedStatusResponse resp;
     grpc::ServerContext ctx;
     auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
     REQUIRE(st.ok());

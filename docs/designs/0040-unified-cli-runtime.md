@@ -41,7 +41,7 @@ TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. T
 tensorcast
 ├── daemon
 │   ├── start [--config PATH] [--set KEY=VALUE] [--stable-bytes SIZE]
-│   │        [--mem-pool-size-bytes SIZE] [--pinned-pool-bytes SIZE] [--enable-rdma]
+│   │        [--mem-pool-size-bytes SIZE] [--enable-rdma]
 │   │        [--log-level LEVEL] [--global-store-endpoints HOST:PORT]
 │   │        [--global-store-mode connect|start|none]
 │   │        [--global-store-address HOST:PORT] [--session SID] [--json] [--blocking]
@@ -60,7 +60,7 @@ tensorcast
 - Default UX: `tensorcast global start` (if needed) → `tensorcast daemon start` with an explicit `global_store_mode` (`connect`/`start`). Start always waits for readiness (no startup timeout). Use `--blocking` to keep the process attached and stop it when the CLI exits; otherwise starts are detached. Daemon commands respect `current_session`; Global Store commands respect `current_global_session`.
 - `global_store_mode`: `connect` (must reach an existing GS), `start` (start a local GS if needed), `none` (skip HA). Default is `none`. `--global-store-address` implies `connect`.
 - `--set KEY=VALUE` overlays daemon config values using dot-paths (proto field names). Values are YAML-parsed and applied before HA injection and port backfill; repeat to set multiple fields.
-- Convenience flags (`--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`, `--enable-rdma`, `--log-level`) are translated into config overlays. `--global-store-endpoints` seeds both GS resolution (connect-only) and HA endpoint injection.
+- Convenience flags (`--stable-bytes`, `--mem-pool-size-bytes`, `--enable-rdma`, `--log-level`) are translated into config overlays. `--global-store-endpoints` seeds both GS resolution (connect-only) and HA endpoint injection.
 - Cluster identity is implicit. The runtime refuses to start a new GS when a cluster token already exists but is unreachable unless the caller explicitly cleans state.
 
 ## Runtime orchestrator (CLI + SDK)

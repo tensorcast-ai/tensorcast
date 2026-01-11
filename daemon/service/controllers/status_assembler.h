@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StatusAssembler: assemble status responses from StoreEngine and RefTracker
 
@@ -10,7 +10,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "core/store/store_engine.h"
 #include "daemon/ref_tracker.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -19,7 +19,7 @@ class StatusAssembler {
   // Populates memory pool info, GPU aggregation, CPU replicas, communication summary,
   // and global totals in the provided response. Caller is responsible for setting
   // top-level worker fields (is_registered, is_healthy, is_shutting_down, uptime, worker_id).
-  static void FillDetailedStatus(store::StoreEngine& engine, RefTracker& refs, v1::GetDetailedStatusResponse& resp) {
+  static void FillDetailedStatus(store::StoreEngine& engine, RefTracker& refs, v2::GetDetailedStatusResponse& resp) {
     auto* mp = resp.mutable_memory_pool_info();
     mp->set_total_size_bytes(engine.get_mem_pool_size());
     mp->set_available_bytes(engine.get_available_memory());
@@ -31,7 +31,7 @@ class StatusAssembler {
     int32_t total_replicas = 0;
 
     struct GpuAgg {
-      v1::GpuDeviceInfo* out;
+      v2::GpuDeviceInfo* out;
       bool mem_filled{false};
     };
 
@@ -62,7 +62,7 @@ class StatusAssembler {
         auto* r = it->second.out->add_loaded_replicas();
         r->set_artifact_id(info.artifact_id);
         r->set_artifact_size_bytes(info.size_bytes);
-        r->set_location(v1::MemoryLocation::MEMORY_LOCATION_GPU);
+        r->set_location(v2::MemoryLocation::MEMORY_LOCATION_GPU);
         r->set_loaded_timestamp(
             std::chrono::duration_cast<std::chrono::seconds>(info.load_time.time_since_epoch()).count());
         r->set_last_access_timestamp(
@@ -76,7 +76,7 @@ class StatusAssembler {
         auto* r = resp.add_cpu_replicas();
         r->set_artifact_id(info.artifact_id);
         r->set_artifact_size_bytes(info.size_bytes);
-        r->set_location(v1::MemoryLocation::MEMORY_LOCATION_PAGEABLE_CPU);
+        r->set_location(v2::MemoryLocation::MEMORY_LOCATION_PAGEABLE_CPU);
         r->set_loaded_timestamp(
             std::chrono::duration_cast<std::chrono::seconds>(info.load_time.time_since_epoch()).count());
         r->set_last_access_timestamp(

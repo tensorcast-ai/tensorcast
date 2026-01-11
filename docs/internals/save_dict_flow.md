@@ -7,10 +7,9 @@ sidebar_position: 2
 # `save_dict` Workflow
 
 This document explains how **tensorcast** persists a PyTorch `state_dict` using the Python helper
-`save_dict` and the underlying C++ Checkpoint subsystem. Registration into the distributed Store is
-handled by the session API (surfaced as `tensorcast.put` / `tensorcast.register`); `save_dict` remains the path for
-materialising disk checkpoints that the Store can subsequently ingest when disk fallback is
-requested.
+`tensorcast.testing.io_disk.save_dict` (test-only) and the underlying C++ Checkpoint subsystem.
+Registration into the distributed Store is handled by the daemon APIs (surfaced as
+`tensorcast.put` / `tensorcast.register`); production flows should not rely on local disk helpers.
 
 ---
 
@@ -29,9 +28,9 @@ The unified writer path (`save_model_to_disk`) is used for all saves. There is n
 
 | Layer | Function | File |
 |-------|----------|------|
-| Python API | `save_dict` | `tensorcast/api/_io_disk.py` |
+| Python test helper | `save_dict` | `tensorcast/testing/io_disk.py` |
+| Internal (guarded) | `tensorcast.api._io_disk.save_dict` | `tensorcast/api/_io_disk.py` |
 | PyBind11 wrapper | `save_model_to_disk_wrapper` | `tensorcast/csrc/checkpoint_py.cc` |
-| C++ Checkpoint API | `save_tensors_streaming` | `core/checkpoint/checkpoint_streaming.h` |
 | Streaming writer | `StreamingTensorWriter::write_tensor` | `core/checkpoint/streaming_tensor_writer.h` |
 | Low-level I/O | `AlignedBuffer::write_data` | `core/checkpoint/aligned_buffer.h` |
 | Tensor alignment | `TensorWriter::aligned_size` | `core/checkpoint/tensor_writer.h` |
@@ -44,26 +43,23 @@ The unified writer path (`save_model_to_disk`) is used for all saves. There is n
 sequenceDiagram
     autonumber
     participant U as "User code"
-    participant PY as "save_dict()\ntensorcast/api/_io_disk.py"
-    participant CPP as "save_tensors_streaming_wrapper\ncheckpoint_py.cc"
-    participant API as "save_tensors_streaming\ncheckpoint.h"
+    participant PY as "save_dict()\ntensorcast/testing/io_disk.py"
+    participant CPP as "save_model_to_disk_wrapper\ncheckpoint_py.cc"
     participant TW as "StreamingTensorWriter"
     participant FS as "File System"
 
     U->>PY: call save_dict(state_dict, disk_path)
     PY->>PY: Collect tensor_names & data_ptr/size
     PY->>CPP: save_model_to_disk(...)
-    CPP->>API: forward call
-    API->>TW: write_tensor(data, size)
+    CPP->>TW: write_tensor(data, size)
     loop For each chunk
         TW->>FS: pwrite() 10 GB partitions
     end
-    TW-->>API: tensor_offsets
-    API-->>CPP: tensor_offsets
-    CPP-->>PY: tensor_offsets
-    PY->>PY: write tensor_index.json
-    PY->>PY: optionally generate verification.json
-    PY-->>U: return (None)
+    TW-->>CPP: tensor_offsets
+    CPP->>FS: write tensor_index.json / tensor_index.cbor
+    CPP->>FS: write artifact_descriptor.json
+    CPP-->>PY: return descriptor
+    PY-->>U: return descriptor
 ```
 
 ---

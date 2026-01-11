@@ -15,6 +15,9 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **Efficient I/O**: Uses 4K-aligned buffers for optimal disk performance
 - **Partitioned Storage**: Automatically splits large models into manageable chunks (10GB per partition)
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
+- **CUDA IPC restores**: Uses the shared `core/cuda` IPC handle bytes/mapping abstraction so tensors share a single
+  reference-counted owner and the mapping is closed exactly once after the last tensor is released.
+- **Fake CUDA test mode**: When `TENSORCAST_CUDA_BACKEND=fake` is active in tests, device restores use shared-memory mappings and `device_id` restores fall back to CPU tensors.
 - **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)
 - **Python Bindings**: First-class PyTorch integration via `tensorcast.csrc.checkpoint_py` (zero-copy where possible), packaged through the Bazel target `//core:libcheckpoint_ext.so`
@@ -84,15 +87,15 @@ SC_CHECK_OK(writer.finalize());
 Python users can call the same functionality via the binding:
 
 ```python
-import tensorcast.store as scs
+from tensorcast.testing.io_disk import save_dict  # test-only helper
 
-# tensor_names, tensor_data prepared as before
+# state_dict is a mapping: name -> torch.Tensor
 cfg = {
     "num_buffers": 4,
     "buffer_size_mb": 256,
     "enable_async_write": True,
 }
-offsets = scs.save_tensors_streaming(tensor_names, tensor_data, "/path/to/replica", cfg)
+save_dict(state_dict, "/path/to/replica", streaming_config=cfg)
 ```
 
 ### Async Copy Manager (ACM) Usage

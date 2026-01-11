@@ -1,6 +1,6 @@
 #  Copyright (c) 2025, TensorCast Team.
 
-"""Repository for RFC-0014 key → artifact_id mappings.
+"""Repository for key -> artifact_id mappings.
 
 Schema: key_mappings(key PRIMARY KEY, artifact_id, replica_uuid, daemon_address,
 disk_path, ttl_seconds, created_at, updated_at)

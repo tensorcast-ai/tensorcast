@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import map_registration_error
 from tensorcast.api.store.views import ViewOrchestrator
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 def _make_canonical_index() -> CanonicalIndex:

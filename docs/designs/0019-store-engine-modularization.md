@@ -222,5 +222,4 @@ Targeted behavioral tests
 - `core/store/store_engine.cc`, `core/store/store_engine.h` (current implementation)
 - `core/store/materialization/dataplane/metadata/canonical_index.*`, `core/store/materialization/dataplane/metadata/safetensors_util.*`, `core/store/materialization/dataplane/metadata/source_hash.*`, `core/store/materialization/dataplane/sources/segment_plan_source.*`, `core/store/materialization/dataplane/view/view_plan_source.*`
 - `core/store/components/{replica_registry,device_manager,metrics_collector}.h`
-- 0007‑content‑addressed‑artifact‑id, 0014‑store‑session‑api‑modernization, 0016‑artifact‑view‑v1, 0018‑artifact‑view‑registration
-
+- 0007‑content‑addressed‑artifact‑id, [api-design](../architecture/api/api-design.md), 0016‑artifact‑view‑v1, 0018‑artifact‑view‑registration

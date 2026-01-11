@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/service/controllers/materialization_controller.h"
 
@@ -26,10 +26,10 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/deadline_utils.h"
 #include "daemon/status_utils.h"
 #include "nlohmann/json.hpp"
@@ -134,8 +134,48 @@ void record_disk_resolution_outcome(std::string_view outcome) {
   }
 }
 
+void record_lease_create_failed() {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+    ctr->Add(1.0);
+  } catch (...) {
+  }
+}
+
+void register_session_and_refs(
+    SessionsService& sessions,
+    RefTracker& refs,
+    SessionLifecycleManager* lifecycle,
+    const store::loading::ReplicaKey& replica_key,
+    std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal,
+    const std::string& replica_uuid,
+    int32_t pid,
+    std::string_view log_context) {
+  if (!replica_uuid.empty()) {
+    sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
+  }
+  if (pid <= 0) {
+    return;
+  }
+  refs.add_ref(replica_key, pid);
+  if (!lifecycle || replica_key.device.type != DeviceType::GPU) {
+    return;
+  }
+  SessionLifecycleManager::ReplicaSubject subj{
+      .artifact_id = replica_key.artifact_id, .device_id = replica_key.device.ordinal};
+  auto lid_or = lifecycle->create_use_lease(subj, pid);
+  if (!lid_or.ok()) {
+    LOG(WARNING) << "create_use_lease failed (" << log_context << "): artifact_id=" << replica_key.artifact_id
+                 << " dev=" << replica_key.device.ordinal << ": " << lid_or.status();
+    record_lease_create_failed();
+  }
+  // TTL prefetch pins via request flag removed; only UseLease is created.
+}
+
 struct DescriptorMetadata {
   bool found{false};
+  std::optional<std::string> schema_version;
   std::optional<std::string> artifact_id;
   std::optional<std::string> index_multihash;
   std::optional<std::string> data_multihash;
@@ -190,6 +230,7 @@ absl::StatusOr<DescriptorMetadata> load_descriptor_metadata(const std::filesyste
       return trimmed;
     };
     metadata.artifact_id = get_string("artifact_id");
+    metadata.schema_version = get_string("schema_version");
     metadata.index_multihash = get_string("index_multihash");
     metadata.data_multihash = get_string("data_multihash");
   } catch (const std::exception& ex) {
@@ -273,7 +314,7 @@ absl::StatusOr<std::vector<TargetOffsetEntry>> resolve_target_offsets(const v2::
 void record_materialize_into_target(
     std::string_view result,
     std::string_view reason,
-    v1::MaterializationSource source) {
+    v2::MaterializationSource source) {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateUInt64Counter("tc_store_materialize_into_target_total");
@@ -329,30 +370,66 @@ absl::Status validate_descriptor_against_index(
   return absl::OkStatus();
 }
 
-SourcePreference to_hint_preference(v1::SourcePreference preference) {
+SourcePreference to_hint_preference(v2::SourcePreference preference) {
   switch (preference) {
-    case v1::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P:
+    case v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P:
       return SourcePreference::kPreferP2P;
-    case v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK:
+    case v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK:
       return SourcePreference::kPreferDisk;
-    case v1::SourcePreference::SOURCE_PREFERENCE_AUTO:
-    case v1::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED:
+    case v2::SourcePreference::SOURCE_PREFERENCE_AUTO:
+    case v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED:
     default:
       return SourcePreference::kAuto;
   }
 }
 
-v1::MaterializationSource to_proto_source(MaterializationSource source) {
+struct ResolvedSourcePolicy {
+  v2::SourcePreference preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
+  bool allow_p2p{true};
+  bool allow_disk{true};
+};
+
+ResolvedSourcePolicy resolve_source_policy(const v2::SourcePolicy* policy, v2::SourcePreference legacy_preference) {
+  ResolvedSourcePolicy resolved;
+  resolved.preference = legacy_preference;
+  if (policy != nullptr) {
+    if (policy->preference() != v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
+      resolved.preference = policy->preference();
+    }
+    if (policy->has_allow_p2p()) {
+      resolved.allow_p2p = policy->allow_p2p();
+    }
+    if (policy->has_allow_disk()) {
+      resolved.allow_disk = policy->allow_disk();
+    }
+  }
+  if (resolved.preference == v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
+    resolved.preference = v2::SourcePreference::SOURCE_PREFERENCE_AUTO;
+  }
+  return resolved;
+}
+
+absl::Status validate_source_policy(const ResolvedSourcePolicy& policy) {
+  if (!policy.allow_p2p && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P) {
+    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
+  }
+  if (!policy.allow_disk && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK) {
+    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
+  }
+  return absl::OkStatus();
+}
+
+v2::MaterializationSource to_proto_source(MaterializationSource source) {
   switch (source) {
     case MaterializationSource::kDisk:
-      return v1::MaterializationSource::MATERIALIZATION_SOURCE_DISK;
+      return v2::MaterializationSource::MATERIALIZATION_SOURCE_DISK;
     case MaterializationSource::kP2P:
-      return v1::MaterializationSource::MATERIALIZATION_SOURCE_P2P;
+      return v2::MaterializationSource::MATERIALIZATION_SOURCE_P2P;
     case MaterializationSource::kLocalReplica:
-      return v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA;
+      return v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA;
     case MaterializationSource::kUnspecified:
     default:
-      return v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
+      return v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
   }
 }
 
@@ -371,13 +448,13 @@ uint64_t compute_generation_from_index(std::string_view canonical_index_json) {
   return value;
 }
 
-absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
+absl::StatusOr<ViewSpec> convert_view_spec(const v2::ViewSpec& proto) {
   ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : proto.tensors()) {
     store::loader::TensorViewOps ops;
     for (const auto& op_proto : ops_proto.ops()) {
       switch (op_proto.kind_case()) {
-        case v1::Op::kNarrow: {
+        case v2::Op::kNarrow: {
           const auto& narrow = op_proto.narrow();
           store::loader::NarrowOp op{
               .dim = static_cast<int32_t>(narrow.dim()),
@@ -387,7 +464,7 @@ absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
           ops.ops.push_back(ViewOp::Narrow(op));
           break;
         }
-        case v1::Op::kTranspose: {
+        case v2::Op::kTranspose: {
           const auto& transpose = op_proto.transpose();
           store::loader::TransposeOp op{
               .dim0 = static_cast<int32_t>(transpose.dim0()),
@@ -396,7 +473,7 @@ absl::StatusOr<ViewSpec> convert_view_spec(const v1::ViewSpec& proto) {
           ops.ops.push_back(ViewOp::Transpose(op));
           break;
         }
-        case v1::Op::KIND_NOT_SET:
+        case v2::Op::KIND_NOT_SET:
           return absl::InvalidArgumentError("view op kind not set");
       }
     }
@@ -417,14 +494,14 @@ bool spec_includes_transpose(const ViewSpec& spec) {
 }
 
 store::loading::TransformPlacement resolve_placement(
-    const v1::MaterializeReplicaRequest& req,
+    const v2::MaterializeReplicaRequest& req,
     const std::optional<ViewSpec>& spec) {
   switch (req.placement()) {
-    case v1::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
       return store::loading::TransformPlacement::kServer;
-    case v1::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
       return store::loading::TransformPlacement::kClient;
-    case v1::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
     default:
       break;
   }
@@ -609,7 +686,7 @@ absl::StatusOr<DescriptorBuildResult> build_descriptors_from_index(
 }
 
 absl::StatusOr<std::string> resolve_layout_json(
-    const v1::MaterializeReplicaResponse& v1_resp,
+    const v2::MaterializeReplicaResponse& v1_resp,
     const v2::MaterializeReplicaRequest& v2_req,
     store::StoreEngine& engine) {
   if (!v1_resp.view_index_json().empty()) {
@@ -639,12 +716,72 @@ absl::StatusOr<std::string> resolve_layout_json(
 }
 
 absl::StatusOr<std::string> resolve_layout_json_by_key(
-    const v1::MaterializeByKeyResponse& v1_resp,
+    const v2::MaterializeByKeyResponse& v1_resp,
     store::StoreEngine& engine) {
   if (!v1_resp.artifact_id().empty()) {
     return engine.get_canonical_index_by_id(v1_resp.artifact_id());
   }
   return absl::NotFoundError("canonical index JSON unavailable for key materialization");
+}
+
+template <typename ResponseT>
+absl::Status populate_materialize_payloads(
+    ResponseT& resp,
+    const std::string& layout_json,
+    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
+    const std::string& device_uuid,
+    const std::string& view_subset_hash,
+    bool wait_for_completion,
+    const std::string& replica_uuid,
+    const std::string* ticket_device_uuid,
+    const std::optional<store::loader::ViewPlan>& view_plan,
+    bool prefer_view_plan,
+    bool fill_view_index_bytes) {
+  const uint64_t generation = compute_generation_from_index(layout_json);
+  resp.set_canonical_index_bytes(layout_json);
+  resp.set_generation(generation);
+  if (fill_view_index_bytes && resp.view_index_bytes().empty()) {
+    resp.set_view_index_bytes(layout_json);
+  }
+
+  std::optional<DescriptorBuildResult> desc_result;
+  if (prefer_view_plan && view_plan.has_value() && !view_plan->is_identity) {
+    auto desc_or = build_descriptors_from_view_plan(*view_plan, tensor_names, device_uuid);
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    desc_result = std::move(*desc_or);
+  }
+  if (!desc_result.has_value()) {
+    auto desc_or = build_descriptors_from_index(layout_json, tensor_names, device_uuid);
+    if (!desc_or.ok()) {
+      return desc_or.status();
+    }
+    desc_result = std::move(*desc_or);
+  }
+
+  for (auto& desc : desc_result->descriptors) {
+    *resp.add_payloads() = std::move(desc);
+  }
+  if (!view_subset_hash.empty() || !desc_result->included_names.empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!view_subset_hash.empty()) {
+      subset->set_subset_hash(view_subset_hash);
+    }
+    for (const auto& name : desc_result->included_names) {
+      subset->add_tensor_names(name);
+    }
+  }
+  if (!wait_for_completion && !replica_uuid.empty()) {
+    auto* ticket = resp.mutable_ticket();
+    ticket->set_replica_uuid(replica_uuid);
+    ticket->set_status(resp.status());
+    if (ticket_device_uuid != nullptr && !ticket_device_uuid->empty()) {
+      ticket->set_device_uuid(*ticket_device_uuid);
+    }
+    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  }
+  return absl::OkStatus();
 }
 
 } // namespace
@@ -662,13 +799,23 @@ MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
 
 grpc::Status MaterializationController::materialize_replica(
     RpcContext& rctx,
-    const v1::MaterializeReplicaRequest& req,
-    v1::MaterializeReplicaResponse& resp) {
+    const v2::MaterializeReplicaRequest& req,
+    v2::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  const v1::SourcePreference preference = req.preference();
-  const bool prefer_disk = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
-  const bool prefer_p2p = preference == v1::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
-  const bool verify_checksums = req.has_verify_checksums() ? req.verify_checksums() : true;
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  const bool prefer_disk = policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
+  const bool prefer_p2p = policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
+  bool verify_checksums = true;
+  std::string disk_path;
+  const bool has_disk_fallback = req.has_disk_fallback() && !req.disk_fallback().disk_path().empty();
+  const bool has_legacy_disk = req.has_disk_path() && !req.disk_path().empty();
+  if (has_disk_fallback) {
+    disk_path = req.disk_fallback().disk_path();
+    verify_checksums = req.disk_fallback().verify_checksums();
+  } else if (has_legacy_disk) {
+    disk_path = req.disk_path();
+    verify_checksums = req.has_verify_checksums() ? req.verify_checksums() : true;
+  }
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
 
@@ -676,28 +823,40 @@ grpc::Status MaterializationController::materialize_replica(
     span->SetAttribute("tc.device.uuid", req.device_uuid());
   }
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.size_bytes()));
-  span->SetAttribute("tc.store.preference", static_cast<int64_t>(preference));
+  span->SetAttribute("tc.store.preference", static_cast<int64_t>(policy.preference));
+  span->SetAttribute("tc.store.allow_p2p", policy.allow_p2p);
+  span->SetAttribute("tc.store.allow_disk", policy.allow_disk);
 
-  using v1::MaterializeReplicaStatus;
+  using v2::MaterializeReplicaStatus;
   if (d_.is_shutting_down.load()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_status);
+  }
+
   const bool request_has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
-  const bool request_has_disk = req.has_disk_path() && !req.disk_path().empty();
+  const bool request_has_disk = has_disk_fallback || has_legacy_disk;
   if (!request_has_artifact && !request_has_disk) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id or disk_path is required"};
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id or disk_fallback.disk_path is required"};
+  }
+  if (request_has_disk && !policy.allow_disk) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
   }
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
 
   std::optional<std::filesystem::path> normalized_disk_path;
   if (request_has_disk) {
-    auto normalized_or = normalize_disk_path(req.disk_path(), storage_path_);
+    auto normalized_or = normalize_disk_path(disk_path, storage_path_);
     if (!normalized_or.ok()) {
       record_disk_path_denied();
-      LOG(WARNING) << "disk_path rejected: " << req.disk_path() << ": " << normalized_or.status();
+      LOG(WARNING) << "disk_path rejected: " << disk_path << ": " << normalized_or.status();
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
       return to_grpc_status(normalized_or.status());
     }
@@ -711,6 +870,7 @@ grpc::Status MaterializationController::materialize_replica(
 
   DescriptorMetadata descriptor_meta;
   std::optional<store::loader::IndexInfo> disk_index;
+  std::optional<store::loading::DiskMetadata> disk_metadata;
   if (normalized_disk_path.has_value()) {
     auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
     if (!descriptor_or.ok()) {
@@ -741,6 +901,23 @@ grpc::Status MaterializationController::materialize_replica(
         return to_grpc_status(idx_status);
       }
     }
+
+    store::loading::DiskMetadata metadata;
+    metadata.descriptor_present = descriptor_meta.found;
+    metadata.schema_version = descriptor_meta.schema_version;
+    metadata.index_multihash = descriptor_meta.index_multihash;
+    metadata.data_multihash = descriptor_meta.data_multihash;
+    if (disk_index.has_value()) {
+      metadata.canonical_index_json = disk_index->canonical_index_json;
+      if (!disk_index->index_multihash.empty()) {
+        metadata.index_multihash = disk_index->index_multihash;
+      }
+      if (disk_index->total_size_bytes > 0) {
+        metadata.logical_total_size = disk_index->total_size_bytes;
+      }
+      metadata.is_safetensors = disk_index->is_safetensors;
+    }
+    disk_metadata = std::move(metadata);
   }
 
   std::optional<std::string> artifact_id =
@@ -775,7 +952,7 @@ grpc::Status MaterializationController::materialize_replica(
   std::optional<std::string> request_view_id;
 
   switch (req.view_identity_case()) {
-    case v1::MaterializeReplicaRequest::kView: {
+    case v2::MaterializeReplicaRequest::kView: {
       if (!has_artifact) {
         return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id for canonical planning"};
       }
@@ -803,7 +980,7 @@ grpc::Status MaterializationController::materialize_replica(
       }
       break;
     }
-    case v1::MaterializeReplicaRequest::kViewId: {
+    case v2::MaterializeReplicaRequest::kViewId: {
       if (!req.view_id().empty()) {
         if (!has_artifact) {
           return {StatusCode::INVALID_ARGUMENT, "view_id requires artifact_id for routing"};
@@ -812,12 +989,43 @@ grpc::Status MaterializationController::materialize_replica(
       }
       break;
     }
-    case v1::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
+    case v2::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
       break;
   }
   if (request_view_id.has_value()) {
     span->SetAttribute("tc.view.id", *request_view_id);
   }
+
+  auto finalize_response = [&]() -> grpc::Status {
+    if (!resp.view_index_json().empty() && resp.view_index_bytes().empty()) {
+      resp.set_view_index_bytes(resp.view_index_json());
+    }
+
+    auto layout_or = resolve_layout_json(resp, req, d_.engine);
+    if (!layout_or.ok()) {
+      return to_grpc_status(layout_or.status());
+    }
+    const bool prefer_view_plan =
+        req.view_identity_case() == v2::MaterializeReplicaRequest::kView && resp.view_index_json().empty();
+    const std::string* ticket_device_uuid = req.device_uuid().empty() ? nullptr : &req.device_uuid();
+    absl::Status payload_status = populate_materialize_payloads(
+        resp,
+        *layout_or,
+        req.tensor_names(),
+        req.device_uuid(),
+        req.view_subset_hash(),
+        req.wait_for_completion(),
+        req.replica_uuid(),
+        ticket_device_uuid,
+        view_plan,
+        prefer_view_plan,
+        /*fill_view_index_bytes=*/false);
+    if (!payload_status.ok()) {
+      return to_grpc_status(payload_status);
+    }
+    rctx.mark_success();
+    return Status::OK;
+  };
 
   // Artifact LIP fast path: try cross-device consumption
   const bool view_requested = view_spec.has_value() || request_view_id.has_value();
@@ -826,29 +1034,8 @@ grpc::Status MaterializationController::materialize_replica(
         resolved_artifact_id,
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
-          if (!req.replica_uuid().empty()) {
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
-          }
-          if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid());
-            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
-              SessionLifecycleManager::ReplicaSubject subj{
-                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-              if (!lid_or.ok()) {
-                LOG(WARNING) << "create_use_lease failed (LIP path): artifact_id=" << rkey.artifact_id
-                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
-                try {
-                  static auto meter =
-                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-                  ctr->Add(1.0);
-                } catch (...) {
-                }
-              }
-              // TTL prefetch pins via request flag removed; only UseLease is created.
-            }
-          }
+          register_session_and_refs(
+              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP path");
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -859,10 +1046,9 @@ grpc::Status MaterializationController::materialize_replica(
       }
     } else if (*satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-      resp.set_source(v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
+      resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      rctx.mark_success();
-      return Status::OK;
+      return finalize_response();
     }
   }
 
@@ -873,11 +1059,16 @@ grpc::Status MaterializationController::materialize_replica(
   }
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
-  hints.source_preference = to_hint_preference(preference);
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
   if (has_disk)
     hints.disk_path = normalized_disk_path->string();
+  if (disk_metadata.has_value()) {
+    hints.disk_metadata = std::move(*disk_metadata);
+  }
   if (view_spec.has_value() || request_view_id.has_value()) {
     store::loading::VariantIdentity variant;
     if (has_artifact) {
@@ -909,35 +1100,21 @@ grpc::Status MaterializationController::materialize_replica(
   const auto& handle = *result;
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
-  }
-  if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid());
-    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
-      SessionLifecycleManager::ReplicaSubject subj{
-          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine path): artifact_id=" << handle.replica_key.artifact_id
-                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-          ctr->Add(1.0);
-        } catch (...) {
-        }
-      }
-      // TTL prefetch pins via request flag removed; only UseLease is created.
-    }
-  }
+  register_session_and_refs(
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      handle.replica_key,
+      handle.ready_signal,
+      req.replica_uuid(),
+      req.pid(),
+      "engine path");
   if (has_disk)
     resp.set_disk_path(normalized_disk_path->string());
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(
-        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
+    auto handle_view = handle.cuda_ipc_handle.as_string_view();
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
   }
   if (handle.view_index_json.has_value()) {
     resp.set_view_index_json(*handle.view_index_json);
@@ -971,25 +1148,57 @@ grpc::Status MaterializationController::materialize_replica(
   if (handle.view_data_hash.has_value()) {
     resp.set_view_data_hash(*handle.view_data_hash);
   }
-  rctx.mark_success();
-  return Status::OK;
+  return finalize_response();
 }
 
 grpc::Status MaterializationController::materialize_by_key(
     RpcContext& rctx,
-    const v1::MaterializeByKeyRequest& req,
-    v1::MaterializeByKeyResponse& resp) {
+    const v2::MaterializeByKeyRequest& req,
+    v2::MaterializeByKeyResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req.key());
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  span->SetAttribute("tc.store.preference", static_cast<int64_t>(policy.preference));
+  span->SetAttribute("tc.store.allow_p2p", policy.allow_p2p);
+  span->SetAttribute("tc.store.allow_disk", policy.allow_disk);
 
-  using v1::MaterializeReplicaStatus;
+  using v2::MaterializeReplicaStatus;
   if (d_.is_shutting_down.load()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_status);
+  }
   if (req.key().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "key is required"};
   }
+
+  auto finalize_response = [&]() -> grpc::Status {
+    auto layout_or = resolve_layout_json_by_key(resp, d_.engine);
+    if (!layout_or.ok()) {
+      return to_grpc_status(layout_or.status());
+    }
+    absl::Status payload_status = populate_materialize_payloads(
+        resp,
+        *layout_or,
+        req.tensor_names(),
+        /*device_uuid=*/"",
+        req.view_subset_hash(),
+        req.wait_for_completion(),
+        req.replica_uuid(),
+        /*ticket_device_uuid=*/nullptr,
+        /*view_plan=*/std::nullopt,
+        /*prefer_view_plan=*/false,
+        /*fill_view_index_bytes=*/true);
+    if (!payload_status.ok()) {
+      return to_grpc_status(payload_status);
+    }
+    rctx.mark_success();
+    return Status::OK;
+  };
 
   auto mapping_or = d_.engine.resolve_key_mapping(req.key());
   if (!mapping_or.ok()) {
@@ -999,7 +1208,7 @@ grpc::Status MaterializationController::materialize_by_key(
   const auto& mapping = *mapping_or;
   span->SetAttribute("tc.artifact.id", mapping.artifact_id);
   std::string used_disk_path;
-  if (!mapping.disk_path.empty()) {
+  if (!mapping.disk_path.empty() && policy.allow_disk) {
     auto normalized_or = normalize_disk_path(mapping.disk_path, storage_path_);
     if (!normalized_or.ok()) {
       record_disk_path_denied();
@@ -1015,29 +1224,8 @@ grpc::Status MaterializationController::materialize_by_key(
         mapping.artifact_id,
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
-          if (!req.replica_uuid().empty()) {
-            d_.sessions.put_with_verification(req.replica_uuid(), rkey, nullptr);
-          }
-          if (req.pid() > 0) {
-            d_.refs.add_ref(rkey, req.pid());
-            if (d_.lifecycle && rkey.device.type == DeviceType::GPU) {
-              SessionLifecycleManager::ReplicaSubject subj{
-                  .artifact_id = rkey.artifact_id, .device_id = rkey.device.ordinal};
-              auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-              if (!lid_or.ok()) {
-                LOG(WARNING) << "create_use_lease failed (LIP by-key): artifact_id=" << rkey.artifact_id
-                             << " dev=" << rkey.device.ordinal << ": " << lid_or.status();
-                try {
-                  static auto meter =
-                      opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-                  static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-                  ctr->Add(1.0);
-                } catch (...) {
-                }
-              }
-              // MaterializeByKey: no TTL prefetch; only UseLease is created.
-            }
-          }
+          register_session_and_refs(
+              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP by-key");
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -1052,10 +1240,9 @@ grpc::Status MaterializationController::materialize_by_key(
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_artifact_id(mapping.artifact_id);
       resp.set_used_disk_path(used_disk_path);
-      resp.set_source(v1::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
+      resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      rctx.mark_success();
-      return Status::OK;
+      return finalize_response();
     }
   }
 
@@ -1073,6 +1260,9 @@ grpc::Status MaterializationController::materialize_by_key(
   if (!used_disk_path.empty()) {
     hints.disk_path = used_disk_path;
   }
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
 
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
   if (!result.ok()) {
@@ -1080,255 +1270,135 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
-  if (!req.replica_uuid().empty()) {
-    d_.sessions.put_with_verification(req.replica_uuid(), handle.replica_key, handle.ready_signal);
-  }
-  if (req.pid() > 0) {
-    d_.refs.add_ref(handle.replica_key, req.pid());
-    if (d_.lifecycle && handle.replica_key.device.type == DeviceType::GPU) {
-      SessionLifecycleManager::ReplicaSubject subj{
-          .artifact_id = handle.replica_key.artifact_id, .device_id = handle.replica_key.device.ordinal};
-      auto lid_or = d_.lifecycle->create_use_lease(subj, req.pid());
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine by-key): artifact_id=" << handle.replica_key.artifact_id
-                     << " dev=" << handle.replica_key.device.ordinal << ": " << lid_or.status();
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-          ctr->Add(1.0);
-        } catch (...) {
-        }
-      }
-      // MaterializeByKey: no TTL prefetch; only UseLease is created.
-    }
-  }
+  register_session_and_refs(
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      handle.replica_key,
+      handle.ready_signal,
+      req.replica_uuid(),
+      req.pid(),
+      "engine by-key");
   if (handle.cuda_ipc_handle.is_valid()) {
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(
-        handle.cuda_ipc_handle.bytes.data(), handle.cuda_ipc_handle.bytes.size());
+    auto handle_view = handle.cuda_ipc_handle.as_string_view();
+    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);
   resp.set_used_disk_path(used_disk_path);
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  rctx.mark_success();
-  return Status::OK;
-}
-
-grpc::Status MaterializationController::materialize_replica_v2(
-    RpcContext& rctx,
-    const v2::MaterializeReplicaRequest& req,
-    v2::MaterializeReplicaResponse& resp) {
-  v1::MaterializeReplicaRequest v1_req;
-  v1_req.set_verify_checksums(true);
-  if (req.has_artifact_id() && !req.artifact_id().empty()) {
-    v1_req.set_artifact_id(req.artifact_id());
-  }
-  if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
-    v1_req.set_disk_path(req.disk_fallback().disk_path());
-    v1_req.set_verify_checksums(req.disk_fallback().verify_checksums());
-  }
-  v1_req.set_replica_uuid(req.replica_uuid());
-  v1_req.set_device_uuid(req.device_uuid());
-  v1_req.set_target_device_type(req.target_device_type());
-  v1_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
-  v1_req.set_pid(req.pid());
-  v1_req.set_size_bytes(req.size_bytes());
-  v1_req.set_preference(req.preference());
-  v1_req.set_placement(req.placement());
-  switch (req.view_identity_case()) {
-    case v2::MaterializeReplicaRequest::kView:
-      v1_req.mutable_view()->CopyFrom(req.view());
-      break;
-    case v2::MaterializeReplicaRequest::kViewId:
-      v1_req.set_view_id(req.view_id());
-      break;
-    case v2::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
-      break;
-  }
-
-  v1::MaterializeReplicaResponse v1_resp;
-  auto status = materialize_replica(rctx, v1_req, v1_resp);
-  if (!status.ok()) {
-    return status;
-  }
-
-  if (!v1_resp.artifact_id().empty()) {
-    resp.set_artifact_id(v1_resp.artifact_id());
-  } else if (req.has_artifact_id()) {
-    resp.set_artifact_id(req.artifact_id());
-  }
-  resp.set_disk_path(v1_resp.disk_path());
-  resp.set_status(v1_resp.status());
-  resp.set_source(v1_resp.source());
-  if (v1_resp.has_mem_handle()) {
-    resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
-  }
-  if (!v1_resp.view_index_json().empty()) {
-    resp.set_view_index_bytes(v1_resp.view_index_json());
-  }
-
-  auto layout_or = resolve_layout_json(v1_resp, req, d_.engine);
-  if (!layout_or.ok()) {
-    return to_grpc_status(layout_or.status());
-  }
-  const uint64_t generation = compute_generation_from_index(*layout_or);
-  resp.set_canonical_index_bytes(*layout_or);
-  resp.set_generation(generation);
-
-  std::optional<DescriptorBuildResult> desc_result;
-  if (req.view_identity_case() == v2::MaterializeReplicaRequest::kView && v1_resp.view_index_json().empty()) {
-    auto spec_or = convert_view_spec(req.view());
-    if (!spec_or.ok()) {
-      return to_grpc_status(spec_or.status());
-    }
-    auto plan_or = store::StoreEngine::compute_view_plan(*layout_or, *spec_or);
-    if (!plan_or.ok()) {
-      return to_grpc_status(plan_or.status());
-    }
-    if (!plan_or->is_identity) {
-      auto desc_or = build_descriptors_from_view_plan(*plan_or, req.tensor_names(), req.device_uuid());
-      if (!desc_or.ok()) {
-        return to_grpc_status(desc_or.status());
-      }
-      desc_result = std::move(*desc_or);
-    }
-  }
-  if (!desc_result.has_value()) {
-    auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), req.device_uuid());
-    if (!desc_or.ok()) {
-      return to_grpc_status(desc_or.status());
-    }
-    desc_result = std::move(*desc_or);
-  }
-  for (auto& desc : desc_result->descriptors) {
-    *resp.add_payloads() = std::move(desc);
-  }
-  if (!req.view_subset_hash().empty() || !desc_result->included_names.empty()) {
-    auto* subset = resp.mutable_view_subset();
-    if (!req.view_subset_hash().empty()) {
-      subset->set_subset_hash(req.view_subset_hash());
-    }
-    for (const auto& name : desc_result->included_names) {
-      subset->add_tensor_names(name);
-    }
-  }
-  if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
-    auto* ticket = resp.mutable_ticket();
-    ticket->set_replica_uuid(req.replica_uuid());
-    ticket->set_status(v1_resp.status());
-    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
-  }
-  return status;
+  return finalize_response();
 }
 
 grpc::Status MaterializationController::materialize_into_target(
     RpcContext& rctx,
     const v2::MaterializeIntoTargetRequest& req,
     v2::MaterializeIntoTargetResponse& resp) {
-  auto& span = rctx.span();
   if (d_.is_shutting_down.load()) {
     record_materialize_into_target(
-        "error", "unavailable", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "unavailable", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  absl::Status policy_status = validate_source_policy(policy);
+  if (!policy_status.ok()) {
+    record_materialize_into_target(
+        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(policy_status);
   }
 
   const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
   const bool has_key = req.has_key() && !req.key().empty();
   if (has_key) {
     record_materialize_into_target(
-        "error", "key_not_supported", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "key-based requests not supported for MaterializeIntoTarget"};
   }
   if (!has_artifact_id) {
     record_materialize_into_target(
-        "error", "missing_artifact_id", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required for MaterializeIntoTarget"};
   }
   if (req.has_disk_fallback() && req.disk_fallback().disk_path().empty()) {
     record_materialize_into_target(
-        "error", "disk_fallback_empty", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "disk_fallback_empty", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "disk_fallback.disk_path must not be empty"};
   }
   if (!req.has_target_layout()) {
     record_materialize_into_target(
-        "error", "layout_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
   }
   if (req.tensor_names_size() > 0 || !req.view_subset_hash().empty()) {
     record_materialize_into_target(
-        "error", "subset_not_supported", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "subset_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "tensor_names/view_subset_hash not supported for MaterializeIntoTarget"};
   }
   if (req.view_identity_case() != v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET) {
     record_materialize_into_target(
-        "error", "view_not_supported", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "view_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "view/view_id not supported for MaterializeIntoTarget"};
   }
   if (req.device_uuid().empty()) {
     record_materialize_into_target(
-        "error", "device_uuid_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "device_uuid is required"};
   }
   if (req.pid() <= 0) {
     record_materialize_into_target(
-        "error", "owner_pid_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "pid is required for MaterializeIntoTarget"};
   }
 
   const auto& layout = req.target_layout();
   if (layout.layout_kind() != v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED) {
     record_materialize_into_target(
-        "error", "layout_kind_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "layout_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Only LAYOUT_KIND_COALESCED_UNSPECIFIED is supported"};
   }
   if (layout.index_kind() != v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
     record_materialize_into_target(
-        "error", "index_kind_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Only INDEX_KIND_CANONICAL_UNSPECIFIED is supported"};
   }
   if (layout.storages_size() != 1) {
     record_materialize_into_target(
-        "error", "multi_storage", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "multi_storage", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "COALESCED layouts must include exactly one storage entry"};
   }
   if (layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS &&
       layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
     record_materialize_into_target(
-        "error", "tensor_spec_kind_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "tensor_spec_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Unsupported tensor_spec_kind for MaterializeIntoTarget"};
   }
 
   const auto& storage = layout.storages(0);
-  if (storage.storage_source_case() != v1::StorageEntry::kVramRegionId) {
+  if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
     record_materialize_into_target(
-        "error", "storage_not_region", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
   }
-  if (!storage.has_region_base_offset()) {
-    record_materialize_into_target(
-        "error", "region_base_offset_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "region_base_offset is required for region-backed targets"};
-  }
 
-  const auto device = d_.devices.From(v1::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
   if (storage.device_id() != device.ordinal) {
     record_materialize_into_target(
-        "error", "device_uuid_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
   }
 
   auto canonical_json_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
-        "error", "index_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(canonical_json_or.status());
   }
   auto index_table_or = parse_canonical_index(*canonical_json_or);
   if (!index_table_or.ok()) {
     record_materialize_into_target(
-        "error", "index_parse_failed", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(index_table_or.status());
   }
   const CanonicalIndexTable& index_table = *index_table_or;
@@ -1337,51 +1407,51 @@ grpc::Status MaterializationController::materialize_into_target(
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
     record_materialize_into_target(
-        "error", "offsets_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(offsets_or.status());
   }
   const auto& offsets = *offsets_or;
   if (offsets.empty()) {
     record_materialize_into_target(
-        "error", "offsets_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
   if (offsets.size() != index_table.entries.size()) {
     record_materialize_into_target(
-        "error", "tensor_name_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout must include every canonical tensor"};
   }
   for (const auto& entry : offsets) {
     auto it = index_table.entries.find(entry.name);
     if (it == index_table.entries.end()) {
       record_materialize_into_target(
-          "error", "tensor_name_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
     }
     if (entry.logical_length != it->second.logical_length) {
       record_materialize_into_target(
-          "error", "layout_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
     }
     if (entry.storage_offset != it->second.logical_offset) {
       record_materialize_into_target(
-          "error", "offset_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset must match logical offset"};
     }
     if (entry.storage_id != storage.storage_id()) {
       record_materialize_into_target(
-          "error", "storage_id_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout storage_id mismatch"};
     }
   }
   if (storage.storage_length() != logical_total_size) {
     record_materialize_into_target(
-        "error", "storage_length_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "storage_length must cover full logical space"};
   }
 
   if (rctx.server_context().IsCancelled()) {
-    record_materialize_into_target("error", "cancelled", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    record_materialize_into_target("error", "cancelled", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::CANCELLED, "request cancelled before transfer"};
   }
 
@@ -1392,19 +1462,19 @@ grpc::Status MaterializationController::materialize_into_target(
     record_materialize_into_target(
         "error",
         poisoned ? "region_poisoned" : "region_missing",
-        v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(st);
   }
   auto region_desc = *region_desc_or;
   if (region_desc.device_id != storage.device_id()) {
     record_materialize_into_target(
-        "error", "device_uuid_mismatch", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     d_.regions.release(storage.vram_region_id()).IgnoreError();
     return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
   }
-  const uint64_t region_end = storage.region_base_offset() + storage.storage_length();
+  const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
   if (region_end > region_desc.size_bytes) {
-    record_materialize_into_target("error", "bounds", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     d_.regions.release(storage.vram_region_id()).IgnoreError();
     return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
   }
@@ -1424,34 +1494,41 @@ grpc::Status MaterializationController::materialize_into_target(
   auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
   if (!handle_or.ok()) {
     record_materialize_into_target(
-        "error", "region_missing", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(handle_or.status());
   }
-  auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+  auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
   if (!map_or.ok()) {
     record_materialize_into_target(
-        "error", "map_failed", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(map_or.status());
   }
 
   store::loading::MaterializeHints hints;
   hints.artifact_id = req.artifact_id();
   if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
+    if (!policy.allow_disk) {
+      record_materialize_into_target(
+          "error", "disk_fallback_disallowed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
+    }
     auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
     if (!normalized_or.ok()) {
       record_disk_path_denied();
       record_materialize_into_target(
-          "error", "disk_fallback_invalid", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "disk_fallback_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return to_grpc_status(normalized_or.status());
     }
     hints.disk_path = normalized_or->string();
   }
-  hints.source_preference = to_hint_preference(req.preference());
+  hints.source_preference = to_hint_preference(policy.preference);
+  hints.allow_p2p = policy.allow_p2p;
+  hints.allow_disk = policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
 
   record_materialize_into_target_verification_skipped();
 
-  void* region_base_ptr = static_cast<uint8_t*>(map_or->get()) + static_cast<uint64_t>(storage.region_base_offset());
+  void* region_base_ptr = static_cast<uint8_t*>(map_or->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
   auto result_or = d_.engine.materialize_into_target(
       device, gsl::not_null<void*>{region_base_ptr}, logical_total_size, *canonical_json_or, generation, hints);
@@ -1459,82 +1536,22 @@ grpc::Status MaterializationController::materialize_into_target(
     if (absl::IsDataLoss(result_or.status())) {
       d_.regions.mark_poisoned(storage.vram_region_id()).IgnoreError();
       record_materialize_into_target(
-          "error", "transfer_failed", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "transfer_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     } else {
       record_materialize_into_target(
-          "error", "transfer_error", v1::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          "error", "transfer_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     }
     return to_grpc_status(result_or.status());
   }
 
   resp.set_artifact_id(req.artifact_id());
-  resp.set_status(v1::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
   resp.set_canonical_index_bytes(*canonical_json_or);
   resp.set_generation(generation);
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();
   return Status::OK;
-}
-
-grpc::Status MaterializationController::materialize_by_key_v2(
-    RpcContext& rctx,
-    const v2::MaterializeByKeyRequest& req,
-    v2::MaterializeByKeyResponse& resp) {
-  v1::MaterializeByKeyRequest v1_req;
-  v1_req.set_key(req.key());
-  v1_req.set_device_id(req.device_id());
-  v1_req.set_pinned_allocation_timeout_ms(req.pinned_allocation_timeout_ms());
-  v1_req.set_replica_uuid(req.replica_uuid());
-  v1_req.set_pid(req.pid());
-
-  v1::MaterializeByKeyResponse v1_resp;
-  auto status = materialize_by_key(rctx, v1_req, v1_resp);
-  if (!status.ok()) {
-    return status;
-  }
-
-  resp.set_status(v1_resp.status());
-  resp.set_artifact_id(v1_resp.artifact_id());
-  resp.set_used_disk_path(v1_resp.used_disk_path());
-  resp.set_source(v1_resp.source());
-  if (v1_resp.has_mem_handle()) {
-    resp.mutable_mem_handle()->CopyFrom(v1_resp.mem_handle());
-  }
-
-  auto layout_or = resolve_layout_json_by_key(v1_resp, d_.engine);
-  if (!layout_or.ok()) {
-    return to_grpc_status(layout_or.status());
-  }
-  const uint64_t generation = compute_generation_from_index(*layout_or);
-  resp.set_canonical_index_bytes(*layout_or);
-  resp.set_generation(generation);
-
-  auto desc_or = build_descriptors_from_index(*layout_or, req.tensor_names(), /*device_uuid=*/"");
-  if (!desc_or.ok()) {
-    return to_grpc_status(desc_or.status());
-  }
-  for (auto& desc : desc_or->descriptors) {
-    *resp.add_payloads() = std::move(desc);
-  }
-  if (!req.view_subset_hash().empty() || !desc_or->included_names.empty()) {
-    auto* subset = resp.mutable_view_subset();
-    if (!req.view_subset_hash().empty()) {
-      subset->set_subset_hash(req.view_subset_hash());
-    }
-    for (const auto& name : desc_or->included_names) {
-      subset->add_tensor_names(name);
-    }
-  }
-  if (!req.wait_for_completion() && !req.replica_uuid().empty()) {
-    auto* ticket = resp.mutable_ticket();
-    ticket->set_replica_uuid(req.replica_uuid());
-    ticket->set_status(v1_resp.status());
-    *ticket->mutable_created_at() = google::protobuf::util::TimeUtil::GetCurrentTime();
-  }
-  // Fill view index bytes with resolved canonical to aid clients that expect a layout hint.
-  resp.set_view_index_bytes(*layout_or);
-  return status;
 }
 
 grpc::Status MaterializationController::resolve_artifact_from_disk(
@@ -1620,8 +1637,8 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
 
 grpc::Status MaterializationController::get_artifact_index_by_id(
     RpcContext& rctx,
-    const v1::GetArtifactIndexByIdRequest& req,
-    v1::GetArtifactIndexByIdResponse& resp) {
+    const v2::GetArtifactIndexByIdRequest& req,
+    v2::GetArtifactIndexByIdResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.artifact.id", req.artifact_id());
 
@@ -1641,8 +1658,8 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
 
 grpc::Status MaterializationController::confirm(
     RpcContext& rctx,
-    const v1::ConfirmReplicaRequest& req,
-    v1::ConfirmReplicaResponse& resp) const {
+    const v2::ConfirmReplicaRequest& req,
+    v2::ConfirmReplicaResponse& resp) const {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.disk.path", req.disk_path());
@@ -1682,8 +1699,8 @@ grpc::Status MaterializationController::confirm(
 
 grpc::Status MaterializationController::unload(
     RpcContext& rctx,
-    const v1::UnloadReplicaRequest& req,
-    v1::UnloadReplicaResponse& resp) {
+    const v2::UnloadReplicaRequest& req,
+    v2::UnloadReplicaResponse& resp) {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs()) {
     if (!req.disk_path().empty())
@@ -1693,7 +1710,7 @@ grpc::Status MaterializationController::unload(
   }
   resp.set_disk_path(req.disk_path());
 
-  if (req.target_device_type() == v1::DeviceType::DEVICE_TYPE_DISK) {
+  if (req.target_device_type() == v2::DeviceType::DEVICE_TYPE_DISK) {
     resp.set_code(0);
     rctx.mark_success();
     return Status::OK;
@@ -1749,8 +1766,8 @@ grpc::Status MaterializationController::unload(
 
 grpc::Status MaterializationController::wait_verification(
     RpcContext& rctx,
-    const v1::WaitReplicaVerificationRequest& req,
-    v1::WaitReplicaVerificationResponse& resp) {
+    const v2::WaitReplicaVerificationRequest& req,
+    v2::WaitReplicaVerificationResponse& resp) {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs()) {
     if (!req.replica_uuid().empty())
@@ -1770,7 +1787,7 @@ grpc::Status MaterializationController::wait_verification(
   }
   auto entry = d_.sessions.get(req.replica_uuid());
   if (!entry.has_value()) {
-    resp.set_status(v1::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
+    resp.set_status(v2::VerificationStatus::VERIFICATION_STATUS_UNSPECIFIED);
     rctx.mark_success();
     return Status::OK;
   }
@@ -1782,15 +1799,15 @@ grpc::Status MaterializationController::wait_verification(
     return {StatusCode::DEADLINE_EXCEEDED, "verification wait timeout"};
   }
   if (st.ok()) {
-    resp.set_status(v1::VerificationStatus::VERIFICATION_STATUS_PASSED);
-    d_.sessions.update_verification_status(req.replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_PASSED);
+    resp.set_status(v2::VerificationStatus::VERIFICATION_STATUS_PASSED);
+    d_.sessions.update_verification_status(req.replica_uuid(), v2::VerificationStatus::VERIFICATION_STATUS_PASSED);
     rctx.mark_success();
     return Status::OK;
   }
-  resp.set_status(v1::VerificationStatus::VERIFICATION_STATUS_FAILED);
+  resp.set_status(v2::VerificationStatus::VERIFICATION_STATUS_FAILED);
   resp.set_err_msg(std::string(st.message()));
   d_.sessions.update_verification_status(
-      req.replica_uuid(), v1::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
+      req.replica_uuid(), v2::VerificationStatus::VERIFICATION_STATUS_FAILED, std::string(st.message()));
   return to_grpc_status(st);
 }
 

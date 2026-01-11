@@ -240,7 +240,7 @@ class StoreEngine {
   // Deregister a memory replica from Global Store using worker identity.
   [[nodiscard]] absl::Status unregister_replica_from_global_store(std::string_view artifact_id, int device_id);
 
-  // RFC-0014: Key-mapping wrappers delegating to Global Store client. These
+  // Key-mapping wrappers delegating to Global Store client. These
   // avoid exposing the client to callers and ensure we always use the Engine's
   // configured Global Store connection.
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view key);

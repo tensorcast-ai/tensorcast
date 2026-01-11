@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -8,9 +8,7 @@ from typing import Literal, Union
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tensorcast.common.identity import ArtifactIdKind
-from tensorcast.proto.daemon.v1 import (
-    store_daemon_pb2 as store_daemon_pb2,
-)
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 # ---------------------------------------------------------------------------
 # Canonical typed models used across the Python SDK in place of raw dicts
@@ -227,25 +225,27 @@ Plan = Union[CoalescedPlan, LeasePlan, StableDramPlan]
 class LeaseSegment(BaseModel):
     """A single lease segment exported from CUDA IPC and fed to the daemon.
 
-    dst_offset is mandatory to eliminate ordering assumptions and reduce
-    optional branching in downstream logic.
+    A LeaseSegment maps a physical storage window (referenced by storage_id) into
+    the artifact's logical address space.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    device_id: int
-    cuda_ipc_handle: bytes | None = None
-    base_addr: int = 0
+    storage_id: str
+    storage_offset: int = 0
+    artifact_offset: int
     length: int
-    dst_offset: int
-    storage_id: str | None = None
 
     @model_validator(mode="after")
-    def _validate_source(self) -> "LeaseSegment":
-        if self.cuda_ipc_handle is None and not self.storage_id:
-            raise ValueError(
-                "LeaseSegment requires either cuda_ipc_handle or storage_id"
-            )
+    def _validate_offsets(self) -> "LeaseSegment":
+        if not self.storage_id:
+            raise ValueError("LeaseSegment.storage_id must not be empty")
+        if self.storage_offset < 0:
+            raise ValueError("LeaseSegment.storage_offset must be non-negative")
+        if self.artifact_offset < 0:
+            raise ValueError("LeaseSegment.artifact_offset must be non-negative")
+        if self.length <= 0:
+            raise ValueError("LeaseSegment.length must be positive")
         return self
 
 
@@ -259,7 +259,7 @@ class RegisterStorage(BaseModel):
     cuda_ipc_handle: bytes | None = None
     storage_length: int
     vram_region_id: str | None = None
-    region_base_offset: int | None = None
+    mapping_base_offset: int = 0
 
     @model_validator(mode="after")
     def _validate_source(self) -> "RegisterStorage":
@@ -269,10 +269,8 @@ class RegisterStorage(BaseModel):
             raise ValueError(
                 "RegisterStorage requires exactly one of cuda_ipc_handle or vram_region_id"
             )
-        if has_region and self.region_base_offset is None:
-            raise ValueError(
-                "RegisterStorage.region_base_offset is required when vram_region_id is set"
-            )
+        if self.mapping_base_offset < 0:
+            raise ValueError("RegisterStorage.mapping_base_offset must be non-negative")
         return self
 
 

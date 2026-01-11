@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ import grpc
 import yaml
 
 from tensorcast.cli_utils.proc import build_daemon_process_env
-from tensorcast.proto.daemon.v1 import store_daemon_pb2 as _pb2
-from tensorcast.proto.daemon.v1 import store_daemon_pb2_grpc as _pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2 as _pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc as _pb2_grpc
 
 
 def _resolve_daemon_binary(repo_root: Path) -> Path:
@@ -74,8 +74,11 @@ def start_daemon_binary(
     port = int(port_s)
     storage_path.mkdir(parents=True, exist_ok=True)
     env = build_daemon_process_env(os.environ)
+    fake_cuda = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
 
     if config_mode == "yaml":
+        engine_pool_bytes = 268435456 if fake_cuda else 67108864
+        comm_gpu_pool_bytes = 268435456 if fake_cuda else 67108864
         cfg = {
             "server": {
                 "listen": {"host": host, "port": port},
@@ -85,12 +88,36 @@ def start_daemon_binary(
                 "grpc": {"tcp_nodelay": True, "so_reuseport": False},
             },
             "engine": {
-                "mem_pool_size_bytes": 268435456,
-                "tx_slice_bytes": 8388608,
                 "artifact_chunk_bytes": 8388608,
-                "streaming_buffer_max_concurrent_sessions": 1,
+                "streaming_buffer_chunks": 4,
             },
-            "communicator": {"enable_rdma": False},
+            "pinned_memory": {
+                "allocation_timeout": "30s",
+                "classes": [
+                    {
+                        "name": "engine",
+                        "slice_bytes": 8388608,
+                        "pool_bytes": engine_pool_bytes,
+                    },
+                    {
+                        "name": "comm_gpu",
+                        "slice_bytes": 16777216,
+                        "pool_bytes": comm_gpu_pool_bytes,
+                        "rdma_preregister": False,
+                    },
+                    {
+                        "name": "comm_cpu",
+                        "slice_bytes": 4194304,
+                        "pool_bytes": 8388608,
+                        "rdma_preregister": False,
+                    },
+                ],
+            },
+            "communicator": {
+                "enable_rdma": False,
+                "stager": {"buffers_per_flow": 1},
+                "transport": {"tcp_conn_count": 2},
+            },
             "observability": {
                 "otel": {"enabled": False},
                 "logging": {"level": "INFO"},
@@ -111,11 +138,21 @@ def start_daemon_binary(
             cfg_path = Path(f.name)
         args = [str(bin_path), f"--config={cfg_path}"]
     else:
+        engine_pool_bytes = 268435456 if fake_cuda else 67108864
+        comm_gpu_pool_bytes = 268435456 if fake_cuda else 67108864
         config_text = (
             "{"
             f'"server": {{"listen": {{"host": "{host}", "port": {port}}}, '
             f'"storage_path": "{str(storage_path)}", "num_threads": 2}}, '
-            '"engine": {"mem_pool_size_bytes": 268435456, "tx_slice_bytes": 8388608, "artifact_chunk_bytes": 268435456}, '
+            '"engine": {"artifact_chunk_bytes": 8388608, "streaming_buffer_chunks": 4}, '
+            '"pinned_memory": {'
+            '"allocation_timeout": "30s", '
+            '"classes": ['
+            f'{{"name": "engine", "slice_bytes": 8388608, "pool_bytes": {engine_pool_bytes}}}, '
+            f'{{"name": "comm_gpu", "slice_bytes": 16777216, "pool_bytes": {comm_gpu_pool_bytes}}}, '
+            '{"name": "comm_cpu", "slice_bytes": 4194304, "pool_bytes": 8388608}'
+            ']}, '
+            '"communicator": {"enable_rdma": false, "stager": {"buffers_per_flow": 1}, "transport": {"tcp_conn_count": 2}}, '
             f'"debug": {{"cuda": {{"enable_same_process_ipc_fallback": {str(enable_same_process_ipc_fallback).lower()} }}}}'
             "}"
         )

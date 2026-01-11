@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -44,7 +44,7 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<tensorcast::store::components::WorkerRegistrationInfo> register_worker(
       std::string_view,
       std::string_view,
       uint32_t,
@@ -56,10 +56,6 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
     return absl::UnimplementedError("register_worker not needed for key-mapping tests");
   }
 
-  absl::Status send_heartbeat(std::string_view, uint64_t, bool) override {
-    return absl::UnimplementedError("send_heartbeat not needed for key-mapping tests");
-  }
-
   absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view,
       uint64_t,
@@ -68,7 +64,8 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
       std::string_view,
       const std::vector<std::string>&,
       int64_t,
-      tensorcast::global_store::v1::ConnectionStatus) override {
+      tensorcast::global_store::v1::ConnectionStatus,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not needed for key-mapping tests");
   }
 
@@ -158,14 +155,16 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const tensorcast::global_store::v1::WorkerLocalState&,
       bool,
-      std::vector<tensorcast::global_store::v1::StateChange>*) override {
+      std::vector<tensorcast::global_store::v1::StateChange>*,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("synchronize_worker_state not needed for key-mapping tests");
   }
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view,
       uint64_t,
-      std::vector<tensorcast::common::v1::ReplicaInfo>*) override {
+      std::vector<tensorcast::common::v1::ReplicaInfo>*,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("request_full_state_sync not needed for key-mapping tests");
   }
 
@@ -264,13 +263,13 @@ TEST_CASE("PublishReplicaKey canonicalizes storage_path before validating disk_p
   svc_opts.storage_path = storage_link_via_dotdot;
   StoreDaemonServiceImpl svc(engine, svc_opts);
 
-  tensorcast::daemon::v1::PublishReplicaKeyRequest req;
+  tensorcast::daemon::v2::PublishReplicaKeyRequest req;
   req.set_key("key-1");
   req.mutable_artifact_descriptor()->set_artifact_id("mi2:test");
   req.set_disk_path(artifact_dir.string());
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::PublishReplicaKeyResponse resp;
+  tensorcast::daemon::v2::PublishReplicaKeyResponse resp;
   auto status = svc.PublishReplicaKey(&ctx, &req, &resp);
   REQUIRE(status.ok());
   REQUIRE(resp.ok());

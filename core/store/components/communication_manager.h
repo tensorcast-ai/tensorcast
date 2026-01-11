@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -54,6 +54,13 @@ class CommunicationManager {
       const std::string& listen_addr,
       uint16_t listen_port,
       const tensorcast::communicator::v1::CommunicatorConfig& config);
+
+  // Initialize with typed config and externally provided pinned staging pools.
+  absl::Status initialize_with_config_and_pools(
+      const std::string& listen_addr,
+      uint16_t listen_port,
+      const tensorcast::communicator::v1::CommunicatorConfig& config,
+      tensorcast::communicator::engine::Communicator::PinnedStagingPools pools);
 
   /**
    * @brief Check if communication is enabled.

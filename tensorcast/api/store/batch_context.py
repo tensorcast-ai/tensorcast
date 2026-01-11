@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -17,8 +17,7 @@ import torch
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api.store.types import ArtifactError
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
     from tensorcast.api.store.artifact import Artifact
@@ -296,7 +295,7 @@ class PrefetchTicket:
             return False
         runtime = self._runtime()
         client = runtime.ensure_client()
-        ticket = store_daemon_v2_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
+        ticket = store_daemon_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
             if deadline is not None and time.monotonic() > deadline:
@@ -331,7 +330,7 @@ class PrefetchTicket:
         if runtime is None or runtime.closed:
             return
         client = runtime.ensure_client()
-        ticket = store_daemon_v2_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
+        ticket = store_daemon_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
         with contextlib.suppress(Exception):
             client.release_replica(ticket)
             store_metrics.record_prefetch_event(

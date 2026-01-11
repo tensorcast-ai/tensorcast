@@ -1,3 +1,5 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2026, TensorCast Team.
 
-"""Testing utilities for TensorCast."""
+from tensorcast.testing.io_disk import load_dict_from_disk, save_dict
+
+__all__ = ["load_dict_from_disk", "save_dict"]

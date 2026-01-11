@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // RegistrationController: handles begin/feed/commit/abort/keep_alive/revoke
 
@@ -16,7 +16,7 @@
 #include "daemon/rpc_context.h"
 #include "daemon/session_lifecycle.h"
 #include "grpcpp/grpcpp.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -35,35 +35,35 @@ class RegistrationController {
 
   grpc::Status begin(
       RpcContext& rctx,
-      const v1::BeginRegisterArtifactRequest& req,
-      v1::BeginRegisterArtifactResponse& resp);
+      const v2::BeginRegisterArtifactRequest& req,
+      v2::BeginRegisterArtifactResponse& resp);
 
   grpc::Status feed_stream(
       RpcContext& rctx,
-      ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>& reader,
-      v1::FeedRegisterArtifactStreamResponse& resp);
+      ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>& reader,
+      v2::FeedRegisterArtifactStreamResponse& resp);
 
-  grpc::Status feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
+  grpc::Status feed_vector(const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs);
 
   grpc::Status keep_alive(
       RpcContext& rctx,
-      const v1::KeepAliveRegisterArtifactRequest& req,
-      v1::KeepAliveRegisterArtifactResponse& resp);
+      const v2::KeepAliveRegisterArtifactRequest& req,
+      v2::KeepAliveRegisterArtifactResponse& resp);
 
   grpc::Status commit(
       RpcContext& rctx,
-      const v1::CommitRegisteredArtifactRequest& req,
-      v1::CommitRegisteredArtifactResponse& resp);
+      const v2::CommitRegisteredArtifactRequest& req,
+      v2::CommitRegisteredArtifactResponse& resp);
 
   grpc::Status abort(
       RpcContext& rctx,
-      const v1::AbortRegisteredArtifactRequest& req,
-      v1::AbortRegisteredArtifactResponse& resp);
+      const v2::AbortRegisteredArtifactRequest& req,
+      v2::AbortRegisteredArtifactResponse& resp);
 
   grpc::Status revoke(
       RpcContext& rctx,
-      const v1::RevokeRegisteredArtifactRequest& req,
-      v1::RevokeRegisteredArtifactResponse& resp);
+      const v2::RevokeRegisteredArtifactRequest& req,
+      v2::RevokeRegisteredArtifactResponse& resp);
 
  private:
   Dep d_;

@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 # Aligned buffer utilities
 sc_cc_library(
     name = "aligned_buffer_lib",
@@ -46,29 +40,11 @@ sc_cc_library(
     deps = [
         ":tensor_writer_lib",
         "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/cuda:cuda_api_lib",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/synchronization",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@libtorch",
-        ],
-    }),
-)
-
-# Checkpoint streaming functionality
-sc_cc_library(
-    name = "checkpoint_streaming_lib",
-    srcs = ["checkpoint_streaming.cc"],
-    hdrs = ["checkpoint_streaming.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":progress_bar_lib",
-        ":streaming_tensor_writer_lib",
-        "//core/common:cuda_api_lib",
-        "@abseil-cpp//absl/log:check",
+        "@libtorch",
     ],
 )
 
@@ -77,24 +53,22 @@ sc_cc_library(
     name = "checkpoint_lib",
     srcs = ["checkpoint.cc"],
     hdrs = ["checkpoint.h"],
+    includes = ["."],
     visibility = ["//visibility:public"],
     deps = [
         ":aligned_buffer_lib",
-        ":checkpoint_streaming_lib",
+        ":progress_bar_lib",
         ":tensor_writer_lib",
         "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/store/materialization/dataplane:safetensors_util",
         "@abseil-cpp//absl/log:check",
+        "@cublas",
+        "@cublas//:cublasLt",
         "@libtorch",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@cublas",
-            "@cublas//:cublasLt",
-        ],
-    }),
+    ],
 )
 
 # Aggregate target for backward compatibility
@@ -104,7 +78,6 @@ sc_cc_library(
     deps = [
         ":aligned_buffer_lib",
         ":checkpoint_lib",
-        ":checkpoint_streaming_lib",
         ":streaming_tensor_writer_lib",
         ":tensor_writer_lib",
     ],

@@ -143,7 +143,7 @@ None. All modules operate on in-memory runtime state; `schema.sql` and RPC paylo
 - Tests gating this architecture:
   - `bazel test //core/store:store_engine_test //core/store:store_engine_view_test`
   - `bazel test //core/store/runtime/...` (covers context, ingestion runtime/facade/service, metadata gateway, replica runtime)
-  - `bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=true`
+  - `bazel test //daemon:grpc_service_impl_registration_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
   - `uv run pytest tests/python/test_store_session_api.py -k "(register or materialize)"` plus `uv run pytest tests/python/test_store_region_registration.py`
 - Metrics `tc_register_pending_gauge`, `tc_register_commit_seconds`, and ingestion telemetry counters continue to emit via `MetricsCollector` and event subscribers; goldens live under `core/store/runtime/runtime_services_test.cc`.
 - Documentation for module owners stays in sync: modifying runtime/materialization code requires updating `core/store/README.md`, `core/store/docs/architecture.md`, and this design (doc-sync rule).

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/artifact_hash.h"
 
@@ -23,15 +23,13 @@
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash_internal.h"
-#include "core/common/cuda_api.h"
-
-#ifndef USE_FAKE_CUDA
-#include <cuda.h>
-#include <dlfcn.h>
-#include <nvrtc.h>
-#endif // USE_FAKE_CUDA
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_driver_api.h"
+#include "core/cuda/lazy_nvrtc.h"
 
 namespace tensorcast::common {
+
+namespace cuda = ::tensorcast::cuda;
 
 namespace {
 
@@ -41,9 +39,6 @@ using internal::determine_leaf_chunk_size;
 using internal::kMaxChunkSize;
 using internal::sha256_bytes;
 using internal::to_multibase_multihash_sha256;
-
-#ifndef USE_FAKE_CUDA
-constexpr std::array<const char*, 2> kCudaDriverLibraryNames{"libcuda.so.1", "libcuda.so"};
 
 std::string format_cuda_driver_version(int version) {
   if (version <= 0) {
@@ -65,8 +60,12 @@ void log_driver_nvrtc_mismatch_hint_if_needed(const absl::Status& status) {
 
   int nvrtc_major = 0;
   int nvrtc_minor = 0;
-  const nvrtcResult nvrtc_version_result = nvrtcVersion(&nvrtc_major, &nvrtc_minor);
-  const bool has_nvrtc_version = nvrtc_version_result == NVRTC_SUCCESS;
+  bool has_nvrtc_version = false;
+  auto nvrtc_version_or = cuda::LazyNvrtc::get().nvrtcVersion();
+  if (nvrtc_version_or.ok()) {
+    const nvrtcResult nvrtc_version_result = (*nvrtc_version_or)(&nvrtc_major, &nvrtc_minor);
+    has_nvrtc_version = nvrtc_version_result == NVRTC_SUCCESS;
+  }
 
   int driver_version = 0;
   const cudaError_t driver_version_result = cudaDriverGetVersion(&driver_version);
@@ -97,124 +96,6 @@ void log_driver_nvrtc_mismatch_hint_if_needed(const absl::Status& status) {
   LOG(ERROR) << hint;
 }
 
-// NOLINTBEGIN(readability-identifier-naming)
-struct CudaDriverSymbols {
-  decltype(&::cuInit) cuInit = nullptr;
-  decltype(&::cuModuleLoadData) cuModuleLoadData = nullptr;
-  decltype(&::cuModuleGetFunction) cuModuleGetFunction = nullptr;
-  decltype(&::cuModuleUnload) cuModuleUnload = nullptr;
-  decltype(&::cuLaunchKernel) cuLaunchKernel = nullptr;
-  decltype(&::cuGetErrorName) cuGetErrorName = nullptr;
-  decltype(&::cuGetErrorString) cuGetErrorString = nullptr;
-};
-
-// NOLINTEND(readability-identifier-naming)
-
-CudaDriverSymbols& cuda_driver_symbols() {
-  static auto* symbols = new CudaDriverSymbols();
-  return *symbols;
-}
-
-void*& cuda_driver_handle() {
-  static void* handle = nullptr;
-  return handle;
-}
-
-template <typename Fn>
-absl::Status load_cuda_symbol(void* handle, const char* symbol_name, Fn& out) {
-  dlerror();
-  void* symbol = dlsym(handle, symbol_name);
-  const char* error = dlerror();
-  if (symbol == nullptr || error != nullptr) {
-    return absl::UnavailableError(
-        absl::StrCat(
-            "Failed to load CUDA driver symbol ", symbol_name, ": ", error != nullptr ? error : "symbol not found"));
-  }
-  out = reinterpret_cast<Fn>(symbol);
-  return absl::OkStatus();
-}
-
-absl::Status load_cuda_driver() {
-  auto& handle = cuda_driver_handle();
-  if (handle != nullptr) {
-    return absl::OkStatus();
-  }
-
-  std::string load_errors;
-  for (const char* library_name : kCudaDriverLibraryNames) {
-    dlerror();
-    handle = dlopen(library_name, RTLD_NOW | RTLD_LOCAL);
-    if (handle != nullptr) {
-      break;
-    }
-    const char* error = dlerror();
-    if (error != nullptr) {
-      if (!load_errors.empty()) {
-        absl::StrAppend(&load_errors, "; ");
-      }
-      absl::StrAppend(&load_errors, "dlopen(", library_name, "): ", error);
-    }
-  }
-
-  if (handle == nullptr) {
-    return absl::UnavailableError(
-        absl::StrCat(
-            "Failed to load CUDA driver library (libcuda.so): ",
-            load_errors.empty() ? "(no error details)" : load_errors));
-  }
-
-  CudaDriverSymbols& symbols = cuda_driver_symbols();
-  absl::Cleanup cleanup = absl::MakeCleanup([&]() {
-    symbols = CudaDriverSymbols{};
-    if (handle != nullptr) {
-      dlclose(handle);
-      handle = nullptr;
-    }
-  });
-
-  auto load_or = [&](auto& fn, const char* name) -> absl::Status {
-    absl::Status status = load_cuda_symbol(handle, name, fn);
-    if (!status.ok()) {
-      return status;
-    }
-    return absl::OkStatus();
-  };
-
-  if (auto status = load_or(symbols.cuInit, "cuInit"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuModuleLoadData, "cuModuleLoadData"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuModuleGetFunction, "cuModuleGetFunction"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuModuleUnload, "cuModuleUnload"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuLaunchKernel, "cuLaunchKernel"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuGetErrorName, "cuGetErrorName"); !status.ok()) {
-    return status;
-  }
-  if (auto status = load_or(symbols.cuGetErrorString, "cuGetErrorString"); !status.ok()) {
-    return status;
-  }
-
-  std::move(cleanup).Cancel();
-  return absl::OkStatus();
-}
-
-absl::Status ensure_cuda_driver_loaded() {
-  static std::once_flag once;
-  static absl::Status load_status = absl::OkStatus();
-  std::call_once(once, [&]() { load_status = load_cuda_driver(); });
-  return load_status;
-}
-
-#endif // USE_FAKE_CUDA
-
 void release_device_buffer(void** ptr) {
   if (ptr == nullptr || *ptr == nullptr) {
     return;
@@ -226,7 +107,6 @@ void release_device_buffer(void** ptr) {
   *ptr = nullptr;
 }
 
-#ifdef USE_FAKE_CUDA
 absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
     const uint8_t* device_base,
     uint64_t total_size,
@@ -271,9 +151,7 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_host_copy(
   }
   return root.value();
 }
-#endif // USE_FAKE_CUDA
 
-#ifndef USE_FAKE_CUDA
 constexpr char kSha256KernelName[] = "tensorcast_sha256_leaf_kernel";
 
 constexpr char kSha256KernelSource[] = R"NVRTC(
@@ -498,49 +376,14 @@ extern "C" __global__ void tensorcast_sha256_leaf_kernel(
 )NVRTC";
 
 absl::Status cu_result_to_status(CUresult result, std::string_view context) {
-  if (result == CUDA_SUCCESS) {
-    return absl::OkStatus();
+  if (auto status = cuda::DriverApi::ensure_loaded(); !status.ok()) {
+    return absl::InternalError(absl::StrCat(context, " - CUDA driver unavailable: ", status.message()));
   }
-  const char* name = nullptr;
-  const char* description = nullptr;
-  absl::Status driver_status = ensure_cuda_driver_loaded();
-  if (driver_status.ok()) {
-    const CudaDriverSymbols& symbols = cuda_driver_symbols();
-    if (symbols.cuGetErrorName != nullptr) {
-      symbols.cuGetErrorName(result, &name);
-    }
-    if (symbols.cuGetErrorString != nullptr) {
-      symbols.cuGetErrorString(result, &description);
-    }
-  } else {
-    return absl::InternalError(absl::StrCat(context, " - CUDA driver unavailable: ", driver_status.message()));
-  }
-  return absl::InternalError(
-      absl::StrCat(
-          context,
-          " - ",
-          (name != nullptr ? name : "CUDA_ERROR_UNKNOWN"),
-          ": ",
-          (description != nullptr ? description : "(no description)")));
+  return cuda::DriverApi::get().to_status(result, context);
 }
 
 absl::Status ensure_cuda_driver_initialized() {
-  static std::once_flag once;
-  static absl::Status init_status = absl::OkStatus();
-  std::call_once(once, [&]() {
-    absl::Status driver_status = ensure_cuda_driver_loaded();
-    if (!driver_status.ok()) {
-      init_status = driver_status;
-      return;
-    }
-    const CudaDriverSymbols& symbols = cuda_driver_symbols();
-    if (symbols.cuInit == nullptr) {
-      init_status = absl::UnavailableError("cuInit symbol unavailable in CUDA driver");
-      return;
-    }
-    init_status = cu_result_to_status(symbols.cuInit(0), "cuInit");
-  });
-  return init_status;
+  return cuda::DriverApi::ensure_loaded();
 }
 
 struct NvrtcSha256Kernel {
@@ -549,21 +392,31 @@ struct NvrtcSha256Kernel {
 
   ~NvrtcSha256Kernel() {
     if (module != nullptr) {
-      const CudaDriverSymbols& symbols = cuda_driver_symbols();
-      if (symbols.cuModuleUnload != nullptr) {
-        symbols.cuModuleUnload(module);
+      if (cuda::DriverApi::ensure_loaded().ok()) {
+        const cuda::DriverApi& driver = cuda::DriverApi::get();
+        if (driver.cuModuleUnload != nullptr) {
+          driver.cuModuleUnload(module);
+        }
       }
     }
   }
 };
 
 std::string read_nvrtc_log(nvrtcProgram program) {
+  auto log_size_or = cuda::LazyNvrtc::get().nvrtcGetProgramLogSize();
+  if (!log_size_or.ok()) {
+    return {};
+  }
+  auto log_or = cuda::LazyNvrtc::get().nvrtcGetProgramLog();
+  if (!log_or.ok()) {
+    return {};
+  }
   size_t log_size = 0;
-  if (nvrtcGetProgramLogSize(program, &log_size) != NVRTC_SUCCESS || log_size <= 1) {
+  if ((*log_size_or)(program, &log_size) != NVRTC_SUCCESS || log_size <= 1) {
     return {};
   }
   std::string log(log_size, '\0');
-  if (nvrtcGetProgramLog(program, log.data()) != NVRTC_SUCCESS) {
+  if ((*log_or)(program, log.data()) != NVRTC_SUCCESS) {
     return {};
   }
   while (!log.empty() && (log.back() == '\0' || log.back() == '\n')) {
@@ -583,19 +436,50 @@ std::string format_nvrtc_options(absl::Span<const char* const> options) {
   return formatted;
 }
 
+std::string nvrtc_error_string(nvrtcResult result) {
+  auto error_or = cuda::LazyNvrtc::get().nvrtcGetErrorString();
+  if (!error_or.ok()) {
+    return absl::StrCat("NVRTC error ", static_cast<int>(result));
+  }
+  const char* message = (*error_or)(result);
+  return message != nullptr ? message : "NVRTC error (null)";
+}
+
 absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(int major, int minor) {
+  auto create_program_or = cuda::LazyNvrtc::get().nvrtcCreateProgram();
+  if (!create_program_or.ok()) {
+    return create_program_or.status();
+  }
+  auto destroy_program_or = cuda::LazyNvrtc::get().nvrtcDestroyProgram();
+  if (!destroy_program_or.ok()) {
+    return destroy_program_or.status();
+  }
+  auto compile_program_or = cuda::LazyNvrtc::get().nvrtcCompileProgram();
+  if (!compile_program_or.ok()) {
+    return compile_program_or.status();
+  }
+  auto get_ptx_size_or = cuda::LazyNvrtc::get().nvrtcGetPTXSize();
+  if (!get_ptx_size_or.ok()) {
+    return get_ptx_size_or.status();
+  }
+  auto get_ptx_or = cuda::LazyNvrtc::get().nvrtcGetPTX();
+  if (!get_ptx_or.ok()) {
+    return get_ptx_or.status();
+  }
+
   nvrtcProgram program;
   nvrtcResult create_result =
-      nvrtcCreateProgram(&program, kSha256KernelSource, "tensorcast_sha256.cu", 0, nullptr, nullptr);
+      (*create_program_or)(&program, kSha256KernelSource, "tensorcast_sha256.cu", 0, nullptr, nullptr);
   if (create_result != NVRTC_SUCCESS) {
-    return absl::InternalError(absl::StrCat("nvrtcCreateProgram failed: ", nvrtcGetErrorString(create_result)));
+    return absl::InternalError(absl::StrCat("nvrtcCreateProgram failed: ", nvrtc_error_string(create_result)));
   }
-  absl::Cleanup destroy_program = absl::MakeCleanup([&]() { nvrtcDestroyProgram(&program); });
+  absl::Cleanup destroy_program = absl::MakeCleanup([&]() { (*destroy_program_or)(&program); });
 
   std::string arch_option = absl::StrCat("--gpu-architecture=compute_", major, minor);
   std::array<const char*, 2> options{"--std=c++17", arch_option.c_str()};
   absl::Span<const char* const> options_span(options.data(), options.size());
-  nvrtcResult compile_result = nvrtcCompileProgram(program, static_cast<int>(options_span.size()), options_span.data());
+  nvrtcResult compile_result =
+      (*compile_program_or)(program, static_cast<int>(options_span.size()), options_span.data());
 
   const std::string log = read_nvrtc_log(program);
   if (!log.empty()) {
@@ -604,7 +488,7 @@ absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(i
 
   if (compile_result != NVRTC_SUCCESS) {
     std::string message =
-        absl::StrCat("nvrtcCompileProgram failed: ", nvrtcGetErrorString(compile_result), " (options: ");
+        absl::StrCat("nvrtcCompileProgram failed: ", nvrtc_error_string(compile_result), " (options: ");
     absl::StrAppend(&message, format_nvrtc_options(options_span), ")");
     if (!log.empty()) {
       absl::StrAppend(&message, "; NVRTC log:\n", log);
@@ -615,34 +499,34 @@ absl::StatusOr<std::shared_ptr<NvrtcSha256Kernel>> compile_nvrtc_sha256_kernel(i
   }
 
   size_t ptx_size = 0;
-  nvrtcGetPTXSize(program, &ptx_size);
+  nvrtcResult ptx_size_result = (*get_ptx_size_or)(program, &ptx_size);
+  if (ptx_size_result != NVRTC_SUCCESS) {
+    return absl::InternalError(absl::StrCat("nvrtcGetPTXSize failed: ", nvrtc_error_string(ptx_size_result)));
+  }
   std::string ptx(ptx_size, '\0');
-  nvrtcGetPTX(program, ptx.data());
+  nvrtcResult ptx_result = (*get_ptx_or)(program, ptx.data());
+  if (ptx_result != NVRTC_SUCCESS) {
+    return absl::InternalError(absl::StrCat("nvrtcGetPTX failed: ", nvrtc_error_string(ptx_result)));
+  }
 
   auto init_status = ensure_cuda_driver_initialized();
   if (!init_status.ok()) {
     return init_status;
   }
-
-  const CudaDriverSymbols& symbols = cuda_driver_symbols();
-  if (symbols.cuModuleLoadData == nullptr || symbols.cuModuleGetFunction == nullptr) {
-    return absl::UnavailableError("CUDA driver missing module symbol support for NVRTC hashing");
-  }
+  const cuda::DriverApi& driver = cuda::DriverApi::get();
 
   CUmodule module = nullptr;
   CUfunction function = nullptr;
-  auto module_status = cu_result_to_status(symbols.cuModuleLoadData(&module, ptx.c_str()), "cuModuleLoadData");
+  auto module_status = cu_result_to_status(driver.cuModuleLoadData(&module, ptx.c_str()), "cuModuleLoadData");
   if (!module_status.ok()) {
     log_driver_nvrtc_mismatch_hint_if_needed(module_status);
     return module_status;
   }
 
   auto function_status =
-      cu_result_to_status(symbols.cuModuleGetFunction(&function, module, kSha256KernelName), "cuModuleGetFunction");
+      cu_result_to_status(driver.cuModuleGetFunction(&function, module, kSha256KernelName), "cuModuleGetFunction");
   if (!function_status.ok()) {
-    if (symbols.cuModuleUnload != nullptr) {
-      symbols.cuModuleUnload(module);
-    }
+    driver.cuModuleUnload(module);
     log_driver_nvrtc_mismatch_hint_if_needed(function_status);
     return function_status;
   }
@@ -721,7 +605,7 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
   if (!ensure_driver_status.ok()) {
     return ensure_driver_status;
   }
-  const CudaDriverSymbols& symbols = cuda_driver_symbols();
+  const cuda::DriverApi& driver = cuda::DriverApi::get();
 
   const uint64_t leaf_count64 =
       (total_size + static_cast<uint64_t>(chunk_size_bytes) - 1ULL) / static_cast<uint64_t>(chunk_size_bytes);
@@ -774,12 +658,8 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
 
   CUstream launch_stream = stream_created ? reinterpret_cast<CUstream>(stream) : nullptr;
 
-  if (symbols.cuLaunchKernel == nullptr) {
-    return absl::UnavailableError("CUDA driver missing cuLaunchKernel symbol required for NVRTC hashing");
-  }
-
   auto launch_status = cu_result_to_status(
-      symbols.cuLaunchKernel(
+      driver.cuLaunchKernel(
           kernel->function, launch_blocks, 1, 1, kThreadsPerBlock, 1, 1, 0, launch_stream, params, nullptr),
       "cuLaunchKernel(tensorcast_sha256_leaf_kernel)");
   if (!launch_status.ok()) {
@@ -815,8 +695,6 @@ absl::StatusOr<std::vector<uint8_t>> compute_root_via_nvrtc(
   }
   return root.value();
 }
-
-#endif // USE_FAKE_CUDA
 
 } // namespace
 
@@ -855,15 +733,15 @@ absl::StatusOr<std::string> compute_data_multihash_from_gpu(
 
   absl::StatusOr<std::vector<uint8_t>> root_or;
 
-#ifndef USE_FAKE_CUDA
-  root_or = compute_root_via_nvrtc(device_base, total_size, chunk_size, device_id);
-  if (!root_or.ok()) {
-    LOG(ERROR) << "NVRTC hashing unavailable: " << root_or.status();
-    return root_or.status();
+  if (!cuda::is_fake()) {
+    root_or = compute_root_via_nvrtc(device_base, total_size, chunk_size, device_id);
+    if (!root_or.ok()) {
+      LOG(WARNING) << "NVRTC hashing unavailable; falling back to CPU hashing: " << root_or.status();
+      root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);
+    }
+  } else {
+    root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);
   }
-#else
-  root_or = compute_root_via_host_copy(device_base, total_size, chunk_size);
-#endif
 
   if (!root_or.ok()) {
     return root_or.status();

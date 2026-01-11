@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -32,6 +32,7 @@ class TransferService {
   struct Config {
     size_t max_buffer_bytes{kDefaultMaxBufferBytes};
     std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds::zero()};
+    size_t streaming_buffer_chunks{16};
   };
 
   TransferService(

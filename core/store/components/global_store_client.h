@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -35,6 +35,19 @@ struct GlobalStoreClientConfig {
   uint32_t max_retries = 3;
   absl::Duration retry_backoff = absl::Milliseconds(100);
   std::string cluster_token;
+};
+
+struct RpcOptions {
+  std::optional<absl::Duration> timeout;
+  std::optional<uint32_t> max_retries;
+  std::optional<absl::Duration> retry_backoff;
+};
+
+struct WorkerRegistrationInfo {
+  std::string worker_id;
+  uint64_t expected_state_version{0};
+  bool state_sync_required{false};
+  uint32_t heartbeat_interval_ms{0};
 };
 
 // Information about a remote replica replica
@@ -203,7 +216,7 @@ class IGlobalStoreClient {
 
   virtual absl::Status initialize() = 0;
 
-  virtual absl::StatusOr<std::string> register_worker(
+  virtual absl::StatusOr<WorkerRegistrationInfo> register_worker(
       std::string_view node_id,
       std::string_view node_address,
       uint32_t grpc_port,
@@ -213,11 +226,6 @@ class IGlobalStoreClient {
       bool is_recovery_registration = false,
       std::string_view previous_worker_id = {}) = 0;
 
-  virtual absl::Status send_heartbeat(
-      std::string_view worker_id,
-      uint64_t mem_pool_available_size,
-      bool accepting_new_requests = true) = 0;
-
   virtual absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
       uint64_t mem_pool_available_size,
@@ -226,7 +234,8 @@ class IGlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED) = 0;
+      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
@@ -295,12 +304,14 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::StateChange>* out_changes) = 0;
+      std::vector<global_store::StateChange>* out_changes,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<common::v1::ReplicaInfo>* out_expected_replicas) = 0;
+      std::vector<common::v1::ReplicaInfo>* out_expected_replicas,
+      const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
   virtual bool is_connected() const = 0;
 
@@ -370,7 +381,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::Status initialize() override;
 
   // Worker registration and lifecycle
-  absl::StatusOr<std::string> register_worker(
+  absl::StatusOr<WorkerRegistrationInfo> register_worker(
       std::string_view node_id,
       std::string_view node_address,
       uint32_t grpc_port,
@@ -379,11 +390,6 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
       std::string_view previous_worker_id = {}) override;
-
-  absl::Status send_heartbeat(
-      std::string_view worker_id,
-      uint64_t mem_pool_available_size,
-      bool accepting_new_requests = true) override;
 
   // Enhanced heartbeat with HA state fields
   absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
@@ -394,7 +400,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view state_checksum,
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
-      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED) override;
+      global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 
@@ -467,12 +474,14 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const global_store::WorkerLocalState& local_state,
       bool force_full_sync,
-      std::vector<global_store::StateChange>* out_changes) override;
+      std::vector<global_store::StateChange>* out_changes,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view worker_id,
       uint64_t current_state_version,
-      std::vector<common::v1::ReplicaInfo>* out_expected_replicas) override;
+      std::vector<common::v1::ReplicaInfo>* out_expected_replicas,
+      const RpcOptions& rpc_options = RpcOptions{}) override;
 
   bool is_connected() const override;
 
@@ -521,7 +530,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const Request& request,
       Response* response,
       RpcMethod method,
-      const std::string& method_name);
+      const std::string& method_name,
+      const RpcOptions& rpc_options = RpcOptions{});
 
   // Convert between internal types and proto types
   static common::v1::MemoryType convert_to_proto_memory_type(common::memory::MemoryLocation location);

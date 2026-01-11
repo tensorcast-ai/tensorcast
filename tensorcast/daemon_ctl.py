@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 
 import atexit
@@ -18,18 +18,10 @@ from tensorcast.api._config import StorePolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
-# Use v1 daemon proto path
-from tensorcast.proto.daemon.v1 import (
-    store_daemon_pb2 as store_daemon_pb2,
-)
-from tensorcast.proto.daemon.v1 import (
+# Use v2 daemon proto path
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
-)
-from tensorcast.proto.daemon.v2 import (
-    store_daemon_pb2 as store_daemon_v2_pb2,
-)
-from tensorcast.proto.daemon.v2 import (
-    store_daemon_pb2_grpc as store_daemon_v2_pb2_grpc,
 )
 from tensorcast.types import (
     ArtifactDescriptor,
@@ -141,7 +133,7 @@ class DaemonCtl:
         self._ch_lock: RLock = RLock()
         self.channel = self._create_channel(server_address)
         self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
-        self.stub_v2 = store_daemon_v2_pb2_grpc.StoreDaemonServiceStub(self.channel)
+        self.stub_v2 = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
         self.checkpoints_in_gpu = {}
 
         # Check environment variable
@@ -172,7 +164,7 @@ class DaemonCtl:
                 self.channel.close()
             self.channel = self._create_channel(self.server_address)
             self.stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
-            self.stub_v2 = store_daemon_v2_pb2_grpc.StoreDaemonServiceStub(self.channel)
+            self.stub_v2 = store_daemon_pb2_grpc.StoreDaemonServiceStub(self.channel)
             _inc_channel_refresh(self.server_address)
 
     def _unary_call(
@@ -517,60 +509,50 @@ class DaemonCtl:
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
-    def get_materialize_capabilities(self):
-        with self._client_span("Client/GetMaterializeCapabilities") as span:
-            request = store_daemon_v2_pb2.GetMaterializeCapabilitiesRequest()
-            try:
-                response: store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse = (
-                    self._unary_call(
-                        self.stub_v2.GetMaterializeCapabilities,
-                        request,
-                        timeout=5.0,
-                        span=span,
-                        retries=1,
-                    )
-                )
-            except grpc.RpcError as e:  # noqa: BLE001
-                span.record_exception(e)
-                if e.code() == grpc.StatusCode.UNIMPLEMENTED:
-                    return store_daemon_v2_pb2.GetMaterializeCapabilitiesResponse(
-                        supports_view_subset_hash=False,
-                        supports_region_backed_get_into=False,
-                    )
-                raise RuntimeError("GetMaterializeCapabilities failed") from e
-        return response
-
     def materialize_into_target_v2(
         self,
         *,
         artifact_id: str,
-        target_layout: store_daemon_v2_pb2.TargetLayout,
+        target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
         pid: int | None = None,
         return_response: bool = True,
-    ) -> store_daemon_v2_pb2.MaterializeIntoTargetResponse:
+    ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
-            request = store_daemon_v2_pb2.MaterializeIntoTargetRequest(
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.MaterializeIntoTargetRequest(
                 artifact_id=artifact_id,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = True
             try:
-                response: store_daemon_v2_pb2.MaterializeIntoTargetResponse = (
+                response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeIntoTarget,
                         request,
@@ -598,12 +580,12 @@ class DaemonCtl:
         return response
 
     def query_replica_status(
-        self, ticket: store_daemon_v2_pb2.ReplicaTicket
-    ) -> store_daemon_v2_pb2.QueryReplicaStatusResponse:
+        self, ticket: store_daemon_pb2.ReplicaTicket
+    ) -> store_daemon_pb2.QueryReplicaStatusResponse:
         with self._client_span("Client/QueryReplicaStatus") as span:
-            request = store_daemon_v2_pb2.QueryReplicaStatusRequest(ticket=ticket)
+            request = store_daemon_pb2.QueryReplicaStatusRequest(ticket=ticket)
             try:
-                response: store_daemon_v2_pb2.QueryReplicaStatusResponse = (
+                response: store_daemon_pb2.QueryReplicaStatusResponse = (
                     self._unary_call(
                         self.stub_v2.QueryReplicaStatus,
                         request,
@@ -618,12 +600,12 @@ class DaemonCtl:
         return response
 
     def release_replica(
-        self, ticket: store_daemon_v2_pb2.ReplicaTicket
-    ) -> store_daemon_v2_pb2.ReleaseReplicaResponse:
+        self, ticket: store_daemon_pb2.ReplicaTicket
+    ) -> store_daemon_pb2.ReleaseReplicaResponse:
         with self._client_span("Client/ReleaseReplica") as span:
-            request = store_daemon_v2_pb2.ReleaseReplicaRequest(ticket=ticket)
+            request = store_daemon_pb2.ReleaseReplicaRequest(ticket=ticket)
             try:
-                response: store_daemon_v2_pb2.ReleaseReplicaResponse = self._unary_call(
+                response: store_daemon_pb2.ReleaseReplicaResponse = self._unary_call(
                     self.stub_v2.ReleaseReplica,
                     request,
                     timeout=5.0,
@@ -650,10 +632,11 @@ class DaemonCtl:
         return_response: Literal[True],
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
-    ) -> store_daemon_v2_pb2.MaterializeReplicaResponse: ...
+    ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
     def materialize_by_artifact_id_v2(
@@ -670,6 +653,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -690,6 +674,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
@@ -708,11 +693,12 @@ class DaemonCtl:
         return_response: bool = False,
         disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
     ) -> (
-        store_daemon_v2_pb2.MaterializeReplicaResponse
+        store_daemon_pb2.MaterializeReplicaResponse
         | bytes
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]
     ):
@@ -726,17 +712,29 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeReplicaV2") as span:
-            request = store_daemon_v2_pb2.MaterializeReplicaRequest(
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid,
                 device_uuid=device_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = bool(verify_checksums)
@@ -751,7 +749,7 @@ class DaemonCtl:
             if placement is not None:
                 request.placement = placement
             try:
-                response: store_daemon_v2_pb2.MaterializeReplicaResponse = (
+                response: store_daemon_pb2.MaterializeReplicaResponse = (
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
                         request,
@@ -817,9 +815,10 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
-    ) -> store_daemon_v2_pb2.MaterializeByKeyResponse: ...
+    ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
 
     @overload
     def materialize_by_key_v2(
@@ -832,6 +831,7 @@ class DaemonCtl:
         wait_for_completion: Literal[False],
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
@@ -847,6 +847,7 @@ class DaemonCtl:
         wait_for_completion: Literal[True] = True,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> tuple[bytes, str, str]: ...
@@ -860,10 +861,11 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
     ) -> (
-        store_daemon_v2_pb2.MaterializeByKeyResponse
+        store_daemon_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
         | tuple[bytes, str, str]
     ):
@@ -875,29 +877,39 @@ class DaemonCtl:
         )
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeByKeyV2") as span:
-            request = store_daemon_v2_pb2.MaterializeByKeyRequest(
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.MaterializeByKeyRequest(
                 key=key,
                 device_id=int(device_id),
                 pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
                 pid=pid,
                 replica_uuid=replica_uuid,
-                preference=preference
-                if preference is not None
-                else store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO,
+                preference=preference_value,
             )
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
             if view_subset_hash:
                 request.view_subset_hash = view_subset_hash
             try:
-                response: store_daemon_v2_pb2.MaterializeByKeyResponse = (
-                    self._unary_call(
-                        self.stub_v2.MaterializeByKey,
-                        request,
-                        timeout=60,
-                        span=span,
-                        retries=1,
-                    )
+                response: store_daemon_pb2.MaterializeByKeyResponse = self._unary_call(
+                    self.stub_v2.MaterializeByKey,
+                    request,
+                    timeout=60,
+                    span=span,
+                    retries=1,
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
@@ -965,11 +977,11 @@ class DaemonCtl:
 
     def resolve_artifact_from_disk_v2(
         self, *, disk_path: str, verify_checksums: bool = True
-    ) -> store_daemon_v2_pb2.ResolveArtifactFromDiskResponse:
+    ) -> store_daemon_pb2.ResolveArtifactFromDiskResponse:
         if not disk_path:
             raise ValueError("disk_path is required")
         with self._client_span("Client/ResolveArtifactFromDiskV2") as span:
-            request = store_daemon_v2_pb2.ResolveArtifactFromDiskRequest(
+            request = store_daemon_pb2.ResolveArtifactFromDiskRequest(
                 disk_path=disk_path, verify_checksums=bool(verify_checksums)
             )
             try:
@@ -1010,7 +1022,7 @@ class DaemonCtl:
         wait_for_completion: bool = True,
         return_response: bool = False,
     ):
-        """Materialize a replica by RFC-0014 key via daemon.
+        """Materialize a replica by key via daemon.
 
         Returns
             If wait_for_completion=True: (cuda_ipc_handle_bytes, used_disk_path, artifact_id)
@@ -1170,10 +1182,10 @@ class DaemonCtl:
         timeout_s: float = 30.0,
         view: store_daemon_pb2.ViewRegistrationOptions | None = None,
     ) -> BeginRegisterArtifactResult:
-        """Begin unified artifact registration (RFC-0014).
+        """Begin unified artifact registration.
 
         Args:
-            device_id: target device ordinal (single-GPU invariant per RFC-0014).
+            device_id: target device ordinal (single-GPU invariant).
             total_size_bytes: AVBS total size (8B aligned).
             ttl_ms: optional TTL used by Lease/UMA/VS plans.
             tensor_index_key: optional hex key of canonical index.
@@ -1429,14 +1441,10 @@ class DaemonCtl:
             )
             for s in segments:
                 seg = req.lease_segments.segments.add()
-                seg.device_id = int(s.device_id)
-                if s.cuda_ipc_handle is not None:
-                    seg.cuda_ipc_handle = s.cuda_ipc_handle
-                seg.base_addr = int(s.base_addr)
+                seg.storage_id = s.storage_id
+                seg.storage_offset = int(s.storage_offset)
                 seg.length = int(s.length)
-                seg.dst_offset = int(s.dst_offset)
-                if s.storage_id:
-                    seg.storage_id = s.storage_id
+                seg.artifact_offset = int(s.artifact_offset)
             if storages:
                 for storage in storages:
                     entry = req.storage_entries.add()
@@ -1447,8 +1455,7 @@ class DaemonCtl:
                     if storage.vram_region_id:
                         entry.vram_region_id = storage.vram_region_id
                     entry.storage_length = int(storage.storage_length)
-                    if storage.region_base_offset is not None:
-                        entry.region_base_offset = int(storage.region_base_offset)
+                    entry.mapping_base_offset = int(storage.mapping_base_offset)
             if tensor_aliases:
                 for alias in tensor_aliases:
                     dst = req.tensor_aliases.add()
@@ -1770,7 +1777,7 @@ class DaemonCtl:
                 return None
 
     # ------------------------------------------------------------------
-    # RFC-0014: Key mapping publish via daemon
+    # Key mapping publish via daemon
     # ------------------------------------------------------------------
 
     def publish_replica_key(
@@ -1824,7 +1831,7 @@ class DaemonCtl:
                 raise
 
     # ------------------------------------------------------------------
-    # RFC-0014 helpers to keep API layer decoupled from Global Store
+    # Key mapping helpers to keep API layer decoupled from Global Store
     # ------------------------------------------------------------------
 
     def resolve_key_mapping(

@@ -4,8 +4,8 @@ title: Unified Memory Stager and Staged P2P (Design)
 related_code:
   - core/communicator/engine/engine.*
   - core/communicator/engine/memory_stager.*
-  - core/communicator/engine/dram_stager.*
-  - core/communicator/engine/gpu_net_stager.*
+  - core/communicator/engine/host_pinned_cpu_stager.*
+  - core/communicator/engine/host_pinned_gpu_stager.*
   - core/common/memory/pinned_buffer_pool.h (alias of pinned_buffer_pool.*)
   - core/communicator/transport/mtcp_transport.*
   - core/store/replica/chunk_export_service.*
@@ -36,9 +36,9 @@ Non‑Goals
 ## Concepts
 
 - MemoryStager: component that produces host‑pinned slices suitable for transport from either VS (CPU) or VRAM (GPU) sources.
-- StageToken: scoped handle carrying `host_ptr`, `bytes`, and optional `RdmaMr`, plus `complete()` to return resources.
-- DRAMStager: VS VA → host‑pinned copy; holds a VS lease only for the duration of memcpy and then releases it.
-- GpuNetStager: VRAM → host‑pinned D2H via `cudaMemcpyAsync`; emits token upon completion.
+- StageToken: scoped handle carrying `exposed_ptr`, `bytes`, and optional `RdmaMr`, plus `complete()` to return resources.
+- HostPinnedCpuStager: VS VA → host‑pinned copy; holds a VS lease only for the duration of memcpy and then releases it.
+- HostPinnedGpuStager: VRAM → host‑pinned D2H via `cudaMemcpyAsync`; emits token upon completion.
 - PinnedBufferPool: per‑NUMA pools of pinned buffers; each buffer is permanently registered per RNIC PD with cached `ibv_mr`.
 
 ## Class model (Mermaid)
@@ -49,15 +49,15 @@ class MemoryStager {
   +StageToken stage(uint64_t va_offset, size_t bytes)
 }
 class StageToken {
-  +void* host_ptr
+  +void* exposed_ptr
   +size_t bytes
   +optional RdmaMr mr
   +void complete()
 }
-class DRAMStager
-class GpuNetStager
-MemoryStager <|.. DRAMStager
-MemoryStager <|.. GpuNetStager
+class HostPinnedCpuStager
+class HostPinnedGpuStager
+MemoryStager <|.. HostPinnedCpuStager
+MemoryStager <|.. HostPinnedGpuStager
 ```
 
 ## Transport semantics
@@ -103,7 +103,7 @@ Selection rules
 # Invariants & Error Model
 
 Invariants
-- VS leases are held only during memcpy in DRAMStager; leases are released before tokens are returned to callers.
+- VS leases are held only during memcpy in HostPinnedCpuStager; leases are released before tokens are returned to callers.
 - MR registration never occurs over VS VA or producer VRAM; only over pool buffers.
 - StageToken must be completed exactly once. RDMA tokens require ACK; MTCP tokens are completed upon send completion.
 - Staged‑only across machines: PAD bytes are never transmitted and are zero‑filled by receivers.
@@ -145,7 +145,7 @@ Risks and mitigations
 ```cpp
 // memory_stager.h
 struct StageToken {
-  void* host_ptr;
+  void* exposed_ptr;
   size_t bytes;
   struct ibv_mr* mr; // optional
   std::function<void()> complete; // RAII/explicit
@@ -176,14 +176,14 @@ sequenceDiagram
 
   Sv->>ST: stage(offset,len)
   alt RDMA
-    ST-->>Sv: StageToken{host_ptr,len,mr}
+    ST-->>Sv: StageToken{exposed_ptr,len,mr}
     Sv-->>CL: READ_RESPONSE_EX{segments: [(addr,rkey,bytes),...]}
     CL->>TX: post RDMA READs
     CL->>Sv: RDMA_READ_DONE_EX(offsets)
     Sv->>ST: token.complete()
   else MTCP
-    ST-->>Sv: StageToken{host_ptr,len}
-    Sv->>TX: send(host_ptr,len, token)
+    ST-->>Sv: StageToken{exposed_ptr,len}
+    Sv->>TX: send(exposed_ptr,len, token)
     TX-->>ST: send_done → token.complete()
   end
 ```

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -130,7 +130,7 @@ class StageLease {
   StageLease(
       std::shared_ptr<MemoryStager> stager,
       FlowCreditLedger* ledger,
-      void* host_ptr,
+      void* exposed_ptr,
       size_t bytes,
       ibv_mr* mr,
       bool deregister_mr,
@@ -149,7 +149,7 @@ class StageLease {
   [[nodiscard]] bool released() const;
   void release();
 
-  [[nodiscard]] void* host_ptr() const;
+  [[nodiscard]] void* exposed_ptr() const;
   [[nodiscard]] size_t bytes() const;
   [[nodiscard]] ibv_mr* mr() const;
   [[nodiscard]] const Metadata& metadata() const;
@@ -161,7 +161,7 @@ class StageLease {
     State(
         std::shared_ptr<MemoryStager> stager,
         FlowCreditLedger* ledger,
-        void* host_ptr,
+        void* exposed_ptr,
         size_t bytes,
         ibv_mr* mr,
         bool deregister_mr,
@@ -172,7 +172,7 @@ class StageLease {
 
     std::shared_ptr<MemoryStager> stager;
     FlowCreditLedger* ledger;
-    void* host_ptr;
+    void* exposed_ptr;
     size_t bytes;
     ibv_mr* mr;
     bool deregister_mr;

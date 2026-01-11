@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -24,8 +24,7 @@ from tensorcast.api.store.types import (
     StoreOptions,
 )
 from tensorcast.api.store.views import ViewOrchestrator
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2 as store_daemon_v2_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +55,7 @@ def _patch_validate_targets(monkeypatch):
 
 
 def test_materialization_proto_alignment():
-    resp = store_daemon_v2_pb2.MaterializeReplicaResponse()
+    resp = store_daemon_pb2.MaterializeReplicaResponse()
     assert hasattr(resp, "canonical_index_bytes")
     assert hasattr(resp, "view_index_bytes")
     assert hasattr(resp, "generation")
@@ -91,6 +90,13 @@ class _FakeClient:
         self.unloaded.append(f"{replica_uuid}:{disk_path}")
         return True
 
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        # Region-backed get_into may probe artifact indices even when tests do not
+        # set up a daemon. Returning an empty canonical index forces the region-backed
+        # path to fall back cleanly.
+        del artifact_id
+        return b"{}"
+
     def resolve_artifact_from_disk_v2(
         self, *, disk_path: str, verify_checksums: bool = True
     ):
@@ -123,9 +129,6 @@ class _RuntimeStub:
             mem_pool_bytes=0,
             tx_slice_bytes=0,
             artifact_chunk_bytes=0,
-            supports_coalesced=False,
-            supports_lease=False,
-            supports_region_backed_get_into=False,
             server_config=None,
         )
 
@@ -143,6 +146,9 @@ class _RuntimeStub:
 
     def get_artifact_index_by_disk_path(self, disk_path: str):
         return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
+
+    def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
+        return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
     def cache_key_mapping(self, *_, **__) -> None:  # pragma: no cover - noop
         return None

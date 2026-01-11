@@ -6,7 +6,7 @@ created: 2025-09-29
 last_updated: 2025-09-30
 areas: ["daemon", "communicator", "core"]
 links:
-  supersedes: ../designs/0021-region-backed-registration.md
+  supersedes: ../architecture/api/region-backed.md
 related_code:
   - daemon/lip_manager.cc
   - core/communicator/engine/**
@@ -16,7 +16,7 @@ related_code:
 
 # Summary
 
-Region-backed registrations (design 0021) eliminate CUDA IPC handle fan-out but today still stage GPU memory through host buffers before every RDMA transfer. This design removes the extra copy by teaching the communicator to reuse the pre-registered GPU memory regions, exposing the existing Memory Region (MR) directly to peers while retaining the current credit-based flow control, synchronously confirming MR readiness, and keeping staged fallbacks for compatibility.
+Region-backed registrations (see [region-backed](../architecture/api/region-backed.md)) eliminate CUDA IPC handle fan-out but today still stage GPU memory through host buffers before every RDMA transfer. This design removes the extra copy by teaching the communicator to reuse the pre-registered GPU memory regions, exposing the existing Memory Region (MR) directly to peers while retaining the current credit-based flow control, synchronously confirming MR readiness, and keeping staged fallbacks for compatibility.
 
 ```mermaid
 sequenceDiagram
@@ -65,7 +65,7 @@ sequenceDiagram
 ## Stage Function Variants
 
 - Introduce helper `MakeStageFunction(const std::shared_ptr<PartitionTensor>& tensor, FlowCreditLedger* ledger)`.
-  - **Direct path:** returns a lambda that creates `StageLease{stager=nullptr, ledger, host_ptr=tensor_base+offset, mr=tensor->get_mr(), deregister_mr=false}`.
+  - **Direct path:** returns a lambda that creates `StageLease{stager=nullptr, ledger, exposed_ptr=tensor_base+offset, mr=tensor->get_mr(), deregister_mr=false}`.
   - **Fallback path:** retains current staging lambda using `MemoryStager::stage`.
 - `StagingWindow` continues to drive chunking. Add configuration knob `stager().direct_chunk_mb` (defaults to `stage_chunk_mb_gpu`) to tune zero-copy window size without affecting staging chunking.
 
@@ -126,7 +126,7 @@ sequenceDiagram
 
 # References
 
-- `docs/designs/0021-region-backed-registration.md`
+- `docs/architecture/api/region-backed.md`
 - `core/communicator/README.md`
 - `core/communicator/engine/engine.cc`
 - `daemon/lip_manager.cc`

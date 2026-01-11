@@ -14,6 +14,7 @@ This section contains comprehensive guides for developers working on or extendin
 Understand how TensorCast works:
 
 - **[Component Interactions](architecture/README.md)** - How components work together
+- **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
 
 ## 🔧 Component Development
@@ -73,6 +74,10 @@ bazel build //tests/cpp:gpu_ce_test
 bazel build //tests/cpp:replica_p2p_registration_test --compilation_mode=dbg
 bazel build //tests/cpp:replica_p2p_transfer_test --compilation_mode=dbg
 ```
+
+### Testing
+
+- **[Testing Guide](development/testing.md)** - Python, C++, P2P, and multi-machine tests
 
 ## Development Topics by Area
 

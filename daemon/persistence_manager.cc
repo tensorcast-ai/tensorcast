@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/persistence_manager.h"
 
@@ -48,13 +48,13 @@ std::string make_digest(absl::string_view artifact_id, uint32_t shard_idx, uint6
       absl::string_view(reinterpret_cast<const char*>(digest_bytes.data()), digest_bytes.size()));
 }
 
-gs::PlacementPolicy to_global_policy(v1::PlacementPolicy policy) {
+gs::PlacementPolicy to_global_policy(v2::PlacementPolicy policy) {
   switch (policy) {
-    case v1::PLACEMENT_POLICY_LOCAL_ONLY:
+    case v2::PLACEMENT_POLICY_LOCAL_ONLY:
       return gs::PLACEMENT_POLICY_LOCAL_ONLY;
-    case v1::PLACEMENT_POLICY_REPLICATED:
+    case v2::PLACEMENT_POLICY_REPLICATED:
       return gs::PLACEMENT_POLICY_REPLICATED;
-    case v1::PLACEMENT_POLICY_SHARDED:
+    case v2::PLACEMENT_POLICY_SHARDED:
       return gs::PLACEMENT_POLICY_SHARDED;
     default:
       return gs::PLACEMENT_POLICY_UNSPECIFIED;
@@ -206,12 +206,12 @@ absl::optional<PersistenceTaskState> task_from_json(const nlohmann::json& j) {
     }
     task.plan_id = j.value("plan_id", "");
     task.artifact_id = j.value("artifact_id", "");
-    task.placement_policy = static_cast<v1::PlacementPolicy>(j.value("placement_policy", 0));
+    task.placement_policy = static_cast<v2::PlacementPolicy>(j.value("placement_policy", 0));
     task.persist_to_shared_disk = j.value("persist_to_shared_disk", false);
     task.remote_requirement = static_cast<RequirementLevel>(j.value("remote_requirement", 0));
     task.shared_disk_requirement = static_cast<RequirementLevel>(j.value("shared_disk_requirement", 0));
-    task.layout = static_cast<v1::PolicyLayout>(j.value("layout", v1::POLICY_LAYOUT_AUTO));
-    task.state = static_cast<v1::PersistenceState>(j.value("state", 0));
+    task.layout = static_cast<v2::PolicyLayout>(j.value("layout", v2::POLICY_LAYOUT_AUTO));
+    task.state = static_cast<v2::PersistenceState>(j.value("state", 0));
     task.progress = j.value("progress", 0.0);
     task.degraded_reason = j.value("degraded_reason", "");
     task.last_error = j.value("last_error", "");
@@ -224,7 +224,7 @@ absl::optional<PersistenceTaskState> task_from_json(const nlohmann::json& j) {
         shard.byte_range_length = shard_json.value("byte_range_length", 0);
         shard.size_bytes = shard_json.value("size_bytes", 0);
         shard.content_digest = shard_json.value("content_digest", "");
-        shard.state = static_cast<v1::PersistenceState>(shard_json.value("state", 0));
+        shard.state = static_cast<v2::PersistenceState>(shard_json.value("state", 0));
         shard.progress = shard_json.value("progress", 0.0);
         shard.degraded_reason = shard_json.value("degraded_reason", "");
         shard.last_error = shard_json.value("last_error", "");
@@ -283,7 +283,7 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
     PersistenceSource source,
     const ResolvedStorePolicy& policy) {
   const uint64_t id = ++counter_;
-  const v1::PlacementPolicy placement_policy = select_placement_policy(policy, source.total_size_bytes);
+  const v2::PlacementPolicy placement_policy = select_placement_policy(policy, source.total_size_bytes);
   const bool persist_to_shared_disk = policy.shared_disk_requirement != RequirementLevel::kNone;
   PersistenceTaskState task{
       .task_id = absl::StrFormat("persist-%016x", id),
@@ -294,7 +294,7 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
       .remote_requirement = policy.remote_requirement,
       .shared_disk_requirement = policy.shared_disk_requirement,
       .layout = policy.layout,
-      .state = v1::PERSISTENCE_STATE_PENDING,
+      .state = v2::PERSISTENCE_STATE_PENDING,
       .progress = 0.0,
       .degraded_reason = "",
       .last_error = "",
@@ -302,13 +302,13 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
 
   auto shards_or = plan_shards(source, policy.layout);
   if (!shards_or.ok()) {
-    task.state = v1::PERSISTENCE_STATE_FAILED;
+    task.state = v2::PERSISTENCE_STATE_FAILED;
     task.last_error = std::string(shards_or.status().message());
   } else {
     auto shards = std::move(*shards_or);
     const absl::Status plan_status = apply_placement_plan(task, shards);
     if (!plan_status.ok()) {
-      task.state = v1::PERSISTENCE_STATE_FAILED;
+      task.state = v2::PERSISTENCE_STATE_FAILED;
       task.last_error = std::string(plan_status.message());
     }
     {
@@ -319,10 +319,10 @@ absl::StatusOr<PersistenceTaskState> PersistenceManager::start_task_with_source(
   }
   propagate_degraded_reason(task);
   task.progress = compute_task_progress(task);
-  if (task.state == v1::PERSISTENCE_STATE_FAILED) {
+  if (task.state == v2::PERSISTENCE_STATE_FAILED) {
     record_error_metric("plan");
   }
-  if (!task.metrics_active && task.state != v1::PERSISTENCE_STATE_FAILED) {
+  if (!task.metrics_active && task.state != v2::PERSISTENCE_STATE_FAILED) {
     adjust_active_metric(1);
     task.metrics_active = true;
   }
@@ -390,19 +390,19 @@ absl::StatusOr<PersistenceManager::PersistenceSource> PersistenceManager::stable
   return absl::FailedPreconditionError("stable DRAM replica not found for artifact");
 }
 
-v1::PlacementPolicy PersistenceManager::select_placement_policy(
+v2::PlacementPolicy PersistenceManager::select_placement_policy(
     const ResolvedStorePolicy& policy,
     uint64_t total_size_bytes) {
   if (policy.remote_requirement == RequirementLevel::kNone) {
-    return v1::PLACEMENT_POLICY_LOCAL_ONLY;
+    return v2::PLACEMENT_POLICY_LOCAL_ONLY;
   }
-  if (policy.layout == v1::POLICY_LAYOUT_SHARDED) {
-    return v1::PLACEMENT_POLICY_SHARDED;
+  if (policy.layout == v2::POLICY_LAYOUT_SHARDED) {
+    return v2::PLACEMENT_POLICY_SHARDED;
   }
-  if (policy.layout == v1::POLICY_LAYOUT_UNSHARDED) {
-    return v1::PLACEMENT_POLICY_REPLICATED;
+  if (policy.layout == v2::POLICY_LAYOUT_UNSHARDED) {
+    return v2::PLACEMENT_POLICY_REPLICATED;
   }
-  return total_size_bytes >= kShardThresholdBytes ? v1::PLACEMENT_POLICY_SHARDED : v1::PLACEMENT_POLICY_REPLICATED;
+  return total_size_bytes >= kShardThresholdBytes ? v2::PLACEMENT_POLICY_SHARDED : v2::PLACEMENT_POLICY_REPLICATED;
 }
 
 absl::optional<PersistenceTaskState> PersistenceManager::get_by_task_id(absl::string_view task_id) const {
@@ -490,7 +490,7 @@ absl::Status PersistenceManager::ack_and_register_remote(
 
 absl::StatusOr<std::vector<PersistenceShardState>> PersistenceManager::plan_shards(
     const PersistenceSource& source,
-    v1::PolicyLayout layout) const {
+    v2::PolicyLayout layout) const {
   const uint64_t chunk_bytes = artifact_chunk_bytes_ == 0 ? kDefaultChunkBytes : artifact_chunk_bytes_;
   if (chunk_bytes == 0) {
     return absl::FailedPreconditionError("artifact_chunk_bytes must be > 0");
@@ -512,13 +512,13 @@ absl::StatusOr<std::vector<PersistenceShardState>> PersistenceManager::plan_shar
     shard.size_bytes = length;
     shard.content_digest = make_digest(source.artifact_id, shard.shard_idx, start, length);
     shard.chunk_ids = std::move(chunk_ids);
-    shard.state = v1::PERSISTENCE_STATE_PENDING;
+    shard.state = v2::PERSISTENCE_STATE_PENDING;
     shard.progress = 0.0;
     shards.push_back(std::move(shard));
   };
 
-  const bool force_unsharded = layout == v1::POLICY_LAYOUT_UNSHARDED;
-  const bool force_sharded = layout == v1::POLICY_LAYOUT_SHARDED;
+  const bool force_unsharded = layout == v2::POLICY_LAYOUT_UNSHARDED;
+  const bool force_sharded = layout == v2::POLICY_LAYOUT_SHARDED;
   if (force_unsharded || (!force_sharded && source.total_size_bytes < kShardThresholdBytes)) {
     std::vector<uint32_t> chunk_ids;
     chunk_ids.reserve(static_cast<size_t>(chunk_count));
@@ -599,7 +599,7 @@ absl::Status PersistenceManager::apply_placement_plan(
   auto plan_or = request_plan(task, shards);
   if (!plan_or.ok()) {
     if (task.remote_requirement == RequirementLevel::kMust) {
-      task.state = v1::PERSISTENCE_STATE_FAILED;
+      task.state = v2::PERSISTENCE_STATE_FAILED;
       task.last_error = std::string(plan_or.status().message());
     } else if (task.remote_requirement == RequirementLevel::kShould) {
       task.degraded_reason = std::string(plan_or.status().message());
@@ -626,7 +626,7 @@ absl::Status PersistenceManager::apply_placement_plan(
   }
   if (plan.degraded && task.degraded_reason.empty()) {
     if (task.remote_requirement == RequirementLevel::kMust) {
-      task.state = v1::PERSISTENCE_STATE_FAILED;
+      task.state = v2::PERSISTENCE_STATE_FAILED;
       task.last_error = plan.degraded_reason.empty() ? "placement_plan_degraded" : plan.degraded_reason;
     } else if (task.remote_requirement == RequirementLevel::kShould) {
       task.degraded_reason = plan.degraded_reason;
@@ -687,7 +687,7 @@ void PersistenceManager::attach_shared_disk_targets(
 }
 
 void PersistenceManager::propagate_degraded_reason(PersistenceTaskState& task) const {
-  if (task.state == v1::PERSISTENCE_STATE_FAILED) {
+  if (task.state == v2::PERSISTENCE_STATE_FAILED) {
     return;
   }
   if (task.degraded_reason.empty()) {
@@ -709,7 +709,7 @@ void PersistenceManager::propagate_degraded_reason(PersistenceTaskState& task) c
 
 double PersistenceManager::compute_task_progress(const PersistenceTaskState& task) {
   if (task.shards.empty()) {
-    return task.state == v1::PERSISTENCE_STATE_SUCCESS ? 1.0 : 0.0;
+    return task.state == v2::PERSISTENCE_STATE_SUCCESS ? 1.0 : 0.0;
   }
   double accum = 0.0;
   for (const auto& shard : task.shards) {
@@ -963,15 +963,15 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
     }
   }
   if (shard_failed) {
-    shard.state = v1::PERSISTENCE_STATE_FAILED;
+    shard.state = v2::PERSISTENCE_STATE_FAILED;
     return;
   }
   const bool all_done = done_targets == total_targets;
   if (all_done) {
-    shard.state = (shard_degraded || !task.degraded_reason.empty()) ? v1::PERSISTENCE_STATE_DEGRADED
-                                                                    : v1::PERSISTENCE_STATE_SUCCESS;
+    shard.state = (shard_degraded || !task.degraded_reason.empty()) ? v2::PERSISTENCE_STATE_DEGRADED
+                                                                    : v2::PERSISTENCE_STATE_SUCCESS;
   } else {
-    shard.state = v1::PERSISTENCE_STATE_RUNNING;
+    shard.state = v2::PERSISTENCE_STATE_RUNNING;
   }
 }
 
@@ -1109,9 +1109,9 @@ void PersistenceManager::load_task_log() {
   }
 }
 
-bool PersistenceManager::is_terminal(v1::PersistenceState state) {
-  return state == v1::PERSISTENCE_STATE_SUCCESS || state == v1::PERSISTENCE_STATE_FAILED ||
-      state == v1::PERSISTENCE_STATE_DEGRADED;
+bool PersistenceManager::is_terminal(v2::PersistenceState state) {
+  return state == v2::PERSISTENCE_STATE_SUCCESS || state == v2::PERSISTENCE_STATE_FAILED ||
+      state == v2::PERSISTENCE_STATE_DEGRADED;
 }
 
 bool PersistenceManager::is_spill_evictable(
@@ -1136,17 +1136,17 @@ bool PersistenceManager::is_spill_evictable(
   return true;
 }
 
-gs::PersistenceState PersistenceManager::to_global_state(v1::PersistenceState state) {
+gs::PersistenceState PersistenceManager::to_global_state(v2::PersistenceState state) {
   switch (state) {
-    case v1::PERSISTENCE_STATE_PENDING:
+    case v2::PERSISTENCE_STATE_PENDING:
       return gs::PERSISTENCE_STATE_PENDING;
-    case v1::PERSISTENCE_STATE_RUNNING:
+    case v2::PERSISTENCE_STATE_RUNNING:
       return gs::PERSISTENCE_STATE_RUNNING;
-    case v1::PERSISTENCE_STATE_DEGRADED:
+    case v2::PERSISTENCE_STATE_DEGRADED:
       return gs::PERSISTENCE_STATE_DEGRADED;
-    case v1::PERSISTENCE_STATE_SUCCESS:
+    case v2::PERSISTENCE_STATE_SUCCESS:
       return gs::PERSISTENCE_STATE_SUCCESS;
-    case v1::PERSISTENCE_STATE_FAILED:
+    case v2::PERSISTENCE_STATE_FAILED:
       return gs::PERSISTENCE_STATE_FAILED;
     default:
       return gs::PERSISTENCE_STATE_UNSPECIFIED;
@@ -1170,10 +1170,10 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
     if (is_terminal(task.state)) {
       continue;
     }
-    if (task.state == v1::PERSISTENCE_STATE_PENDING) {
-      task.state = v1::PERSISTENCE_STATE_RUNNING;
+    if (task.state == v2::PERSISTENCE_STATE_PENDING) {
+      task.state = v2::PERSISTENCE_STATE_RUNNING;
       for (auto& shard : task.shards) {
-        shard.state = v1::PERSISTENCE_STATE_RUNNING;
+        shard.state = v2::PERSISTENCE_STATE_RUNNING;
         shard.progress = 0.0;
       }
       propagate_degraded_reason(task);
@@ -1188,13 +1188,13 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
 
     for (auto& shard : task.shards) {
       advance_shard_locked(task, shard);
-      if (shard.state == v1::PERSISTENCE_STATE_FAILED) {
+      if (shard.state == v2::PERSISTENCE_STATE_FAILED) {
         any_failed = true;
       }
-      if (shard.state == v1::PERSISTENCE_STATE_DEGRADED || !shard.degraded_reason.empty()) {
+      if (shard.state == v2::PERSISTENCE_STATE_DEGRADED || !shard.degraded_reason.empty()) {
         any_degraded = true;
       }
-      if (shard.state != v1::PERSISTENCE_STATE_SUCCESS && shard.state != v1::PERSISTENCE_STATE_DEGRADED) {
+      if (shard.state != v2::PERSISTENCE_STATE_SUCCESS && shard.state != v2::PERSISTENCE_STATE_DEGRADED) {
         all_done = false;
       }
     }
@@ -1205,17 +1205,17 @@ void PersistenceManager::advance_locked(std::vector<comps::PersistenceReport>& r
     }
     propagate_degraded_reason(task);
     if (any_failed) {
-      task.state = v1::PERSISTENCE_STATE_FAILED;
+      task.state = v2::PERSISTENCE_STATE_FAILED;
     } else if (all_done) {
-      task.state = any_degraded ? v1::PERSISTENCE_STATE_DEGRADED : v1::PERSISTENCE_STATE_SUCCESS;
+      task.state = any_degraded ? v2::PERSISTENCE_STATE_DEGRADED : v2::PERSISTENCE_STATE_SUCCESS;
     } else {
-      task.state = v1::PERSISTENCE_STATE_RUNNING;
+      task.state = v2::PERSISTENCE_STATE_RUNNING;
     }
     task.progress = compute_task_progress(task);
     if (is_terminal(task.state) && task.metrics_active && !task.metrics_closed) {
       adjust_active_metric(-1);
       task.metrics_closed = true;
-      if (task.state == v1::PERSISTENCE_STATE_FAILED) {
+      if (task.state == v2::PERSISTENCE_STATE_FAILED) {
         record_error_metric("task");
       }
     }

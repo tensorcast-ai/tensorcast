@@ -5,7 +5,7 @@ sidebar_position: 6
 ---
 
 # Summary
-TensorCast’s core bet is that any model state can be treated as a rigorously described `dict[str, torch.Tensor]`. This note connects the high-level rationale from the design set (0007, 0016, 0014, checkpoint data format) with the concrete code that keeps the abstraction true. It also surfaces the main trade-offs: while a uniform tensor view enables zero-copy routing and verifiable views, it obligates us to encode tensor semantics when scheduling resources, hashing bytes, or caching replicas.
+TensorCast’s core bet is that any model state can be treated as a rigorously described `dict[str, torch.Tensor]`. This note connects the high-level rationale from the design set (0007, 0016, API design, checkpoint data format) with the concrete code that keeps the abstraction true. It also surfaces the main trade-offs: while a uniform tensor view enables zero-copy routing and verifiable views, it obligates us to encode tensor semantics when scheduling resources, hashing bytes, or caching replicas.
 
 Note: the public SDK surface is now handle-first (`tensorcast.artifact(...).tensor*`); legacy
 module-level `get/get_into` helpers have been removed in favor of the `Artifact` handle while
@@ -14,7 +14,7 @@ reusing the same materialization pipeline described below.
 ## Related design threads
 - [0007-content-addressed-artifact-id](../designs/0007-content-addressed-artifact-id.md): canonical identity (`mi2:index:data`), hashing policy, Global Store schema.
 - [0016-artifact-view-v1](../designs/0016-artifact-view-v1.md): variant-aware retrieval/registration via `ViewSpec`, shared planners, leaf digests.
-- [0014-store-session-api-modernization](../designs/0014-store-session-api-modernization.md): Store-centric SDK session that owns daemon policy, retries, and tensor validation.
+- [api-design](../architecture/api/api-design.md): Store-centric SDK session that owns daemon policy, retries, and tensor validation.
 - [core/checkpoint/data-format](../../core/checkpoint/docs/data-format.md): file/partition layout, canonical tensor index v2→v3, and PAD semantics.
 
 ## 1. Canonical tensor ledger
@@ -103,7 +103,7 @@ flowchart LR
 Because both retrieval and registration invoke the same planner, we avoid divergence between server-side slicing and client-side ingestion.
 
 ## 4. Store-centric session API and resource orchestration
-RFC‑0014 moved session policy into `tensorcast/api/store.py::Store`. The session:
+The Store API design moved session policy into the Store runtime and facade (`tensorcast/api/store/runtime.py`). The session:
 
 - Owns retry budgets, fallback rules, lease keepalive, and daemon channel pooling.
 - Validates target tensors (`_validate_targets`) before mutating caller buffers, ensuring shapes/strides/dtypes match the canonical index returned by the daemon.
@@ -134,7 +134,7 @@ Tensor-first semantics remain intact even as artifacts bounce between Lease-In-P
 | Lease-In-Place reuse on the same GPU (or peer) | `Store.get*` issues a `MaterializeReplicaRequest` without a view | Existing `ReplicaKey` + CUDA IPC handle exported from prior registration; no copying, just ref-count/lease | [`MaterializationController::materialize_replica`](../../daemon/service/controllers/materialization_controller.cc) tries `lip.try_satisfy_from_lip` before touching the engine, while [`LipManager::copy_to_new_coalesced`](../../daemon/lip_manager.cc) rehydrates segments whenever a peer needs a coalesced buffer. |
 | Coalesced VRAM materialization (engine path) | `Store._materialize` streams via `materialize_artifact_v2` | Fresh UMA allocation zero-fills PAD ranges and replays the canonical segment plan | [`StoreEngine::materialize_replica`](../../core/store/store_engine.cc) delegates to ingestion runtimes, and [`build_segment_plan_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/segment_plan_source.cc) emits deterministic DATA/PAD spans so seams stay canonical. |
 | Host UMA staging & view ingestion | Registration of a view or canonical ingest that cannot alias GPU memory | Host buffers populated according to `SelectionPlan` and replayed into canonical VRAM | [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) streams only the requested ranges, while [`ViewIngestExecutor`](../../core/store/materialization/dataplane/view/view_ingest_executor.cc) enforces contiguity, executes inverse transforms, and copies back into UMA. |
-| Disk-first fallback on the client | `FallbackOptions(prefer_disk=True)` or explicit `disk_path` | Disk path forwarded to daemon with `SourcePreference=PREFER_DISK`; daemon streams metadata, validates checksums, and reports the actual materialization source | [`MaterializationPipeline._materialize`](../../tensorcast/api/store/materialization.py) resolves key mappings, sets `disk_path`/`preference`, and `MaterializationPayload.source` mirrors the daemon-reported path. |
+| Disk-first fallback on the client | `FallbackOptions(prefer_disk=True)` or explicit `disk_path` | Disk path forwarded to daemon with `SourcePolicy(preference=PREFER_DISK, allow flags)`; daemon streams metadata, validates checksums, and reports the actual materialization source | [`MaterializationPipeline._materialize`](../../tensorcast/api/store/materialization.py) resolves key mappings, sets `disk_path`/`preference`, and `MaterializationPayload.source` mirrors the daemon-reported path. |
 | Remote daemon / P2P streaming | Engine needs bytes another daemon already hosts | Chunked `SegmentPlan` ranges copied over communicator sessions before being committed locally | [`StoreEngine::ingest_from_p2p`](../../core/store/store_engine.cc) and [`LipManager::create_staged_export`](../../daemon/lip_manager.cc) both consume the same segment metadata, so the receiver observes tensors in canonical byte order even though the source is remote VRAM. |
 
 ### 6.2 Canonical data & abstraction graph
@@ -209,7 +209,7 @@ flowchart LR
 
     GET -->|resolve key/view, cache canonical index| GS
     GET -->|prefer_disk?| FALL
-    FALL -->|load_dict_from_disk + validate index| GET
+    FALL -->|test-only: tensorcast.testing.io_disk.load_dict_from_disk + validate index| GET
 
     GET -->|MaterializeReplicaRequest| CTRL
     CTRL -->|try_satisfy_from_lip| LIP

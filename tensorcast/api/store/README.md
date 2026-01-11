@@ -15,6 +15,8 @@ managing clients manually.
   tensor directly into the provided buffer. Only the requested tensor must be
   present in the target mapping, so multi-tensor artifacts no longer require
   pre-allocating placeholders for every entry when using the helper.
+- `tensor_dict_into` / `tensor_into` region-backed paths assume daemon support;
+  `region_backed_mode` (`auto`/`require`/`disable`) controls fallback behavior.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`,
   `disk_path`). At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
@@ -54,6 +56,9 @@ managing clients manually.
 - Async consumers can `await artifact.tensor_async(...)` or
   `await artifact.tensor_dict_async(...)`; calls are coalesced by the process
   `MaterializationBatcher` (1ms window) on the store event loop.
+- `tensor_dict_into_async` / `tensor_into_async` cancellation is best-effort:
+  once a region-backed RPC is in-flight, `cancel()` may return `False`; streaming
+  materialization remains cancellable before the RPC boundary.
 - `artifact.prefetch(device=...)` issues background materialization
   (`wait_for_completion=False`) and returns a tuple of
   `(prefetched_handle, PrefetchTicket)`. The returned handle is a clone whose
@@ -67,8 +72,8 @@ managing clients manually.
 `FallbackOptions` now supports explicit source preferences:
 
 - `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P; prefer an existing local replica without
-  requiring a disk fallback path
+- `prefer="local"` — disallow P2P and disk unless an explicit `disk_path` is provided;
+  daemon enforces this via `SourcePolicy` gating
 - `prefer="p2p"` — allow remote transfer
 - `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
   mapping

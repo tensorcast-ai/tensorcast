@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/persistence_manager.h"
 
@@ -23,14 +23,14 @@ using tensorcast::daemon::PersistenceTaskState;
 using tensorcast::daemon::RequirementLevel;
 using tensorcast::daemon::resolve_store_policy;
 using tensorcast::daemon::ResolvedStorePolicy;
-using tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED;
-using tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED;
-using tensorcast::daemon::v1::PERSISTENCE_STATE_PENDING;
-using tensorcast::daemon::v1::PERSISTENCE_STATE_RUNNING;
-using tensorcast::daemon::v1::PERSISTENCE_STATE_SUCCESS;
-using tensorcast::daemon::v1::PLACEMENT_POLICY_LOCAL_ONLY;
-using tensorcast::daemon::v1::PLACEMENT_POLICY_REPLICATED;
-using tensorcast::daemon::v1::POLICY_LAYOUT_UNSHARDED;
+using tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED;
+using tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED;
+using tensorcast::daemon::v2::PERSISTENCE_STATE_PENDING;
+using tensorcast::daemon::v2::PERSISTENCE_STATE_RUNNING;
+using tensorcast::daemon::v2::PERSISTENCE_STATE_SUCCESS;
+using tensorcast::daemon::v2::PLACEMENT_POLICY_LOCAL_ONLY;
+using tensorcast::daemon::v2::PLACEMENT_POLICY_REPLICATED;
+using tensorcast::daemon::v2::POLICY_LAYOUT_UNSHARDED;
 
 namespace {
 
@@ -127,7 +127,7 @@ TEST_CASE("PersistenceManager requests placement plans", "[daemon][persistence][
   mgr.advance_once_for_test(); // complete
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_SUCCESS);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_SUCCESS);
   REQUIRE(final->shards[0].targets.size() == 3);
   for (const auto& tgt : final->shards[0].targets) {
     REQUIRE(tgt.target_state == tensorcast::global_store::v1::PLACEMENT_TARGET_STATE_COMPLETE);
@@ -151,7 +151,7 @@ TEST_CASE("PersistenceManager degrades when plan fails", "[daemon][persistence][
 
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED);
   REQUIRE_FALSE(final->degraded_reason.empty());
   REQUIRE(final->shards[0].targets.size() == 2); // local + disk
   REQUIRE(final->shards[0].targets[0].node_id == "node-local");
@@ -205,11 +205,11 @@ TEST_CASE("PersistenceManager honors layout overrides for placement policy", "[d
 
   ResolvedStorePolicy auto_layout;
   auto_layout.remote_requirement = RequirementLevel::kShould;
-  auto_layout.layout = tensorcast::daemon::v1::POLICY_LAYOUT_AUTO;
+  auto_layout.layout = tensorcast::daemon::v2::POLICY_LAYOUT_AUTO;
   auto auto_small = mgr.start_task_for_test_with_policy("artifact-auto-small", auto_layout, 64ULL * 1024 * 1024);
   REQUIRE(auto_small.placement_policy == PLACEMENT_POLICY_REPLICATED);
   auto auto_large = mgr.start_task_for_test_with_policy("artifact-auto-large", auto_layout, 200ULL * 1024 * 1024);
-  REQUIRE(auto_large.placement_policy == tensorcast::daemon::v1::PLACEMENT_POLICY_SHARDED);
+  REQUIRE(auto_large.placement_policy == tensorcast::daemon::v2::PLACEMENT_POLICY_SHARDED);
 
   ResolvedStorePolicy unsharded;
   unsharded.remote_requirement = RequirementLevel::kShould;
@@ -219,14 +219,14 @@ TEST_CASE("PersistenceManager honors layout overrides for placement policy", "[d
 
   ResolvedStorePolicy sharded;
   sharded.remote_requirement = RequirementLevel::kShould;
-  sharded.layout = tensorcast::daemon::v1::POLICY_LAYOUT_SHARDED;
+  sharded.layout = tensorcast::daemon::v2::POLICY_LAYOUT_SHARDED;
   auto sharded_task = mgr.start_task_for_test_with_policy("artifact-sharded", sharded, 64ULL * 1024 * 1024);
-  REQUIRE(sharded_task.placement_policy == tensorcast::daemon::v1::PLACEMENT_POLICY_SHARDED);
+  REQUIRE(sharded_task.placement_policy == tensorcast::daemon::v2::PLACEMENT_POLICY_SHARDED);
 }
 
 TEST_CASE("PersistenceManager lowers durable profile to shared disk persistence", "[daemon][persistence][policy]") {
-  tensorcast::daemon::v1::StorePolicy policy;
-  policy.set_profile(tensorcast::daemon::v1::POLICY_PROFILE_DURABLE);
+  tensorcast::daemon::v2::StorePolicy policy;
+  policy.set_profile(tensorcast::daemon::v2::POLICY_PROFILE_DURABLE);
   auto resolved_or = resolve_store_policy(&policy);
   REQUIRE(resolved_or.ok());
 
@@ -249,17 +249,17 @@ TEST_CASE("PersistenceManager degrades when leases are denied", "[daemon][persis
     mgr.advance_once_for_test();
     auto maybe = mgr.get_by_task_id(task.task_id);
     if (maybe.has_value() &&
-        (maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED ||
-         maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED)) {
+        (maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED ||
+         maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED)) {
       break;
     }
   }
 
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED);
   REQUIRE_FALSE(final->shards.empty());
-  REQUIRE(final->shards[0].state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED);
+  REQUIRE(final->shards[0].state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED);
   REQUIRE_FALSE(final->shards[0].degraded_reason.empty());
 }
 
@@ -405,7 +405,7 @@ TEST_CASE("PersistenceManager retries leases before succeeding", "[daemon][persi
     auto maybe = mgr.get_by_task_id(task.task_id);
     if (maybe.has_value() &&
         (maybe->state == PERSISTENCE_STATE_SUCCESS || maybe->state == PERSISTENCE_STATE_DEGRADED ||
-         maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED)) {
+         maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED)) {
       break;
     }
   }
@@ -430,7 +430,7 @@ TEST_CASE("PersistenceManager registers remote replicas and acks leases", "[daem
 
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_SUCCESS);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_SUCCESS);
   REQUIRE(final->shards.size() == 1);
   bool remote_registered = false;
   bool ack_seen = false;
@@ -462,15 +462,15 @@ TEST_CASE("PersistenceManager degrades when remote registration fails", "[daemon
     mgr.advance_once_for_test();
     auto maybe = mgr.get_by_task_id(task.task_id);
     if (maybe.has_value() &&
-        (maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED ||
-         maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED)) {
+        (maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED ||
+         maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED)) {
       break;
     }
   }
 
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED);
   REQUIRE_FALSE(final->degraded_reason.empty());
   bool remote_failed = false;
   for (const auto& target : final->shards[0].targets) {
@@ -515,16 +515,16 @@ TEST_CASE("PersistenceManager fails when shared disk write fails", "[daemon][per
     mgr.advance_once_for_test();
     auto maybe = mgr.get_by_task_id(task.task_id);
     if (maybe.has_value() &&
-        (maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED ||
-         maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_DEGRADED ||
-         maybe->state == tensorcast::daemon::v1::PERSISTENCE_STATE_SUCCESS)) {
+        (maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED ||
+         maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_DEGRADED ||
+         maybe->state == tensorcast::daemon::v2::PERSISTENCE_STATE_SUCCESS)) {
       break;
     }
   }
 
   auto final = mgr.get_by_task_id(task.task_id);
   REQUIRE(final.has_value());
-  REQUIRE(final->state == tensorcast::daemon::v1::PERSISTENCE_STATE_FAILED);
+  REQUIRE(final->state == tensorcast::daemon::v2::PERSISTENCE_STATE_FAILED);
   bool disk_failed = false;
   for (const auto& target : final->shards[0].targets) {
     if (target.is_shared_disk) {

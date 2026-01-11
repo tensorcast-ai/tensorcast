@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -34,8 +34,8 @@ def test_checksum_format_matches_daemon(repositories):
         )
     ]
 
-    expected_state = "artifact-format:node-format:0:RAM:1;"
-    wrong_state = "artifact-format:RAM:0:1:node-format;"
+    expected_state = "artifact-format:node-format:10.0.0.1:50051:0:RAM:1;"
+    wrong_state = "artifact-format:RAM:0:1:node-format:10.0.0.1:50051;"
 
     assert service._compute_state_checksum(replicas) == _fnv1a_64(expected_state)
     assert service._compute_state_checksum(replicas) != _fnv1a_64(wrong_state)
@@ -121,7 +121,7 @@ def test_force_full_sync_allows_empty_inventory_removal(repositories):
 
     local_state = global_store_pb2.WorkerLocalState(
         worker_id=worker_id,
-        state_version=0,
+        state_version=1,
         state_checksum="",
     )
 
@@ -171,7 +171,7 @@ def test_availability_drift_triggers_update(repositories):
 
     local_state = global_store_pb2.WorkerLocalState(
         worker_id=worker_id,
-        state_version=0,
+        state_version=1,
         state_checksum="",
     )
     local_replica = local_state.local_replicas.add()
@@ -188,7 +188,7 @@ def test_availability_drift_triggers_update(repositories):
     )
 
     assert success is True
-    assert new_version == 1
+    assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
         for change in changes
@@ -214,3 +214,80 @@ def test_availability_drift_triggers_update(repositories):
     )
     assert new_checksum == expected_checksum
     assert new_checksum != original_checksum
+
+
+def test_endpoint_drift_triggers_update(repositories):
+    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    worker_id = "worker-endpoint"
+
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            node_id="node-endpoint",
+            node_address="10.0.0.10",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=4096,
+            mem_pool_available_size=4096,
+        )
+    )
+
+    replica = Replica(
+        artifact_id="artifact-endpoint",
+        node_id="node-endpoint",
+        node_address="10.0.0.10",
+        node_port=50051,
+        memory_size=512,
+        memory_type=MemoryType.GPU,
+        device_id=0,
+        worker_id=worker_id,
+        is_available=True,
+    )
+    repositories["replica"].create(replica)
+
+    local_state = global_store_pb2.WorkerLocalState(
+        worker_id=worker_id,
+        state_version=1,
+        state_checksum="",
+    )
+    local_replica = local_state.local_replicas.add()
+    local_replica.ref.artifact_id = replica.artifact_id
+    local_replica.memory_info.node_id = replica.node_id
+    local_replica.memory_info.node_address = "10.0.0.20"
+    local_replica.memory_info.node_port = 55000
+    local_replica.memory_info.memory_type = common_pb2.MEMORY_TYPE_GPU
+    local_replica.memory_info.device_id = replica.device_id
+    local_replica.memory_info.memory_size = replica.memory_size
+    local_replica.stats.is_available = replica.is_available
+
+    success, changes, new_version, new_checksum = recovery.synchronize_worker_state(
+        worker_id, local_state, False
+    )
+
+    assert success is True
+    assert new_version == 2
+    assert any(
+        change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
+        for change in changes
+    )
+
+    updated_replicas = repositories["replica"].get_replicas_by_worker(worker_id)
+    assert updated_replicas[0].node_address == "10.0.0.20"
+    assert updated_replicas[0].node_port == 55000
+
+    expected_checksum = recovery._compute_state_checksum(
+        [
+            Replica(
+                artifact_id=replica.artifact_id,
+                node_id=replica.node_id,
+                node_address="10.0.0.20",
+                node_port=55000,
+                memory_size=replica.memory_size,
+                memory_type=replica.memory_type,
+                device_id=replica.device_id,
+                worker_id=worker_id,
+                is_available=True,
+            )
+        ]
+    )
+    assert new_checksum == expected_checksum

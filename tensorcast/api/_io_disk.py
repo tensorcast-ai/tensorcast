@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -18,19 +18,33 @@ def save_dict(
     state_dict: dict[str, torch.Tensor],
     disk_path: str | os.PathLike,
     streaming_config: dict | None = None,
+    *,
+    _unsafe_allow_local_disk_io: bool = False,
 ) -> dict:
-    """Persist a PyTorch state_dict to disk using the unified writer.
+    """Persist a PyTorch state_dict to disk (test-only).
+
+    This helper is intentionally test-only. Production persistence is handled by
+    daemon-owned flows (e.g., `tensorcast.put` / `tensorcast.register`).
 
     Args:
         state_dict: Mapping from tensor name to tensor.
         disk_path: Target directory for artifact files.
         streaming_config: Optional configuration dict for the writer
             (e.g., num_buffers, buffer_size_mb, enable_async_write).
+        _unsafe_allow_local_disk_io: Internal escape hatch for tests only.
 
     Returns:
         A descriptor dict with artifact_id, index_multihash, data_multihash,
         schema_version, encoding, and total_size.
     """
+    from tensorcast.api._errors import TensorCastError
+
+    if not _unsafe_allow_local_disk_io:
+        raise TensorCastError(
+            "save_dict is test-only and not supported in production; "
+            "use daemon flows (tensorcast.put/register) or "
+            "tensorcast.testing.io_disk.save_dict for tests."
+        )
     graph = build_tensor_storage_graph(state_dict)
     tensor_names = sorted(graph.aliases.keys())
     tensor_data_index: dict[str, tuple[int, int]] = {
@@ -57,7 +71,17 @@ def load_dict_from_disk(
     disk_path: str | os.PathLike,
     *,
     device_id: int | torch.device = 0,
+    _unsafe_allow_local_disk_io: bool = False,
 ) -> dict[str, torch.Tensor]:
+    """Restore a state_dict from disk (test-only)."""
+    from tensorcast.api._errors import TensorCastError
+
+    if not _unsafe_allow_local_disk_io:
+        raise TensorCastError(
+            "load_dict_from_disk is test-only and not supported in production; "
+            "materialize via the daemon store, or use "
+            "tensorcast.testing.io_disk.load_dict_from_disk for tests."
+        )
     raw_disk_path = Path(str(disk_path))
     artifact_dir = raw_disk_path
     tensor_meta_index, tensor_data_index = load_tensor_indices_from_dir(artifact_dir)

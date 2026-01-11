@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -30,7 +30,7 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
 
   // Begin coalesced registration
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1024 * 1024);
   breq.set_owner_pid(getpid());
@@ -38,13 +38,13 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   idx->set_data("{}");
   idx->set_schema_version("v3");
   idx->set_encoding("json");
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
 
   // KeepAlive should return OK
-  tensorcast::daemon::v1::KeepAliveRegisterArtifactRequest kreq;
-  tensorcast::daemon::v1::KeepAliveRegisterArtifactResponse kresp;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactRequest kreq;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactResponse kresp;
   kreq.set_registration_id(bresp.registration_id());
   kreq.set_ttl_ms(2000);
   kreq.set_epoch(1);
@@ -53,8 +53,8 @@ TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
   REQUIRE(st.ok());
 
   // Revoke should return OK
-  tensorcast::daemon::v1::RevokeRegisteredArtifactRequest rreq;
-  tensorcast::daemon::v1::RevokeRegisteredArtifactResponse rresp;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactRequest rreq;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactResponse rresp;
   rreq.set_registration_id(bresp.registration_id());
   rreq.set_reason("test");
   st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);

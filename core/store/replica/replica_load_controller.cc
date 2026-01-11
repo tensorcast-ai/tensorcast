@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/replica/replica_load_controller.h"
 
@@ -18,11 +18,11 @@
 #include "absl/time/clock.h"
 
 #include "core/common/async_copy_manager.h"
-#include "core/common/cuda_api.h"
 #include "core/common/device_types.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/streaming_pinned_buffer.h"
 #include "core/communicator/engine/engine.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/replica/memory_export_registry.h"
@@ -120,6 +120,7 @@ ReplicaLoadController::ReplicaLoadController(
     size_t artifact_chunk_bytes,
     size_t max_buffer_bytes,
     std::chrono::milliseconds pinned_memory_timeout,
+    size_t streaming_buffer_chunks,
     uint64_t artifact_size,
     std::optional<std::string> view_id,
     std::optional<MemoryTierConfig> memory_tier_config)
@@ -129,6 +130,7 @@ ReplicaLoadController::ReplicaLoadController(
       pinned_pool_(pinned_pool),
       max_buffer_bytes_(max_buffer_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
+      streaming_buffer_chunks_(std::max<size_t>(1, streaming_buffer_chunks)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       memory_coordinator_(std::make_shared<UnifiedMemoryAuthority>(artifact_chunk_bytes_)),
       transfer_service_(
@@ -142,7 +144,8 @@ ReplicaLoadController::ReplicaLoadController(
                   .replica = 0},
               TransferService::Config{
                   .max_buffer_bytes = max_buffer_bytes_,
-                  .pinned_memory_timeout = pinned_memory_timeout_})),
+                  .pinned_memory_timeout = pinned_memory_timeout_,
+                  .streaming_buffer_chunks = streaming_buffer_chunks})),
       export_service_(
           std::make_shared<MemoryExportRegistry>(
               gsl::not_null<std::shared_ptr<UnifiedMemoryAuthority>>{memory_coordinator_})) {
@@ -1052,7 +1055,7 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
 
     // Staged fallback using StreamingPinnedBuffer
     auto spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-        /*num_chunks=*/4, pinned_pool_->slice_bytes(), pinned_pool_);
+        /*num_chunks=*/streaming_buffer_chunks_, pinned_pool_->slice_bytes(), pinned_pool_);
     auto init_status = spb->initialize(pinned_memory_timeout_);
     if (!init_status.ok()) {
       ABSL_CHECK_OK(set_state(MemoryLocation::GPU, MemoryState::FAILED));

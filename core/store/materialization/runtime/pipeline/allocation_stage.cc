@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/allocation_stage.h"
 
@@ -28,6 +28,9 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
   config.pinned_memory_timeout =
       ctx.hints.pinned_timeout.count() > 0 ? ctx.hints.pinned_timeout : ctx.pinned_memory_timeout;
   config.max_buffer_bytes = ctx.hints.max_buffer_bytes;
+  if (ctx.options != nullptr) {
+    config.streaming_buffer_chunks = std::max<size_t>(1, ctx.options->streaming_buffer_chunks);
+  }
   config.view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::nullopt;
   config.view_plan = ctx.resolved_view_plan;
   config.transform_placement = ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer;

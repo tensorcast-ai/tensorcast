@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for artifact replica data access."""
 
@@ -362,16 +362,16 @@ class ReplicaRepository(BaseRepository):
 
         return replica
 
-    def update(self, replica: Replica) -> Replica:
-        """Update an existing replica."""
-        cursor = self.get_cursor()
-
+    def update_atomic(self, replica: Replica, cursor) -> Replica:
+        """Update an existing replica within an active transaction."""
         result = cursor.execute(
             """
             UPDATE artifact_replicas
             SET
                 updated_at = CURRENT_TIMESTAMP,
                 node_id = ?,
+                node_address = ?,
+                node_port = ?,
                 is_available = ?,
                 max_concurrency = ?,
                 remote_memory_keys = ?,
@@ -384,6 +384,67 @@ class ReplicaRepository(BaseRepository):
             """,
             [
                 replica.node_id,
+                replica.node_address,
+                replica.node_port,
+                replica.is_available,
+                replica.max_concurrency,
+                list(replica.remote_memory_keys),
+                list(replica.buffer_sizes),
+                replica.verification_json,
+                replica.memory_size,
+                replica.worker_id,
+                str(replica.replica_id),
+            ],
+        )
+        if result.fetchone() is None:
+            raise NotFoundError(f"Replica {replica.replica_id} not found")
+        return replica
+
+    def delete_atomic(self, replica_id: UUID, cursor) -> bool:
+        """Delete a replica within an existing transaction."""
+        cursor.execute(
+            """
+            DELETE FROM replica_counters
+            WHERE replica_id = ?
+            """,
+            [str(replica_id)],
+        )
+        result = cursor.execute(
+            """
+            DELETE FROM artifact_replicas
+            WHERE replica_id = ?
+            RETURNING replica_id
+            """,
+            [str(replica_id)],
+        )
+        return result.fetchone() is not None
+
+    def update(self, replica: Replica) -> Replica:
+        """Update an existing replica."""
+        cursor = self.get_cursor()
+
+        result = cursor.execute(
+            """
+            UPDATE artifact_replicas
+            SET
+                updated_at = CURRENT_TIMESTAMP,
+                node_id = ?,
+                node_address = ?,
+                node_port = ?,
+                is_available = ?,
+                max_concurrency = ?,
+                remote_memory_keys = ?,
+                buffer_sizes = ?,
+                verification_json = ?,
+                memory_size = ?,
+                worker_id = ?
+            WHERE replica_id = ?
+            RETURNING replica_id
+            """,
+            [
+                replica.node_id,
+                replica.node_address,
+                replica.node_port,
                 replica.is_available,
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),
@@ -649,6 +710,18 @@ class ReplicaRepository(BaseRepository):
             [worker_id],
         )
 
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        rows = result.fetchall()
+        return [self._row_to_model(row, columns) for row in rows]
+
+    def get_replicas_by_worker_atomic(self, worker_id: str, cursor) -> list[Replica]:
+        """Get replicas for a worker using an existing transaction cursor."""
+        result = cursor.execute(
+            self._replica_select_sql("LEFT JOIN")
+            + " WHERE mr.worker_id = ? ORDER BY mr.created_at DESC",
+            [worker_id],
+        )
         assert result.description is not None
         columns = [desc[0] for desc in result.description]
         rows = result.fetchall()

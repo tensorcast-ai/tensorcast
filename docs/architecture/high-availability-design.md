@@ -12,7 +12,7 @@ This document explains High Availability (HA) as implemented in code: startup re
 
 ## TODO
 
-- Add persistence-task durability/resume plan for distributed persistence (daemon-local journal + recovery flow) once design 0041 lands.
+- Add persistence-task durability/resume plan for distributed persistence (daemon-local journal + recovery flow). See `docs/architecture/api/policy-persistence.md` for the current model.
 
 ## Key Components (sources)
 
@@ -39,20 +39,22 @@ Materialization HA invariant: v2 descriptor streaming in the daemon uses UMA vie
 On startup the Global Store runs a guarded recovery pass; state stays marked stale until workers re-confirm via registration or heartbeat.
 
 - `RecoveryService.initiate_recovery` short-circuits if already running so only one pass executes.
-- The pass validates the DuckDB backing store, marks every worker and replica as stale, clears cached state versions, and records the recovery timestamp.
+- The pass validates the DuckDB backing store, marks every worker and replica as stale, preserves persisted state versions/checksums, and records the recovery timestamp.
 - Keeping the stale flag forces each daemon to re-register and re-sync before it can serve traffic, ensuring registry drift does not leak into routing.
 
 ## Enhanced Heartbeat
 
-Enhanced heartbeats (state_version > 0) include the daemon’s view of inventory and state so the Global Store can detect drift. Legacy heartbeats (state_version == 0) are still accepted for older daemons.
+Heartbeats are always enhanced and must include a non-zero `state_version` so the Global Store can detect drift. Legacy heartbeats (`state_version == 0`) are rejected.
 
 - Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids, last successful sync timestamp, and the daemon→Global Store connection status.
 - Global Store handling (`grpc_service._handle_enhanced_heartbeat`):
-  - Compares the sent version with `RecoveryService`’s version and recomputes checksum when provided.
+  - Compares the sent version with the persisted `state_version` and compares the worker checksum with the cached global checksum (recomputed only when missing).
   - Marks `state_sync_required` when versions or checksums diverge, or when obsolete replicas are detected.
   - Returns the server timestamp, the expected version, and the list of obsolete replicas so the daemon can prune immediately.
+- Registration initializes each worker’s `state_version` to 1; the daemon seeds its local `state_version` from `RegisterWorkerResponse.expected_state_version` and treats missing/zero versions as an error.
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
   - Collects current replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
+  - Heartbeat is lightweight and only queues sync work; state synchronization runs in a separate loop that the monitor can restart by epoch without blocking.
   - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a full-state sync before resuming heartbeats.
 
 ## State Synchronization
@@ -60,23 +62,27 @@ Enhanced heartbeats (state_version > 0) include the daemon’s view of inventory
 When `state_sync_required` is returned (or the daemon detects its version/checksum diverged), the daemon submits its full inventory through `SynchronizeWorkerState`.
 
 - Global Store computes diffs with “addition over removal” semantics: additions are always applied, removals are only applied when the daemon provided a non-empty inventory to avoid deleting during partial reports.
-- Versions only advance when actual changes are applied; a no-op sync returns the existing version along with a recomputed checksum.
+- Synchronization applies changes transactionally and only bumps `state_version` + checksum when all changes succeed.
+- No-op sync keeps the version and refreshes the persisted checksum if it is stale.
 - The daemon stores the returned version and checksum so subsequent heartbeats can short-circuit unnecessary syncs.
-- Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, memory_type, device_id, node_id, availability)`. Order never changes the checksum, and availability flips (remote access enable/disable) intentionally mutate it to trigger reconciliation.
+- `StateChange` removals are applied per replica key `(artifact_id, memory_type, device_id)` so GPU/CPU tiers are reconciled independently.
+- `StateChange` updates propagate endpoint metadata drift (node address/port, memory size, and transport keys when reported) so routing stays accurate.
+- Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, node_id, node_address, node_port, memory_type, device_id, availability)`. Order never changes the checksum, and availability or endpoint drift intentionally mutates it to trigger reconciliation.
 - Authoritative empties: when `high_availability.force_full_sync_on_empty_inventory=true`, an empty inventory is treated as authoritative and removals are applied (for drains/retirements). Default keeps the conservative behavior (empty = “unknown”, no removals).
 
 ## Full-State Sync
 
-The daemon requests the authoritative replica set after cold start, re-registration, or when drift is suspected. Full-state sync returns the current checksum and expected set without bumping versions.
+The daemon requests the authoritative replica set after cold start, re-registration, or when drift is suspected. Full-state sync returns the current checksum and expected set without bumping versions (and refreshes the cached checksum if stale).
 
 - `request_full_state_sync` provides a complete snapshot the daemon treats as source of truth.
-- During startup, `WorkerLifecycleManager::start` performs this call once, prunes any local replicas not present in the expected set, and only then starts serving traffic.
+- During startup, `WorkerLifecycleManager::start` performs this call once, prunes any local replicas not present in the expected set (keyed by `(artifact_id, memory_type, device_id)`), and only then starts serving traffic.
 
 ## Connection Management & Retries (Daemon)
 
 All Global Store RPCs use bounded retries with exponential backoff and jitter (`max_retries=3`, initial backoff 100ms, doubled per attempt with ±50% jitter). Each call also sets deadlines so stalled channels fail fast.
 
 - The retry helper is centralized in `GlobalStoreClient::execute_rpc_with_retry`, so heartbeat, registration, sync, and health probes share the same policy.
+- HA config can override heartbeat/state sync/full sync RPC timeouts and retry limits to bound recovery latency without affecting other calls.
 - Endpoint selection: the daemon currently uses the first entry in `high_availability.global_store_endpoints` as `global_store_address` (single Global Store only; additional endpoints are ignored for now).
 - Advertise constraints: `RegisterWorker` rejects loopback or unspecified addresses; `resolve_advertised_address` prefers `server.advertise.host` and otherwise uses the listen host, then validates routability.
 - Health check: `GlobalStoreClient::initialize` issues a `HealthCheck` before registration; failing the probe aborts HA startup early instead of hanging during registration. When a `meta.cluster_token` is configured, the daemon refuses to proceed unless the HealthCheck token matches, preventing accidental cross-cluster registration.
@@ -170,7 +176,7 @@ From `proto/tensorcast/global_store/v1/global_store.proto`:
 
 ## End-to-End Flows
 
-- Startup recovery: validate DB, mark stale, reset versions → workers re-register/heartbeat → server may request sync.
+- Startup recovery: validate DB, mark stale, preserve persisted versions/checksums → workers re-register/heartbeat → server may request sync.
 - Heartbeat loop: daemon sends enhanced heartbeat → server compares version/checksum and obsolete set → may request sync.
 - Incremental sync: daemon sends `WorkerLocalState.local_replicas` snapshot → server computes StateChange list and applies → returns new version/checksum.
 - Full-state sync: daemon requests expected replicas → prunes drift locally → resumes incremental syncs.
@@ -218,6 +224,9 @@ high_availability:
   heartbeat_interval: 5s      # defaults to 5s if omitted
   periodic_sync_interval: 10s # drives chunk_sync_loop; 0 disables
   force_full_sync_on_empty_inventory: false # set true to drain/retire nodes
+  heartbeat_rpc_timeout: 2s   # optional per-RPC overrides
+  state_sync_rpc_timeout: 5s
+  full_sync_rpc_timeout: 10s
 server:
   listen:
     host: 0.0.0.0

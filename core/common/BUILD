@@ -1,78 +1,10 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
-load("//core:BUILD.bzl", "cuda_conditional_deps", "sc_cc_library", "sc_header_only_library")
-
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
-# Core CUDA API abstraction
-sc_cc_library(
-    name = "cuda_api_lib",
-    srcs = select({
-        ":use_fake_cuda": ["cuda_fake.cc"],
-        "//conditions:default": ["cuda_real.cc"],
-    }),
-    hdrs = ["cuda_api.h"],
-    defines = select({
-        ":use_fake_cuda": ["USE_FAKE_CUDA"],
-        "//conditions:default": [],
-    }),
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-ldl"],
-    }),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":error_handling_lib",
-        "//third_party/cuda_compat:nv_target",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
-        "@abseil-cpp//absl/synchronization",
-        "@abseil-cpp//absl/time:time",
-        "@cublas",
-        "@cublas//:cublasLt",
-        "@cudart",
-        "@cudnn",
-        "@cufft",
-        "@cupti",
-        "@curand",
-        "@cusparse",
-        "@cusparselt",
-        "@nccl",
-        "@nvjitlink//:nvJitLink",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [],
-    }),
-    alwayslink = True,
-)
-
-# Device management utilities
-sc_header_only_library(
-    name = "device_guard_lib",
-    hdrs = ["device_guard.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":cuda_api_lib",
-    ],
-)
+load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 sc_header_only_library(
     name = "device_types_lib",
     hdrs = ["device_types.h"],
     visibility = ["//visibility:public"],
-)
-
-# Error handling utilities
-sc_header_only_library(
-    name = "error_handling_lib",
-    hdrs = ["error_handling.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "@abseil-cpp//absl/log:check",
-    ],
 )
 
 # Logging initialization
@@ -98,8 +30,9 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":artifact_hash_lib",
-        ":cuda_api_lib",
-        ":error_handling_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/cuda:error_handling_lib",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
     ],
@@ -116,22 +49,15 @@ sc_cc_library(
         "artifact_hash.h",
         "artifact_hash_internal.h",
     ],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["-ldl"],
-    }),
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@boringssl//:crypto",
-    ] + cuda_conditional_deps(
-        fake_cuda_deps = [],
-        real_cuda_deps = ["@nvrtc//:nvrtc"],
-    ),
+    ],
 )
 
 sc_cc_library(
@@ -151,8 +77,9 @@ sc_cc_library(
     hdrs = ["memory/cuda_memory.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//core/cuda:error_handling_lib",
     ],
 )
 
@@ -166,8 +93,8 @@ sc_cc_library(
     includes = ["memory"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:error_handling_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
         "@gsl",
@@ -182,9 +109,21 @@ sc_cc_library(
     includes = ["memory"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
         ":pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:error_handling_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "pinned_memory_authority_lib",
+    srcs = ["memory/pinned_memory_authority.cc"],
+    hdrs = ["memory/pinned_memory_authority.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":pinned_buffer_pool_lib",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -226,9 +165,9 @@ sc_cc_library(
     hdrs = ["memory/streaming_pinned_buffer.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
-        ":error_handling_lib",
         ":pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:error_handling_lib",
     ],
 )
 
@@ -359,8 +298,8 @@ sc_header_only_library(
     hdrs = ["trace/trace_cuda_async_fn.h"],
     visibility = ["//visibility:public"],
     deps = [
-        ":cuda_api_lib",
         ":trace_manager_lib",
+        "//core/cuda:cuda_api_lib",
         "@folly//folly:executor",
     ],
 )
@@ -373,8 +312,10 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":async_runtime_lib",
-        ":cuda_api_lib",
         ":trace_cuda_async_fn_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_runtime_lib",
+        "//core/cuda:device_guard_lib",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
@@ -446,19 +387,6 @@ cc_test(
     ],
 )
 
-# Test for cuda_api
-cc_test(
-    name = "cuda_api_test",
-    srcs = ["cuda_api_test.cc"],
-    tags = ["requires_cuda"],
-    deps = [
-        ":cuda_api_lib",
-        "//core/testing:catch_main",
-        "//core/testing:common",
-        "@catch2//:catch2_main",
-    ],
-)
-
 cc_test(
     name = "async_runtime_test",
     srcs = ["async_runtime_test.cc"],
@@ -484,11 +412,8 @@ sc_cc_library(
         ":artifact_verification_lib",
         ":async_copy_manager_lib",
         ":async_runtime_lib",
-        ":cuda_api_lib",
         ":cuda_memory_lib",
-        ":device_guard_lib",
         ":device_types_lib",
-        ":error_handling_lib",
         ":logging_init_lib",
         ":pinned_buffer_pool_lib",
         ":pinned_memory_lib",
@@ -500,6 +425,10 @@ sc_cc_library(
         ":trace_manager_lib",
         ":trace_request_data_lib",
         ":trace_scope_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:cuda_runtime_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/cuda:error_handling_lib",
         "@gsl",
     ],
     alwayslink = True,

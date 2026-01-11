@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // SessionsService: wraps ReplicaSessionManager + VerificationTracker wiring
 
@@ -61,11 +61,11 @@ class SessionsService {
     return sessions_.erase(replica_uuid);
   }
 
-  void update_verification_status(const std::string& uuid, v1::VerificationStatus st, std::string err = "") {
+  void update_verification_status(const std::string& uuid, v2::VerificationStatus st, std::string err = "") {
     verif_.update(uuid, st, std::move(err));
   }
 
-  [[nodiscard]] std::optional<std::pair<v1::VerificationStatus, std::string>> get_known(absl::string_view uuid) const {
+  [[nodiscard]] std::optional<std::pair<v2::VerificationStatus, std::string>> get_known(absl::string_view uuid) const {
     return verif_.get_known(std::string(uuid));
   }
 

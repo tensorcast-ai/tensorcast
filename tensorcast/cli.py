@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -191,16 +191,6 @@ def daemon():
     help="Override engine.memory_tiers.stable_bytes (supports KB/MB/GB).",
 )
 @click.option(
-    "--mem-pool-size-bytes",
-    default=None,
-    help="Override engine.mem_pool_size_bytes (supports KB/MB/GB).",
-)
-@click.option(
-    "--pinned-pool-bytes",
-    default=None,
-    help="Override checkpoint.streaming.pinned_pool_bytes (supports KB/MB/GB).",
-)
-@click.option(
     "--enable-rdma",
     is_flag=True,
     help="Enable RDMA (communicator.enable_rdma=true).",
@@ -242,8 +232,6 @@ def daemon_start(
     global_store_address: str | None,
     global_store_endpoints: tuple[str, ...],
     stable_bytes: str | None,
-    mem_pool_size_bytes: str | None,
-    pinned_pool_bytes: str | None,
     enable_rdma: bool,
     log_level: str | None,
     session: str | None,
@@ -267,16 +255,6 @@ def daemon_start(
             _check_conflict("engine.memory_tiers.stable_bytes")
             overrides.append(f"engine.memory_tiers.stable_bytes={stable_bytes}")
             override_paths.add("engine.memory_tiers.stable_bytes")
-        if mem_pool_size_bytes:
-            _check_conflict("engine.mem_pool_size_bytes")
-            overrides.append(f"engine.mem_pool_size_bytes={mem_pool_size_bytes}")
-            override_paths.add("engine.mem_pool_size_bytes")
-        if pinned_pool_bytes:
-            _check_conflict("checkpoint.streaming.pinned_pool_bytes")
-            overrides.append(
-                f"checkpoint.streaming.pinned_pool_bytes={pinned_pool_bytes}"
-            )
-            override_paths.add("checkpoint.streaming.pinned_pool_bytes")
         if enable_rdma:
             _check_conflict("communicator.enable_rdma")
             overrides.append("communicator.enable_rdma=true")
@@ -440,16 +418,6 @@ def daemon_status(session: str | None, as_json: bool):
     help="Override engine.memory_tiers.stable_bytes (supports KB/MB/GB).",
 )
 @click.option(
-    "--mem-pool-size-bytes",
-    default=None,
-    help="Override engine.mem_pool_size_bytes (supports KB/MB/GB).",
-)
-@click.option(
-    "--pinned-pool-bytes",
-    default=None,
-    help="Override checkpoint.streaming.pinned_pool_bytes (supports KB/MB/GB).",
-)
-@click.option(
     "--enable-rdma",
     is_flag=True,
     help="Enable RDMA (communicator.enable_rdma=true).",
@@ -481,8 +449,6 @@ def daemon_restart(
     global_store_address: str | None,
     global_store_endpoints: tuple[str, ...],
     stable_bytes: str | None,
-    mem_pool_size_bytes: str | None,
-    pinned_pool_bytes: str | None,
     enable_rdma: bool,
     log_level: str | None,
     session: str | None,
@@ -496,8 +462,6 @@ def daemon_restart(
         global_store_address=global_store_address,
         global_store_endpoints=global_store_endpoints,
         stable_bytes=stable_bytes,
-        mem_pool_size_bytes=mem_pool_size_bytes,
-        pinned_pool_bytes=pinned_pool_bytes,
         enable_rdma=enable_rdma,
         log_level=log_level,
         session=session,

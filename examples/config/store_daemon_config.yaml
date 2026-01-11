@@ -59,26 +59,38 @@ server:
 
 # StoreEngine and data-plane memory/transfer tuning.
 engine:
-  # Pinned host pool for data-plane transfers; larger improves concurrency but reduces DRAM for UMA tiers.
-  mem_pool_size_bytes: 8GB
-  # Transfer slice size (pinned pool block); must divide artifact_chunk_bytes to avoid cross-chunk slices.
-  tx_slice_bytes: 256MB
   # UMA chunk granularity; larger chunks reduce metadata but make eviction/leases coarser.
   artifact_chunk_bytes: 256MB
+  # Default depth for StreamingPinnedBuffer instances created by StoreEngine.
+  streaming_buffer_chunks: 16
   # Memory tiers define stable/preemptible behavior; tune for DRAM pressure and HA telemetry.
   memory_tiers:
     # When false, CPU chunks stay resident (no preemptible marking); use for stability or debugging.
     enable_preemptible: false
-    # Stable budget in bytes; must fit in host DRAM minus mem_pool_size_bytes or startup fails.
+    # Stable budget in bytes; must fit in host DRAM minus total pinned pools (sum(pinned_memory.classes[].pool_bytes)) or startup fails.
     stable_bytes: 4GB
     # Cap for preemptible pool; ignored when enable_preemptible=false (0 means no preemptible budget).
     preemptible_limit_bytes: 0
     # Reclaim target ratio for preemptible pressure; lower values reclaim more aggressively.
     preemptible_low_watermark_ratio: 0.4
-  # Upper bound on concurrent streaming sessions leasing pinned buffers from the shared pool.
-  streaming_buffer_max_concurrent_sessions: 1
-  # Wait time for pinned buffer allocation under pressure; raise if large transfers outlive the default.
-  pinned_allocation_timeout: 30s
+
+# Unified pinned memory configuration for all daemon-side pinned usage.
+pinned_memory:
+  # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes).
+  # Deadline for pinned slice acquisition under pressure.
+  allocation_timeout: 30s
+  classes:
+    - name: engine
+      slice_bytes: 256MB
+      pool_bytes: 8GB
+    - name: comm_gpu
+      slice_bytes: 16MB
+      pool_bytes: 8GB
+      rdma_preregister: true
+    - name: comm_cpu
+      slice_bytes: 4MB
+      pool_bytes: 1GB
+      rdma_preregister: true
 
 # Global Store registration and heartbeat coordination.
 high_availability:
@@ -133,18 +145,12 @@ communicator:
   stager:
     # Stage CPU tensors for RDMA; disable only if you rely on direct GPU RDMA paths.
     stage_cpu_for_rdma: true
-    # GPU staging chunk size (MB); larger boosts throughput but raises per-transfer latency.
-    stage_chunk_mb_gpu: 16
-    # CPU staging chunk size (MB); smaller favors latency, larger favors bandwidth.
-    stage_chunk_mb_cpu: 4
     # Buffers per flow; more buffers increase overlap but require a larger pool.
     buffers_per_flow: 4
     # Cap concurrent in-flight segments; 0 inherits buffers_per_flow.
     max_window_segments: 0
     # Cap concurrent GPU channels so pool sizing is predictable (0 = auto).
     expected_gpu_channels: 0
-    # Direct RDMA window size (MB); set 0 to inherit stage_chunk_mb_gpu.
-    direct_chunk_mb: 0
   rdma:
     # Outstanding WRs per QP; increase for bandwidth, decrease to reduce CPU/latency.
     outstanding_wr: 64
@@ -154,13 +160,9 @@ communicator:
     traffic_class: 186
     qp_timeout: 20
     qp_retry: 7
-  pool:
-    # Communicator pinned pool (separate from engine.mem_pool_size_bytes).
-    pool_size_bytes: 8GB
-    # Staging slice size; align with tx_slice_bytes or multiples for reuse.
-    chunk_bytes: 64MB
-    # Pre-register MRs for lower RDMA latency; disable to reduce startup cost.
-    preregister_mr: true
+    # Multi-QP configuration for high-throughput scenarios
+    qp_count: 1  # Number of QPs per transport (1-16, default: 1)
+    bonding_balance: false  # Enable LAG port balancing (default: false)
   transport:
     # TCP connections per peer; more lanes help bandwidth but add CPU overhead.
     tcp_conn_count: 8
@@ -237,17 +239,6 @@ compatibility:
   auto_register_disk_loads: false
   # Force full-digest verification on load; reserved until wired.
   force_full_digest_on_load: false
-
-# Checkpoint streaming defaults used by save/restore flows.
-checkpoint:
-  # Streaming checkpoint IO tuning; larger buffers improve throughput but reserve more pinned memory.
-  streaming:
-    # Number of in-flight buffers in the circular writer; scale with disk throughput and GPU overlap.
-    num_buffers: 4
-    # Per-buffer IO chunk size; trade syscall overhead against latency and buffer reuse.
-    io_chunk_bytes: 256MB
-    # Total pinned pool for streaming; keep >= num_buffers * io_chunk_bytes to avoid rounding up.
-    pinned_pool_bytes: 2GB
 
 # Debug-only toggles; keep disabled in production unless explicitly needed.
 debug:

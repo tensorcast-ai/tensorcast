@@ -1,9 +1,9 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
 #include <catch2/catch_test_macros.hpp>
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
@@ -35,7 +35,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   const std::string index_bytes = j.dump();
 
   // Begin lease registration with in_place=true
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1 * 1024 * 1024); // 1 MiB
   breq.set_owner_pid(getpid());
@@ -46,7 +46,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   breq.mutable_lease()->set_in_place(true);
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = svc.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
 
@@ -57,31 +57,44 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
   cudaIpcMemHandle_t h{};
   REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h, p).ok());
 
-  tensorcast::daemon::v1::FeedRegisterArtifactStreamRequest freq;
+  tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest freq;
   freq.set_registration_id(bresp.registration_id());
   auto* ls = freq.mutable_lease_segments();
   auto* s = ls->add_segments();
-  s->set_device_id(0);
+  auto* storage = freq.add_storage_entries();
+  storage->set_storage_id("s0");
+  storage->set_device_id(0);
+  storage->set_storage_length(1 * 1024 * 1024);
+  storage->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h), sizeof(h)));
+  storage->set_mapping_base_offset(0);
+  auto* alias = freq.add_tensor_aliases();
+  alias->set_name("tensor");
+  alias->set_storage_id("s0");
+  alias->set_storage_offset(0);
+  alias->set_logical_length(1 * 1024 * 1024);
+  alias->add_shape(1 * 1024 * 1024);
+  alias->add_stride(1);
+  alias->set_dtype("torch.uint8");
+  s->set_storage_id("s0");
+  s->set_storage_offset(0);
   s->set_length(1 * 1024 * 1024);
-  s->set_base_addr(0);
-  s->set_dst_offset(0);
-  s->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h), sizeof(h)));
+  s->set_artifact_offset(0);
   st = svc.feed_register_artifact_stream_vector({freq});
   REQUIRE(st.ok());
 
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = svc.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.has_artifact_descriptor());
 
   // Attempt to materialize on the same device (0) using artifact_id; must be denied.
-  tensorcast::daemon::v1::MaterializeReplicaRequest mreq;
+  tensorcast::daemon::v2::MaterializeReplicaRequest mreq;
   mreq.set_artifact_id(cresp.artifact_descriptor().artifact_id());
   // Default target_device_type = GPU → resolves to device 0
-  tensorcast::daemon::v1::MaterializeReplicaResponse mresp;
+  tensorcast::daemon::v2::MaterializeReplicaResponse mresp;
   st = svc.MaterializeReplica(&ctx, &mreq, &mresp);
   REQUIRE(st.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
-  REQUIRE(mresp.status() == tensorcast::daemon::v1::MATERIALIZE_REPLICA_STATUS_FAILED);
+  REQUIRE(mresp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_FAILED);
 }

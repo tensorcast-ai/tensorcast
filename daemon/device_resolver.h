@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // DeviceResolver: unify device selection from request parameters
 
@@ -9,7 +9,7 @@
 #include "absl/strings/string_view.h"
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
-#include "tensorcast/daemon/v1/store_daemon.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -23,7 +23,7 @@ class DeviceResolver {
 
   // Resolve a device from type + uuid + optional ordinal hint (for GPU)
   store::DeviceKey From(
-      v1::DeviceType type,
+      v2::DeviceType type,
       absl::string_view device_uuid,
       std::optional<int> ordinal_hint = std::nullopt) const {
     using store::DeviceKey;
@@ -31,13 +31,13 @@ class DeviceResolver {
       DeviceKey key{.type = DeviceType::GPU, .ordinal = 0, .uuid = std::string(device_uuid)};
       return reg_.normalize(key);
     }
-    if (type == v1::DeviceType::DEVICE_TYPE_CPU) {
+    if (type == v2::DeviceType::DEVICE_TYPE_CPU) {
       return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
     }
-    if (type == v1::DeviceType::DEVICE_TYPE_GPU && ordinal_hint.has_value() && *ordinal_hint >= 0) {
+    if (type == v2::DeviceType::DEVICE_TYPE_GPU && ordinal_hint.has_value() && *ordinal_hint >= 0) {
       return reg_.gpu_key(*ordinal_hint);
     }
-    // Treat DISK as ingest-to-default GPU for v1 parity; default GPU otherwise
+    // Treat DISK as ingest-to-default GPU for legacy parity; default GPU otherwise.
     return DefaultGpu();
   }
 

@@ -4,7 +4,7 @@ title: Client‑Generated Artifact ID (CGID)
 areas: ["core","daemon","global_store","sdk","proto"]
 links:
   prior_design: ./0007-content-addressed-artifact-id.md
-  session_api: ./0014-store-session-api-modernization.md
+  session_api: ../architecture/api/api-design.md#store-and-entry-points
   views: ./0016-artifact-view-v1.md
 related_code:
   - core/store/**
@@ -20,7 +20,7 @@ Introduce an alternative artifact identity kind, CGID (Client‑Generated ID), f
 Key outcomes
 - Dual identity kinds: `artifact_id` can be either `mi2:...` (content‑addressed) or `cgid:...` (client‑generated).
 - Low‑overhead registration: CGID path skips `index_multihash`/`data_multihash` computation; daemon trusts a client‑supplied identifier.
-- Same verbs and flows: Keep `register/put/get/get_into` from 0014; a single optional `artifact_id` parameter (when set to a `cgid:`) selects the CGID path.
+- Same verbs and flows: Keep `register/put` and handle-based materialization from the API design doc; a single optional `artifact_id` parameter (when set to a `cgid:`) selects the CGID path.
 - Short‑lived/ephemeral by default: CGID artifacts are intended for runtime residency with TTL/explicit deregistration; no tree‑hash leaves or de‑dup semantics.
 
 # Goals / Non‑Goals
@@ -55,7 +55,7 @@ Shared helpers
 - Python: `tensorcast.common.identity` defines `ArtifactIdKind`, `infer_artifact_id_kind()`, and `validate_client_generated_id()` so SDK and Global Store share grammar.
 - C++: `core/common/artifact_identity.h/.cc` expose the same helpers for the daemon, store engine, and tests, eliminating ad-hoc validation.
 
-## 2. SDK changes (0014 Store API compatible)
+## 2. SDK changes (Store API compatible)
 
 Public facade remains unchanged; registration consolidates to a single optional identity parameter:
 
@@ -76,7 +76,7 @@ Rules
 - If `artifact_id` is not provided, SDK takes the mi2 path (content‑addressed) as today.
 - Supplying an `artifact_id` that does not start with `cgid:` is invalid (SDK or daemon rejects to avoid forged mi2 ids).
 - `ttl_ms` continues to control lease keepalive for LIP replicas; CGID favors short to medium TTL.
-- `get/get_into` accept either `artifact_id` (which can be `mi2:` or `cgid:`) or `key`, unchanged from 0014.
+- `get/get_into` accept either `artifact_id` (which can be `mi2:` or `cgid:`) or `key`, unchanged from the current Store API design.
 
 ## 3. Daemon changes (registration/commit identity)
 
@@ -177,7 +177,7 @@ Risks & mitigations
 # References
 
 - Identity (mi2): [0007 Content‑Addressed Artifact ID](./0007-content-addressed-artifact-id.md)
-- Session API: [0014 Store‑Centric Artifact Session API](./0014-store-session-api-modernization.md)
+- Session API: [api-design](../architecture/api/api-design.md#store-and-entry-points)
 - Views: [0016 Variant‑Aware Artifact Views](./0016-artifact-view-v1.md)
 
 - Key code locations for the implementation:

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -198,7 +198,7 @@ def test_store_policy_profile_warm_expands_to_local_should() -> None:
         ),
     )
 
-    from tensorcast.proto.daemon.v1 import store_daemon_pb2
+    from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
     proto = policy.to_proto()
     assert proto.profile == store_daemon_pb2.POLICY_PROFILE_WARM

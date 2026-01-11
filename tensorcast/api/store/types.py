@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -223,9 +223,6 @@ class StoreCapabilities:
     mem_pool_bytes: int
     tx_slice_bytes: int
     artifact_chunk_bytes: int
-    supports_coalesced: bool
-    supports_lease: bool
-    supports_region_backed_get_into: bool
     server_config: ServerConfig | None = None
 
 

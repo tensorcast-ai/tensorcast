@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // MaterializationController: handles materialize/by_key/get_artifact_index RPCs
 
@@ -38,28 +38,18 @@ class MaterializationController {
 
   grpc::Status materialize_replica(
       RpcContext& rctx,
-      const v1::MaterializeReplicaRequest& req,
-      v1::MaterializeReplicaResponse& resp);
+      const v2::MaterializeReplicaRequest& req,
+      v2::MaterializeReplicaResponse& resp);
 
   grpc::Status materialize_by_key(
       RpcContext& rctx,
-      const v1::MaterializeByKeyRequest& req,
-      v1::MaterializeByKeyResponse& resp);
-
-  grpc::Status materialize_replica_v2(
-      RpcContext& rctx,
-      const v2::MaterializeReplicaRequest& req,
-      v2::MaterializeReplicaResponse& resp);
+      const v2::MaterializeByKeyRequest& req,
+      v2::MaterializeByKeyResponse& resp);
 
   grpc::Status materialize_into_target(
       RpcContext& rctx,
       const v2::MaterializeIntoTargetRequest& req,
       v2::MaterializeIntoTargetResponse& resp);
-
-  grpc::Status materialize_by_key_v2(
-      RpcContext& rctx,
-      const v2::MaterializeByKeyRequest& req,
-      v2::MaterializeByKeyResponse& resp);
 
   grpc::Status resolve_artifact_from_disk(
       RpcContext& rctx,
@@ -68,17 +58,17 @@ class MaterializationController {
 
   grpc::Status get_artifact_index_by_id(
       RpcContext& rctx,
-      const v1::GetArtifactIndexByIdRequest& req,
-      v1::GetArtifactIndexByIdResponse& resp);
+      const v2::GetArtifactIndexByIdRequest& req,
+      v2::GetArtifactIndexByIdResponse& resp);
 
-  grpc::Status confirm(RpcContext& rctx, const v1::ConfirmReplicaRequest& req, v1::ConfirmReplicaResponse& resp) const;
+  grpc::Status confirm(RpcContext& rctx, const v2::ConfirmReplicaRequest& req, v2::ConfirmReplicaResponse& resp) const;
 
-  grpc::Status unload(RpcContext& rctx, const v1::UnloadReplicaRequest& req, v1::UnloadReplicaResponse& resp);
+  grpc::Status unload(RpcContext& rctx, const v2::UnloadReplicaRequest& req, v2::UnloadReplicaResponse& resp);
 
   grpc::Status wait_verification(
       RpcContext& rctx,
-      const v1::WaitReplicaVerificationRequest& req,
-      v1::WaitReplicaVerificationResponse& resp);
+      const v2::WaitReplicaVerificationRequest& req,
+      v2::WaitReplicaVerificationResponse& resp);
 
  private:
   Dep d_;

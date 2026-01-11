@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Shared daemon-local strong types and hashing helpers
 
@@ -8,11 +8,11 @@
 #include <string>
 #include <vector>
 
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/ipc_region_registry.h"
 
 #include "absl/container/flat_hash_map.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/cuda_ipc.h"
 
 namespace tensorcast::daemon {
 
@@ -29,12 +29,13 @@ H AbslHashValue(H h, const ArtifactDeviceKey& k) {
 
 // Lease segment metadata used for LIP registration/commit
 struct LeaseSegMeta {
-  int device_id{0};
-  std::string handle_bytes; // raw cudaIpcMemHandle_t bytes
-  uint64_t base_offset{0}; // offset within mapped handle
+  // Physical storage backing this segment (must match RegisterStorageMeta.storage_id).
+  std::string storage_id;
+  // Byte offset within the referenced storage window where this segment begins.
+  uint64_t storage_offset{0};
+  // Logical byte offset within the artifact where this segment begins.
+  uint64_t artifact_offset{0};
   uint64_t length{0};
-  uint64_t dst_offset{0}; // destination offset in coalesced buffer
-  std::string storage_id; // optional ref to RegisterStorageMeta
 };
 
 struct RegisterStorageMeta {
@@ -43,7 +44,9 @@ struct RegisterStorageMeta {
   std::string handle_bytes;
   uint64_t storage_length{0};
   std::string region_id;
-  uint64_t region_base_offset{0};
+  // Byte offset from the mapped base pointer (allocation base for handle_bytes, region base for region_id)
+  // to the start of this storage window.
+  uint64_t mapping_base_offset{0};
 
   [[nodiscard]] bool has_region() const {
     return !region_id.empty();
@@ -87,7 +90,7 @@ struct LipLeaseEntry {
 struct LipExportRecord {
   std::string artifact_id;
   int device_id{0};
-  std::vector<CudaIpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
+  std::vector<cuda::IpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister
   // Region lease ownership for region-backed storages used by this export.
   // These references are acquired explicitly at staging time and must be

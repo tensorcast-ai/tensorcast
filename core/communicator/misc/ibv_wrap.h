@@ -1,14 +1,13 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
-#ifndef CORE_COMMUNICATOR_MISC_IBV_WRAP_H_
-#define CORE_COMMUNICATOR_MISC_IBV_WRAP_H_
+#pragma once
 
 extern "C" {
 #include <stdint.h>
 #include <unistd.h>
 
-#ifdef USE_FAKE_CUDA
+#ifdef USE_MOCK_IBV
 #include "core/communicator/misc/ibv_mock.h" // NOLINT
 }
 #else
@@ -100,5 +99,3 @@ static inline result_t wrap_ibv_post_recv(struct ibv_qp* qp, struct ibv_recv_wr*
 }
 
 } // namespace tensorcast::communicator::misc
-
-#endif // STEPUCX_SRC_MISC_IBV_WRAP_H_

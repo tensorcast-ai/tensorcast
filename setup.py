@@ -1,19 +1,11 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # type: ignore
 """
 TensorCast Setup Script
 
-Supports building with fake CUDA backend for development without GPU:
-  - Environment variable: USE_FAKE_CUDA=1
-  - Command line flag: --use-fake-cuda
-
-Examples:
-  # Build with fake CUDA using environment variable
-  BUILD_CORE=1 BUILD_EXTENSION=1 USE_FAKE_CUDA=1 python setup.py develop
-
-  # Build with fake CUDA using command line flag
-  BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py develop --use-fake-cuda
+Runtime CUDA backend selection is handled via TENSORCAST_CUDA_BACKEND
+(see AGENTS.md and docs) and is not a build-time toggle.
 """
 
 import glob
@@ -124,7 +116,6 @@ PRE_CXX11_ABI = True
 RELEASE = False
 BUILD_EXTENSION = False
 BUILD_CORE = False
-USE_FAKE_CUDA = False
 USE_REMOTE = False
 
 if os.environ.get("RELEASE") == "1":
@@ -142,18 +133,9 @@ if os.environ.get("BUILD_CORE") == "1":
     BUILD_CORE = True
     print("BUILD_CORE is set to True")
 
-if os.environ.get("USE_FAKE_CUDA") == "1":
-    USE_FAKE_CUDA = True
-    print("USE_FAKE_CUDA is set to True")
-
 if "--force-build-extension" in sys.argv:
     BUILD_EXTENSION = True
     sys.argv.remove("--force-build-extension")
-
-if "--use-fake-cuda" in sys.argv:
-    USE_FAKE_CUDA = True
-    print("Using fake CUDA backend")
-    sys.argv.remove("--use-fake-cuda")
 
 if os.environ.get("USE_REMOTE") == "1":
     USE_REMOTE = True
@@ -205,7 +187,7 @@ def get_torch_version_suffix() -> str:
     return torch_suffix
 
 
-# Get torch version suffix after USE_FAKE_CUDA is defined
+# Get torch version suffix after configuration is defined
 torch_suffix = get_torch_version_suffix()
 
 if RELEASE:
@@ -263,7 +245,6 @@ def ensure_external_symlink() -> None:
 
 def build_checkpoint_runtime_and_daemon(
     develop: bool = True,
-    use_fake_cuda: bool = False,
     use_remote: bool = False,
     use_dist_dir: bool = False,
 ):
@@ -293,10 +274,6 @@ def build_checkpoint_runtime_and_daemon(
 
     if use_dist_dir:
         cmd.append("--distdir=third_party/dist_dir")
-
-    if use_fake_cuda:
-        cmd += ["--define", "use_fake_cuda=true"]
-        print("Building with fake CUDA backend")
 
     if use_remote:
         api_key = os.environ.get("BUILDBUDDY_API_KEY")
@@ -484,10 +461,9 @@ class DevelopCommand(develop):
         develop.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -506,10 +482,9 @@ class BuildExtensionCommand(BuildExtension):
         BuildExtension.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -529,10 +504,9 @@ class InstallCommand(install):
         install.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -553,10 +527,9 @@ class BdistCommand(bdist_wheel):
         bdist_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=False,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         copy_checkpoint_extension_lib()
@@ -577,10 +550,9 @@ class EditableWheelCommand(editable_wheel):
         editable_wheel.finalize_options(self)
 
     def run(self):
-        global PRE_CXX11_ABI, USE_FAKE_CUDA
+        global PRE_CXX11_ABI
         build_checkpoint_runtime_and_daemon(
             develop=True,
-            use_fake_cuda=USE_FAKE_CUDA,
             use_remote=USE_REMOTE,
         )
         gen_version_file()
@@ -660,14 +632,68 @@ def find_cuda_runtime_lib_dir():
     2. nvidia.cuda_runtime Python package's bundled lib dir
     3. Best-effort scan of sys.path for nvidia/cuda_runtime/lib
     """
-    # Use the installed Python package
-    import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+    if (env_dir := os.environ.get("CUDA_RUNTIME_LIB_DIR")) is not None:
+        candidate = Path(env_dir)
+        if candidate.is_dir():
+            return str(candidate)
 
-    pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
-    if pkg_lib.is_dir():
-        return str(pkg_lib)
+    try:
+        # Use the installed Python package
+        import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+        pkg_lib = Path(nvidia_cuda_runtime.__file__).parent / "lib"
+        if pkg_lib.is_dir():
+            return str(pkg_lib)
+    except Exception:
+        pass
+
+    for base in sys.path:
+        candidate = Path(base) / "nvidia" / "cuda_runtime" / "lib"
+        if candidate.is_dir():
+            return str(candidate)
 
     return None
+
+
+def find_cuda_include_dirs() -> list[str]:
+    """Locate CUDA headers (cuda.h, cuda_runtime_api.h) for C++ extension builds.
+
+    TensorCast's C++ sources include CUDA headers for type declarations even when
+    running in fake CUDA mode. CI environments may not have a full CUDA toolkit
+    installed, so we additionally look for headers shipped via Python packages.
+    """
+    candidates: list[Path] = []
+
+    for env_var in ("CUDA_HOME", "CUDA_PATH"):
+        if (env_dir := os.environ.get(env_var)) is None:
+            continue
+        candidates.append(Path(env_dir) / "include")
+
+    try:
+        import nvidia.cuda_runtime as nvidia_cuda_runtime  # type: ignore
+
+        candidates.append(Path(nvidia_cuda_runtime.__file__).parent / "include")
+    except Exception:
+        pass
+
+    for base in sys.path:
+        candidates.append(Path(base) / "triton" / "backends" / "nvidia" / "include")
+        candidates.append(Path(base) / "nvidia" / "cuda_runtime" / "include")
+
+    include_dirs: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate.is_dir():
+            continue
+        if not ((candidate / "cuda.h").is_file() and (candidate / "cuda_runtime_api.h").is_file()):
+            continue
+        path_str = str(candidate)
+        if path_str in seen:
+            continue
+        seen.add(path_str)
+        include_dirs.append(path_str)
+
+    return include_dirs
 
 
 def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
@@ -699,6 +725,7 @@ def ensure_cudart_unversioned_symlink(lib_dir: str) -> None:
 
 if BUILD_EXTENSION:
     CUDA_RUNTIME_LIB_DIR = find_cuda_runtime_lib_dir()
+    CUDA_INCLUDE_DIRS = find_cuda_include_dirs()
     if CUDA_RUNTIME_LIB_DIR:
         ensure_cudart_unversioned_symlink(CUDA_RUNTIME_LIB_DIR)
 
@@ -741,6 +768,7 @@ if BUILD_EXTENSION:
             dir_path + "/external/xz+/src",
             dir_path + "/external/zlib+",
         ] + boost_include_dirs
+        _include_dirs += CUDA_INCLUDE_DIRS
 
         # Library search paths
         _library_dirs = [
@@ -769,11 +797,6 @@ if BUILD_EXTENSION:
                         "-Wno-macro-redefined",
                         "-Wno-pragmas",
                     ]
-                    + (
-                        ["-DUSE_FAKE_CUDA"]
-                        if USE_FAKE_CUDA
-                        else []
-                    )
                     + [
                         '-DGLOG_DEPRECATED=__attribute__((deprecated))',
                         '-DGLOG_EXPORT=__attribute__((visibility("default")))',

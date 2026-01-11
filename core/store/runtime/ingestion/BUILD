@@ -22,6 +22,7 @@ sc_cc_library(
     deps = [
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_ipc_lib",
         "//core/store:device_types",
         "//core/store:replica_registry",
         "//core/store/materialization/common:view_hash_utils",

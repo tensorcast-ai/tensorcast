@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -12,7 +12,7 @@
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/common/v1/common.pb.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -43,7 +43,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   StoreDaemonServiceImpl service(engine);
 
   // Begin registration with inline index data to exercise content addressing (v1 namespace)
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(1 * 1024 * 1024);
   breq.set_owner_pid(getpid());
@@ -53,7 +53,7 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   if (!st.ok()) {
     FAIL(std::string("BeginRegisterArtifact failed: ") + st.error_message());
@@ -65,9 +65,9 @@ TEST_CASE("CommitRegisteredArtifact populates descriptor", "[daemon][registratio
   REQUIRE(bresp.coalesced().daemon_ipc_handle().size() > 0);
 
   // Commit and validate descriptor fields are populated
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   // Descriptor presence and consistency (only field in new response)
@@ -86,29 +86,29 @@ TEST_CASE("CommitRegisteredArtifact degrades when warm local stable cannot be sa
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(std::move(opts));
   StoreDaemonServiceImpl service(engine);
 
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(16);
   breq.set_owner_pid(getpid());
-  breq.mutable_policy()->set_profile(tensorcast::daemon::v1::POLICY_PROFILE_WARM);
+  breq.mutable_policy()->set_profile(tensorcast::daemon::v2::POLICY_PROFILE_WARM);
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data(R"({"weights":[0,16,[2,2],[2,1],"torch.float32",0]})");
   idx->set_schema_version("v3");
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
   REQUIRE(!bresp.registration_id().empty());
 
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.has_local_stable_tier());
-  REQUIRE(cresp.local_stable_tier().status() == tensorcast::daemon::v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+  REQUIRE(cresp.local_stable_tier().status() == tensorcast::daemon::v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
   REQUIRE_FALSE(cresp.local_stable_tier().message().empty());
 }
 
@@ -118,25 +118,25 @@ TEST_CASE("CommitRegisteredArtifact fails when pinned local stable cannot be sat
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(std::move(opts));
   StoreDaemonServiceImpl service(engine);
 
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(16);
   breq.set_owner_pid(getpid());
-  breq.mutable_policy()->set_profile(tensorcast::daemon::v1::POLICY_PROFILE_PINNED);
+  breq.mutable_policy()->set_profile(tensorcast::daemon::v2::POLICY_PROFILE_PINNED);
   auto* idx = breq.mutable_tensor_index_data();
   idx->set_data(R"({"weights":[0,16,[2,2],[2,1],"torch.float32",0]})");
   idx->set_schema_version("v3");
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
   REQUIRE(!bresp.registration_id().empty());
 
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE_FALSE(st.ok());
   REQUIRE(st.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED);
@@ -146,7 +146,7 @@ TEST_CASE("CommitRegisteredArtifact accepts CGID", "[daemon][registration]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   StoreDaemonServiceImpl service(engine);
 
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(512 * 1024);
   breq.set_owner_pid(getpid());
@@ -157,13 +157,13 @@ TEST_CASE("CommitRegisteredArtifact accepts CGID", "[daemon][registration]") {
   idx->set_encoding("json");
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(st.ok());
 
-  tensorcast::daemon::v1::CommitRegisteredArtifactRequest creq;
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
   creq.set_registration_id(bresp.registration_id());
-  tensorcast::daemon::v1::CommitRegisteredArtifactResponse cresp;
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
   st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
   REQUIRE(st.ok());
   REQUIRE(cresp.has_artifact_descriptor());
@@ -180,7 +180,7 @@ TEST_CASE(
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   StoreDaemonServiceImpl service(engine);
 
-  tensorcast::daemon::v1::BeginRegisterArtifactRequest breq;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(99); // invalid device id to trigger fallback guard
   breq.set_total_size(16);
   breq.set_owner_pid(getpid());
@@ -193,16 +193,16 @@ TEST_CASE(
   view->set_view_id("view-transpose");
   view->set_canonical_size_bytes(16);
   view->set_allow_partial(false);
-  view->set_placement(tensorcast::daemon::v1::TRANSFORM_PLACEMENT_SERVER);
+  view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
   auto& tensors = *view->mutable_spec()->mutable_tensors();
-  tensorcast::daemon::v1::TensorViewOps ops;
+  tensorcast::daemon::v2::TensorViewOps ops;
   auto* transpose = ops.add_ops()->mutable_transpose();
   transpose->set_dim0(0);
   transpose->set_dim1(1);
   tensors["weights"] = ops;
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v1::BeginRegisterArtifactResponse bresp;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
   REQUIRE(status.error_message().find("placement=CLIENT") != std::string::npos);

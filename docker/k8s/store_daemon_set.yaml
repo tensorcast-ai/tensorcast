@@ -10,41 +10,47 @@ metadata:
     kubernetes.io/description: StoreDaemon default configuration
 data:
   store-daemon.yaml: |
-    # Basic server settings
     server:
-      host: "0.0.0.0"
-      port: 61052
+      listen:
+        host: "0.0.0.0"
+        port: 61052
+      p2p_listen:
+        host: "0.0.0.0"
+        port: 65090
       storage_path: "/mnt/stepcloud/prod/"
       num_threads: 16
-      chunk_size: 256MB
-      mem_pool_size: 8GB
-      enable_p2p_engine: true
-      enable_p2p_access: true
-      pinned_memory_timeout_ms: 30000
 
-    global_store_address: "10.148.40.11:50051"
+    engine:
+      artifact_chunk_bytes: 256MB
+      streaming_buffer_chunks: 16
 
-    # High-availability behaviour
+    pinned_memory:
+      # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes)
+      allocation_timeout: 30s
+      classes:
+        - name: engine
+          slice_bytes: 256MB
+          pool_bytes: 8GB
+        - name: comm_gpu
+          slice_bytes: 16MB
+          pool_bytes: 8GB
+        - name: comm_cpu
+          slice_bytes: 4MB
+          pool_bytes: 1GB
+
     high_availability:
       enabled: true
-      heartbeat_interval_ms: 30000
-      registration_retry_delay_ms: 5000
+      global_store_endpoints:
+        - host: "10.148.40.11"
+          port: 50051
+      heartbeat_interval: 30s
+      registration_retry_delay: 5s
       max_retries: -1
 
-    # Network ports
-    network:
-      p2p_port: 65090
-
-    # Lifecycle & eviction
     lifecycle:
       gpu_memory_limit_fraction: 0.1
-      global_cache_fraction: 0.1
-      proc_check_interval_s: 5.0
-      eviction_check_interval_s: 15.0
-
-    # Graceful shutdown window
-    shutdown:
-      grace_period_ms: 30000
+      proc_check_interval: 5s
+      eviction_check_interval: 15s
 
 ---
 apiVersion: apps/v1
@@ -188,6 +194,3 @@ spec:
     rollingUpdate:
       maxSurge: 0
       maxUnavailable: "100%"
-
-
-

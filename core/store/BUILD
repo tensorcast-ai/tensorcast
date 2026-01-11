@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 # ========== Type definitions ==========
 
 # Header-only token and VA range types for direct-write capability
@@ -32,6 +26,7 @@ sc_header_only_library(
     deps = [
         "//core/common:device_types_lib",
         "//core/common:memory_location_lib",
+        "//core/cuda:cuda_ipc_lib",
         "@abseil-cpp//absl/hash",
     ],
 )
@@ -134,7 +129,7 @@ sc_cc_library(
     hdrs = ["components/device_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -146,6 +141,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":communication_types",
+        "//core/communicator:config_io_lib",
         "//core/communicator:engine_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
     ],
@@ -176,6 +172,7 @@ sc_cc_library(
         ":replica_registry",
         "//core/common:memory_location_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/common:pinned_memory_authority_lib",
         "@abseil-cpp//absl/synchronization",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
@@ -309,10 +306,10 @@ sc_cc_library(
         "//core/common:artifact_hash_lib",
         "//core/common:artifact_identity_lib",
         "//core/common:artifact_verification_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/common:trace_macros_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store/materialization/common:view_hash_utils",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/contracts:materialization_request",
@@ -343,16 +340,12 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",
+        "@cudart",
         "@gsl",
+        "@libtorch//:torch",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "@cudart",
-            "@libtorch//:torch",
-        ],
-    }),
+    ],
 )
 
 # Tests for store_engine

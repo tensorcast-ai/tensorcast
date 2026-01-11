@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from opentelemetry.trace import SpanKind
 
 from tensorcast._c_ext import (
     compute_view_registration_plan,
-    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
     get_cuda_memory_ptr,
     restore_tensors,
 )
@@ -44,13 +44,12 @@ from tensorcast.api._indices import (
     TensorMetaIndex,
     calculate_tensor_device_offsets,
 )
-from tensorcast.api._io_disk import save_dict
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api._utils import validate_disk_index_matches
 from tensorcast.api._view_ops import NarrowOp, TransposeOp, ViewSpecBuildResult
 from tensorcast.common.identity import ArtifactIdKind, validate_client_generated_id
 from tensorcast.observability.otel import ensure_client_otel
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import (
     ArtifactDescriptor,
     CanonicalRange,
@@ -361,28 +360,13 @@ def _persist_publish_if_needed(
     client: DaemonCtl,
 ) -> None:
     if options.disk_path is not None and options.disk_path.strip() == "":
-        try:
-            from tensorcast.client_runtime import storage_root_default
-
-            root = storage_root_default()
-            if not root:
-                raise TensorCastError(
-                    "ClientConfig.storage.default_root is required when disk_path==''"
-                )
-            out_dir = Path(root) / desc.artifact_id
-            if state_dict_to_save is not None:
-                save_dict(state_dict_to_save, str(out_dir))
-            _upsert_key_mapping_if_needed(
-                key=options.key,
-                artifact_id=desc.artifact_id,
-                disk_path=str(out_dir),
-                descriptor=desc,
-                client=client,
+        if state_dict_to_save is not None:
+            raise TensorCastError(
+                "disk_path=='' local persistence is test-only and disabled in production. "
+                "Provide an explicit disk_path, or persist via your own pipeline; "
+                "tests may use tensorcast.testing.io_disk.save_dict."
             )
-        except TensorCastError:
-            raise
-        except Exception:
-            pass
+        return
     else:
         _upsert_key_mapping_if_needed(
             key=options.key,
@@ -947,8 +931,8 @@ class _LeaseUploader:
         handshake: Handshake,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, torch.Tensor]:
-        def _export_cuda_ipc_handle(ptr: int) -> bytes:
-            return get_cuda_memory_handle(ctx.device_id, int(ptr))
+        def _export_cuda_ipc_handle(ptr: int) -> tuple[bytes, int]:
+            return get_cuda_memory_handle_with_offset(ctx.device_id, int(ptr))
 
         graph = ctx.storage_graph
         offsets_for_device = layout.offsets.get(int(ctx.device_id), {})
@@ -1003,12 +987,10 @@ class _LeaseUploader:
                 base_offset = int(entry.base_ptr) - int(rec.base_ptr)
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=None,
-                        base_addr=0,
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1018,20 +1000,22 @@ class _LeaseUploader:
                         cuda_ipc_handle=None,
                         storage_length=length_bytes,
                         vram_region_id=rec.region_id,
-                        region_base_offset=int(base_offset),
+                        mapping_base_offset=int(base_offset),
                     )
                 )
             else:
                 # Fallback to legacy handle-based path.
-                handle_bytes = _export_cuda_ipc_handle(int(entry.base_ptr))
+                handle_bytes, base_offset = _export_cuda_ipc_handle(int(entry.base_ptr))
+                if not handle_bytes:
+                    raise TensorCastError(
+                        f"Failed to export CUDA IPC handle for storage '{storage_id}'"
+                    )
                 segments.append(
                     LeaseSegment(
-                        device_id=int(ctx.device_id),
-                        cuda_ipc_handle=handle_bytes,
-                        base_addr=0,
-                        length=length_bytes,
-                        dst_offset=int(dst_offset),
                         storage_id=storage_id,
+                        storage_offset=0,
+                        artifact_offset=int(dst_offset),
+                        length=length_bytes,
                     )
                 )
                 storages_payload.append(
@@ -1040,6 +1024,7 @@ class _LeaseUploader:
                         device_id=int(ctx.device_id),
                         cuda_ipc_handle=handle_bytes,
                         storage_length=length_bytes,
+                        mapping_base_offset=int(base_offset),
                     )
                 )
         if not storages_payload:

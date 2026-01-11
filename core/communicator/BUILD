@@ -1,10 +1,11 @@
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_cc//cc:defs.bzl", "cc_binary")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
+# Config for using mock IBV backend
 config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
+    name = "use_mock_ibv",
+    define_values = {"use_mock_ibv": "true"},
 )
 
 # ========== Base definitions ==========
@@ -49,17 +50,23 @@ sc_header_only_library(
 
 sc_cc_library(
     name = "ibv_wrap_lib",
-    srcs = ["misc/ibv_wrap.cc"],
-    hdrs = ["misc/ibv_wrap.h"],
+    srcs = [
+        "misc/ibv_wrap.cc",
+        "misc/mlx5_warp.cc",
+    ],
+    hdrs = [
+        "misc/ibv_wrap.h",
+        "misc/mlx5_warp.h",
+    ],
     defines = select({
-        ":use_fake_cuda": ["USE_FAKE_CUDA"],
+        ":use_mock_ibv": ["USE_MOCK_IBV"],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"],
     deps = [
         ":common_lib",
     ] + select({
-        ":use_fake_cuda": [":ibv_mock_lib"],
+        ":use_mock_ibv": [":ibv_mock_lib"],
         "//conditions:default": [],
     }),
 )
@@ -145,6 +152,29 @@ cc_test(
     ],
 )
 
+cc_binary(
+    name = "cpu_ce_test_binary",
+    srcs = ["engine/cpu_ce_test.cc"],
+    deps = [
+        ":engine_lib",
+        ":utils_lib",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+    ],
+)
+
+cc_binary(
+    name = "gpu_ce_test_binary",
+    srcs = ["engine/gpu_ce_test.cc"],
+    deps = [
+        ":engine_lib",
+        ":utils_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:common",
+        "//core/testing:test_helpers",
+    ],
+)
+
 # Combined net_dev and partition_tensor to avoid circular dependency
 sc_cc_library(
     name = "partition_tensor_lib",
@@ -221,7 +251,7 @@ sc_cc_library(
         ":net_dev_lib",
         ":request_lib",
         ":utils_lib",
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
     ],
 )
 
@@ -276,12 +306,12 @@ sc_cc_library(
         ":staging_flow_controller_lib",
         ":tcp_lib",
         "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
-        "//core/common:device_guard_lib",
-        "//core/common:error_handling_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/cuda:error_handling_lib",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -312,25 +342,25 @@ sc_cc_library(
     ],
 )
 
-# GPU Net Stager (header-only)
+# Host-pinned GPU stager (header-only)
 sc_header_only_library(
-    name = "gpu_net_stager_lib",
-    hdrs = ["engine/gpu_net_stager.h"],
+    name = "host_pinned_gpu_stager_lib",
+    hdrs = ["engine/host_pinned_gpu_stager.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":memory_stager_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/cuda:cuda_api_lib",
     ],
 )
 
-# DRAM (CPU) stager implementation
+# Host-pinned CPU stager implementation
 sc_cc_library(
-    name = "dram_stager_lib",
-    srcs = ["engine/dram_stager.cc"],
-    hdrs = ["engine/dram_stager.h"],
+    name = "host_pinned_cpu_stager_lib",
+    srcs = ["engine/host_pinned_cpu_stager.cc"],
+    hdrs = ["engine/host_pinned_cpu_stager.h"],
     visibility = ["//visibility:public"],
     deps = [
         ":memory_stager_lib",
@@ -339,6 +369,24 @@ sc_cc_library(
         "@abseil-cpp//absl/base",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+# GPU VRAM staged-RDMA stager
+sc_cc_library(
+    name = "gpu_vram_rdma_stager_lib",
+    srcs = ["engine/gpu_vram_rdma_stager.cc"],
+    hdrs = ["engine/gpu_vram_rdma_stager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constants_lib",
+        ":memory_stager_lib",
+        ":partition_tensor_lib",
+        "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@gsl",
     ],
 )
 
@@ -362,8 +410,9 @@ sc_cc_library(
     deps = [
         ":channel_lib",
         ":constants_lib",
-        ":dram_stager_lib",
-        ":gpu_net_stager_lib",
+        ":gpu_vram_rdma_stager_lib",
+        ":host_pinned_cpu_stager_lib",
+        ":host_pinned_gpu_stager_lib",
         ":message_lib",
         ":mr_cache_lib",
         ":mtcp_transport_lib",
@@ -373,19 +422,17 @@ sc_cc_library(
         ":store_lib",
         ":tcp_lib",
         ":utils_lib",
-        "//core/common:cuda_api_lib",
-        "//core/common:device_guard_lib",
-        "//core/common:error_handling_lib",
         "//core/common:pinned_buffer_pool_lib",
         "//core/common:system_capabilities_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/cuda:error_handling_lib",
         "//proto/tensorcast/communicator/v1:communicator_cc",
         "@abseil-cpp//absl/log:check",
         "@abseil-cpp//absl/strings",
+        "@cudart",
         "@opentelemetry-cpp//api:api",
-    ] + select({
-        ":use_fake_cuda": [],
-        "//conditions:default": ["@cudart"],
-    }),
+    ],
 )
 
 # MR cache for pinned buffers per PD
@@ -480,6 +527,16 @@ cc_test(
 )
 
 cc_test(
+    name = "rdma_stage_fn_test",
+    srcs = ["engine/rdma_stage_fn_test.cc"],
+    deps = [
+        ":engine_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "tcp_engine_test",
     srcs = ["engine/tcp_engine_test.cc"],
     deps = [
@@ -555,6 +612,37 @@ cc_test(
     ],
 )
 
+cc_test(
+    name = "stager_mr_normalization_test",
+    srcs = ["engine/stager_mr_normalization_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":host_pinned_cpu_stager_lib",
+        ":host_pinned_gpu_stager_lib",
+        ":memory_stager_lib",
+        ":partition_tensor_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "gpu_vram_rdma_stager_test",
+    srcs = ["engine/gpu_vram_rdma_stager_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":gpu_vram_rdma_stager_lib",
+        ":partition_tensor_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
 sc_header_only_library(
     name = "engine_hdrs",
     hdrs = ["engine/engine.h"],
@@ -562,7 +650,7 @@ sc_header_only_library(
     deps = [
         ":channel_lib",
         ":constants_lib",
-        ":dram_stager_lib",
+        ":host_pinned_cpu_stager_lib",
         ":ibv_wrap_lib",
         ":message_lib",
         ":mr_cache_lib",

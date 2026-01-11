@@ -1,11 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/handle_stage.h"
 
-#include <cstring>
 #include <optional>
 
 #include "absl/status/statusor.h"
+#include "core/cuda/cuda_ipc.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
 
@@ -32,7 +32,7 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
 
     auto ipc_or = ctx.replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
-      std::memcpy(handle.cuda_ipc_handle.bytes.data(), &(*ipc_or), sizeof(cudaIpcMemHandle_t));
+      handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
     }
   }
 

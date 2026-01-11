@@ -1,0 +1,5 @@
+[default]
+# 使用正则表达式忽略所有以 mis- 开头的单词或标识符
+extend-ignore-re = [
+    "(?i)mis-[a-zA-Z0-9_-]*",
+]

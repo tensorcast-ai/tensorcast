@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Shared configuration helpers for CLI/SDK orchestration.
 
@@ -163,11 +163,28 @@ def build_embedded_daemon_config(
     cfg.server.p2p_listen.host = listen_host
     cfg.server.p2p_listen.port = 0
 
-    cfg.engine.mem_pool_size_bytes = 1 * 1024 * 1024 * 1024
-    cfg.engine.tx_slice_bytes = 256 * 1024 * 1024
     cfg.engine.artifact_chunk_bytes = 256 * 1024 * 1024
-    cfg.engine.streaming_buffer_max_concurrent_sessions = 1
-    cfg.engine.pinned_allocation_timeout.FromSeconds(30)
+    cfg.engine.streaming_buffer_chunks = 16
+
+    cfg.pinned_memory.allocation_timeout.FromSeconds(30)
+    cfg.pinned_memory.classes.add(
+        name="engine",
+        slice_bytes=256 * 1024 * 1024,
+        pool_bytes=1 * 1024 * 1024 * 1024,
+        rdma_preregister=False,
+    )
+    cfg.pinned_memory.classes.add(
+        name="comm_gpu",
+        slice_bytes=16 * 1024 * 1024,
+        pool_bytes=512 * 1024 * 1024,
+        rdma_preregister=False,
+    )
+    cfg.pinned_memory.classes.add(
+        name="comm_cpu",
+        slice_bytes=4 * 1024 * 1024,
+        pool_bytes=128 * 1024 * 1024,
+        rdma_preregister=False,
+    )
 
     cfg.lifecycle.gpu_memory_limit_fraction = 0.75
     cfg.lifecycle.enable_periodic_eviction = False
@@ -181,9 +198,6 @@ def build_embedded_daemon_config(
 
     cfg.high_availability.enabled = False
     cfg.communicator.enable_rdma = False
-    cfg.checkpoint.streaming.num_buffers = 2
-    cfg.checkpoint.streaming.io_chunk_bytes = 128 * 1024 * 1024
-    cfg.checkpoint.streaming.pinned_pool_bytes = 512 * 1024 * 1024
     cfg.observability.logging.level = common_pb.Observability.LogLevel.LOG_LEVEL_INFO
     cfg.meta.description = "embedded-daemon-config"
     return cfg

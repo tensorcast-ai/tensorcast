@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from tensorcast.cli_utils import service_manager
 from tensorcast.cli_utils.paths import runtime_state_path, session_paths
 from tensorcast.daemon_runtime_config import dump_daemon_config, load_daemon_config
 from tensorcast.proto.config.v1 import daemon_config_pb2
-from tensorcast.proto.daemon.v1 import store_daemon_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _FakeProc:

@@ -6,7 +6,7 @@ links:
 areas: ["core", "daemon", "sdk", "proto"]
 related_code:
   - docs/internals/tensor_dict_into_dataflow.md
-  - docs/designs/0021-region‑backed-registration.md
+  - docs/architecture/api/region-backed.md
   - docs/designs/0004-unified-runtime-config.md
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/config/v1/client_config.proto
@@ -73,8 +73,8 @@ Region-backed `tensor_dict_into` needs a compact description of where each tenso
   (or view) index entries, not the sum of lengths; COALESCED storages must span this size.
 
 **TargetLayout** (new v2 wrapper message)
-- `repeated tensorcast.daemon.v1.StorageEntry storages`
-- `repeated tensorcast.daemon.v1.TensorAlias aliases`
+- `repeated tensorcast.daemon.v2.StorageEntry storages`
+- `repeated tensorcast.daemon.v2.TensorAlias aliases`
 - `repeated TargetTensorOffset offsets`
 - `enum LayoutKind { LAYOUT_KIND_COALESCED_UNSPECIFIED = 0; LAYOUT_KIND_TENSOR_TABLE = 1; }`
 - `LayoutKind layout_kind`
@@ -91,14 +91,14 @@ Region-backed `tensor_dict_into` needs a compact description of where each tenso
 **StorageEntry** (existing, v1)
 - `storage_id`, `device_id`, `storage_length`
 - `vram_region_id` (required for region-backed target)
-- `region_base_offset` (required)
+- `mapping_base_offset` (required)
 
 **TensorAlias** (existing, v1)
 - `name`, `storage_id`, `storage_offset`, `logical_length`
 - `shape`, `stride`, `dtype`
 
 The **offset table** maps each tensor's logical offset to a region offset:
-`logical_offset (canonical or view) -> region_id + region_base_offset + storage_offset`.
+`logical_offset (canonical or view) -> region_id + mapping_base_offset + storage_offset`.
 
 ### Layout Compaction
 - `TENSOR_SPEC_KIND_OFFSETS` sends only `TargetTensorOffset` entries; dtype/shape/stride come
@@ -110,7 +110,7 @@ The **offset table** maps each tensor's logical offset to a region offset:
 `logical_layout_hash` is a SHA-256 digest over the logical byte space only:
 - Derive it from canonical (or view) index bytes plus `index_kind`; prefer `index_multihash`
   when present to avoid re-hashing large indices.
-- Exclude physical binding fields (`storage_id`, `vram_region_id`, `region_base_offset`,
+- Exclude physical binding fields (`storage_id`, `vram_region_id`, `mapping_base_offset`,
   `storage_offset`) so the hash stays stable across region bindings.
 - In Phase 1 the on-wire field is optional and diagnostic; SegmentPlan caching should
   key on `index_multihash` (or a locally computed `logical_layout_hash`) plus
@@ -141,7 +141,7 @@ does not implement this logic.
 ### Layout Modes
 1. **COALESCED**: the target region is arranged in logical order (canonical or view).
    The daemon verifies `storage_offset == logical_offset` for each tensor, and a single
-   storage entry spans the logical space (`storage_length == logical_total_size`). The `region_base_offset` acts as the base of
+   storage entry spans the logical space (`storage_length == logical_total_size`). The `mapping_base_offset` acts as the base of
    the coalesced buffer slice in the region. This lets the pipeline stream ranges
    without extra scatter logic and reuse `pump_ranges`.
    COALESCED implies the storage covers the full logical space and includes every tensor
@@ -165,8 +165,8 @@ daemon-side write. It builds a `TargetLayout` only when all of the following are
 - Phase 1 rejects view requests (`view` / `view_id`) for region-backed targets.
 - `device_uuid` is required and treated as authoritative for device identity; `device_id`
   is carried only as a local ordinal and must match the daemon-resolved UUID.
-- The daemon advertises `supports_region_backed_get_into`; otherwise the SDK falls back
-  or errors based on `region_backed_mode`.
+- The SDK assumes region-backed `MaterializeIntoTarget` support; fallback is still
+  controlled by `region_backed_mode`.
 
 **Construction steps**
 1. Resolve artifact identity and fetch canonical index bytes (already cached).
@@ -178,8 +178,8 @@ daemon-side write. It builds a `TargetLayout` only when all of the following are
    and `view_subset_hash` must be empty for Phase 1.
 5. Group target tensors by storage; assign deterministic `storage_id` (e.g., hash of base
    pointer + size).
-6. For each storage, find the covering region and compute `region_base_offset`.
-7. Emit `StorageEntry` records with `vram_region_id`, `region_base_offset`, and
+6. For each storage, find the covering region and compute `mapping_base_offset`.
+7. Emit `StorageEntry` records with `vram_region_id`, `mapping_base_offset`, and
    `storage_length == logical_total_size`.
 8. Emit `TargetTensorOffset` records for each tensor with `storage_offset` and
    `logical_length` (use `TensorAlias` only when `tensor_spec_kind=ALIAS`).
@@ -224,9 +224,6 @@ cannot build a canonical layout, the SDK falls back or errors based on
 ### Capabilities and Config Integration
 - Extend `ClientConfig.defaults` with `region_backed_mode` so the default path is
   driven by the unified runtime config system.
-- Extend `StoreCapabilities` with `supports_region_backed_get_into` and populate it
-  by calling `GetMaterializeCapabilities` during session initialization (in addition
-  to `GetServerConfig`).
 - `region_backed_mode` defaults to the configured value and can be overridden per call,
   but into paths are the only consumers until `GetIntoOptions` is introduced.
 
@@ -251,34 +248,30 @@ message MaterializeIntoTargetRequest {
   int32 pid = 5;
   string device_uuid = 6;
 
-  tensorcast.daemon.v1.SourcePreference preference = 7;
+  tensorcast.daemon.v2.SourcePreference preference = 7;
 
   // Selective materialization (reserved for Phase 2)
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    tensorcast.daemon.v1.ViewSpec view = 1001;
+    tensorcast.daemon.v2.ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v1.TransformPlacement placement = 1003;
+  tensorcast.daemon.v2.TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetResponse {
   string artifact_id = 1;
-  tensorcast.daemon.v1.MaterializeReplicaStatus status = 2;
-  tensorcast.daemon.v1.MaterializationSource source = 3;
+  tensorcast.daemon.v2.MaterializeReplicaStatus status = 2;
+  tensorcast.daemon.v2.MaterializationSource source = 3;
   bytes canonical_index_bytes = 4;
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
 }
 
-message GetMaterializeCapabilitiesResponse {
-  bool supports_view_subset_hash = 1;
-  bool supports_region_backed_get_into = 2;
-}
 ```
 
 When `MaterializeIntoTarget` is used:
@@ -314,7 +307,7 @@ target_layout {
     storage_id: "s0"
     device_id: 0
     vram_region_id: "region:0001"
-    region_base_offset: 0
+    mapping_base_offset: 0
     storage_length: 3072
   }
   offsets: [
@@ -360,7 +353,7 @@ target_layout {
     storage_id: "s0"
     device_id: 0
     vram_region_id: "region:0002"
-    region_base_offset: 0
+    mapping_base_offset: 0
     storage_length: 8192
   }
   offsets: [
@@ -409,7 +402,7 @@ so the data-path stays in core and shares scheduling, buffer pools, and loaders.
 - `device_uuid` is present and resolves to a device; each storage entry `device_id`
   matches the resolved UUID (device_id is not authoritative across processes).
 - `layout_kind == COALESCED` and `len(storages) == 1`.
-- `region_base_offset + storage_length <= region.size_bytes`.
+- `mapping_base_offset + storage_length <= region.size_bytes`.
 - `owner_pid` matches the session (via `IpcRegionRegistry::acquire`).
 - Region is not poisoned (fail fast if the registry marks the region as invalid).
 - `TensorAlias` or `TargetTensorOffset` matches canonical entry (length, name).
@@ -430,7 +423,7 @@ For COALESCED layouts, the logical offsets match the destination offsets. The da
 ### External GPU Target
 Introduce an external GPU target in the materialization pipeline:
 - Bypass `AllocationStage` and `HandleStage`; no daemon-owned replica or IPC export.
-- Open the single region IPC handle and pass `gpu_base_ptr = region_base + region_base_offset`
+- Open the single region IPC handle and pass `gpu_base_ptr = region_base + mapping_base_offset`
   into `GpuMemorySink`, with `total_size = logical_total_size` to enforce a full copy.
 - Acquire the region via `IpcRegionRegistry::acquire` to extend TTL and enforce ownership,
   then release on completion to decrement the refcount.
@@ -452,7 +445,7 @@ Implementation note: extend `IpcRegionRegistry` to track region state
   via loaders/pump, even when a local replica is present.
 - **SegmentPlan cache**: cache `logical_layout_hash` (or `index_multihash`) + `generation`
   to reuse computed plans across calls; exclude physical binding fields.
-- **IPC mapping cache**: reuse `CudaIpcMapping` per region for the duration of a request
+- **IPC mapping cache**: reuse `cuda::IpcMapping` per region for the duration of a request
   batch to avoid repeated open/close overhead.
 
 ## Control Flow
@@ -555,15 +548,13 @@ updates are acceptable in this pre-launch phase.
 - Region-backed writes use `MaterializeIntoTarget`; existing get/get_into paths remain
   available but are not extended with `target_layout`.
 - `region_backed_mode` affects only into paths; `get` / `get_view` remain unchanged.
-- SDKs still gate the feature on `supports_region_backed_get_into` to allow mixed
-  daemon/client deployments during rollout.
 
 ## Acceptance Criteria
 - Daemon VRAM usage does not exceed target region size during `tensor_dict_into`.
 - IPC handle count per `tensor_dict_into` is limited to region handles only.
 - Phase 1 skips external-target verification and reports the skip via metrics.
 - Observability: new counters for region-backed get-into success/failure and fallback
-  reasons (no region, non-contiguous, capability missing, layout mismatch).
+  reasons (no region, non-contiguous, layout mismatch).
 - Region-backed transfers are non-cancelable once started; failures mark the region
   poisoned and return `DATA_LOSS`/`FAILED_PRECONDITION` (non-retryable).
 - Key-based requests or `INDEX_KIND_VIEW` return `INVALID_ARGUMENT` in Phase 1.
@@ -575,7 +566,7 @@ updates are acceptable in this pre-launch phase.
 Proposed API and type names follow repository conventions:
 - **Proto messages**: `TargetLayout`, `TargetTensorOffset` (PascalCase)
 - **Proto messages**: `MaterializeIntoTargetRequest`, `MaterializeIntoTargetResponse` (PascalCase)
-- **Proto fields**: `target_layout`, `layout_kind`, `region_base_offset` (snake_case)
+- **Proto fields**: `target_layout`, `layout_kind`, `mapping_base_offset` (snake_case)
 - **RPCs**: `MaterializeIntoTarget` (PascalCase)
 - **C++ functions**: `materialize_into_target` (snake_case)
 - **Python types**: `RegionBackedMode`, `TargetLayout` (PascalCase)
@@ -583,7 +574,7 @@ Proposed API and type names follow repository conventions:
 
 # References
 
-- `docs/designs/0021-region‑backed-registration.md`
+- `docs/architecture/api/region-backed.md`
 - `docs/internals/tensor_dict_into_dataflow.md`
 - `core/store/materialization/dataplane/runtime/pump.h`
 - `daemon/service/controllers/materialization_controller.cc`

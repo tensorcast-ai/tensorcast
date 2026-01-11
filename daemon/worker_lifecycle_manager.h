@@ -1,13 +1,16 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
@@ -29,6 +32,12 @@ class WorkerLifecycleManager {
     uint16_t p2p_port{0};
     int heartbeat_interval_ms{5000};
     int chunk_sync_interval_ms{10000}; // 0 to disable
+    int heartbeat_rpc_timeout_ms{0};
+    int state_sync_rpc_timeout_ms{0};
+    int full_sync_rpc_timeout_ms{0};
+    std::optional<int32_t> heartbeat_rpc_max_retries;
+    std::optional<int32_t> state_sync_rpc_max_retries;
+    std::optional<int32_t> full_sync_rpc_max_retries;
     // When true, an empty local inventory is treated as authoritative and will
     // drive removals via force_full_sync during synchronization.
     bool force_full_sync_on_empty_inventory{false};
@@ -52,6 +61,8 @@ class WorkerLifecycleManager {
   // Exposed for deterministic HA synchronization and unit tests.
   static std::string compute_state_checksum(
       std::string_view node_id,
+      std::string_view node_address,
+      uint32_t node_port,
       const std::vector<store::StoreEngine::ReplicaInfo>& infos);
 
  private:
@@ -74,6 +85,7 @@ class WorkerLifecycleManager {
   }
 
   void heartbeat_loop();
+  void state_sync_loop(uint64_t epoch);
   void chunk_sync_loop();
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
@@ -81,6 +93,11 @@ class WorkerLifecycleManager {
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
+  void request_state_sync();
+  void queue_obsolete_replicas(std::vector<std::string> obsolete);
+  void perform_state_sync(uint64_t epoch);
+  void retire_thread(std::thread* thread);
+  store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
 
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
@@ -93,11 +110,13 @@ class WorkerLifecycleManager {
   const gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> global_store_;
   const std::string node_id_;
   std::string worker_id_;
+  std::string node_address_;
 
   // HA state tracking
   uint64_t state_version_{0};
   std::string state_checksum_;
   int64_t last_sync_success_ts_{0};
+  mutable std::mutex state_mu_;
 
   std::atomic<bool> stop_{false};
   // Ensure stop() is idempotent even if invoked from multiple places (e.g.,
@@ -107,8 +126,11 @@ class WorkerLifecycleManager {
   std::mutex stop_mu_;
   std::condition_variable stop_cv_;
   std::thread hb_thread_;
+  std::thread state_sync_thread_;
   std::thread sync_thread_;
   std::thread monitor_thread_;
+  std::mutex retired_threads_mu_;
+  std::vector<std::thread> retired_threads_;
 
   // Lightweight metrics/counters for observability
   std::atomic<uint64_t> hb_success_{0};
@@ -120,9 +142,20 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> hb_restarts_{0};
   std::atomic<uint64_t> sync_restarts_{0};
   std::atomic<uint64_t> hb_ticks_{0};
+  std::atomic<uint64_t> state_sync_ticks_{0};
   std::atomic<uint64_t> sync_ticks_{0};
   std::atomic<bool> hb_alive_{false};
+  std::atomic<bool> state_sync_alive_{false};
+  std::atomic<bool> state_sync_inflight_{false};
   std::atomic<bool> sync_alive_{false};
+  std::atomic<uint64_t> hb_epoch_{0};
+  std::atomic<uint64_t> state_sync_epoch_{0};
+  std::atomic<uint64_t> state_sync_requests_{0};
+  std::mutex state_sync_mu_;
+  std::condition_variable state_sync_cv_;
+  std::mutex obsolete_mu_;
+  std::vector<std::string> pending_obsolete_replicas_;
+  std::atomic<bool> obsolete_pending_{false};
   bool memory_tier_enabled_{false};
 
  public:

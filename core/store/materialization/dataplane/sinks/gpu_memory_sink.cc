@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 
@@ -20,7 +20,7 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/async_copy_manager.h"
-#include "core/common/device_guard.h"
+#include "core/cuda/device_guard.h"
 #include "opentelemetry/metrics/meter.h"
 #include "opentelemetry/metrics/observer_result.h"
 #include "opentelemetry/metrics/provider.h"
@@ -251,7 +251,7 @@ absl::Status GpuMemorySink::write_at(uint64_t offset, const void* src, size_t by
   }
 
   // Set device context
-  common::DeviceGuard guard(options_.device_id);
+  cuda::DeviceGuard guard(options_.device_id);
   if (!guard.status().ok()) {
     overall_status_ = guard.status();
     return overall_status_;
@@ -294,7 +294,7 @@ absl::StatusOr<common::CopyHandle> GpuMemorySink::write_at_async(
     return absl::InvalidArgumentError("Write would exceed total GPU memory size");
   }
   // Set device context
-  common::DeviceGuard guard(options_.device_id);
+  cuda::DeviceGuard guard(options_.device_id);
   if (!guard.status().ok()) {
     overall_status_ = guard.status();
     return overall_status_;

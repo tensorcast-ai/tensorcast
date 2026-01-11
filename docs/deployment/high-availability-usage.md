@@ -13,14 +13,15 @@ TensorCast HA keeps the single Global Store resilient and consistent with Store 
 ## Features
 
 ### Global Store
-- **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and resets per-worker state versions.
-- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts; incremental sync applies additions/removals with “addition over removal” semantics; full-state sync returns the expected set without bumping versions.
+- **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and preserves persisted `state_version`/`state_checksum`.
+- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts (heartbeats require `state_version >= 1`); incremental sync applies additions/removals with “addition over removal” semantics, transactionally bumps version/checksum on success, and no-op sync refreshes cached checksum; full-state sync returns the expected set without bumping versions.
 - **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, listen endpoints, metrics port, and version.
 
 ### Store Daemon
 - **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
-- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas not expected by the Global Store.
-- **Enhanced heartbeat loop**: sends version/checksum/inventory; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
+- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas (keyed by `(artifact_id, memory_type, device_id)`) not expected by the Global Store.
+- **Registration seeding**: initializes `state_version` from `RegisterWorkerResponse.expected_state_version` before the first heartbeat.
+- **Enhanced heartbeat loop**: sends version/checksum/inventory and queues background sync work; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
 - **Incremental sync handling**: applies obsolete removals immediately and prefetches server-requested `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.
 - **Bounded retries**: all RPCs use jittered exponential backoff (`max_retries=3`, base 100ms).
 
@@ -67,9 +68,14 @@ high_availability:
       port: 50051
   heartbeat_interval: 5s      # default when omitted
   periodic_sync_interval: 10s # chunk sync loop; 0 disables
+  heartbeat_rpc_timeout: 2s   # optional per-RPC overrides
+  state_sync_rpc_timeout: 5s
+  full_sync_rpc_timeout: 10s
 ```
 
 > The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address` or `--global-store-endpoints`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
+>
+> Note: `listen.host: 0.0.0.0` is a bind-all address (server-side). Clients should connect using a routable IP/DNS name (e.g. `10.0.0.5:50051`). TensorCast will not treat `0.0.0.0` as a dial target even if the Global Store reports it via health metadata.
 
 ## Usage
 

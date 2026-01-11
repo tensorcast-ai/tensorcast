@@ -50,7 +50,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 ### Build Systems
 - **Primary**: Bazel (Bzlmod) for C++ Core and Daemon
 - **Secondary**: setuptools + `uv` for Python packaging/clients
-- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.6+, gRPC, Protocol Buffers
+- **Dependencies**: LibTorch 2.6/2.7, CUDA 12.4+, gRPC, Protocol Buffers
 
 ## Documentation Structure and Project Hierarchy
 
@@ -138,36 +138,36 @@ bazel build //daemon:tensorcast_daemon \
 
 # Run tests with minimal output: only show failure details, reduce general logging
 bazel test //daemon:session_lifecycle_test \
-  --define=use_fake_cuda=true \
+  --test_env=TENSORCAST_CUDA_BACKEND=fake \
   --test_output=errors \
   --noshow_progress --noshow_loading_progress \
   --ui_event_filters=warning,error
 ```
 
-#### Fake CUDA Backend (Development Without GPU)
-Use `nvidia-smi` to check if you have GPU available. The project supports a fake CUDA backend for development and testing without GPU hardware. C++ tests default to the fake backend so they run on CPU‑only machines.
+#### CUDA Backend (Runtime Selection)
+TensorCast ships a **single binary** that supports both CUDA backends:
+- `real` (default)
+- `fake` (TEST ONLY; simulated CUDA for development and running tests without GPU hardware)
+
+Backend selection is **runtime**, via `TENSORCAST_CUDA_BACKEND`:
+- Unset / `real`: use the real backend.
+- `fake`: allowed only in recognized test environments (fails fast otherwise). Signals: Bazel tests set `TEST_SRCDIR`/`TEST_TMPDIR`; PyTest sets `PYTEST_CURRENT_TEST`.
 
 ```bash
-# Build Python extension with fake CUDA
-USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+# Build Python extension (single binary supports real/fake at runtime)
+BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+
+# Run Python tests with fake CUDA backend
+TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/...
 
 # Run C++ tests with fake CUDA backend
-# Most tests already run with fake CUDA by default. You can also select explicitly with a single define:
-bazel test //core/store:store_engine_test --define=use_fake_cuda=true
-bazel test //core/communicator/engine:gpu_ce_test --define=use_fake_cuda=true
+# Select fake explicitly via test env:
+bazel test //core/store:store_engine_test --test_env=TENSORCAST_CUDA_BACKEND=fake
+bazel test //core/communicator/engine:gpu_ce_test --test_env=TENSORCAST_CUDA_BACKEND=fake
 
-# To run with real CUDA instead of the default fake backend, pass:
-bazel test //daemon:grpc_service_impl_registration_test --define=use_fake_cuda=false
+# To run with real CUDA, leave the env unset (or set TENSORCAST_CUDA_BACKEND=real):
+bazel test //daemon:grpc_service_impl_registration_test
 ```
-
-**Fake CUDA Mode Features:**
-- Enables development and testing without GPU hardware
-- Simulates 4 GPUs for testing multi-device scenarios
-- Stream and event APIs now execute callbacks asynchronously on a lightweight worker so `AsyncCopyManager` and staged transfers behave like the real runtime
-- All CUDA operations return successful status
-- Memory allocations tracked but use CPU memory
-- Zero overhead when using real CUDA backend
-- Complete API coverage for all CUDA operations used in codebase
 
 ### Code Quality and Linting
 
@@ -227,6 +227,8 @@ third_party/   ─▶  BUILD files defining cc_library targets (no source code h
      ▼
 ./external/    ─▶  Actual headers & sources (populated after bazel build)
 ```
+
+**Mapping rule**: Each `./third_party/<lib>/BUILD` is the Bazel-compatible wrapper for a dependency fetched in `MODULE.bazel` (via `bazel_dep` or `http_archive`); the real files live under `./external/<lib>+/...` after a Bazel build.
 
 **To explore a third-party library**: look in `./external/`, not `third_party/`.
 

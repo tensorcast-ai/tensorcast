@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -10,8 +10,8 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/time/time.h"
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/replica_config.h"
 

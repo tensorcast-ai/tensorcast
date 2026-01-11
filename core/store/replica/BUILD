@@ -1,12 +1,6 @@
 load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
-# Config for using fake CUDA backend
-config_setting(
-    name = "use_fake_cuda",
-    define_values = {"use_fake_cuda": "true"},
-)
-
 sc_header_only_library(
     name = "memory_state",
     hdrs = ["memory_state.h"],
@@ -58,9 +52,9 @@ sc_cc_library(
         ":direct_write",
         "//core/common:const_granularity_lib",
         "//core/common:cuda_memory_lib",
-        "//core/common:error_handling_lib",
         "//core/common:memory_location_lib",
         "//core/common:system_capabilities_lib",
+        "//core/cuda:error_handling_lib",
         "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:memory_tier_budget",
@@ -83,10 +77,10 @@ sc_cc_library(
         ":chunk_state",
         ":unified_memory_authority",
         "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_chunk_guard_lib",
         "//core/common:streaming_pinned_buffer_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:device_types",
         "@opentelemetry-cpp//api:api",
     ],
@@ -109,8 +103,8 @@ sc_cc_library(
         ":transfer_constants",
         ":transfer_helpers",
         ":unified_memory_authority",
-        "//core/common:cuda_api_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:device_types",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/dataplane:cpu_va_sink",
@@ -136,7 +130,7 @@ sc_cc_library(
     deps = [
         ":unified_memory_authority",
         ":transfer_constants",
-        "//core/common:cuda_api_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/communicator:engine_lib",
         "//core/store:communication_types",
         # UMA lease provider bridge removed; UMA keepalive is held within ExportRegistration
@@ -162,11 +156,11 @@ sc_cc_library(
         ":transfer_service",
         ":unified_memory_authority",
         "//core/common:async_copy_manager_lib",
-        "//core/common:cuda_api_lib",
         "//core/common:device_types_lib",
         "//core/common:memory_location_lib",
         "//core/common:streaming_pinned_buffer_lib",
         "//core/communicator:engine_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:device_types",
         "//core/store:memory_types",
         "//core/store:store_engine_options",
@@ -197,9 +191,9 @@ sc_cc_library(
         ":chunk_state",
         ":memory_state",
         ":replica_load_controller",
-        "//core/common:cuda_api_lib",
         "//core/common:memory_location_lib",
         "//core/communicator:engine_lib",
+        "//core/cuda:cuda_api_lib",
         "//core/store:communication_types",
         "//core/store:device_types",
         "//core/store:memory_types",
@@ -248,13 +242,6 @@ cc_test(
 cc_test(
     name = "replica_p2p_registration_test",
     srcs = ["replica_p2p_registration_test.cc"],
-    linkopts = select({
-        ":use_fake_cuda": [],
-        "//conditions:default": [
-            "-lcuda",
-            "-lrt",
-        ],
-    }),
     tags = ["requires_cuda"],
     deps = [
         "//core/common",

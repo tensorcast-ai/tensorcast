@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Human and machine-readable status routines for StoreDaemon."""
 
@@ -14,7 +14,7 @@ import grpc
 import psutil
 
 from tensorcast.daemon_runtime_config import load_daemon_config
-from tensorcast.proto.daemon.v1 import store_daemon_pb2, store_daemon_pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.store_session_registry import (
     StoreSessionRecord,
 )

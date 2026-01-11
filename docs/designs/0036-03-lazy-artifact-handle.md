@@ -13,7 +13,7 @@ links:
   phase1: ./0036-01-materialization-pipeline-v2.md
   phase2: ./0036-02-artifact-handle-core.md
   successor: ./0036-04-disk-artifact-variant.md
-  prior_design: ./0014-store-session-api-modernization.md
+  prior_design: ../architecture/api/api-design.md
   view_design: ./0016-artifact-view-v1.md
 ---
 
@@ -740,7 +740,7 @@ All new public names follow Python naming in `AGENTS.md`:
 
 # References
 
-- [0014-store-session-api-modernization](./0014-store-session-api-modernization.md) — Current Store session API
+- [api-design](../architecture/api/api-design.md#store-and-entry-points) — Current Store session API
 - [0016-artifact-view-v1](./0016-artifact-view-v1.md) — ViewSpec and view retrieval/registration
 - [tensor-first-artifact-architecture](../internals/tensor-first-artifact-architecture.md) — Tensor-first design philosophy
 - [0007-content-addressed-artifact-id](./0007-content-addressed-artifact-id.md) — mi2 identity model

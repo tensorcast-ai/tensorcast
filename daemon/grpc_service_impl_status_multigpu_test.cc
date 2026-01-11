@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "daemon/grpc_service_impl.h"
 
@@ -6,7 +6,7 @@
 #include "absl/strings/str_format.h"
 #include "core/store/store_engine.h"
 #include "grpcpp/server_context.h"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 using tensorcast::daemon::StoreDaemonServiceImpl;
 
@@ -51,8 +51,8 @@ TEST_CASE("GetDetailedStatus aggregates multi-GPU replicas", "[daemon][status][m
   create_gpu_memory_replica(engine, "logical-A", /*device_id=*/0, /*size_bytes=*/4ULL * 1024 * 1024);
   create_gpu_memory_replica(engine, "logical-B", /*device_id=*/1, /*size_bytes=*/8ULL * 1024 * 1024);
 
-  tensorcast::daemon::v1::GetDetailedStatusRequest req;
-  tensorcast::daemon::v1::GetDetailedStatusResponse resp;
+  tensorcast::daemon::v2::GetDetailedStatusRequest req;
+  tensorcast::daemon::v2::GetDetailedStatusResponse resp;
   grpc::ServerContext ctx;
   auto st = svc.GetDetailedStatus(&ctx, &req, &resp);
   REQUIRE(st.ok());

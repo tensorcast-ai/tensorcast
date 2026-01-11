@@ -15,9 +15,9 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
   - CLI class: `client.py::DaemonCtl`
   - CXX: `checkpoint_py.cc`
 
-- **LocalStoreDaemon**: C++ gRPC service (RFC‑0011, RFC‑0014)
+- **LocalStoreDaemon**: C++ gRPC service (see `../architecture/api/api-design.md`)
   - Binary: `daemon/tensorcast_daemon`
-  - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/ConfirmReplica/UnloadReplica；兼容保留 MaterializeReplica)
+  - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/MaterializeReplica/ConfirmReplica/UnloadReplica/MaterializeIntoTarget)
 
 - **SessionLifecycle & LIP Runtime**: `SessionLifecycleManager`, `RefTracker`, and `LipManager` (under `daemon/session_lifecycle.*` and `daemon/lip_manager.*`) track per-PID references, mint `UseLease`s for GPU replicas, and satisfy `MaterializeByKey` from already-resident CUDA IPC handles when a matching Lease-In-Place replica exists.
 
@@ -47,7 +47,7 @@ sequenceDiagram
     Note right of InferenceInstance: Local: store_engine.py::allocate_cuda_memory
 
     InferenceInstance->>LocalStoreDaemon: 1. MaterializeByKey (alloc + async load)
-    Note left of LocalStoreDaemon: RPC: MaterializeByKey (RFC‑0014)
+    Note left of LocalStoreDaemon: RPC: MaterializeByKey
 
     LocalStoreDaemon->>GlobalStore: 2. Resolve Key → Artifact ID + disk hint
     Note left of GlobalStore: RPC: ResolveKeyMapping
@@ -116,7 +116,7 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 7. **Registration & Publish**: Once ingestion completes, `MaterializationFacade` marks the Global Store transport session finished, registers or refreshes the replica metadata, and publishes `ingestion_completed` events with the original `publish_context_id` so ReplicaRuntime and MetadataGateway stay in lock-step.
 8. **Cleanup**: When inference exits or releases the tensors, it calls `UnloadReplica`. The daemon drops the PID reference, releases the associated `UseLease`, and only tears down the GPU allocation once no active references remain, ensuring shared replicas survive across overlapping consumers.
 
-## In-Memory Registration (RFC-0014)
+## In-Memory Registration (Store API)
 
 - Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:
@@ -125,13 +125,13 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 
 ### LeaseSegments ↔ SegmentPlan
 
-- Robust protocol: each `LeasedSegment` now includes `dst_offset` (destination offset in the coalesced VRAM buffer). This removes any ordering assumption when sending lease segments.
+- Robust protocol: each `LeasedSegment` includes `artifact_offset` (logical byte offset in the canonical artifact layout) plus a `storage_id` reference. This removes any ordering assumption when sending lease segments.
 - Daemon behavior:
   - Builds the `SegmentPlan` from canonical index bytes.
-  - Zeros all `PAD` intervals in the destination VRAM buffer.
-  - Copies each `LeasedSegment` payload into `dst_offset .. dst_offset+length` regardless of feed order.
+  - Treats all `PAD` intervals as zero-filled for hashing and for any materialization copies.
+  - Reads `DATA` intervals from the referenced storage windows (`StorageEntry` + `mapping_base_offset` + `storage_offset`) regardless of feed order.
 - Client behavior:
-  - SDK already computes a coalesced layout and sets `dst_offset` per unique storage block.
+  - SDK computes a coalesced logical layout and sets `artifact_offset` per unique storage block.
   - Ordering no longer matters, but the SDK still sorts for stable traces.
 
 ### Shared Storage Graph Helper
@@ -139,6 +139,7 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 - SDK registration flows call `tensorcast.api._tensor_graph.build_tensor_storage_graph()` before feeding lease segments.
 - The helper deduplicates `torch.Storage` objects and emits a `TensorStorageGraph` containing `StorageEntry` rows (unique storage id, device id, base pointer, storage length) plus `TensorAlias` metadata (tensor name, storage id, storage offset, logical byte length, shape, stride, dtype).
 - Clients transmit the deduplicated storage table via `storage_entries` and alias metadata via `tensor_aliases`. The daemon reconstructs canonical index JSON from these structures, producing byte-for-byte parity with disk persistence and opening each CUDA IPC handle only once per unique storage.
+- On materialization, the SDK maps the returned CUDA IPC handle once and constructs all `torch.Tensor` views from that mapping in one pass so the mapping is reference-counted across tensors and closed exactly once.
 
 Recommended: rely on `tensorcast.register(...)` (or `register_async`) with
 `RegisterArtifactOptions(lease_in_place=True)` and an explicit `ttl_ms`. The Store

@@ -115,19 +115,21 @@ graph TB
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
   - Modes:
-    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. If `hints.disk_path` is populated it will fall back to disk unless `hints.source_preference` is `PREFER_P2P`; when `disk_path` is empty the orchestrator returns the transport status directly (no implicit fallback). Global Store routing is eventually consistent and may briefly reference evicted local replicas; when that happens, the route is treated as stale: disk fallback is used when available, otherwise a retryable error is returned.
+    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. P2P is gated by `hints.allow_p2p`; disk fallback happens only when `hints.allow_disk` is true and `hints.disk_path` is populated. `PREFER_DISK` flips ordering to disk‑first, while `PREFER_P2P` keeps P2P‑first ordering and still requires a canonical `artifact_id`. When `disk_path` is empty the orchestrator returns the transport status directly (no implicit fallback). Global Store routing is eventually consistent and may briefly reference evicted local replicas; when that happens, the route is treated as stale: disk fallback is used when allowed and available, otherwise a retryable error is returned.
     - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
-    - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target.
+    - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target. If the destination replica already exists, it is reused instead of re-copying.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_signal, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
+    `cuda_ipc_handle` uses the shared `cuda::IpcHandleBytes` abstraction from `core/cuda`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
-  Note: In the key-based client flow (RFC‑0014), the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
+  Note: In the key-based client flow, the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 
 - In-memory registration (RFC-0006/0007):
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
-    - Allocates target GPU memory via a temporary `Replica` and returns a CUDA IPC handle so the caller can write directly.
+    - Allocates target GPU memory via a temporary `Replica` and returns CUDA IPC handle bytes via the shared
+      `cuda::IpcHandleBytes` abstraction so the caller can write directly.
   - `commit_registered_artifact(string_view registration_id) -> RegistrationCommitResult`
     - Computes `mi2:<index_multihash>:<data_multihash>` from GPU memory and optional canonical index bytes, optionally exports remote keys via communicator, registers with Global Store, and emits a `RegistrationCommitted` RuntimeContext notification. The returned `RegistrationCommitResult` now includes a `DeviceKey device` describing the committed residency alongside `device_id` for ABI compatibility.
   - `abort_registered_artifact(string_view registration_id)`
@@ -146,6 +148,7 @@ graph TB
 - View registration (v1.5):
   - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/materialization/dataplane/view::ViewPlanner`.
   - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
+  - When the runtime Fake CUDA backend is active (`TENSORCAST_CUDA_BACKEND=fake` in tests), view ingestion/transform runs on CPU tensors even for GPU placement and tolerates missing device ids.
   - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
 
 - Remote access and registration helpers:
@@ -167,10 +170,10 @@ These helpers intentionally operate on generic `SeekableSource` instances; the d
 
 - Canonical sizes:
   - Artifact chunk (layout/state): `artifact_chunk_bytes`
-  - Transfer slice/window (pump, pinned blocks): `tx_slice_bytes`
+  - Transfer slice/window (pump, pinned blocks): `pinned_memory.classes[name=engine].slice_bytes` (surfaced as `tx_slice_bytes`)
   - Hash leaf (content-addressed leaf): `hash_leaf_bytes`
 - Invariants enforced at startup:
-  - `artifact_chunk_bytes % tx_slice_bytes == 0`
+  - `artifact_chunk_bytes % pinned_memory.classes[name=engine].slice_bytes == 0` (equivalently `artifact_chunk_bytes % tx_slice_bytes == 0`)
   - Pinned buffer pool slice size aligned to 512 B and page size
 - Transfer ranges never cross artifact chunk boundaries; pump slices always align to `tx_slice_bytes`.
 
@@ -272,7 +275,7 @@ stateDiagram-v2
 - `MemoryTierBudget` is built from `engine.memory_tiers` at runtime start, injected into each ReplicaLoadController/UMA for stable lease admission control, and surfaced via `StoreEngine::get_memory_tier_snapshot()` for daemon telemetry; the budget stays movable so runtime setup can pass it through `StatusOr` and into a shared instance without copies.
 - Stable lease admission bumps the UMA `ledger_version` only after stable bytes are successfully reserved from `MemoryTierBudget`; failed admissions roll the ledger back to the pre-admission value so daemon telemetry only reflects accepted changes.
 - `StableDramCacheManager` gates local stable-DRAM retention by acquiring UMA stable leases on admission, applies and upgrades per-entry retention/overflow policy (`best_effort` → `ttl` → `pinned`), filters eviction candidates during demand-driven cache pressure, treats `overflow_policy=spill` as a hard requirement on shared-disk availability plus a spill-evictable durability check before evicting, and de-duplicates concurrent admits so accounting only updates on successful inserts while eviction clears tracking once stable leases are released. `StoreEngine::admit_stable_cache_policy(...)` exposes this as an engine-level hook so the daemon can apply/upgrade stable retention contracts post-commit.
-- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
+- Transfers and loading are pipelined via `TransferService` and `pump_ranges`, using a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. Session buffer depth is controlled by `engine.streaming_buffer_chunks` (used for disk/P2P loads and local CPU→GPU copies). GPU materialization sessions are serialized per local GPU device before entering the pump so waiting sessions do not consume thread-pool workers needed by the active transfer. `TransferService` now synchronises the per-device H2D stream via `AsyncCopyManager::synchronize_h2d_stream()` followed by `cuda::device_synchronize()` so GPU residency is fully committed before verification and metadata persistence run.
 
 ### Async Copy Manager Integration
 
@@ -336,6 +339,7 @@ IO helpers (`write_at`, `map_file_segments`).
   - Owns `DeviceManager`, `ReplicaRegistry`, `MetricsCollector`, optional `GlobalStoreClient`, and optional `CommunicationManager`
   - When Global Store is configured, store registrations now fail if the daemon cannot determine a routable (non-loopback) IP to advertise; operators must set `--advertise_host` or a non-loopback `listen_addr`
   - The `GlobalStoreClient` channel and stub are constructed once at engine bring-up; `initialize()` performs only the health-check handshake so retry/backoff state stays immutable at runtime
+  - Per-RPC overrides in `GlobalStoreClient::RpcOptions` allow HA call sites to bound heartbeat/sync timeouts and retries without changing the shared client defaults
   - Implements helpers for VS chunk locks, remote access registration, and Global Store registration
 
 - Replica
@@ -438,8 +442,8 @@ For broader architectural context, see docs/architecture.md and docs/state-manag
 ## Granularity Terminology and Invariants
 
 - Artifact layout chunk: `artifact_chunk_bytes` (VS/UMA)
-- Transfer slice/window: `tx_slice_bytes` (pinned buffer block)
-- Invariant: `artifact_chunk_bytes % tx_slice_bytes == 0`
+- Transfer slice/window: `pinned_memory.classes[name=engine].slice_bytes` (surfaced as `tx_slice_bytes`)
+- Invariant: `artifact_chunk_bytes % pinned_memory.classes[name=engine].slice_bytes == 0`
 - Pinned pool block is aligned to 512 B and 4096 B (page) and validated at startup.
 
 Defaults are defined in `core/common/const/granularity.h` and exposed to Python via the extension module.

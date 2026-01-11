@@ -187,8 +187,11 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - On Global Store startup, marks all workers/replicas as stale until they re-confirm
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
+- Persists `state_version` and `state_checksum` per worker; heartbeats use cached checksum to avoid full-table scans
+- Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
-- HA checksum format is `artifact_id:node_id:device_id:memory_type:available;` (FNV-1a 64-bit).
+- Applies endpoint/metadata drift updates (node address/port, memory size, transport keys when reported) during sync
+- HA checksum format is `artifact_id:node_id:node_address:node_port:device_id:memory_type:available;` (FNV-1a 64-bit).
 
 **Safe-removal semantics:** When a worker reports an empty inventory, the Global Store does NOT blindly delete all its replicas. An empty list might mean "I haven't enumerated yet" rather than "I have nothing." Removals only apply when the worker explicitly provides a non-empty inventory that excludes replicas the Global Store expects.
 
@@ -204,7 +207,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 
 ### PlacementService
 
-**Purpose:** Plan shard placement and ingest persistence status (Design 0041).
+**Purpose:** Plan shard placement and ingest persistence status. See `../../docs/architecture/api/policy-persistence.md`.
 
 **Key behaviors:**
 - Generates placement plans that always include the source node and attempt a stable-DRAM remote target when policy is `replicated` or `sharded`; degrades to local-only when no remote capacity is available.

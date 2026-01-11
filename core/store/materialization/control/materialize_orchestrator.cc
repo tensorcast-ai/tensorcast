@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/control/materialize_orchestrator.h"
 
@@ -66,10 +66,21 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   const auto preference = hints.source_preference;
   const bool has_disk_path = !hints.disk_path.empty();
   const bool has_artifact_id_hint = !hints.artifact_id.empty();
+  const bool allow_p2p = hints.allow_p2p;
+  const bool allow_disk = hints.allow_disk;
+  if (!allow_p2p && !allow_disk) {
+    return absl::FailedPreconditionError("source_policy disallows both P2P and disk materialization");
+  }
   if (preference == loading::SourcePreference::kPreferP2P && !has_artifact_id_hint) {
     return absl::InvalidArgumentError("preference=PREFER_P2P requires a canonical artifact_id");
   }
-  if (!gs_connected && !has_disk_path) {
+  if (preference == loading::SourcePreference::kPreferP2P && !allow_p2p) {
+    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
+  }
+  if (preference == loading::SourcePreference::kPreferDisk && !allow_disk) {
+    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
+  }
+  if (!gs_connected && (!has_disk_path || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
@@ -88,7 +99,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // ------------------------------------------------------------------
   // 2. Disk-first path when requested
   // ------------------------------------------------------------------
-  if (preference == loading::SourcePreference::kPreferDisk && has_disk_path) {
+  if (preference == loading::SourcePreference::kPreferDisk && has_disk_path && allow_disk) {
     loading::DiskSource disk_src;
     disk_src.path = std::filesystem::path(hints.disk_path);
 
@@ -104,7 +115,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       return disk_or;
     }
     // If caller only provided disk hints, surface the disk failure directly.
-    if (!has_artifact_id_hint || !gs_connected) {
+    if (!has_artifact_id_hint || !gs_connected || !allow_p2p) {
       return disk_or.status();
     }
     LOG(INFO) << "Disk-preferred load failed, retrying via P2P: " << disk_or.status();
@@ -113,9 +124,10 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // ------------------------------------------------------------------
   // 3. Request transport session – Global Store will choose a suitable source
   // ------------------------------------------------------------------
-  absl::StatusOr<components::TransportSession> transport_or =
-      absl::FailedPreconditionError("GlobalStoreClient not connected");
-  if (gs_connected) {
+  absl::StatusOr<components::TransportSession> transport_or = allow_p2p
+      ? absl::FailedPreconditionError("GlobalStoreClient not connected")
+      : absl::FailedPreconditionError("source_policy disallows P2P");
+  if (gs_connected && allow_p2p) {
     if (view_id.has_value()) {
       transport_or = gs_client_->request_view_transport(
           artifact_id,
@@ -161,7 +173,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
       }
       last_p2p_status = stale_local_route_status(artifact_id);
-      if (hints.disk_path.empty()) {
+      if (hints.disk_path.empty() || !allow_disk) {
         return last_p2p_status;
       }
     } else {
@@ -209,7 +221,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "P2P load failed: " << load_or.status();
       }
 
-      if (hints.disk_path.empty()) {
+      if (hints.disk_path.empty() || !allow_disk) {
         return load_or.status();
       }
     }
@@ -218,7 +230,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     // Not found or GS unavailable → fall back to disk
     LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk"
               << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "");
-    if (hints.disk_path.empty()) {
+    if (hints.disk_path.empty() || !allow_disk) {
       return transport_or.status();
     }
   }
@@ -241,6 +253,9 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     return transport_or.ok() ? absl::FailedPreconditionError("disk path already attempted") : transport_or.status();
   }
 
+  if (!allow_disk) {
+    return absl::FailedPreconditionError("source_policy disallows disk materialization");
+  }
   auto disk_or = backend_->ingest_from_disk(std::string(artifact_id), disk_src, target, hints);
   if (disk_or.ok()) {
     const auto& handle = *disk_or;

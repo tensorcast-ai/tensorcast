@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -9,6 +9,8 @@
 
 #include "core/common/async_runtime.h"
 #include "core/common/const/granularity.h"
+#include "core/common/memory/pinned_buffer_pool.h"
+#include "core/common/memory/pinned_memory_authority.h"
 #include "core/store/components/communication_manager.h"
 #include "core/store/memory_tier_config.h"
 
@@ -36,6 +38,17 @@ struct StoreEngineOptions {
   // Transfer slice size in bytes for streaming transfers (pinned pool block size).
   // Canonical name: tx_slice_bytes
   size_t tx_slice_bytes{common::consts::kTxSliceDefault};
+
+  // Optional external pinned buffer pool to use instead of constructing a
+  // private pool from (memory_pool_size, tx_slice_bytes).
+  std::shared_ptr<common::memory::PinnedBufferPool> pinned_buffer_pool_override{nullptr};
+
+  // Optional pinned memory authority for daemon-wide pooling and metrics.
+  std::shared_ptr<common::memory::PinnedMemoryAuthority> pinned_memory_authority{nullptr};
+
+  // Total host-pinned reservation used for UMA budgeting. When set to 0, the
+  // engine uses `memory_pool_size` as the pinned reservation.
+  size_t pinned_total_bytes{0};
 
   // Timeout for pinned-memory allocations.
   std::chrono::milliseconds pinned_memory_timeout{std::chrono::milliseconds{30000}}; // 30 s
@@ -67,10 +80,9 @@ struct StoreEngineOptions {
   // share a single executor runtime with unified shutdown/drain.
   std::shared_ptr<common::AsyncRuntime> async_runtime{nullptr};
 
-  // Maximum number of concurrent replica transfers that can use the shared
-  // streaming pinned buffer pool. Each transfer receives an isolated buffer
-  // instance (lease). Defaults to 1 (fully serialized).
-  int streaming_buffer_max_concurrent_sessions{1};
+  // Default depth for StreamingPinnedBuffer instances created by StoreEngine.
+  // This bounds overlap and pinned pressure for streaming pipelines.
+  uint32_t streaming_buffer_chunks{16};
 
   // UMA/VS artifact chunk size for CPU-side allocations (bytes).
   // Canonical name: artifact_chunk_bytes

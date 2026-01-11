@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/common/config/daemon_config_io.h"
 
@@ -208,10 +208,6 @@ void normalize_size_fields(nlohmann::json& root) {
   // engine.* bytes (final canonical names only)
   if (root.contains("engine") && root["engine"].is_object()) {
     auto& e = root["engine"];
-    if (e.contains("mem_pool_size_bytes"))
-      to_bytes(e["mem_pool_size_bytes"]);
-    if (e.contains("tx_slice_bytes"))
-      to_bytes(e["tx_slice_bytes"]);
     if (e.contains("artifact_chunk_bytes"))
       to_bytes(e["artifact_chunk_bytes"]);
     if (e.contains("memory_tiers") && e["memory_tiers"].is_object()) {
@@ -222,26 +218,18 @@ void normalize_size_fields(nlohmann::json& root) {
         to_bytes(mt["preemptible_limit_bytes"]);
     }
   }
-  // communicator.pool.* bytes
-  if (root.contains("communicator") && root["communicator"].is_object()) {
-    auto& comm = root["communicator"];
-    if (comm.contains("pool") && comm["pool"].is_object()) {
-      auto& pool = comm["pool"];
-      if (pool.contains("pool_size_bytes"))
-        to_bytes(pool["pool_size_bytes"]);
-      if (pool.contains("chunk_bytes"))
-        to_bytes(pool["chunk_bytes"]);
-    }
-  }
-  // checkpoint.streaming.* bytes
-  if (root.contains("checkpoint") && root["checkpoint"].is_object()) {
-    auto& cp = root["checkpoint"];
-    if (cp.contains("streaming") && cp["streaming"].is_object()) {
-      auto& st = cp["streaming"];
-      if (st.contains("io_chunk_bytes"))
-        to_bytes(st["io_chunk_bytes"]);
-      if (st.contains("pinned_pool_bytes"))
-        to_bytes(st["pinned_pool_bytes"]);
+
+  if (root.contains("pinned_memory") && root["pinned_memory"].is_object()) {
+    auto& pm = root["pinned_memory"];
+    if (pm.contains("classes") && pm["classes"].is_array()) {
+      for (auto& cls : pm["classes"]) {
+        if (!cls.is_object())
+          continue;
+        if (cls.contains("slice_bytes"))
+          to_bytes(cls["slice_bytes"]);
+        if (cls.contains("pool_bytes"))
+          to_bytes(cls["pool_bytes"]);
+      }
     }
   }
 }
@@ -257,10 +245,10 @@ void normalize_duration_fields(nlohmann::json& root) {
     }
   };
 
-  if (root.contains("engine") && root["engine"].is_object()) {
-    auto& e = root["engine"];
-    if (e.contains("pinned_allocation_timeout"))
-      to_duration(e["pinned_allocation_timeout"]);
+  if (root.contains("pinned_memory") && root["pinned_memory"].is_object()) {
+    auto& pm = root["pinned_memory"];
+    if (pm.contains("allocation_timeout"))
+      to_duration(pm["allocation_timeout"]);
   }
 
   if (root.contains("server") && root["server"].is_object()) {
@@ -297,7 +285,13 @@ void normalize_duration_fields(nlohmann::json& root) {
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {
     auto& ha = root["high_availability"];
-    const char* ha_fields[] = {"heartbeat_interval", "periodic_sync_interval", "registration_retry_delay"};
+    const char* ha_fields[] = {
+        "heartbeat_interval",
+        "periodic_sync_interval",
+        "registration_retry_delay",
+        "heartbeat_rpc_timeout",
+        "state_sync_rpc_timeout",
+        "full_sync_rpc_timeout"};
     for (const char* f : ha_fields) {
       if (ha.contains(f))
         to_duration(ha[f]);
@@ -313,18 +307,23 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
 
   // Engine defaults
   auto* e = cfg->mutable_engine();
-  if (e->mem_pool_size_bytes() == 0)
-    e->set_mem_pool_size_bytes(8ULL * 1024 * 1024 * 1024);
-  if (e->tx_slice_bytes() == 0)
-    e->set_tx_slice_bytes(32ULL * 1024 * 1024);
   if (e->artifact_chunk_bytes() == 0)
     e->set_artifact_chunk_bytes(256ULL * 1024 * 1024);
-  if (e->streaming_buffer_max_concurrent_sessions() == 0)
-    e->set_streaming_buffer_max_concurrent_sessions(1);
+  if (e->streaming_buffer_chunks() == 0)
+    e->set_streaming_buffer_chunks(16);
   if (e->has_memory_tiers()) {
     auto* mt = e->mutable_memory_tiers();
     if (mt->preemptible_low_watermark_ratio() <= 0.0) {
       mt->set_preemptible_low_watermark_ratio(0.4);
+    }
+  }
+
+  if (cfg->has_pinned_memory()) {
+    auto* pm = cfg->mutable_pinned_memory();
+    if (!pm->has_allocation_timeout()) {
+      auto* d = pm->mutable_allocation_timeout();
+      d->set_seconds(30);
+      d->set_nanos(0);
     }
   }
 

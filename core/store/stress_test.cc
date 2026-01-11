@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StoreEngine stress tests (C-series)
 // Long-running stress tests with randomized operations.
@@ -17,7 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/testing/concurrency_utils.h"
 
 using namespace tensorcast::testing;

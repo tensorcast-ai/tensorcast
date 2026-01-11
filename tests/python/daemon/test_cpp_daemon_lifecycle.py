@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Integration test for the C++ StoreDaemon lifecycle with Global Store.
@@ -104,16 +104,26 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
         },
         "engine": {
-            "mem_pool_size_bytes": 64 * 1024 * 1024,
-            "tx_slice_bytes": 1 * 1024 * 1024,
             "artifact_chunk_bytes": 1 * 1024 * 1024,
-            "streaming_buffer_max_concurrent_sessions": 1,
+            "streaming_buffer_chunks": 4,
+        },
+        "pinned_memory": {
+            "allocation_timeout": "30s",
+            "classes": [
+                {"name": "engine", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 64 * 1024 * 1024},
+                {"name": "comm_gpu", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 4 * 1024 * 1024},
+                {"name": "comm_cpu", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 1 * 1024 * 1024},
+            ],
         },
         "high_availability": {
             "enabled": True,
             "global_store_endpoints": [{"host": "localhost", "port": gs_port}],
         },
-        "communicator": {"enable_rdma": False},
+        "communicator": {
+            "enable_rdma": False,
+            "stager": {"buffers_per_flow": 1},
+            "transport": {"tcp_conn_count": 2},
+        },
         "observability": {
             "otel": {"enabled": False},
             "logging": {

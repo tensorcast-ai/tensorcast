@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -45,8 +45,9 @@
 #pragma clang diagnostic pop
 
 #include "core/common/artifact_verification.h" // Add verification support
-#include "core/common/cuda_api.h"
 #include "core/common/memory/pinned_buffer_pool.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/cuda_ipc.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "progress_bar.h"
 #include "tensor_writer.h"
@@ -459,56 +460,55 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const std::unordered_map<int, std::uint64_t>& memory_base_address,
     const std::unordered_map<int, std::unordered_map<std::string, uint64_t>>& tensor_device_offsets,
     const bool from_ipc_shm) {
-#ifdef USE_FAKE_CUDA
-  // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
+  if (cuda::is_fake()) {
+    // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
+    std::unordered_map<std::string, torch::Tensor> state_dict;
+    std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
+
+    for (const auto& [device, tensor_offset] : tensor_device_offsets) {
+      for (const auto& p : tensor_offset) {
+        const std::string name = p.first;
+        const uint64_t offset = p.second;
+
+        if (memory_base_address.find(device) == memory_base_address.end()) {
+          continue;
+        }
+        std::uint64_t base_address = memory_base_address.at(device);
+        auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
+        at::ScalarType dtype = string_to_scalar_type(type_str);
+
+        const size_t element_size = c10::elementSize(dtype);
+        const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
+        torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
+
+        std::shared_ptr<void> owner;
+        auto it = owners.find(base_address);
+        if (it == owners.end()) {
+          owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm](void* ptr) {
+            absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+            if (!status.ok()) {
+              LOG(WARNING) << "fake restore_tensors: release failed: " << status;
+            }
+          });
+          owners.emplace(base_address, owner);
+        } else {
+          owner = it->second;
+        }
+
+        torch::Tensor tensor = torch::from_blob(
+            reinterpret_cast<void*>(data_address),
+            torch::IntArrayRef(sizes),
+            torch::IntArrayRef(strides),
+            [owner](void*) mutable { owner.reset(); },
+            options);
+        state_dict[name] = tensor;
+      }
+    }
+    return state_dict;
+  }
+
   std::unordered_map<std::string, torch::Tensor> state_dict;
   std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
-
-  for (const auto& [device, tensor_offset] : tensor_device_offsets) {
-    for (const auto& p : tensor_offset) {
-      const std::string name = p.first;
-      const uint64_t offset = p.second;
-
-      if (memory_base_address.find(device) == memory_base_address.end()) {
-        continue;
-      }
-      std::uint64_t base_address = memory_base_address.at(device);
-      auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
-      at::ScalarType dtype = string_to_scalar_type(type_str);
-
-      const size_t element_size = c10::elementSize(dtype);
-      const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
-      const size_t total_bytes = static_cast<size_t>(c10::multiply_integers(sizes)) * element_size;
-
-      torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
-
-      std::shared_ptr<void> owner;
-      auto it = owners.find(base_address);
-      if (it == owners.end()) {
-        owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm](void* ptr) {
-          absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
-          if (!status.ok()) {
-            LOG(WARNING) << "fake restore_tensors: release failed: " << status;
-          }
-        });
-        owners.emplace(base_address, owner);
-      } else {
-        owner = it->second;
-      }
-
-      torch::Tensor tensor = torch::from_blob(
-          reinterpret_cast<void*>(data_address),
-          torch::IntArrayRef(sizes),
-          torch::IntArrayRef(strides),
-          [owner](void*) mutable { owner.reset(); },
-          options);
-      state_dict[name] = tensor;
-    }
-  }
-  return state_dict;
-#else
-  std::unordered_map<std::string, torch::Tensor> state_dict;
-  std::unordered_set<std::uint64_t> handled_memory;
   for (const auto& [device, tensor_offset] : tensor_device_offsets) {
     for (const auto& p : tensor_offset) {
       const std::string name = p.first;
@@ -525,46 +525,39 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         torch::Device tensor_device(torch::kCUDA, device);
         // LOG(INFO) << "Restore tensor " << name << " to device " << device << " with offset " << offset;
 
-        auto deleter = [from_ipc_shm](void* ptr) {
-          absl::Status status;
-          if (from_ipc_shm) {
-            status = cuda::close_ipc_mem_handle(ptr);
-          } else {
-            status = cuda::free(ptr);
-          }
-
-          if (!status.ok()) {
-            LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
-          }
-        };
-
-        if (offset == 0 && handled_memory.find(base_address) == handled_memory.end()) {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              c10::makeArrayRef(sizes),
-              c10::makeArrayRef(strides),
-              deleter,
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
-          handled_memory.insert(base_address);
-          // std::cerr << "Tensor " << name << " is restored to device " <<
-          // device << std::endl;
+        std::shared_ptr<void> owner;
+        auto it = owners.find(base_address);
+        if (it == owners.end()) {
+          owner = std::shared_ptr<void>(reinterpret_cast<void*>(base_address), [from_ipc_shm, device](void* ptr) {
+            if (device >= 0) {
+              absl::Status device_status = cuda::set_device(device);
+              if (!device_status.ok()) {
+                LOG(WARNING) << "CUDA cleanup set_device failed: " << device_status.message();
+              }
+            }
+            absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
+            if (!status.ok()) {
+              LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
+            }
+          });
+          owners.emplace(base_address, owner);
         } else {
-          const torch::Tensor real_tensor = torch::from_blob(
-              reinterpret_cast<void*>(data_address),
-              sizes,
-              strides,
-              [](void* ptr) {},
-              torch::TensorOptions().device(tensor_device).dtype(dtype));
-          state_dict[name] = real_tensor;
+          owner = it->second;
         }
+
+        const torch::Tensor real_tensor = torch::from_blob(
+            reinterpret_cast<void*>(data_address),
+            c10::makeArrayRef(sizes),
+            c10::makeArrayRef(strides),
+            [owner](void*) mutable { owner.reset(); },
+            torch::TensorOptions().device(tensor_device).dtype(dtype));
+        state_dict[name] = real_tensor;
       } else {
         LOG(FATAL) << "Cannot find device " << device;
       }
     }
   }
   return state_dict;
-#endif
 }
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
@@ -574,7 +567,6 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     const std::string& disk_path,
     const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
     int device_id) {
-  // USE_FAKE_CUDA: CPU restore path enforced below; GPU path is compiled out.
   std::vector<std::filesystem::path> partition_paths;
   std::vector<uint64_t> partition_sizes;
   uint64_t total_artifact_size = 0;
@@ -620,8 +612,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
   // ------------------------------------------------------------------
   // GPU PATH (device_id >= 0)
   // ------------------------------------------------------------------
-#ifndef USE_FAKE_CUDA
-  if (device_id >= 0) {
+  if (!cuda::is_fake() && device_id >= 0) {
     // Use fixed defaults for streaming restore (no environment variables)
     const size_t buffer_size_mb = 256; // 256MB
     const size_t num_buffers = 4;
@@ -707,11 +698,9 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     // Reuse restore_tensors to build actual torch::Tensors on GPU
     return restore_tensors(meta_state_dict, memory_base_address, device_offsets_map, /*from_ipc_shm=*/false);
   }
-#else
-  if (device_id >= 0) {
-    LOG(WARNING) << "USE_FAKE_CUDA enabled; forcing CPU restore; ignoring device_id=" << device_id;
+  if (cuda::is_fake() && device_id >= 0) {
+    LOG(WARNING) << "Fake CUDA backend active; forcing CPU restore; ignoring device_id=" << device_id;
   }
-#endif
 
   // ------------------------------------------------------------------
   // CPU PATH (device_id < 0) - original implementation continues below
@@ -883,12 +872,58 @@ std::string get_cuda_memory_handle(int device_id, std::uint64_t memory_ptr) {
     return "";
   }
 
-  return std::string(reinterpret_cast<const char*>(&handle), sizeof(cudaIpcMemHandle_t));
+  const auto bytes = cuda::IpcHandleBytes::from_native(handle);
+  return std::string(bytes.as_string_view());
+}
+
+absl::StatusOr<std::pair<std::string, std::uint64_t>> get_cuda_memory_handle_with_offset(
+    int device_id,
+    std::uint64_t memory_ptr) {
+  if (memory_ptr == 0) {
+    return absl::InvalidArgumentError("memory_ptr must be non-zero");
+  }
+
+  auto set_device_status = cuda::set_device(device_id);
+  if (!set_device_status.ok()) {
+    return set_device_status;
+  }
+
+  void* base = nullptr;
+  size_t range_bytes = 0;
+  auto range_status = cuda::mem_get_address_range(&base, &range_bytes, reinterpret_cast<void*>(memory_ptr));
+  if (!range_status.ok() || base == nullptr) {
+    // Fall back to the legacy behavior: export directly from memory_ptr with a
+    // zero base offset. This preserves previous semantics when address-range
+    // queries are unavailable.
+    const std::string handle = get_cuda_memory_handle(device_id, memory_ptr);
+    if (handle.empty()) {
+      return absl::FailedPreconditionError("Failed to export CUDA IPC handle");
+    }
+    return std::make_pair(handle, static_cast<std::uint64_t>(0));
+  }
+
+  const auto base_addr = reinterpret_cast<std::uint64_t>(base);
+  if (memory_ptr < base_addr) {
+    return absl::FailedPreconditionError("CUDA address range base exceeds memory_ptr");
+  }
+  const std::uint64_t base_offset = memory_ptr - base_addr;
+
+  cudaIpcMemHandle_t handle;
+  auto ipc_status = cuda::get_ipc_mem_handle(&handle, base);
+  if (!ipc_status.ok()) {
+    return ipc_status;
+  }
+  const auto bytes = cuda::IpcHandleBytes::from_native(handle);
+  return std::make_pair(std::string(bytes.as_string_view()), base_offset);
 }
 
 absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::string& cuda_ipc_handle) {
-  cudaIpcMemHandle_t ipc_handle;
-  memcpy(&ipc_handle, cuda_ipc_handle.data(), sizeof(cudaIpcMemHandle_t));
+  if (cuda_ipc_handle.size() != cuda::IpcHandleBytes::kHandleSize) {
+    return absl::InvalidArgumentError("invalid CUDA IPC handle size");
+  }
+  cuda::IpcHandleBytes bytes;
+  std::memcpy(bytes.bytes.data(), cuda_ipc_handle.data(), bytes.bytes.size());
+  cudaIpcMemHandle_t ipc_handle = bytes.to_native();
 
   auto set_device_status = cuda::set_device(device_id);
   if (!set_device_status.ok()) {
@@ -898,20 +933,7 @@ absl::StatusOr<std::uint64_t> get_cuda_memory_ptr(int device_id, const std::stri
   void* opened_ptr = nullptr;
   auto ipc_open_status = cuda::open_ipc_mem_handle(&opened_ptr, ipc_handle, cudaIpcMemLazyEnablePeerAccess);
   if (!ipc_open_status.ok()) {
-    // Fallback: try string-based open to support unit-tests in the same process
-    // where export and open may happen in a single process.
-    std::string handle_hex;
-    handle_hex.reserve(sizeof(cudaIpcMemHandle_t) * 2);
-    for (size_t i = 0; i < sizeof(cudaIpcMemHandle_t); ++i) {
-      char buf[3];
-      unsigned char byte = reinterpret_cast<const unsigned char*>(&ipc_handle)[i];
-      snprintf(buf, sizeof(buf), "%02x", static_cast<unsigned int>(byte));
-      handle_hex.append(buf, 2);
-    }
-    auto alt_status = cuda::open_ipc_handle(handle_hex, &opened_ptr);
-    if (!alt_status.ok()) {
-      return ipc_open_status; // return original error for clarity
-    }
+    return ipc_open_status;
   }
 
   if (opened_ptr == nullptr) {
@@ -928,15 +950,6 @@ absl::Status close_cuda_memory_handle(int device_id, std::uint64_t cuda_ipc_ptr)
   }
 
   auto close_status = cuda::close_ipc_mem_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
-  if (close_status.ok()) {
-    return absl::OkStatus();
-  }
-  // Fallback: handle pointers that were not opened via cudaIpcOpenMemHandle
-  // (e.g., unit tests using same-process fallback). Treat as no-op.
-  auto alt_status = cuda::close_ipc_handle(reinterpret_cast<void*>(cuda_ipc_ptr));
-  if (alt_status.ok()) {
-    return absl::OkStatus();
-  }
   return close_status;
 }
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Helper to build get_loaded_replicas_v2 response with optional cursor pagination.
 // Keeps grpc_service_impl thin.
@@ -15,15 +15,15 @@
 #include "core/store/store_engine.h"
 #include "daemon/ref_tracker.h"
 #include "nlohmann/json.hpp"
-#include "tensorcast/daemon/v1/store_daemon.pb.h"
+#include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon::listing {
 
 inline void FillLoadedReplicasV2(
     store::StoreEngine& engine,
     const RefTracker& refs,
-    const v1::GetLoadedReplicasV2Request& req,
-    v1::GetLoadedReplicasV2Response& resp,
+    const v2::GetLoadedReplicasV2Request& req,
+    v2::GetLoadedReplicasV2Response& resp,
     bool use_cursor_pagination) {
   using store::DeviceRegistry;
 

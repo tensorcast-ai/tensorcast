@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Implementation of RegistrationController
 
@@ -20,9 +20,10 @@
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
+#include "core/cuda/cuda_ipc.h"
+#include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
-#include "daemon/cuda_ipc_raii.h"
 #include "daemon/status_utils.h"
 #include "daemon/store_policy_resolver.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -167,7 +168,7 @@ void record_local_stable_tier_metrics(
   }
 }
 
-absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpec& spec_proto) {
+absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v2::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
     store::loader::TensorViewOps tensor_ops;
@@ -194,13 +195,13 @@ absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v1::ViewSpe
   return spec;
 }
 
-store::StoreEngine::ViewPlacement ToPlacement(v1::TransformPlacement placement) {
+store::StoreEngine::ViewPlacement ToPlacement(v2::TransformPlacement placement) {
   switch (placement) {
-    case v1::TRANSFORM_PLACEMENT_SERVER:
+    case v2::TRANSFORM_PLACEMENT_SERVER:
       return store::StoreEngine::ViewPlacement::kServer;
-    case v1::TRANSFORM_PLACEMENT_CLIENT:
+    case v2::TRANSFORM_PLACEMENT_CLIENT:
       return store::StoreEngine::ViewPlacement::kClient;
-    case v1::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    case v2::TRANSFORM_PLACEMENT_UNSPECIFIED:
     default:
       return store::StoreEngine::ViewPlacement::kUnspecified;
   }
@@ -253,8 +254,9 @@ absl::Status copy_to_staging_from_coalesced_gpu(
     gsl::not_null<void*> src_dev,
     absl::Span<const store::loader::SegmentPiece> plan,
     uint64_t total_size) {
-  if (auto st = cuda::set_device(device_id); !st.ok()) {
-    return st;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   if (plan.empty()) {
     return cuda::memcpy(dst_dev, src_dev, static_cast<size_t>(total_size), cudaMemcpyDeviceToDevice);
@@ -282,24 +284,27 @@ absl::Status copy_to_staging_from_coalesced_gpu(
   return absl::OkStatus();
 }
 
-absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
+absl::StatusOr<cuda::IpcMapping*> get_or_open_mapping_for_storage(
     const RegisterStorageMeta& storage,
-    absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>>& cache,
+    absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>>& cache,
     RegionPinGuard& region_pin,
     IpcRegionRegistry& regions,
     int owner_pid) {
-  auto it = cache.find(storage.storage_id);
+  const std::string cache_key =
+      storage.has_handle() ? absl::StrCat("h:", storage.handle_bytes) : absl::StrCat("r:", storage.region_id);
+  auto it = cache.find(cache_key);
   if (it != cache.end()) {
     return it->second.get();
   }
 
-  std::unique_ptr<CudaIpcMapping> mapping;
+  std::unique_ptr<cuda::IpcMapping> mapping;
   if (storage.has_handle()) {
-    auto map_or = CudaIpcMapping::open(storage.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or =
+        cuda::IpcMapping::open(storage.handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {
       return map_or.status();
     }
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else if (storage.has_region()) {
     auto acq_or = regions.acquire(storage.region_id, owner_pid);
     if (!acq_or.ok()) {
@@ -310,16 +315,16 @@ absl::StatusOr<CudaIpcMapping*> get_or_open_mapping_for_storage(
     if (!handle_or.ok()) {
       return handle_or.status();
     }
-    auto map_or = CudaIpcMapping::open(*handle_or, cudaIpcMemLazyEnablePeerAccess);
+    auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
     if (!map_or.ok()) {
       return map_or.status();
     }
-    mapping = std::make_unique<CudaIpcMapping>(std::move(*map_or));
+    mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or));
   } else {
     return absl::InvalidArgumentError("storage entry missing source handle or region");
   }
 
-  auto [insert_it, _] = cache.emplace(storage.storage_id, std::move(mapping));
+  auto [insert_it, _] = cache.emplace(cache_key, std::move(mapping));
   return insert_it->second.get();
 }
 
@@ -332,90 +337,62 @@ absl::Status copy_to_staging_from_lip_sources(
     absl::Span<const RegisterStorageMeta> storages,
     IpcRegionRegistry& regions,
     int owner_pid) {
-  if (auto st = cuda::set_device(device_id); !st.ok()) {
-    return st;
+  cuda::CudaDeviceGuard guard(device_id);
+  if (!guard.status().ok()) {
+    return guard.status();
   }
   if (plan.empty()) {
     return absl::InvalidArgumentError("LIP local-stable copy requires a canonical segment plan");
   }
 
   absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
-  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_handle;
   storage_by_id.reserve(storages.size());
-  storage_by_handle.reserve(storages.size());
   for (const auto& s : storages) {
     storage_by_id.emplace(s.storage_id, &s);
-    if (s.has_handle()) {
-      storage_by_handle.emplace(s.handle_bytes, &s);
-    }
   }
 
   struct OpenedSeg {
     int device_id;
-    CudaIpcMapping* map;
+    cuda::IpcMapping* map;
     uint64_t base;
     uint64_t len;
     uint64_t dst;
   };
 
   RegionPinGuard pin_guard(regions);
-  absl::flat_hash_map<std::string, std::unique_ptr<CudaIpcMapping>> mapping_cache;
-  std::vector<std::unique_ptr<CudaIpcMapping>> owned_maps;
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
   mapping_cache.reserve(storages.size());
 
   std::vector<OpenedSeg> opened;
   opened.reserve(segments.size());
   for (const auto& seg : segments) {
-    std::optional<OpenedSeg> opened_seg;
-    if (!storages.empty()) {
-      const RegisterStorageMeta* storage = nullptr;
-      if (!seg.storage_id.empty()) {
-        auto it = storage_by_id.find(seg.storage_id);
-        if (it == storage_by_id.end()) {
-          return absl::InvalidArgumentError("segment references unknown storage_id");
-        }
-        storage = it->second;
-      } else if (!seg.handle_bytes.empty()) {
-        auto it = storage_by_handle.find(seg.handle_bytes);
-        if (it == storage_by_handle.end()) {
-          return absl::InvalidArgumentError("segment handle missing matching RegisterStorage entry");
-        }
-        storage = it->second;
-      }
-      if (storage != nullptr) {
-        if (seg.length != storage->storage_length) {
-          return absl::InvalidArgumentError(
-              absl::StrCat("segment length does not match storage_length for storage_id=", storage->storage_id));
-        }
-        auto map_or = get_or_open_mapping_for_storage(*storage, mapping_cache, pin_guard, regions, owner_pid);
-        if (!map_or.ok()) {
-          return map_or.status();
-        }
-        const uint64_t source_base = seg.base_offset + (storage->has_region() ? storage->region_base_offset : 0);
-        opened_seg = OpenedSeg{
-            .device_id = seg.device_id, .map = *map_or, .base = source_base, .len = seg.length, .dst = seg.dst_offset};
-      }
+    auto it = storage_by_id.find(seg.storage_id);
+    if (it == storage_by_id.end()) {
+      return absl::InvalidArgumentError("segment references unknown storage_id");
     }
-    if (!opened_seg.has_value()) {
-      if (seg.handle_bytes.empty()) {
-        return absl::InvalidArgumentError("lease segment missing cuda_ipc_handle bytes");
-      }
-      auto map_or = CudaIpcMapping::open(seg.handle_bytes, cudaIpcMemLazyEnablePeerAccess);
-      if (!map_or.ok()) {
-        return map_or.status();
-      }
-      owned_maps.push_back(std::make_unique<CudaIpcMapping>(std::move(*map_or)));
-      opened_seg = OpenedSeg{
-          .device_id = seg.device_id,
-          .map = owned_maps.back().get(),
-          .base = seg.base_offset,
-          .len = seg.length,
-          .dst = seg.dst_offset};
+    const RegisterStorageMeta* storage = it->second;
+    if (seg.length != storage->storage_length) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("segment length does not match storage_length for storage_id=", storage->storage_id));
     }
-    if (opened_seg->device_id != device_id) {
+    if (seg.storage_offset != 0) {
+      return absl::InvalidArgumentError("segment storage_offset must be 0 for full-storage registrations");
+    }
+    auto map_or = get_or_open_mapping_for_storage(*storage, mapping_cache, pin_guard, regions, owner_pid);
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    OpenedSeg opened_seg{
+        .device_id = storage->device_id,
+        .map = *map_or,
+        .base = storage->mapping_base_offset + seg.storage_offset,
+        .len = seg.length,
+        .dst = seg.artifact_offset,
+    };
+    if (opened_seg.device_id != device_id) {
       return absl::UnimplementedError("multi-device lease sources are not supported for local stable materialization");
     }
-    opened.push_back(*opened_seg);
+    opened.push_back(opened_seg);
   }
   std::sort(opened.begin(), opened.end(), [](const OpenedSeg& a, const OpenedSeg& b) { return a.dst < b.dst; });
 
@@ -699,8 +676,8 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
 
 grpc::Status RegistrationController::begin(
     RpcContext& rctx,
-    const v1::BeginRegisterArtifactRequest& req,
-    v1::BeginRegisterArtifactResponse& resp) {
+    const v2::BeginRegisterArtifactRequest& req,
+    v2::BeginRegisterArtifactResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req.device_id()));
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.total_size()));
@@ -807,14 +784,13 @@ grpc::Status RegistrationController::begin(
       return to_grpc_status(begin_or.status());
     const auto& out = begin_or.value();
     resp.set_registration_id(out.registration_id);
+    auto handle_view = out.cuda_ipc_handle_bytes.as_string_view();
     if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
       auto* hs = resp.mutable_stable_dram();
-      hs->set_staging_cuda_ipc_handle(
-          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+      hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
     } else {
       auto* hs = resp.mutable_coalesced();
-      hs->set_daemon_ipc_handle(
-          reinterpret_cast<const char*>(out.cuda_ipc_handle_bytes.data()), out.cuda_ipc_handle_bytes.size());
+      hs->set_daemon_ipc_handle(handle_view.data(), handle_view.size());
     }
     resp.set_device_id(out.device_id);
     resp.set_total_size(out.size_bytes);
@@ -861,9 +837,9 @@ grpc::Status RegistrationController::begin(
 
 grpc::Status RegistrationController::feed_stream(
     RpcContext& rctx,
-    ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>& reader,
-    v1::FeedRegisterArtifactStreamResponse& /*resp*/) {
-  v1::FeedRegisterArtifactStreamRequest req;
+    ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>& reader,
+    v2::FeedRegisterArtifactStreamResponse& /*resp*/) {
+  v2::FeedRegisterArtifactStreamRequest req;
   std::string reg_id;
   RegistrationManager::RegMeta current_meta;
   bool have_meta = false;
@@ -915,17 +891,12 @@ grpc::Status RegistrationController::feed_stream(
       to_add.reserve(req.lease_segments().segments_size());
       for (const auto& s : req.lease_segments().segments()) {
         LeaseSegMeta m;
-        m.device_id = s.device_id();
-        if (!s.cuda_ipc_handle().empty()) {
-          m.handle_bytes = s.cuda_ipc_handle();
-        }
-        m.base_offset = s.base_addr();
+        m.storage_id = s.storage_id();
+        m.storage_offset = s.storage_offset();
+        m.artifact_offset = s.artifact_offset();
         m.length = s.length();
-        m.dst_offset = s.dst_offset();
-        if (!s.storage_id().empty())
-          m.storage_id = s.storage_id();
-        if (m.handle_bytes.empty() && m.storage_id.empty()) {
-          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage reference"};
+        if (m.storage_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage_id"};
         }
         to_add.push_back(std::move(m));
       }
@@ -969,14 +940,9 @@ grpc::Status RegistrationController::feed_stream(
         const bool has_region = !entry.vram_region_id().empty();
         if (has_region)
           meta.region_id = entry.vram_region_id();
-        const bool has_region_offset = entry.has_region_base_offset();
-        if (has_region_offset)
-          meta.region_base_offset = entry.region_base_offset();
+        meta.mapping_base_offset = entry.mapping_base_offset();
         if (meta.handle_bytes.empty() == meta.region_id.empty()) {
           return {StatusCode::INVALID_ARGUMENT, "storage entry must specify exactly one source"};
-        }
-        if (has_region && !has_region_offset) {
-          return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
           // Validate using describe() first to avoid leaking a ref on failure
@@ -988,7 +954,7 @@ grpc::Status RegistrationController::feed_stream(
           if (desc.device_id != meta.device_id) {
             return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
           }
-          const uint64_t offset = meta.region_base_offset;
+          const uint64_t offset = meta.mapping_base_offset;
           const uint64_t length = meta.storage_length;
           if (length > desc.size_bytes || offset > (desc.size_bytes - length)) {
             return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
@@ -1036,7 +1002,7 @@ grpc::Status RegistrationController::feed_stream(
   return Status::OK;
 }
 
-grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs) {
+grpc::Status RegistrationController::feed_vector(const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs) {
   std::string reg_id;
   RegistrationManager::RegMeta current_meta;
   bool have_meta = false;
@@ -1089,16 +1055,12 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
       to_add.reserve(req.lease_segments().segments_size());
       for (const auto& s : req.lease_segments().segments()) {
         LeaseSegMeta m;
-        m.device_id = s.device_id();
-        if (!s.cuda_ipc_handle().empty())
-          m.handle_bytes = s.cuda_ipc_handle();
-        m.base_offset = s.base_addr();
+        m.storage_id = s.storage_id();
+        m.storage_offset = s.storage_offset();
+        m.artifact_offset = s.artifact_offset();
         m.length = s.length();
-        m.dst_offset = s.dst_offset();
-        if (!s.storage_id().empty())
-          m.storage_id = s.storage_id();
-        if (m.handle_bytes.empty() && m.storage_id.empty()) {
-          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage reference"};
+        if (m.storage_id.empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "lease segment missing storage_id"};
         }
         to_add.push_back(std::move(m));
       }
@@ -1142,14 +1104,9 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
         const bool has_region = !entry.vram_region_id().empty();
         if (has_region)
           meta.region_id = entry.vram_region_id();
-        const bool has_region_offset = entry.has_region_base_offset();
-        if (has_region_offset)
-          meta.region_base_offset = entry.region_base_offset();
+        meta.mapping_base_offset = entry.mapping_base_offset();
         if (meta.handle_bytes.empty() == meta.region_id.empty()) {
           return {StatusCode::INVALID_ARGUMENT, "storage entry must specify exactly one source"};
-        }
-        if (has_region && !has_region_offset) {
-          return {StatusCode::INVALID_ARGUMENT, "region-backed storage requires region_base_offset"};
         }
         if (has_region) {
           // Validate using describe() first to avoid leaking a ref on failure
@@ -1161,7 +1118,7 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
           if (desc.device_id != meta.device_id) {
             return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
           }
-          const uint64_t offset = meta.region_base_offset;
+          const uint64_t offset = meta.mapping_base_offset;
           const uint64_t length = meta.storage_length;
           if (length > desc.size_bytes || offset > (desc.size_bytes - length)) {
             return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
@@ -1210,8 +1167,8 @@ grpc::Status RegistrationController::feed_vector(const std::vector<v1::FeedRegis
 
 grpc::Status RegistrationController::keep_alive(
     RpcContext& rctx,
-    const v1::KeepAliveRegisterArtifactRequest& req,
-    v1::KeepAliveRegisterArtifactResponse& /*resp*/) {
+    const v2::KeepAliveRegisterArtifactRequest& req,
+    v2::KeepAliveRegisterArtifactResponse& /*resp*/) {
   {
     auto st = d_.reg.keepalive_precommit(
         req.registration_id(), req.owner_pid(), req.epoch(), req.ttl_ms() > 0 ? req.ttl_ms() : 0, d_.engine);
@@ -1240,8 +1197,8 @@ KEEPALIVE_OK:
 
 grpc::Status RegistrationController::commit(
     RpcContext& rctx,
-    const v1::CommitRegisteredArtifactRequest& req,
-    v1::CommitRegisteredArtifactResponse& resp) {
+    const v2::CommitRegisteredArtifactRequest& req,
+    v2::CommitRegisteredArtifactResponse& resp) {
   auto meta_opt = d_.reg.get_meta(req.registration_id());
   RegistrationManager::RegMeta meta;
   if (meta_opt.has_value()) {
@@ -1347,11 +1304,11 @@ grpc::Status RegistrationController::commit(
     const char* op_label = local_stable_op_label(meta.plan);
     const char* requirement = requirement_level_label(resolved.local_requirement);
     if (meta.view_registration) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       local_stable->set_message("view registrations do not satisfy the local stable tier");
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else {
       const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
@@ -1388,11 +1345,11 @@ grpc::Status RegistrationController::commit(
           ReleaseRegionRefs(d_.regions, refs);
           return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
         }
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
         local_stable->set_message(message);
         record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
       } else {
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
         const char* retention =
             stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
         const char* overflow =
@@ -1499,11 +1456,11 @@ grpc::Status RegistrationController::commit(
     const char* op_label = local_stable_op_label(meta.plan);
     const char* requirement = requirement_level_label(resolved.local_requirement);
     if (meta.view_registration) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       local_stable->set_message("view registrations do not satisfy the local stable tier");
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
       record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
     } else {
       const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
@@ -1548,11 +1505,11 @@ grpc::Status RegistrationController::commit(
           d_.reg.erase_meta(req.registration_id());
           return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
         }
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
         local_stable->set_message(message);
         record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
       } else {
-        local_stable->set_status(v1::LOCAL_STABLE_TIER_STATUS_READY);
+        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
         const char* retention =
             stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
         const char* overflow =
@@ -1602,8 +1559,8 @@ grpc::Status RegistrationController::commit(
 
 grpc::Status RegistrationController::abort(
     RpcContext& rctx,
-    const v1::AbortRegisteredArtifactRequest& req,
-    v1::AbortRegisteredArtifactResponse& /*resp*/) {
+    const v2::AbortRegisteredArtifactRequest& req,
+    v2::AbortRegisteredArtifactResponse& /*resp*/) {
   auto st = d_.engine.abort_registered_artifact(req.registration_id());
   if (!st.ok())
     return to_grpc_status(st);
@@ -1622,8 +1579,8 @@ grpc::Status RegistrationController::abort(
 
 grpc::Status RegistrationController::revoke(
     RpcContext& rctx,
-    const v1::RevokeRegisteredArtifactRequest& req,
-    v1::RevokeRegisteredArtifactResponse& /*resp*/) {
+    const v2::RevokeRegisteredArtifactRequest& req,
+    v2::RevokeRegisteredArtifactResponse& /*resp*/) {
   // Capture meta for potential joined-reference cleanup
   auto meta_opt = d_.reg.get_meta(req.registration_id());
   {

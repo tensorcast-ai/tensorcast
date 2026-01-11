@@ -1,17 +1,17 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <vector>
 
 #include "absl/status/status.h"
-#include "core/common/cuda_api.h"
-#include "core/common/device_guard.h"
+#include "core/cuda/cuda_api.h"
+#include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
 #include "gsl/pointers"
 
 using namespace tensorcast::store::loader;
-using namespace tensorcast::common;
+using tensorcast::cuda::DeviceGuard;
 
 class GPUMemoryFixture {
  public:
@@ -218,7 +218,7 @@ TEST_CASE("GpuMemorySink basic functionality", "[gpu_memory_sink]") {
     GpuMemorySink sink(options);
 
     fixture.fill_host_buffer('F');
-    std::vector<CopyHandle> handles;
+    std::vector<tensorcast::common::CopyHandle> handles;
     handles.reserve(kNumChunks);
     for (size_t i = 0; i < kNumChunks; ++i) {
       const void* src = static_cast<const char*>(fixture.host_ptr()) + (i * kChunkBytes);

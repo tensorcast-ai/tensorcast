@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 
@@ -7,7 +7,7 @@
 
 #include "absl/types/span.h"
 #include "catch2/catch_test_macros.hpp"
-#include "core/common/cuda_api.h"
+#include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "nlohmann/json.hpp"
 

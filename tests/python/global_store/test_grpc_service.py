@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for Global Store gRPC service interface."""
 
@@ -173,6 +173,7 @@ class TestGRPCService:
             worker_id=registered_worker,
             mem_pool_available_size=7000000000,
             accepting_new_requests=True,
+            state_version=1,
         )
         servicer.WorkerHeartbeat(heartbeat_request, test_context)
 
@@ -265,6 +266,7 @@ class TestGRPCService:
             worker_id=registered_worker,
             mem_pool_available_size=7000000000,
             accepting_new_requests=True,
+            state_version=1,
         )
         servicer.WorkerHeartbeat(heartbeat_request, test_context)
 
@@ -434,6 +436,7 @@ class TestGRPCService:
             worker_id=register_response.worker_id,
             mem_pool_available_size=7000000000,
             accepting_new_requests=True,
+            state_version=1,
         )
 
         heartbeat_response = servicer.WorkerHeartbeat(heartbeat_request, test_context)

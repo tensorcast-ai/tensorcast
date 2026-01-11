@@ -79,9 +79,8 @@ Failure handling:
 
 ## Capability and config gating
 
-The SDK uses daemon capabilities (`supports_region_backed_get_into`) to decide
-whether it can call `MaterializeIntoTarget`. A new `region_backed_mode` default
-in the unified runtime config controls the fallback behavior for into APIs:
+The SDK assumes region-backed `MaterializeIntoTarget` support and relies on the
+unified runtime config `region_backed_mode` to control fallback behavior for into APIs:
 
 - `auto`: try region-backed first; fall back when validation fails.
 - `require`: enforce region-backed and surface errors.

@@ -64,7 +64,7 @@ graph TD
 - **Runtime wiring**: `RuntimeEnv` boots a `RuntimeContext` that owns the device manager, pinned buffer pool, communication manager, metrics collector, Global Store client, and ingestion event hub. The gRPC surface stays thin; lifecycle/telemetry is driven by the runtime modules rather than ad‑hoc engine wiring.
 - **Ingestion pipeline**: `IngestionRuntime` delegates to `MaterializationFacade`, which runs the staged `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). MetadataStage rebuilds or fetches canonical indices (from disk or Global Store for variants), plans views, and enforces descriptor schema v3. AllocationStage handles eviction and retries for P2P GPU loads; VerificationStage enforces `verification_json` key‑point checks and optional full digests, and computes view hashes when configured.
 - **P2P orchestration**: `MaterializationService` invokes `MaterializeOrchestrator` for `AUTO` mode. The orchestrator:
-  - Respects `SourcePreference` (disk‑first only when a disk path is provided; `PREFER_P2P` requires a canonical `artifact_id`).
+  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first requires a disk path; `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
   - Tries view-aware transports first (`request_view_transport`) and falls back to canonical transport when unsupported.
   - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present.
   - Builds `P2PSource` with remote `verification_json` and memory registration info so VerificationStage can validate the transfer.
@@ -164,7 +164,7 @@ Variant-aware requests carry `hints.variant.view_id`; the daemon attempts a view
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
 
-## VRAM Leased-In-Place (RFC‑0014)
+## VRAM Leased-In-Place
 
 LIP adds a replica mode where a producer process exposes its existing GPU memory to the daemon with a time‑bounded lease, avoiding copies into daemon‑owned VRAM at Commit.
 
@@ -209,8 +209,6 @@ Session ID: 20251001-abcd
   Capabilities:
     mem_pool_bytes: 4294967296
     tx_slice_bytes: 67108864
-    supports_coalesced: True
-    supports_lease: True
 ```
 
 Operators can prune stale entries manually or rely on the CLI output to identify orphaned sessions before triggering lease revocation from the daemon.
@@ -220,7 +218,7 @@ Operators can prune stale entries manually or rely on the CLI output to identify
 ### Rollout procedure
 
 1. **Stage the release**: Deploy the aligned Global Store migration, Store Daemon binary, and Python SDK wheel to staging. Check the triplet by running `uv run tensorcast --version` and confirm the staged daemon advertises the expected build in `uv run tensorcast daemon status`.
-2. **Run integration validation**: Execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true` against the staged environment. These suites cover lease timers, LIP flows, and daemon session lifecycle with the Store-centric API.
+2. **Run integration validation**: Execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --test_env=TENSORCAST_CUDA_BACKEND=fake` against the staged environment. These suites cover lease timers, LIP flows, and daemon session lifecycle with the Store-centric API.
 3. **Observe telemetry**: Monitor the OpenTelemetry metrics from [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md) while gradually shifting traffic. Track `tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total` per verb in Grafana to ensure latency, error, and retry rates stay within historical limits.
 4. **Promote to production**: Roll the SDK wheel to production workers and restart clients. Use `uv run tensorcast daemon status` to verify Store sessions register with accurate lease counts before decommissioning any remaining legacy helper usage.
 5. **Reference the release checklist**: Follow the detailed steps in the [Store Session Release Checklist](../deployment/store-session-release-checklist.md) to coordinate broader launches and communications.

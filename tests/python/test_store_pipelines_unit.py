@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -58,6 +58,13 @@ class _FakeClient:
     def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
         return None, None
 
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        # Region-backed get_into may probe indices before determining that no
+        # VRAM region is registered; return an empty canonical index so the
+        # region-backed path falls back cleanly.
+        del artifact_id
+        return b"{}"
+
     def unload_replica(self, replica_uuid: str, *, disk_path: str = "") -> bool:
         self.unloaded.append(f"{replica_uuid}:{disk_path}")
         return True
@@ -95,6 +102,14 @@ class _DummyRuntime:
     def ensure_client(self) -> _FakeClient:
         return self.client
 
+    def get_artifact_index_cached(self, artifact_id: str) -> object | None:
+        del artifact_id
+        return None
+
+    def cache_artifact_index(self, entry: object) -> None:  # pragma: no cover - noop
+        del entry
+        return None
+
     def cache_key_mapping(self, *_, **__) -> None:  # pragma: no cover - noop
         return None
 
@@ -102,6 +117,9 @@ class _DummyRuntime:
         self, *, key: str
     ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
         return self.client.resolve_key_mapping(key)
+
+    def get_artifact_index_by_disk_path(self, _disk_path: str) -> object | None:
+        return None
 
     def invalidate_artifact(
         self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None
@@ -126,9 +144,6 @@ class _DummyRuntime:
             mem_pool_bytes=0,
             tx_slice_bytes=0,
             artifact_chunk_bytes=0,
-            supports_coalesced=False,
-            supports_lease=False,
-            supports_region_backed_get_into=False,
             server_config=None,
         )
 

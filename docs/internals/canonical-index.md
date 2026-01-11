@@ -6,7 +6,7 @@ areas: ["core", "daemon", "global_store", "sdk"]
 
 # Canonical Index Deep Dive
 
-This note consolidates everything in-tree about the canonical index (Index v2) that TensorCast relies on to make artifact identity, storage deduplication, and transport reproducibility work. It ties together the existing design docs (`docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`, and `docs/designs/0014-store-session-api-modernization.md`), the core implementation in `core/store/materialization/dataplane`, and the SDK/daemon call paths that consume it today.
+This note consolidates everything in-tree about the canonical index (Index v2) that TensorCast relies on to make artifact identity, storage deduplication, and transport reproducibility work. It ties together the existing design docs (`docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`), the API design docs (`docs/architecture/api/api-design.md`), the core implementation in `core/store/materialization/dataplane`, and the SDK/daemon call paths that consume it today.
 
 ```mermaid
 flowchart LR
@@ -52,7 +52,7 @@ Together these invariants make the canonical index a pure description of *layout
 
 ## Build Paths
 
-### Disk save (`tensorcast.save_dict`)
+### Disk save (`tensorcast.testing.io_disk.save_dict`, test-only)
 
 `tensorcast/csrc/checkpoint_py.cc` materializes canonical index bytes when persisting to disk:
 
@@ -123,4 +123,4 @@ Canonical offsets depend only on storage identity, not per-alias offsets. The da
 - Hashing & segment plans: `core/store/materialization/dataplane/sources/segment_plan_source.cc`, `tensorcast/csrc/checkpoint_py.cc`
 - Registration flows: `tensorcast/api/_register.py`, `tensorcast/api/store.py`
 - Lease management: `daemon/lip_manager.cc`, `daemon/types.h`
-- Design background: `docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`, `docs/designs/0014-store-session-api-modernization.md`
+- Design background: `docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`, `docs/architecture/api/api-design.md`

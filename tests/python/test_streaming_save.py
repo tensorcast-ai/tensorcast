@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for streaming save functionality (pytest style)."""
 
@@ -9,8 +9,7 @@ import os
 import pytest
 import torch
 
-from tensorcast.api import save_dict
-from tensorcast.api._io_disk import load_dict_from_disk
+from tensorcast.testing.io_disk import load_dict_from_disk, save_dict
 
 
 pytestmark = pytest.mark.requires_cuda_or_fake
@@ -18,6 +17,8 @@ pytestmark = pytest.mark.requires_cuda_or_fake
 @pytest.fixture
 def has_cuda():
     """Whether CUDA is available on the test host."""
+    if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
+        return False
     return torch.cuda.is_available()
 
 

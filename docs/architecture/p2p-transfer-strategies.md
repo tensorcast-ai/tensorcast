@@ -6,111 +6,47 @@ sidebar_position: 5
 
 # P2P Transfer Strategies and Load Balancing
 
-This document describes the peer-to-peer (P2P) artifact transfer strategies and load balancing mechanisms used when Store Daemons operate in Global Store mode. The system implements sophisticated routing and balancing algorithms to optimize artifact distribution across the cluster.
+This document explains how P2P transfers work in Global Store mode. It is code-derived and focuses on control flow, data flow, memory and VRAM movement, and the thread model that drives transfers.
 
-## Overview
+## Scope and terminology
 
-In Global Store mode, artifact weights are transferred directly between Store Daemon nodes using RDMA or TCP, while the Global Store coordinates these transfers without handling the actual artifact data. This architecture provides high-performance artifact distribution with intelligent load balancing.
+- P2P transfer happens between Store Daemons; Global Store only coordinates.
+- Control plane: gRPC to Global Store and key mapping.
+- Data plane: `communicator::engine::Communicator` over RDMA or MTCP (multi-TCP).
+- Remote access uses memory keys registered for coalesced chunk ranges.
+
+## End-to-end lifecycle (control + data)
 
 ```mermaid
-graph TB
-    subgraph "Global Store (Coordinator)"
-        GS[Global Store Service]
-        TR[Transport Service]
-        LB[Load Balancer]
-        REG[Artifact Registry]
-    end
+sequenceDiagram
+    participant Source as Source Store Daemon
+    participant Target as Target Store Daemon
+    participant GS as Global Store
+    participant Comm as Communicator
 
-    subgraph "Store Daemon Cluster"
-        SD1[Store Daemon 1<br/>GPU Artifacts: A, B<br/>Load: 2/5]
-        SD2[Store Daemon 2<br/>RAM Artifacts: B, C<br/>Load: 1/3]
-        SD3[Store Daemon 3<br/>DISK Artifacts: A, C<br/>Load: 0/4]
-    end
+    Note over Source: registration or publish path
+    Source->>Comm: register_tensor_ex (GPU or CPU chunk ranges)
+    Source->>GS: RegisterReplica(memory) with remote_memory_keys
 
-    Client[Client Request<br/>Key: k(A), Target: GPU]
-
-    Client -->|1. MaterializeByKey| SD1
-    SD1 -->|2. ResolveKeyMapping| GS
-    GS -->|3. artifact_id| SD1
-    SD1 -->|4. RequestTransport| TR
-    TR -->|5. Optimal replica| SD1
-    SD1 -.->|6. RDMA Transfer| SD3
-    SD1 -->|7. CompleteTransport| TR
-    SD1 -->|8. RegisterReplica| REG
+    Note over Target: materialize AUTO
+    Target->>GS: RequestReplicaTransport(artifact_id, target_device)
+    GS-->>Target: TransportSession(remote_memory_info)
+    Target->>Comm: read_tensor(key, addr, bytes, ...)
+    Comm-->>Target: READ_RESPONSE_EX (RDMA/MTCP segments)
+    Comm-->>Target: data via RDMA or MTCP
+    Target->>GS: CompleteReplicaTransport(transport_id)
 ```
 
-## Runtime Events & Publish Context Tracking
+## Source-side memory export and registration
 
-- `MaterializationFacade` mints a `publish_context_id` for every ingestion when `publish_to_global_store` is enabled (the daemon defaults to true). Started/completed events flow through the runtime ingestion event hub, carrying the request source, target device, bytes, and duration.
-- `MetadataGateway` subscribes to completion events and registers the replica (and variant residency when `view_id` is present) with Global Store using the same `publish_context_id`. Registration results are cached per replica so subsequent explicit calls are deduped.
-- `MaterializeOrchestrator` still invokes `register_replica_with_global_store` after P2P or disk success, but the call reuses the cached publish context so `MetadataGateway` will return immediately if the event-driven publish already succeeded.
+- `RegistrationBackend::commit` optionally calls `Replica::enable_remote_memory_access`, which uses `MemoryExportRegistry::export_chunks` to coalesce chunk ranges and register them with the communicator (`core/store/replica/memory_export_registry.cc`).
+- CPU exports register tensors without MR (`register_mr=false`) and hold UMA keepalive + stable leases; GPU exports register MR when RDMA is enabled and set `direct_rdma_enabled` when staging is not required.
+- When `enable_p2p` is true, registration publishes a memory replica via `GlobalStoreClient::register_memory_replica` including `remote_memory_keys`, `buffer_sizes`, and optional `verification_json` (`core/store/runtime/metadata/registration_backend.cc`, `core/store/runtime/metadata/metadata_gateway.cc`).
+- `WorkerLifecycleManager` toggles local export on availability changes via `enable_remote_replica_access` and `disable_remote_replica_access`, but does not publish remote keys on its own (`daemon/worker_lifecycle_manager.cc`).
 
-## Unified Staging Flow Control
+## Transport request and replica selection (Global Store)
 
-All transports now use a common staging controller to guarantee progress even when artifacts are larger than the staging pool:
-
-- **Flow credit ledger** &mdash; each channel owns a `FlowCreditLedger` sized from `stager.buffers_per_flow`. Windows may only stage when credit is granted, preventing deadlocks when tensors exceed pool capacity.
-- **Windowed staging** &mdash; `StagingWindow` slices RDMA and MTCP responses into credit-bounded windows (`stager.max_window_segments` caps the per-window grant when non-zero). StageLeases carry offsets, window sequence numbers, and transport metadata.
-- **Non-blocking refill** &mdash; RDMA read handlers enqueue staging sessions and call `resume_rdma_reads()` to drain credit opportunistically. If staging hits a credit or buffer wall the control loop returns to processing TCP messages; RDMA ACKs and the GC reaper re-invoke the helper so credit recirculates without deadlocking the receive thread.
-- **Lease tracking** &mdash; active leases live in a `StageLeaseRegistry` so RDMA ACKs, MTCP send completions, and the GC reaper can all reclaim buffers safely. Completion handlers emit `[staging_credit]` logs showing grant size, outstanding credit, and transport.
-- **Per-transport release** &mdash; RDMA clients return credit via `ENGINE_OP_RDMA_READ_DONE_EX`, while MTCP release hooks fire on socket completion. Both paths recycle pinned buffers automatically and unblock the next window.
-
-### Benchmark Quickstart
-
-1. Build the communicator with fake CUDA so tests can run locally:
-   ```bash
-   USE_FAKE_CUDA=1 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
-   ```
-2. Exercise the RDMA window flow with logs enabled:
-   ```bash
-   bazel test //core/communicator:rdma_engine_test --test_output=all --define=use_fake_cuda=true
-   ```
-   Inspect `[staging_credit]` lines to verify window grant/release cadence.
-3. Stress the MTCP path and observe staged completions:
-   ```bash
-   bazel test //core/communicator:tcp_engine_test --test_output=all --define=use_fake_cuda=true
-   ```
-   Adjust `stager.buffers_per_flow` or `stager.max_window_segments` in a test config snippet to evaluate different credit budgets.
-4. For mixed transport scenarios, run both tests back-to-back while tailing server logs; use the emitted outstanding-credit gauges to identify tuning opportunities before running large-scale soak tests.
-5. To validate the unified flow controller end-to-end, run `bazel test //core/communicator:cross_transport_soak_test --define=use_fake_cuda=true`; on hosts with RDMA hardware this target issues concurrent RDMA+MTCP reads against a 128 MiB tensor and surfaces `[staging_credit]` activity across transports (it exits early with a success note when verbs support is unavailable).
-
-## Load Balancing Strategy
-
-### Replica Prioritization Algorithm
-
-The Global Store uses a multi-tier prioritization system to select the optimal replica for P2P transfers:
-
-#### 1. Memory Type Priority (Primary)
-```
-GPU > RAM > DISK
-```
-- **GPU replicas**: Highest priority for fastest access
-- **RAM replicas**: Medium priority for good performance
-- **DISK replicas**: Lowest priority, used as fallback
-
-#### 2. Capacity Priority (Secondary)
-```
-max_concurrency ASC  # smaller capacity first
-```
-- **Smaller `max_concurrency` values** are preferred so low-capacity GPUs are filled before larger ones
-
-#### 3. Load Ratio Priority (Tertiary)
-```
-load_ratio = current_requests / max_concurrency
-```
-- Lower load ratios get higher priority
-- Prevents overloading high-capacity nodes
-- Ensures even distribution across replicas with the same capacity
-
-#### 4. Freshness Priority (Quaternary)
-```
-ORDER BY updated_at ASC  # older first for deterministic tie-break
-```
-- Older replicas are chosen last to keep ordering deterministic when all other keys tie
-
-### Load Balancing Implementation
-
-The load balancing logic is implemented in `ReplicaRepository.find_available_for_transport()`. This method performs an atomic operation that both selects the best available replica and increments its request counter in a single transaction (using the `artifact_replicas` table):
+Global Store selects a source replica with an atomic claim in `ReplicaRepository.find_available_for_transport`:
 
 ```sql
 WITH candidate AS (
@@ -124,303 +60,170 @@ WITH candidate AS (
       AND w.accepting_new_requests = TRUE
       AND EXTRACT(epoch FROM w.last_heartbeat) > ?
     ORDER BY
-        -- Memory type priority
         CASE
             WHEN r.memory_type = 'GPU' THEN 0
             WHEN r.memory_type = 'RAM' THEN 1
             WHEN r.memory_type = 'DISK' THEN 2
             ELSE 3
         END,
-        -- Capacity priority – fill small GPUs first
         r.max_concurrency ASC,
-        -- Load ratio priority (ties within same capacity)
         (COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(r.max_concurrency, 1)),
-        -- Freshness priority – older replicas first for determinism
         r.updated_at ASC
     LIMIT 1
 )
 UPDATE replica_counters
 SET current_requests = current_requests + 1,
-    last_assigned_at = CURRENT_TIMESTAMP
+    last_assigned_at = now()
 WHERE replica_id = (SELECT replica_id FROM candidate)
 RETURNING replica_id
 ```
 
-Key design decisions:
-- **Atomic Selection**: The CTE (Common Table Expression) with UPDATE ensures atomic replica selection and counter increment
-- **Separate Counter Table**: The `replica_counters` table isolates high-frequency counter updates from the main `artifact_replicas` table, reducing lock contention
-- **Worker Health Check**: Only considers replicas from workers that are accepting requests and have recent heartbeats
-- **Capacity-Driven Fill**: Smaller `max_concurrency` replicas are saturated first so that limited-capacity GPUs are utilised efficiently before larger ones
-- **Load Ratio Calculation**: The load-ratio expression breaks ties among replicas that share the same capacity, ensuring even distribution
+Notes:
+- Selection prefers GPU over RAM over DISK, then smaller `max_concurrency`, then load ratio, then oldest `updated_at`.
+- The increment is atomic; failures to find a replica are retried until timeout in `TransportService.request_transport`.
+- `request_view_transport` currently falls back to canonical routing in `GlobalStoreClient` (view-aware routing is not implemented yet).
 
-### Concurrency Control
+## Target-side orchestration and pipeline
 
-The system implements atomic concurrency control to prevent overloading:
+### Materialization control flow
 
-- **Atomic Request Allocation**: Uses SQL transactions to atomically check and increment request counters
-- **Request Limiting**: Each replica has a `max_concurrency` limit that cannot be exceeded
-- **Load Tracking**: Real-time tracking of `current_requests` per replica
-- **Graceful Degradation**: Falls back to less optimal replicas when preferred ones are at capacity
+- `MaterializationService` tries in-order: reuse existing replica, local CPU to GPU copy, then P2P in AUTO mode (`core/store/runtime/ingestion/materialization_service.cc`).
+- `MaterializeOrchestrator::run` requests a transport, rejects stale local routes, builds a `P2PSource`, and falls back to disk when `hints.disk_path` is present (`core/store/materialization/control/materialize_orchestrator.cc`).
+- The orchestrator always calls `complete_replica_transport` on success or failure; disk fallback does not require Global Store.
 
-### Replica Counters Table Design
+### Entry points used by the daemon
 
-The system uses a separate `replica_counters` table to optimize high-frequency counter updates:
+- `MaterializeByKey` resolves `key -> artifact_id` via `StoreEngine::resolve_key_mapping` and then calls `materialize_replica` with `MaterializeMode::AUTO` (`daemon/service/controllers/materialization_controller.cc`).
+- `MaterializeReplica` and `materialize_replica_v2` also end in `materialize_replica` with AUTO or LOAD_ONLY depending on preference and inputs.
 
-```sql
-CREATE TABLE IF NOT EXISTS replica_counters (
-    replica_id UUID PRIMARY KEY,
-    current_requests INTEGER NOT NULL DEFAULT 0,
-    last_assigned_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-```
+### Ingestion pipeline stages
 
-Key benefits of this design:
-- **Reduced Lock Contention**: Isolates frequent counter updates from the main `replicas` table
-- **Optimized Indexes**: Dedicated indexes for load balancing queries
-- **Atomic Operations**: Enables lock-free concurrent counter updates
-- **Performance**: Counter updates don't trigger updates to the main replica metadata
+`IngestionPipeline::ingest_from_p2p` drives the runtime pipeline:
 
-The repository ensures counter records exist when creating/updating replicas:
-```python
-# From ReplicaRepository.create()
-cursor.execute("""
-    DELETE FROM replica_counters WHERE replica_id = ?
-""", [str(replica.replica_id)])
+- `P2PSourceAdapter::prepare` attaches the shared communicator engine and sets `fallback_disk_dir` unless preference is `kPreferP2P`.
+- `MetadataStage` plans view transforms if needed; for view loads, it fetches the canonical index from Global Store.
+- `AllocationStage` creates the replica and blocks on `ReplicaLoadController::load_async_from_source`. GPU loads retry after eviction on `ResourceExhausted`.
+- `VerificationStage` validates `verification_json` key points and computes optional view hashes.
+- `HandleStage` builds `ReplicaHandle`.
 
-cursor.execute("""
-    INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-""", [str(replica.replica_id), replica.current_requests])
-```
+### Publish and registration after load
 
-## Store Daemon Implementation
+- `IngestionRuntime` calls `ingest_from_p2p` with `publish_to_global_store=true`; `MaterializationFacade` mints a `publish_context_id` and emits started and completed events.
+- `MetadataGateway` consumes completion events and calls `register_replica` (presence only).
+- `MaterializeOrchestrator` also calls `register_replica_with_global_store` after successful P2P or disk loads; the cached `publish_context_id` dedupes duplicate publishes.
+- Memory-replica publication with remote keys is only done by the registration backend (see source-side registration above).
 
-### Materialization Behavior (current implementation)
+## Data plane: loaders and transfer pipeline
 
-- **Local-first reuse**: `MaterializationService` always checks the replica registry before invoking Global Store routing. When a stable DRAM CPU replica is available, the daemon seeds a local GPU replica via CPU→GPU copy and returns `MaterializationSource=LOCAL_REPLICA`.
-- **AUTO mode orchestration**: `MaterializationService` delegates `AUTO` requests to `MaterializeOrchestrator` when a Global Store client is connected. `SourcePreference::kPreferDisk` only takes the disk-first path when `hints.disk_path` is set; `kPreferP2P` requires a canonical `artifact_id`. View-aware transports are attempted first (`request_view_transport`) and fall back to canonical routing if the server does not support views. When Global Store is unreachable and no disk path is supplied, the request fails early.
-- **Pipeline execution**: Both `ingest_from_p2p()` and `ingest_from_disk()` run through the unified `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). SourceAdapter enforces that the communication manager is enabled for P2P and carries the daemon’s fallback disk directory. MetadataStage rebuilds or fetches canonical index JSON (from disk; from Global Store for view-only requests), enforces descriptor schema v3, and plans view projections. AllocationStage retries GPU loads after eviction when needed and blocks until P2P loads finish, returning a handle with a ready future already resolved.
-- **Verification and hashing**: VerificationStage validates P2P transfers using the sender’s `verification_json` (key-point metadata), computes view hashes when a plan is present, and optionally computes full data digests when `force_full_digest_on_load` or safetensors ingestion requires it. Disk loads backfill missing safetensors descriptors and reuse or generate verification JSON for canonical and view registrations.
-- **Registration**: Ingestion completions publish to the ingestion event hub with a minted `publish_context_id`; `MetadataGateway` consumes the event and registers the replica (including variant residency when `view_id` is present). `MaterializeOrchestrator` still completes the transport and calls `register_replica_with_global_store()`, but the cached publish context ensures duplicate publishes are skipped.
-- **Failure handling**: Granted transports are always closed via `complete_replica_transport()`. If the P2P load fails and `hints.disk_path` is available, the orchestrator falls back to disk; otherwise the error is propagated. Disk loads triggered after an orchestrator failure intentionally stay local when Global Store is unavailable.
+### P2PLoader and sources
 
-### Variant-aware routing (current state)
+- `P2PLoader` requires `memory_keys`, `buf_sizes`, `size_bytes`, and a communicator engine. It builds a `RemoteKeySource` which maps global offsets to per-key offsets (`core/store/materialization/dataplane/loaders/p2p_loader.cc`, `core/store/materialization/dataplane/sources/remote_key_source.cc`).
+- `RemoteKeySource::read_at` issues `Communicator::read_tensor` calls and blocks on the returned future; this is why the pipeline runs on the blocking executor.
+- If `fallback_disk_dir` is set, `P2PLoader` wraps the remote source in `MuxSeekableSource`, which falls back on short reads or remote errors (`core/store/materialization/dataplane/sources/mux_seekable_source.cc`).
 
-- The daemon passes `view_id` and view placement hints into `request_view_transport()`. The C++ client currently falls back to canonical routing because the server API is view-unaware; residency and verification metadata for the view are still registered through `MetadataGateway` once the load completes.
+### TransferService and pump_ranges
 
+- `ReplicaLoadController::load_async_from_source` delegates to `TransferService::execute` on the blocking executor and uses a per-GPU gate to serialize GPU sessions (`core/store/replica/replica_load_controller.cc`).
+- `TransferService` creates a per-session `StreamingPinnedBuffer` backed by the shared `PinnedBufferPool`. The pool slice size must divide `artifact_chunk_bytes` to avoid cross-chunk slices.
+- `pump_ranges` drives a producer/consumer pipeline:
+  - Producers run on the blocking executor and call `SeekableSource::read_at` into pinned slots.
+  - The consumer writes to a `PositionedSink`. For GPU sinks, `AsyncPositionedSink::write_at_async` schedules H2D copies via `AsyncCopyManager` and returns slots only after completion.
+- Direct-write fast path: when the source supports direct write (RDMA enabled) and the sink implements `DirectWriteCapable` (CPU sink), `pump_ranges` requests `DirectWriteGrant` windows from UMA and calls `RemoteKeySource::read_into` to RDMA-read directly into CPU VA ranges. Failures fall back to staged reads.
 
-## P2P Transfer Workflow (Key-based)
+### CPU vs GPU sinks
 
-### Complete Transfer Sequence
+- CPU target uses `CpuVaSink` to write into UMA CPU VA and exposes `plan_direct_write`.
+- GPU target uses `GpuMemorySink` with per-GPU inflight limits (bytes and copy counts) and H2D submission via `AsyncCopyManager`. The sink does not implement direct write.
+
+## Network transport internals
+
+### RDMA (pull model)
+
+- Control channel: TCP `ENGINE_OP_READ_REQUEST` and `ENGINE_OP_READ_RESPONSE_EX`.
+- The server stages or exposes memory and replies with RDMA segments (addr, rkey, bytes, window_seq).
+- The client posts RDMA READs via `RdmaTransport::read_multi`. On completion it triggers window ACKs (`ENGINE_OP_RDMA_READ_DONE_EX`) so the server can release staging credit.
+- Zero-copy RDMA: when GPU memory was registered with `direct_rdma_enabled`, the server uses the original MR as the stage window (no staging buffer).
+- Staged RDMA uses a `MemoryStager`:
+  - `HostPinnedGpuStager` performs D2H into pinned buffers.
+  - `GpuVramRdmaStager` performs D2D into a per-GPU VRAM pool when `rdma.staging_backend=GPU_VRAM`.
+  - `HostPinnedCpuStager` copies into pinned host buffers.
+
+### MTCP (push model)
+
+- MTCP is used when `enable_rdma=false` or when a request uses MTCP explicitly.
+- The server sends `READ_RESPONSE_EX` (transport=MTCP) and enqueues a staging task on `mtcp_staging_thread_`.
+- `MTcpTransport` manages multiple sockets (`tcp_conn_count`) plus a staged-send thread. Stage windows are sliced across lanes and each segment completion releases staging credit.
+- GPU receives: MTCP reads into pinned staging buffers (`StreamingPinnedBuffer`) and schedules H2D copies via `AsyncCopyManager`. Each sub-chunk returns its slot on copy completion.
+- CPU receives: MTCP reads directly into the CPU destination buffer, no extra copy.
+
+## Staging flow control and credit
+
+- `FlowCreditLedger` is per-channel and sized by `stager.buffers_per_flow`. It grants window credit for both RDMA and MTCP.
+- `StagingWindow` slices each request into credit-bounded windows; `stager.max_window_segments` caps window size.
+- `StageLeaseRegistry` tracks active staged segments. RDMA ACKs, MTCP send completions, and the GC reaper reclaim leases and return credit.
+- `Communicator` enforces a GPU MTCP channel limit based on `stager.expected_gpu_channels` and pinned pool capacity to prevent unbounded staging.
+
+## Replica memory state flow (target)
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant RPC as Daemon RPC (MaterializeByKey)
-    participant CS as C++ StoreEngine
-    participant PO as C++ MaterializeOrchestrator
-    participant GSC as C++ GlobalStoreClient
-    participant GS as Global Store (Python)
-    participant SD_Source as Store Daemon (Source)
-
-    Client->>RPC: MaterializeByKey(key, device_id, replica_uuid)
-    RPC->>GS: ResolveKeyMapping(key)
-    GS-->>RPC: artifact_id (+ optional disk_path hint)
-
-    Note over CS: AUTO mode via orchestrator
-    RPC->>CS: materialize_replica(target, AUTO, hints{artifact_id[, disk_path]})
-    CS->>PO: MaterializeOrchestrator::run(artifact_id, device_key, hints)
-
-    %% --- P2P transfer attempt ------------------------------------------------
-    PO->>GSC: request_replica_transport(artifact_id, ..., target_device)
-    GSC->>GS: gRPC RequestReplicaTransport
-
-    alt Transport granted
-        GS-->>GSC: {transport_id, remote_memory_info}
-        GSC-->>PO: TransportSession{transport_id, remote_replica}
-
-        Note over PO: Build P2PSource from remote_replica
-        PO->>CS: ingest_from_p2p(artifact_id, p2p_source, target, hints)
-
-        CS->>SD_Source: P2P data transfer (RDMA/TCP)
-        SD_Source-->>CS: Artifact data
-
-        CS-->>PO: ReplicaHandle
-
-        PO->>GSC: complete_replica_transport(transport_id)
-        GSC->>GS: gRPC CompleteReplicaTransport
-
-        PO->>CS: register_replica_with_global_store(handle.key())
-        CS->>GSC: gRPC RegisterReplica
-    else No replica available / transport failed
-        Note over PO: Disk fallback
-        PO->>CS: ingest_from_disk(artifact_id, disk_source, target, hints)
-        CS-->>PO: ReplicaHandle
-
-        PO->>CS: register_replica_with_global_store(handle.key())
-        CS->>GSC: gRPC RegisterReplica
-    end
-
-    PO-->>CS: ReplicaHandle
-    CS-->>Python: ReplicaHandle (with IPC handle)
-    RPC-->>Client: MaterializeByKeyResponse(status=ALLOCATED, handle_bytes, artifact_id)
+stateDiagram-v2
+    [*] --> UNALLOCATED
+    UNALLOCATED --> ALLOCATED : allocate_memory
+    ALLOCATED --> LOADING : load_async_from_source / copy_data_async
+    LOADING --> LOADED : commit + set_state
+    LOADING --> FAILED : load error
+    FAILED --> UNALLOCATED : release_memory + reset
 ```
 
-`IngestionPipeline` already emits a completion event with a `publish_context_id`; `MetadataGateway` registers the replica from that event. The explicit `register_replica_with_global_store()` in the diagram reuses the same context and is a no-op when the event-driven publish has already succeeded.
+Notes:
+- P2P loads call `ensure_loaded_async` and block on the load future in `AllocationStage`.
+- GPU loads may retry after eviction when `ResourceExhausted` is returned.
 
-### Key Components and File Locations
+## Thread model (hot paths)
 
-#### Python Layer
-- Thin CLI and daemon manager used to configure and launch the C++ daemon
+- `Communicator` threads: request loop (`do_read_request_loop`), channel GC (`do_channel_gc_loop`), handshake retry, and MTCP staging loop.
+- RDMA IO: per-device `RdmaThread` with send, poll, and recv threads.
+- MTCP IO: `MTcpTransport` has server/client loops plus send, recv, and staged-send threads. Each connection uses `MTcpTransportTask` send/recv threads.
+- P2P ingestion: `pump_ranges` producers run on the blocking executor; the consumer runs in the caller thread. GPU sessions are serialized by `GpuSchedHandle`.
 
-#### C++ Core Components
-- **StoreEngine** (`core/store/store_engine.h/cc`)
-  - `materialize_replica()`: Entry point that delegates to MaterializeOrchestrator for AUTO mode
-  - `materialization::runtime::pipeline::IngestionPipeline`: Consolidated staged flow for disk and P2P ingestion
+## Failure handling and fallbacks
 
-- **MaterializeOrchestrator** (`core/store/materialization/control/materialize_orchestrator.h/cc`)
-  - `run()`: Implements the decision tree (P2P first, disk fallback)
-  - Coordinates with GlobalStoreClient for transport management
-  - Handles replica registration after successful load
+- `MaterializeOrchestrator` always calls `complete_replica_transport`. On P2P failure, it falls back to disk if `hints.disk_path` is set.
+- `P2PLoader` fallback is per-read: `MuxSeekableSource` completes remaining bytes from disk on short reads or remote errors.
+- RDMA handshake failures surface as transport errors; no automatic MTCP fallback is performed.
+- MTCP staging waits for credit up to `staging_wait_timeout` and fails with `ResourceExhausted` when the deadline is exceeded.
+- `do_channel_gc_loop` reaps stale `StageLease` entries when ACKs are missing (`ack_ttl_ms`).
 
-- **GlobalStoreClient** (`core/store/components/global_store_client.h/cc`)
-  - `request_replica_transport()`: Request P2P transport session
-  - `complete_replica_transport()`: Mark transport as complete
-  - `register_replica()`: Register local (disk/P2P-loaded) replica with Global Store
+## Variant-aware routing and verification
 
-- **ReplicaRegistrationHelper** (`core/store/materialization/control/replica_registration_helper.h/cc`)
-  - `register_local_replica()`: Helper to register replicas with Global Store
+- `request_view_transport` is invoked when `view_id` is present. The client falls back to canonical routing when the server is view-unaware.
+- `MetadataStage` fetches the canonical index from Global Store when a view needs planning.
+- `VerificationStage` validates P2P transfers using `verification_json` (key-point verification) and computes optional view hashes.
 
+## Variant View Registration Telemetry
 
-## Transport Lifecycle and Failure Handling
+- View registrations are handled by `RegistrationController` and `RegistrationBackend`, which build a bidirectional view plan and stream view writes into the target replica (`core/store/runtime/metadata/registration_backend.cc`).
+- On commit, the backend computes view hash and optional leaf digests (when a segment plan is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
+- `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
+- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_variant_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
 
-### Request phase (server)
+## Observability
 
-- When no replicas exist for the requested artifact, the transport service fails fast with `NOT_FOUND` and records `transport_request(not_found)` before entering the selection loop.
-- Global Store loops until timeout to find a candidate via `ReplicaRepository.find_available_for_transport()`; on success it creates a `Transport` row and increments a per-replica counter atomically.
-- Retry cadence is controlled by `transport_wait_retry_interval_ms`. The heartbeat staleness cutoff uses `heartbeat_timeout_ms`.
-- Metrics recorded: `inc_transport_request(artifact_id, "success"|"timeout")`, `observe_transport_wait(artifact_id, seconds)`, `inc_active_transports()`.
+- Global Store metrics: `inc_transport_request`, `observe_transport_wait`, `inc_active_transports`, `dec_active_transports`.
+- Store runtime metrics: `tc_p2p_bytes_total`, `tc_tx_duration_ms`, `tc_tx_inflight_copies_gauge`, `tc_tx_inflight_bytes_gauge`, `tc_tx_direct_window_*`.
+- P2P staging logs: `[staging_credit]` lines identify window grants, outstanding credit, and ACK release paths.
 
-### Completion phase (server)
+## Benchmark quickstart
 
-- `CompleteReplicaTransport` decrements `replica_counters.current_requests` and marks the transport as completed. Metric: `dec_active_transports()`.
-- Safety-net: `cleanup_expired_transports()` periodically force-completes stuck transports to prevent counter leaks if a daemon crashes or loses connectivity.
-
-### Client-side retries/timeouts
-
-- All Global Store RPCs from the daemon use an exponential backoff helper with jitter (`execute_rpc_with_retry`) and respect `GlobalStoreClientConfig` fields: `max_retries`, `retry_backoff`, and `rpc_timeout`.
-
-## Chunk-aware Remote Memory Export
-
-- The source replica exports chunk metadata from the VS-backed CPU region and registers remote-access handles via `Replica::enable_remote_memory_access()` which internally calls `export_chunks_for_p2p(...)`.
-- The Global Store carries these as `remote_memory_keys`, `buffer_sizes`, and optional `verification_json` in `MemoryInfo`. The orchestrator passes them into `P2PSource` so the engine can fetch efficiently and verify key points after transfer.
-- When RDMA is disabled, GPU→GPU transfers over TCP use staging buffers and mark registration options with `needs_staging=true`.
-
-
-## Performance Optimizations
-
-### RDMA-First Strategy
-
-The system prioritizes RDMA transfers for optimal performance:
-
-1. **RDMA Detection**: Check if both source and target support RDMA
-2. **Connection Establishment**: Create RDMA connections between nodes
-3. **Direct Memory Transfer**: Bypass CPU for memory-to-memory transfers
-4. **Fallback Mechanism**: Fall back to TCP if RDMA fails
-
-Implementation notes:
-- RDMA/TCP is selected by `enable_rdma` in the `CommunicatorConfig` used to initialize `Communicator` on each side.
-- GPU over TCP requires staging buffers (`needs_staging=true`), while RDMA can register memory regions directly when supported.
-- Remote access uses exported `remote_memory_keys` and `buffer_sizes` provided by the source replica.
-
-### Memory Pool Management
-
-Efficient memory allocation strategies:
-
-- **Pre-allocated Pools**: Pinned memory pools for zero-copy transfers
-- **Chunked Transfers**: Support for artifacts larger than available memory
-- **Memory Type Awareness**: Optimize transfers based on target memory type
-
-### Connection Pooling
-
-Reuse connections for multiple transfers:
-
-- **Persistent Connections**: Maintain RDMA/TCP connections between frequent pairs
-- **Connection Caching**: Cache connection state to avoid setup overhead
-- **Health Monitoring**: Monitor connection health and recreate as needed
-
-## Monitoring and Metrics
-
-### Key Metrics
-
-- **Transport Success Rate**: Ratio of successful to failed transfers
-- **Load Distribution**: Request distribution across replicas
-- **Transfer Latency**: Time from request to completion
-- **RDMA Utilization**: Percentage of transfers using RDMA vs TCP
-
-Concrete metrics and emitters:
-- Global Store: `inc_transport_request`, `observe_transport_wait`, `inc_active_transports`, `dec_active_transports`.
-- Store Engine: `record_p2p_transfer(bytes, success)`, `record_artifact_load(source, device, phase, seconds)`.
-
-### Health Checks
-
-- **Replica Availability**: Regular heartbeat monitoring
-- **Capacity Monitoring**: Track request counts vs limits
-- **Network Connectivity**: RDMA/TCP connection health
-
-## Configuration Parameters
-
-### Global Store Settings
-
-```yaml
-# Load balancing configuration
-heartbeat_timeout_ms: 30000              # Worker heartbeat timeout (30s)
-transport_wait_retry_interval_ms: 200    # Retry interval for replica availability
-cleanup_interval_ms: 60000               # Stale replica cleanup interval (1 min)
-optimize_interval_ms: 3600000            # Database optimization interval (1 hour)
-
-# Worker management
-heartbeat_interval_ms: 5000              # Worker heartbeat interval (5s)
-max_workers: 10                          # Max gRPC worker threads
-```
-
-### Store Daemon Settings
-
-```yaml
-# Communication settings
-enable_p2p_access: true                  # Require artifact registration before load
-enable_p2p_engine: true                  # Enable communication manager
-enable_rdma: false                       # Toggle RDMA support independently
-p2p_listen_host: 0.0.0.0                # Interface advertised via StoreEngineOptions::p2p_listen_host
-p2p_port: 9090                          # RDMA/TCP communication port (must be non-zero)
-grpc_port: 50052                        # Local gRPC port
-
-# Memory settings
-mem_pool_size: 8589934592               # Memory pool size (8GB)
-tx_slice_bytes: 134217728               # Transfer slice/window size (128MB)
-pinned_memory_timeout_ms: 30000         # Pinned memory timeout (30s)
-
-# Lifecycle settings
-gpu_memory_limit_fraction: 0.60         # GPU memory threshold before eviction
-global_cache_fraction: 0.20             # Fraction for global cache
-eviction_check_interval_s: 30.0         # Eviction check interval
-proc_check_interval_s: 10.0             # Process watcher interval
-
-# High availability settings
-high_availability:
-  enabled: true
-  heartbeat_enhanced: true               # Enhanced heartbeat with state info
-  connection_retry:
-    enabled: true
-    max_retries: 10
-    initial_delay_ms: 1000
-    max_delay_ms: 30000
-  state_sync:
-    enabled: true
-    batch_size: 100
-    sync_interval_ms: 5000
-```
-Integrity verification metadata:
-- When a sender has precomputed lightweight verification (e.g., KEY_POINTS or SEGMENT_HASHES), it includes `verification_json` in the registered memory replica (Global Store `MemoryInfo`).
-- Global Store propagates `verification_json` in `RequestReplicaTransportResponse.remote_memory_info`.
-- The receiver (StoreEngine) consumes `verification_json` via `P2PSource` and validates the loaded replica before completing materialization. On mismatch, the operation fails with a DataLoss error.
+1. Exercise the RDMA window flow with logs enabled:
+   ```bash
+   bazel test //core/communicator:rdma_engine_test --test_output=all --test_env=TENSORCAST_CUDA_BACKEND=fake
+   ```
+2. Stress the MTCP path and observe staged completions:
+   ```bash
+   bazel test //core/communicator:tcp_engine_test --test_output=all --test_env=TENSORCAST_CUDA_BACKEND=fake
+   ```
+3. Validate unified flow control across transports:
+   ```bash
+   bazel test //core/communicator:cross_transport_soak_test --test_env=TENSORCAST_CUDA_BACKEND=fake
+   ```

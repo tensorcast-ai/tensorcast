@@ -19,7 +19,6 @@ jobs:
       run:
         shell: bash
     env:
-      USE_FAKE_CUDA: "1"
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
@@ -63,17 +62,18 @@ jobs:
       - name: Build libcheckpoint_ext.so
         run: |
           bazel build //core:libcheckpoint_ext.so \
-            --define use_fake_cuda=true \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
-      - name: Build tensorcast_daemon (Fake CUDA)
+      - name: Build tensorcast_daemon
         run: |
           bazel build @folly//folly:config_h_gen \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
           bazel build //daemon:tensorcast_daemon \
-            --define use_fake_cuda=true \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
       - name: Upload libcheckpoint_ext.so artifact
@@ -157,10 +157,11 @@ jobs:
         run: |
           bazel test //core/... \
             --test_tag_filters="-stress,-rdma,-multi_gpu" \
-            --define use_fake_cuda=true \
+            --test_env=TENSORCAST_CUDA_BACKEND=fake \
             --test_output=errors \
             --test_summary=detailed \
             --test_timeout=500 \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
@@ -170,11 +171,12 @@ jobs:
         run: |
           bazel test //core/... \
             --test_tag_filters="stress" \
-            --define use_fake_cuda=true \
+            --test_env=TENSORCAST_CUDA_BACKEND=fake \
             --test_output=errors \
             --test_summary=detailed \
             --test_timeout=600 \
             --local_test_jobs=1 \
+            --config=ci \
             --config=remote \
             --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
 
@@ -186,7 +188,6 @@ jobs:
       run:
         shell: bash
     env:
-      USE_FAKE_CUDA: "1"
       UV_CACHE_DIR: /tmp/.uv-cache
       BAZEL_REMOTE_CACHE: https://storage.googleapis.com/bazel-cache-bucket
       GOOGLE_APPLICATION_CREDENTIALS: credentials.json
@@ -312,9 +313,9 @@ jobs:
         run: bash ./tools/build_proto_python.sh raw
         shell: bash
 
-      - name: Build C++ extensions with fake CUDA
+      - name: Build C++ extensions
         run: |
-          USE_FAKE_CUDA=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+          BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 
       - name: Run type checking
         run: |
@@ -351,4 +352,5 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
           GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4096
+          TENSORCAST_CUDA_BACKEND: fake
         shell: bash

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 gRPC service implementation for Global Store.
@@ -1227,7 +1227,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
-    # ========== RFC-0014: Key Mapping ==========
+    # ========== Key Mapping ==========
 
     def UpsertKeyMapping(
         self,
@@ -1429,7 +1429,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     (previous_worker_id or ""),
                     bool(state_sync_required),
                     int(
-                        self.recovery_service.get_worker_state_version(
+                        self.recovery_service.ensure_worker_state_version(
                             registered.worker_id
                         )
                     ),
@@ -1440,7 +1440,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     worker_id=registered.worker_id,
                     heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
                     state_sync_required=state_sync_required,
-                    expected_state_version=self.recovery_service.get_worker_state_version(
+                    expected_state_version=self.recovery_service.ensure_worker_state_version(
                         registered.worker_id
                     ),
                 )
@@ -1465,6 +1465,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     )
 
                 registered = self.worker_service.register_worker(worker)
+                expected_state_version = (
+                    self.recovery_service.ensure_worker_state_version(
+                        registered.worker_id
+                    )
+                )
 
                 # Single, enriched registration log (normal)
                 logger.info(
@@ -1484,7 +1489,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     worker_id=registered.worker_id,
                     heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
                     state_sync_required=False,
-                    expected_state_version=0,
+                    expected_state_version=expected_state_version,
                 )
 
         except ValidationError as e:
@@ -1507,7 +1512,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.WorkerHeartbeatRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.WorkerHeartbeatResponse:
-        """Process enhanced worker heartbeat."""
+        """Process worker heartbeat (enhanced-only)."""
         try:
             # Detect possible duplicate worker_id usage across different addresses
             try:
@@ -1532,25 +1537,20 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     "tc.worker.state_version": int(request.state_version),
                 }
             )
-            # Check if this is an enhanced heartbeat
-            if request.state_version > 0:
-                # Enhanced heartbeat with state information
-                return self._handle_enhanced_heartbeat(request, context)
-            else:
-                # Legacy heartbeat
-                success = self.worker_service.heartbeat(
-                    worker_id=request.worker_id,
-                    mem_pool_available_size=request.mem_pool_available_size,
-                    accepting_new_requests=request.accepting_new_requests,
+            if request.state_version <= 0:
+                logger.warning(
+                    "Rejected legacy heartbeat for worker %s: state_version must be >= 1",
+                    request.worker_id,
+                )
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(
+                    "state_version must be >= 1; legacy heartbeats are not supported"
+                )
+                return global_store_pb2.WorkerHeartbeatResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
                 )
 
-                status = (
-                    global_store_pb2.Status.STATUS_OK
-                    if success
-                    else global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-
-                return global_store_pb2.WorkerHeartbeatResponse(status=status)
+            return self._handle_enhanced_heartbeat(request, context)
 
         except Exception as e:
             logger.exception("Error processing worker heartbeat")
@@ -1580,7 +1580,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 )
 
             # Check if state synchronization is needed
-            current_version = self.recovery_service.get_worker_state_version(
+            current_version = self.recovery_service.ensure_worker_state_version(
                 request.worker_id
             )
             state_sync_required = request.state_version < current_version

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 //  ServerlessLLM
 //  Copyright (c) ServerlessLLM Team 2024
@@ -18,12 +18,21 @@
 //  ----------------------------------------------------------------------------
 #include "pinned_buffer_pool.h"
 
+#include <chrono>
+#include <string>
+#include <utility>
+
 #include "absl/log/log.h"
-#include "core/common/cuda_api.h"
+#include "absl/strings/str_cat.h"
+#include "core/cuda/cuda_api.h"
 
 namespace tensorcast::common::memory {
 
-PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size) : chunk_size_(chunk_size) {
+PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size)
+    : PinnedBufferPool(total_size, chunk_size, /*name=*/std::string()) {}
+
+PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, std::string name)
+    : chunk_size_(chunk_size), name_(std::move(name)) {
   if (chunk_size_ == 0) {
     LOG(FATAL) << "PinnedBufferPool: chunk_size must be > 0";
   }
@@ -33,48 +42,62 @@ PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size) : chunk
   // Ensure chunk_size is aligned for DIRECT_IO support
   if (chunk_size_ % kDirectIOAlignment != 0) {
     size_t aligned_chunk_size = ((chunk_size_ + kDirectIOAlignment - 1) / kDirectIOAlignment) * kDirectIOAlignment;
-    LOG(WARNING) << "PinnedBufferPool: chunk_size " << chunk_size_ << " is not aligned to " << kDirectIOAlignment
-                 << " bytes, rounding up to " << aligned_chunk_size;
+    LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]")) << ": chunk_size "
+                 << chunk_size_ << " is not aligned to " << kDirectIOAlignment << " bytes, rounding up to "
+                 << aligned_chunk_size;
     chunk_size_ = aligned_chunk_size;
   }
 
   const size_t num_buffers = (total_size + chunk_size_ - 1) / chunk_size_;
   if (num_buffers * chunk_size_ != total_size) {
-    LOG(WARNING) << "PinnedBufferPool: total_size " << total_size << " is not a multiple of aligned chunk_size "
-                 << chunk_size_ << ", actual pool size will be " << (num_buffers * chunk_size_);
+    LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]")) << ": total_size "
+                 << total_size << " is not a multiple of aligned chunk_size " << chunk_size_
+                 << ", actual pool size will be " << (num_buffers * chunk_size_);
   }
   VLOG(1) << "Creating PinnedBufferPool with " << num_buffers << " buffers of " << chunk_size_ << " bytes"
           << " (aligned for DIRECT_IO)";
 
-  for (size_t i = 0; i < num_buffers; ++i) {
-    // Allocate with page alignment for optimal performance
-    char* buffer = static_cast<char*>(aligned_alloc(kMemoryAlignment, chunk_size_));
-    if (buffer == nullptr) {
-      LOG(FATAL) << "aligned_alloc failed for size " << chunk_size_;
-    }
+  const size_t slab_bytes = num_buffers * chunk_size_;
+  char* slab = static_cast<char*>(aligned_alloc(kMemoryAlignment, slab_bytes));
+  if (slab == nullptr) {
+    LOG(FATAL) << "PinnedBufferPool: aligned_alloc failed for slab size " << slab_bytes;
+  }
 
-    auto register_status = cuda::host_register(buffer, chunk_size_, cudaHostRegisterDefault);
-    if (!register_status.ok()) {
-      LOG(FATAL) << "PinnedBufferPool: cudaHostRegister failed: " << register_status.message();
+  auto register_status = cuda::host_register(slab, slab_bytes, cudaHostRegisterDefault);
+  if (!register_status.ok()) {
+    LOG(FATAL) << "PinnedBufferPool: cudaHostRegister failed: " << register_status.message();
+  }
+
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    slabs_.push_back(Slab{gsl::not_null<char*>{slab}, slab_bytes});
+    for (size_t i = 0; i < num_buffers; ++i) {
+      char* buffer = slab + (i * chunk_size_);
+      pool_.insert(buffer);
+      free_list_.insert(buffer);
     }
-    pool_.insert(buffer);
-    free_list_.insert(buffer);
   }
 }
 
 PinnedBufferPool::~PinnedBufferPool() {
-  for (char* buffer : pool_) {
-    auto unregister_status = cuda::host_unregister(buffer);
+  std::vector<Slab> slabs_copy;
+  {
+    const std::lock_guard<std::mutex> lock(mutex_);
+    slabs_copy = slabs_;
+  }
+  for (const auto& slab : slabs_copy) {
+    auto unregister_status = cuda::host_unregister(slab.base.get());
     if (!unregister_status.ok()) {
       LOG(ERROR) << "Failed to unregister CUDA host memory: " << unregister_status.message();
     }
-    free(buffer);
+    free(slab.base.get());
   }
 }
 
 int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const std::chrono::milliseconds& timeout) {
   if (size == 0) {
-    LOG(ERROR) << "PinnedBufferPool Allocate size is zero";
+    LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
+               << " allocate: size is zero";
     return -1;
   }
 
@@ -83,16 +106,46 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
   // Use timeout logic if timeout is specified (non-zero), otherwise use immediate check
   if (timeout.count() > 0) {
     std::unique_lock<std::mutex> lock(mutex_);
+    ++waiters_;
 
-    // Wait with timeout for enough memory to become available
-    auto end_time = std::chrono::steady_clock::now() + timeout;
-    bool memory_available = cv_.wait_until(lock, end_time, [this, num_buffers_needed]() {
-      return num_buffers_needed <= static_cast<int>(free_list_.size());
-    });
+    // Wait with timeout for enough memory to become available. Wake periodically so we can emit
+    // diagnosable "still waiting" warnings (no-progress) without relying on notifications.
+    const auto wait_start = std::chrono::steady_clock::now();
+    auto next_log = wait_start + std::chrono::seconds(5);
+    const auto end_time = wait_start + timeout;
+
+    bool memory_available = false;
+    while (true) {
+      const auto now = std::chrono::steady_clock::now();
+      memory_available = num_buffers_needed <= static_cast<int>(free_list_.size());
+      if (memory_available) {
+        break;
+      }
+      if (now >= end_time) {
+        break;
+      }
+      if (now >= next_log) {
+        const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - wait_start).count();
+        LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
+                     << " allocate still waiting: waited_ms=" << waited_ms << " need_slices=" << num_buffers_needed
+                     << " free_slices=" << free_list_.size() << " total_slices=" << pool_.size()
+                     << " waiters=" << waiters_;
+        next_log = now + std::chrono::seconds(5);
+      }
+      const auto wake_deadline = std::min(end_time, now + std::chrono::seconds(1));
+      cv_.wait_until(lock, wake_deadline);
+    }
+    --waiters_;
 
     if (!memory_available) {
-      LOG(WARNING) << "PinnedBufferPool allocation timed out after " << timeout.count() << "ms (" << free_list_.size()
-                   << " buffers available, " << num_buffers_needed << " buffers needed)";
+      ++acquire_timeouts_total_;
+      ++budget_exhausted_total_;
+      const auto waited_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
+      LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
+                   << " allocate timed out: waited_ms=" << waited_ms << " timeout_ms=" << timeout.count()
+                   << " need_slices=" << num_buffers_needed << " free_slices=" << free_list_.size()
+                   << " total_slices=" << pool_.size();
       return num_buffers_needed - free_list_.size();
     }
 
@@ -109,8 +162,10 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
     const std::lock_guard<std::mutex> lock(mutex_);
 
     if (num_buffers_needed > static_cast<int>(free_list_.size())) {
-      LOG(ERROR) << "PinnedBufferPool out of memory (" << free_list_.size() << " buffers available, "
-                 << num_buffers_needed << " buffers needed)";
+      ++budget_exhausted_total_;
+      LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
+                 << " out of memory: need_slices=" << num_buffers_needed << " free_slices=" << free_list_.size()
+                 << " total_slices=" << pool_.size();
       return num_buffers_needed - free_list_.size();
     }
 
@@ -152,12 +207,38 @@ int PinnedBufferPool::deallocate(std::vector<char*>& buffers) {
 }
 
 size_t PinnedBufferPool::get_available_size() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
   return free_list_.size() * chunk_size_;
 }
 
 size_t PinnedBufferPool::capacity_slices() const {
   const std::lock_guard<std::mutex> lock(mutex_);
   return pool_.size();
+}
+
+size_t PinnedBufferPool::free_slices() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return free_list_.size();
+}
+
+size_t PinnedBufferPool::in_use_slices() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return pool_.size() - free_list_.size();
+}
+
+size_t PinnedBufferPool::waiters() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return waiters_;
+}
+
+uint64_t PinnedBufferPool::acquire_timeouts_total() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return acquire_timeouts_total_;
+}
+
+uint64_t PinnedBufferPool::budget_exhausted_total() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return budget_exhausted_total_;
 }
 
 std::vector<gsl::not_null<char*>> PinnedBufferPool::list_buffers() const {
@@ -170,6 +251,24 @@ std::vector<gsl::not_null<char*>> PinnedBufferPool::list_buffers() const {
     }
   }
   return out;
+}
+
+std::vector<PinnedBufferPool::Slab> PinnedBufferPool::list_slabs() const {
+  const std::lock_guard<std::mutex> lock(mutex_);
+  return slabs_;
+}
+
+std::optional<PinnedBufferPool::Slab> PinnedBufferPool::slab_for_ptr(gsl::not_null<void*> ptr) const {
+  const auto address = reinterpret_cast<uintptr_t>(ptr.get());
+  const std::lock_guard<std::mutex> lock(mutex_);
+  for (const auto& slab : slabs_) {
+    const auto base = reinterpret_cast<uintptr_t>(slab.base.get());
+    const auto end = base + slab.bytes;
+    if (address >= base && address < end) {
+      return slab;
+    }
+  }
+  return std::nullopt;
 }
 
 } // namespace tensorcast::common::memory

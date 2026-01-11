@@ -19,7 +19,7 @@ _PathLike = Union[str, os.PathLike[str]]
 
 
 def is_fake_cuda() -> bool:
-    """Returns True if this extension was built with the fake CUDA backend."""
+    """Returns True if the runtime Fake CUDA backend is active."""
     ...
 
 
@@ -33,15 +33,6 @@ def save_tensors(
     tensor_data: MutableMapping[str, Tuple[_Ptr, _Size]],
     path: _PathLike,
 ) -> Dict[str, _Offset]: ...
-
-
-def save_tensors_streaming(
-    tensor_names: Sequence[str],
-    tensor_data: MutableMapping[str, Tuple[_Ptr, _Size]],
-    path: _PathLike,
-    config: Optional[Mapping[str, Union[int, bool]]] = None,
-) -> Dict[str, _Offset]: ...
-
 
 def save_model_to_disk(
     tensor_names: Sequence[str],
@@ -83,6 +74,11 @@ def get_cuda_memory_handle(
     device_id: int,
     memory_ptr: _Ptr,
 ) -> bytes: ...
+
+def get_cuda_memory_handle_with_offset(
+    device_id: int,
+    memory_ptr: _Ptr,
+) -> Tuple[bytes, int]: ...
 
 
 def get_device_uuid_map() -> Dict[_DeviceId, str]: ...

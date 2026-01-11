@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Lazy loader for the tensorcast._C native extension."""
 
@@ -93,6 +93,12 @@ def get_cuda_memory_handle(device_id: int, memory_ptr: int) -> bytes:
     return _load_c_ext().get_cuda_memory_handle(device_id, memory_ptr)
 
 
+def get_cuda_memory_handle_with_offset(
+    device_id: int, memory_ptr: int
+) -> tuple[bytes, int]:
+    return _load_c_ext().get_cuda_memory_handle_with_offset(device_id, memory_ptr)
+
+
 def restore_tensors_from_disk(
     meta_state_dict: Mapping[str, tuple[Sequence[int], Sequence[int], str, int]],
     disk_path: str | os.PathLike[str],
@@ -122,6 +128,7 @@ __all__ = [
     "compute_view_registration_plan",
     "get_c_ext",
     "get_cuda_memory_handle",
+    "get_cuda_memory_handle_with_offset",
     "get_cuda_memory_ptr",
     "get_device_uuid_map",
     "inspect_or_generate_descriptor",

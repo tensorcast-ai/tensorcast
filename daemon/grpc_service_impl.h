@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -34,12 +34,11 @@
 #include "daemon/verification_tracker.h"
 #include "grpcpp/grpcpp.h"
 #include "gsl/pointers"
-#include "tensorcast/daemon/v1/store_daemon.grpc.pb.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {
 
-class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
+class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
  public:
   struct Options {
     // Sweep/TTL configuration
@@ -230,135 +229,146 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
 
   grpc::Status MaterializeReplica(
       grpc::ServerContext* ctx,
-      const v1::MaterializeReplicaRequest* req,
-      v1::MaterializeReplicaResponse* resp) override;
+      const v2::MaterializeReplicaRequest* req,
+      v2::MaterializeReplicaResponse* resp) override;
+
+  grpc::Status MaterializeIntoTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
 
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
-      const v1::ConfirmReplicaRequest* req,
-      v1::ConfirmReplicaResponse* resp) override;
+      const v2::ConfirmReplicaRequest* req,
+      v2::ConfirmReplicaResponse* resp) override;
 
   grpc::Status UnloadReplica(
       grpc::ServerContext* ctx,
-      const v1::UnloadReplicaRequest* req,
-      v1::UnloadReplicaResponse* resp) override;
+      const v2::UnloadReplicaRequest* req,
+      v2::UnloadReplicaResponse* resp) override;
 
-  grpc::Status ClearMem(grpc::ServerContext* ctx, const v1::ClearMemRequest* req, v1::ClearMemResponse* resp) override;
+  grpc::Status ClearMem(grpc::ServerContext* ctx, const v2::ClearMemRequest* req, v2::ClearMemResponse* resp) override;
 
   grpc::Status GetServerConfig(
       grpc::ServerContext* ctx,
-      const v1::GetServerConfigRequest* req,
-      v1::GetServerConfigResponse* resp) override;
+      const v2::GetServerConfigRequest* req,
+      v2::GetServerConfigResponse* resp) override;
 
   grpc::Status WaitReplicaVerification(
       grpc::ServerContext* ctx,
-      const v1::WaitReplicaVerificationRequest* req,
-      v1::WaitReplicaVerificationResponse* resp) override;
+      const v2::WaitReplicaVerificationRequest* req,
+      v2::WaitReplicaVerificationResponse* resp) override;
 
   grpc::Status LockTransportChunks(
       grpc::ServerContext* ctx,
-      const v1::LockTransportChunksRequest* req,
-      v1::LockTransportChunksResponse* resp) override;
+      const v2::LockTransportChunksRequest* req,
+      v2::LockTransportChunksResponse* resp) override;
 
   grpc::Status RegisterVramRegion(
       grpc::ServerContext* ctx,
-      const v1::RegisterVramRegionRequest* req,
-      v1::RegisterVramRegionResponse* resp) override;
+      const v2::RegisterVramRegionRequest* req,
+      v2::RegisterVramRegionResponse* resp) override;
 
   grpc::Status UnregisterVramRegion(
       grpc::ServerContext* ctx,
-      const v1::UnregisterVramRegionRequest* req,
-      v1::UnregisterVramRegionResponse* resp) override;
+      const v2::UnregisterVramRegionRequest* req,
+      v2::UnregisterVramRegionResponse* resp) override;
 
   grpc::Status DeregisterArtifact(
       grpc::ServerContext* ctx,
-      const v1::DeregisterArtifactRequest* req,
-      v1::DeregisterArtifactResponse* resp) override;
+      const v2::DeregisterArtifactRequest* req,
+      v2::DeregisterArtifactResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
-      const v1::UnlockTransportChunksRequest* req,
-      v1::UnlockTransportChunksResponse* resp) override;
+      const v2::UnlockTransportChunksRequest* req,
+      v2::UnlockTransportChunksResponse* resp) override;
 
   grpc::Status BeginRegisterArtifact(
       grpc::ServerContext* ctx,
-      const v1::BeginRegisterArtifactRequest* req,
-      v1::BeginRegisterArtifactResponse* resp) override;
+      const v2::BeginRegisterArtifactRequest* req,
+      v2::BeginRegisterArtifactResponse* resp) override;
 
   grpc::Status CommitRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const v1::CommitRegisteredArtifactRequest* req,
-      v1::CommitRegisteredArtifactResponse* resp) override;
+      const v2::CommitRegisteredArtifactRequest* req,
+      v2::CommitRegisteredArtifactResponse* resp) override;
 
   grpc::Status AbortRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const v1::AbortRegisteredArtifactRequest* req,
-      v1::AbortRegisteredArtifactResponse* resp) override;
+      const v2::AbortRegisteredArtifactRequest* req,
+      v2::AbortRegisteredArtifactResponse* resp) override;
 
   grpc::Status FeedRegisterArtifactStream(
       grpc::ServerContext* ctx,
-      ::grpc::ServerReader<v1::FeedRegisterArtifactStreamRequest>* reader,
-      v1::FeedRegisterArtifactStreamResponse* resp) override;
+      ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>* reader,
+      v2::FeedRegisterArtifactStreamResponse* resp) override;
 
   // Testing/helper overload: process a vector of streaming requests without standing up a gRPC server
-  grpc::Status feed_register_artifact_stream_vector(const std::vector<v1::FeedRegisterArtifactStreamRequest>& reqs);
+  grpc::Status feed_register_artifact_stream_vector(const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs);
 
   grpc::Status KeepAliveRegisterArtifact(
       grpc::ServerContext* ctx,
-      const v1::KeepAliveRegisterArtifactRequest* req,
-      v1::KeepAliveRegisterArtifactResponse* resp) override;
+      const v2::KeepAliveRegisterArtifactRequest* req,
+      v2::KeepAliveRegisterArtifactResponse* resp) override;
 
   grpc::Status RevokeRegisteredArtifact(
       grpc::ServerContext* ctx,
-      const v1::RevokeRegisteredArtifactRequest* req,
-      v1::RevokeRegisteredArtifactResponse* resp) override;
+      const v2::RevokeRegisteredArtifactRequest* req,
+      v2::RevokeRegisteredArtifactResponse* resp) override;
 
-  // RFC-0014
+  // Key-based materialization and key mapping.
   grpc::Status MaterializeByKey(
       grpc::ServerContext* ctx,
-      const v1::MaterializeByKeyRequest* req,
-      v1::MaterializeByKeyResponse* resp) override;
+      const v2::MaterializeByKeyRequest* req,
+      v2::MaterializeByKeyResponse* resp) override;
+
+  grpc::Status ResolveArtifactFromDisk(
+      grpc::ServerContext* ctx,
+      const v2::ResolveArtifactFromDiskRequest* req,
+      v2::ResolveArtifactFromDiskResponse* resp) override;
+
   grpc::Status PublishReplicaKey(
       grpc::ServerContext* ctx,
-      const v1::PublishReplicaKeyRequest* req,
-      v1::PublishReplicaKeyResponse* resp) override;
+      const v2::PublishReplicaKeyRequest* req,
+      v2::PublishReplicaKeyResponse* resp) override;
 
   grpc::Status ResolveKeyMapping(
       grpc::ServerContext* ctx,
-      const v1::ResolveKeyMappingRequest* req,
-      v1::ResolveKeyMappingResponse* resp) override;
+      const v2::ResolveKeyMappingRequest* req,
+      v2::ResolveKeyMappingResponse* resp) override;
 
   grpc::Status GetArtifactIndexById(
       grpc::ServerContext* ctx,
-      const v1::GetArtifactIndexByIdRequest* req,
-      v1::GetArtifactIndexByIdResponse* resp) override;
+      const v2::GetArtifactIndexByIdRequest* req,
+      v2::GetArtifactIndexByIdResponse* resp) override;
 
   grpc::Status StartPersistence(
       grpc::ServerContext* ctx,
-      const v1::StartPersistenceRequest* req,
-      v1::StartPersistenceResponse* resp) override;
+      const v2::StartPersistenceRequest* req,
+      v2::StartPersistenceResponse* resp) override;
   grpc::Status QueryPersistenceStatus(
       grpc::ServerContext* ctx,
-      const v1::QueryPersistenceStatusRequest* req,
-      v1::QueryPersistenceStatusResponse* resp) override;
+      const v2::QueryPersistenceStatusRequest* req,
+      v2::QueryPersistenceStatusResponse* resp) override;
 
   // Status & listing RPCs
   grpc::Status GetWorkerStatus(
       grpc::ServerContext* ctx,
-      const v1::GetWorkerStatusRequest* req,
-      v1::GetWorkerStatusResponse* resp) override;
+      const v2::GetWorkerStatusRequest* req,
+      v2::GetWorkerStatusResponse* resp) override;
 
   grpc::Status GetDetailedStatus(
       grpc::ServerContext* ctx,
-      const v1::GetDetailedStatusRequest* req,
-      v1::GetDetailedStatusResponse* resp) override;
+      const v2::GetDetailedStatusRequest* req,
+      v2::GetDetailedStatusResponse* resp) override;
 
   // Legacy GetLoadedReplicas removed; use V2
 
   grpc::Status GetLoadedReplicasV2(
       grpc::ServerContext* ctx,
-      const v1::GetLoadedReplicasV2Request* req,
-      v1::GetLoadedReplicasV2Response* resp) override;
+      const v2::GetLoadedReplicasV2Request* req,
+      v2::GetLoadedReplicasV2Response* resp) override;
 
   MaterializationController& materialization_controller() const {
     return *materialization_controller_;
@@ -429,41 +439,6 @@ class StoreDaemonServiceImpl final : public v1::StoreDaemonService::Service {
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
   std::unique_ptr<PersistenceManager> persistence_mgr_;
-};
-
-class StoreDaemonServiceV2Impl final : public v2::StoreDaemonService::Service {
- public:
-  StoreDaemonServiceV2Impl(MaterializationController& materialization_controller, bool allow_high_card_attrs)
-      : materialization_controller_(materialization_controller), allow_high_card_attrs_(allow_high_card_attrs) {}
-
-  grpc::Status MaterializeReplica(
-      grpc::ServerContext* ctx,
-      const v2::MaterializeReplicaRequest* req,
-      v2::MaterializeReplicaResponse* resp) override;
-
-  grpc::Status MaterializeIntoTarget(
-      grpc::ServerContext* ctx,
-      const v2::MaterializeIntoTargetRequest* req,
-      v2::MaterializeIntoTargetResponse* resp) override;
-
-  grpc::Status MaterializeByKey(
-      grpc::ServerContext* ctx,
-      const v2::MaterializeByKeyRequest* req,
-      v2::MaterializeByKeyResponse* resp) override;
-
-  grpc::Status ResolveArtifactFromDisk(
-      grpc::ServerContext* ctx,
-      const v2::ResolveArtifactFromDiskRequest* req,
-      v2::ResolveArtifactFromDiskResponse* resp) override;
-
-  grpc::Status GetMaterializeCapabilities(
-      grpc::ServerContext* ctx,
-      const v2::GetMaterializeCapabilitiesRequest* req,
-      v2::GetMaterializeCapabilitiesResponse* resp) override;
-
- private:
-  MaterializationController& materialization_controller_;
-  bool allow_high_card_attrs_{false};
 };
 
 } // namespace tensorcast::daemon

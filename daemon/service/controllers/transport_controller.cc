@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Implementation of TransportController
 
@@ -18,8 +18,8 @@ using status_utils::to_grpc_status;
 
 grpc::Status TransportController::lock(
     RpcContext& rctx,
-    const v1::LockTransportChunksRequest& req,
-    v1::LockTransportChunksResponse& resp) {
+    const v2::LockTransportChunksRequest& req,
+    v2::LockTransportChunksResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.artifact.id", req.artifact_id());
   if (req.has_device_id())
@@ -76,8 +76,8 @@ grpc::Status TransportController::lock(
 
 grpc::Status TransportController::unlock(
     RpcContext& rctx,
-    const v1::UnlockTransportChunksRequest& req,
-    v1::UnlockTransportChunksResponse& /*resp*/) {
+    const v2::UnlockTransportChunksRequest& req,
+    v2::UnlockTransportChunksResponse& /*resp*/) {
   auto& span = rctx.span();
   if (rctx.allow_high_card_attrs())
     span->SetAttribute("tc.lock.token", req.lock_token());

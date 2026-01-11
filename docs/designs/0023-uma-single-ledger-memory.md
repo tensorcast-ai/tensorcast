@@ -92,7 +92,7 @@ None. The design does not introduce or modify persistent schemas.
 2. StoreEngine and daemon telemetry call UMA snapshot helpers exclusively and assert on `ChunkRecordView` data.
 3. CPU pin/export flows operate solely through UMA; direct-write grants and exports keep working in unit and integration tests.
 4. Documentation under `docs/architecture/`, `docs/internals/preemptible-memory.md`, and `core/store/README.md` presents UMA as the sole memory authority.
-5. Unit/integration tests covering CPU residency, export pinning, and plan/commit pass with the new architecture (`bazel test --define=use_fake_cuda=true //core/store/replica:unified_memory_authority_test //core/store/replica:unified_memory_authority_plan_commit_test`, plus daemon telemetry tests).
+5. Unit/integration tests covering CPU residency, export pinning, and plan/commit pass with the new architecture (`bazel test --test_env=TENSORCAST_CUDA_BACKEND=fake //core/store/replica:unified_memory_authority_test //core/store/replica:unified_memory_authority_plan_commit_test`, plus daemon telemetry tests).
 
 # References
 

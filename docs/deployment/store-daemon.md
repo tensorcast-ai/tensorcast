@@ -32,8 +32,7 @@ loopback config (port=0, storage under `~/.tensorcast`). Set listen/advertise
 addresses through the config file instead of CLI flags.
 You can also override config values inline with `--set KEY=VALUE` (repeatable).
 Example: `--set engine.memory_tiers.stable_bytes=4GB`.
-Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--pinned-pool-bytes`,
-`--enable-rdma`, `--log-level`.
+Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--enable-rdma`, `--log-level`.
 
 The CLI locates the binary from the wheel or development path automatically
 and extends ``LD_LIBRARY_PATH`` with the TensorCast shared library bundle as
@@ -125,7 +124,7 @@ Pair this panel with a counter visualization for `tc_store_operation_retries_tot
 ### Rollout checklist
 
 1. **Version alignment**: Ensure the staged Global Store schema, Store Daemon binary, and Python SDK wheel come from the same release. Run `uv run tensorcast --version` and `uv run tensorcast daemon status` to confirm the daemon reports the expected build metadata.
-2. **Pre-traffic validation**: Against staging, execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --define=use_fake_cuda=true`. These suites cover lease renewal, VRAM leased-in-place flows, and daemon session lifecycle.
+2. **Pre-traffic validation**: Against staging, execute `uv run pytest tests/python/test_register_lease_in_place_helper.py`, `uv run pytest tests/python/test_register_vram_leased_and_dvmp_stream.py`, and `bazel test //daemon:session_lifecycle_test --test_env=TENSORCAST_CUDA_BACKEND=fake`. These suites cover lease renewal, VRAM leased-in-place flows, and daemon session lifecycle.
 3. **Metrics watch**: Monitor the OpenTelemetry metrics defined in [Design 0010](../designs/0010-opentelemetry-unified-observability-design.md)—`tc_store_operation_latency_seconds`, `tc_store_operation_errors_total`, and `tc_store_operation_retries_total`—while introducing production traffic. Alert thresholds should track the historical p95 latency and error envelopes before legacy helpers are disabled.
 4. **Session audit**: Use `uv run tensorcast daemon status` to inspect the *Store Sessions* section and verify the session registry under `~/.tensorcast/store_sessions` reflects active clients with the expected lease/future counts.
 5. **Release checklist**: Cross-check the deployment steps against the [Store Session Release Checklist](./store-session-release-checklist.md) before announcing completion.
@@ -172,29 +171,59 @@ global_store_address: 127.0.0.1:6000
 P2P/RDMA communicator is configured via a single YAML/JSON file (no per‑field flags). Example:
 
 ```yaml
-enable_rdma: false
-stager:
-  stage_cpu_for_rdma: true
-  stage_chunk_mb_cpu: 4
-  stage_chunk_mb_gpu: 16
-  buffers_per_flow: 4
-rdma:
-  outstanding_wr: 64
-  ack_ttl_ms: 30000
-  traffic_class: 186
-  qp_timeout: 20
-  qp_retry: 7
-pool:
-  preregister_mr: true
-  pool_size_bytes: 8GB
-  chunk_bytes: 64MB
-transport:
-  tcp_conn_count: 8
-  connect_timeout_sec: 10
-  tcp_tos: 0
+communicator:
+  enable_rdma: false
+  stager:
+    stage_cpu_for_rdma: true
+    buffers_per_flow: 4
+    expected_gpu_channels: 0
+  rdma:
+    outstanding_wr: 64
+    ack_ttl_ms: 30000
+    traffic_class: 186
+    qp_timeout: 20
+    qp_retry: 7
+  transport:
+    tcp_conn_count: 8
+    connect_timeout_sec: 10
+    tcp_tos: 0
 ```
 
-Merge the communicator configuration into the daemon's unified config under `communicator.*`, and launch with `--config`. `pool_size_bytes` and `chunk_bytes` accept humanized sizes like `8GB`/`64MB` when embedded in the daemon config.
+Pinned staging pool sizing and chunking come from the daemon-wide pinned memory configuration (`DaemonConfig.pinned_memory`) via the `comm_gpu` / `comm_cpu` classes (`slice_bytes` + `pool_bytes`), not from `CommunicatorConfig`.
+
+## RDMA Environment Variables
+
+These are optional and only affect RDMA device selection. Runtime parameters
+still live in the unified config file.
+
+### TENSORCAST_IB_HCA
+
+Specifies InfiniBand HCA device names to use for RDMA. Multiple values are
+comma-separated. Any `=` characters in the value are stripped.
+
+```bash
+export TENSORCAST_IB_HCA="mlx5_bond0"
+export TENSORCAST_IB_HCA="mlx5_bond0,mlx5_bond1"
+```
+
+If unset, TensorCast auto-discovers available devices.
+
+### TENSORCAST_LLDP_FILE_NAME
+
+Path to an LLDP-style mapping file for rail ID selection in multi-rail
+configurations. Each non-comment line maps a network interface to PCI path,
+mlx5 device name, and rail ID.
+
+```
+eth1=0000:19:00.0,mlx5_bond100,1
+```
+
+```bash
+export TENSORCAST_LLDP_FILE_NAME="/path/to/lldp_config.txt"
+```
+
+Lines starting with `#` and blank lines are ignored. If unset, rail IDs are
+derived from the mlx5 device name (for example `mlx5_0` -> rail 0).
 
 ## Launch Example (Unified Config)
 
