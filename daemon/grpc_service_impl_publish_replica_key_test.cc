@@ -64,7 +64,8 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
       std::string_view,
       const std::vector<std::string>&,
       int64_t,
-      tensorcast::global_store::v1::ConnectionStatus) override {
+      tensorcast::global_store::v1::ConnectionStatus,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not needed for key-mapping tests");
   }
 
@@ -154,14 +155,16 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
   absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
       const tensorcast::global_store::v1::WorkerLocalState&,
       bool,
-      std::vector<tensorcast::global_store::v1::StateChange>*) override {
+      std::vector<tensorcast::global_store::v1::StateChange>*,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("synchronize_worker_state not needed for key-mapping tests");
   }
 
   absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
       std::string_view,
       uint64_t,
-      std::vector<tensorcast::common::v1::ReplicaInfo>*) override {
+      std::vector<tensorcast::common::v1::ReplicaInfo>*,
+      const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("request_full_state_sync not needed for key-mapping tests");
   }
 

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Worker domain artifact."""
 
@@ -45,6 +45,10 @@ class Worker:
     # Timestamps
     registered_at: Optional[datetime] = None
     last_heartbeat: Optional[datetime] = None
+
+    # HA state tracking
+    state_version: int = 1
+    state_checksum: str = ""
 
     # Latest memory tier state (optional)
     memory_tier_state: Optional[WorkerMemoryTierState] = None

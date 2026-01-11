@@ -4,6 +4,8 @@
 
 import time
 
+from duckdb import DuckDBPyConnection
+
 from tensorcast.global_store.config import GlobalStoreConfig, get_config
 from tensorcast.global_store.models import Worker, WorkerMemoryTierState
 from tensorcast.global_store.repositories.base import BaseRepository
@@ -23,6 +25,8 @@ _WORKER_SELECT = """
         workers.accepting_new_requests,
         workers.registered_at,
         workers.last_heartbeat,
+        COALESCE(workers.state_version, 1) AS state_version,
+        COALESCE(workers.state_checksum, '') AS state_checksum,
         mt.stable_total_bytes,
         mt.stable_used_bytes,
         mt.preemptible_total_bytes,
@@ -77,8 +81,8 @@ class WorkerRepository(BaseRepository):
             INSERT INTO workers (
                 worker_id, node_id, node_address, grpc_port, p2p_port,
                 mem_pool_total_size, mem_pool_available_size,
-                accepting_new_requests
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                accepting_new_requests, state_version, state_checksum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 worker.worker_id,
@@ -89,6 +93,8 @@ class WorkerRepository(BaseRepository):
                 worker.mem_pool_total_size,
                 worker.mem_pool_available_size,
                 worker.accepting_new_requests,
+                worker.state_version,
+                worker.state_checksum,
             ],
         )
 
@@ -275,6 +281,93 @@ class WorkerRepository(BaseRepository):
         result = cursor.execute(f"{_WORKER_SELECT} ORDER BY workers.registered_at DESC")
         return [self._row_to_model(row) for row in result.fetchall()]
 
+    def get_state_version(
+        self, worker_id: str, cursor: DuckDBPyConnection | None = None
+    ) -> int:
+        """Return the persisted state version for the worker."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            "SELECT state_version FROM workers WHERE worker_id = ?",
+            [worker_id],
+        ).fetchone()
+        if not result:
+            raise ValueError(f"Worker {worker_id} not found")
+        return int(result[0])
+
+    def get_state_checksum(
+        self, worker_id: str, cursor: DuckDBPyConnection | None = None
+    ) -> str:
+        """Return the persisted state checksum for the worker."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            "SELECT state_checksum FROM workers WHERE worker_id = ?",
+            [worker_id],
+        ).fetchone()
+        if not result:
+            raise ValueError(f"Worker {worker_id} not found")
+        return result[0] or ""
+
+    def ensure_state_version(
+        self, worker_id: str, cursor: DuckDBPyConnection | None = None
+    ) -> int:
+        """Ensure the worker has a non-zero state version."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            "SELECT state_version FROM workers WHERE worker_id = ?",
+            [worker_id],
+        ).fetchone()
+        if not result:
+            raise ValueError(f"Worker {worker_id} not found")
+        current_version = int(result[0] or 0)
+        if current_version <= 0:
+            current_version = 1
+            cursor.execute(
+                "UPDATE workers SET state_version = ? WHERE worker_id = ?",
+                [current_version, worker_id],
+            )
+        return current_version
+
+    def update_state_version_and_checksum(
+        self,
+        worker_id: str,
+        state_version: int,
+        state_checksum: str,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> None:
+        """Update the worker's state version and checksum together."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            """
+            UPDATE workers
+            SET state_version = ?, state_checksum = ?
+            WHERE worker_id = ?
+            RETURNING worker_id
+            """,
+            [state_version, state_checksum, worker_id],
+        ).fetchone()
+        if result is None:
+            raise ValueError(f"Worker {worker_id} not found")
+
+    def update_state_checksum(
+        self,
+        worker_id: str,
+        state_checksum: str,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> None:
+        """Update the worker's state checksum."""
+        cursor = cursor if cursor is not None else self.get_cursor()
+        result = cursor.execute(
+            """
+            UPDATE workers
+            SET state_checksum = ?
+            WHERE worker_id = ?
+            RETURNING worker_id
+            """,
+            [state_checksum, worker_id],
+        ).fetchone()
+        if result is None:
+            raise ValueError(f"Worker {worker_id} not found")
+
     def mark_as_stale(self, worker_id: str) -> bool:
         """Mark a worker as stale (for recovery purposes)."""
         cursor = self.get_cursor()
@@ -363,17 +456,17 @@ class WorkerRepository(BaseRepository):
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""
         memory_tier_state = None
-        if row[10] is not None:
+        if row[12] is not None:
             memory_tier_state = WorkerMemoryTierState(
-                stable_total_bytes=row[10],
-                stable_used_bytes=row[11],
-                preemptible_total_bytes=row[12],
-                preemptible_marked_bytes=row[13],
-                faults_per_sec=row[14] or 0.0,
-                rehydrate_p99_ns=row[15] or 0,
-                enable_preemptible=bool(row[16]),
-                memory_tier_config_json=row[17] or "{}",
-                snapshot_epoch_ns=row[18] or 0,
+                stable_total_bytes=row[12],
+                stable_used_bytes=row[13],
+                preemptible_total_bytes=row[14],
+                preemptible_marked_bytes=row[15],
+                faults_per_sec=row[16] or 0.0,
+                rehydrate_p99_ns=row[17] or 0,
+                enable_preemptible=bool(row[18]),
+                memory_tier_config_json=row[19] or "{}",
+                snapshot_epoch_ns=row[20] or 0,
             )
 
         return Worker(
@@ -387,6 +480,8 @@ class WorkerRepository(BaseRepository):
             accepting_new_requests=row[7],
             registered_at=row[8],
             last_heartbeat=row[9],
+            state_version=row[10],
+            state_checksum=row[11] or "",
             memory_tier_state=memory_tier_state,
         )
 
