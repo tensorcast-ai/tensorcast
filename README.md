@@ -38,7 +38,7 @@ pre-commit install
 # Ubuntu toolchain deps
 sudo add-apt-repository ppa:ubuntu-toolchain-r/test
 sudo apt update
-sudo apt install -y software-properties-common libxml2 libstdc++-12-dev gcc-13 g++-13
+sudo apt install -y software-properties-common libxml2 libstdc++-12-dev gcc-13 g++-13 python3
 ```
 
 ### Build

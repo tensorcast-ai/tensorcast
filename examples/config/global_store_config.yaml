@@ -1,9 +1,9 @@
 # Config metadata for auditing and cluster safety.
 meta:
-  # Schema version label for auditing; keep empty unless you enforce schema checks.
-  schema_version: ""
+  # Schema version label for auditing; update if you enforce schema checks.
+  schema_version: "v1"
   # Free-form description for operators and change tracking.
-  description: ""
+  description: "default-global-store"
   # Cluster identity token used by daemons to avoid split-brain; echoed by HealthCheck.
   cluster_token: ""
 
@@ -27,7 +27,7 @@ server:
     # Advertised port; 0 uses the bound listen port.
     port: 0
   # Thread pool size for serving RPCs; increase for many concurrent daemons/clients.
-  max_workers: 20
+  max_workers: 10
   grpc:
     # Max concurrent HTTP/2 streams; 0 uses gRPC default.
     max_concurrent_streams: 0
@@ -53,7 +53,7 @@ server:
       # Optional client CA bundle for mTLS; empty disables client cert checks.
       client_ca_file: ""
   # Prometheus metrics HTTP port; 0 lets the service choose an available port.
-  metrics_port: 8000
+  metrics_port: 18000
 
 # Worker lifecycle and cleanup policy.
 worker_policy:

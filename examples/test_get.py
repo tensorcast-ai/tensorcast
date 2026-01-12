@@ -1,11 +1,11 @@
-#  Copyright (c) 2025, TensorCast Team.
-
-import torch
+#  Copyright (c) 2026, TensorCast Team.
 
 import tensorcast as tc
 
-tc.init(mode="connect", address="127.0.0.1:50052")
+tc.init(mode="connect")
 
-device = "cuda:0" if torch.cuda.is_available() else "cpu"
-state_dict = tc.get(key="test:model:001", device=device)
-print(state_dict)
+device = "cuda:0"
+key = "demo:model:002"
+
+handle = tc.artifact(key=key)
+loaded = handle.tensor_dict(device=device)

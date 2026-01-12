@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import importlib.resources
 import json
 import os
 import secrets
@@ -29,12 +30,10 @@ from tensorcast.cli_utils.paths import (
     DaemonSession,
     GlobalSession,
     global_session_paths,
-    home_dir,
     runtime_lock_path,
     runtime_root,
 )
 from tensorcast.cli_utils.process import file_lock
-from tensorcast.daemon_runtime_config import dump_daemon_config
 from tensorcast.proto.config.v1 import common_pb2 as common_pb
 from tensorcast.proto.config.v1 import daemon_config_pb2 as cfg_pb
 from tensorcast.proto.config.v1 import global_store_config_pb2 as gsc_pb
@@ -43,13 +42,35 @@ _CLUSTER_TOKEN_FILENAME = "cluster_token"
 _CLUSTER_TOKEN_HMAC_KEY = b"tensorcast-cluster-token"
 
 
+def _discover_repo_example_config(filename: str) -> Path | None:
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "examples" / "config" / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _discover_packaged_example_config(filename: str) -> Path | None:
+    try:
+        root = importlib.resources.files("tensorcast")
+    except Exception:
+        return None
+    candidate = root / "examples" / "config" / filename
+    try:
+        if candidate.is_file():
+            return Path(str(candidate))
+    except Exception:
+        return None
+    return None
+
+
 def discover_global_store_config() -> Path | None:
     """Discover a default Global Store config.
 
     Order:
     1) $TENSORCAST_GLOBAL_STORE_CONFIG
-    2) ~/.tensorcast/config/global_store.yaml or .yml
-    3) None (caller should fall back to embedded config)
+    2) examples/config/global_store_config.yaml (repo checkout or packaged wheel)
+    3) None (caller should treat this as an error)
     """
 
     env = os.environ.get("TENSORCAST_GLOBAL_STORE_CONFIG")
@@ -58,12 +79,12 @@ def discover_global_store_config() -> Path | None:
         if p.exists():
             return p
 
-    cfg_dir = home_dir() / "config"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("global_store.yaml", "global_store.yml"):
-        candidate = cfg_dir / name
-        if candidate.exists():
-            return candidate
+    example = _discover_repo_example_config("global_store_config.yaml")
+    if example is not None:
+        return example
+    example = _discover_packaged_example_config("global_store_config.yaml")
+    if example is not None:
+        return example
     return None
 
 
@@ -123,8 +144,8 @@ def discover_daemon_config() -> Path | None:
 
     Order:
     1) $TENSORCAST_DAEMON_CONFIG
-    2) ~/.tensorcast/config/daemon.yaml or .yml
-    3) None (callers should fall back to embedded defaults)
+    2) examples/config/store_daemon_config.yaml (repo checkout or packaged wheel)
+    3) None (caller should treat this as an error)
     """
 
     env = os.environ.get("TENSORCAST_DAEMON_CONFIG")
@@ -133,12 +154,12 @@ def discover_daemon_config() -> Path | None:
         if path.exists():
             return path
 
-    cfg_dir = home_dir() / "config"
-    cfg_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("daemon.yaml", "daemon.yml"):
-        candidate = cfg_dir / name
-        if candidate.exists():
-            return candidate
+    example = _discover_repo_example_config("store_daemon_config.yaml")
+    if example is not None:
+        return example
+    example = _discover_packaged_example_config("store_daemon_config.yaml")
+    if example is not None:
+        return example
     return None
 
 
@@ -217,13 +238,11 @@ def materialize_daemon_config(
     if config_path is not None:
         return Path(config_path).expanduser()
 
-    cfg = build_embedded_daemon_config(
-        session, restrict_to_localhost=restrict_to_localhost
+    raise ServiceError(
+        "No Store Daemon config found. Provide --config or set "
+        "TENSORCAST_DAEMON_CONFIG. Expected examples/config/store_daemon_config.yaml "
+        "to be available in the repo or packaged wheel."
     )
-    effective_path = session.effective_config_path
-    effective_path.parent.mkdir(parents=True, exist_ok=True)
-    dump_daemon_config(cfg, effective_path)
-    return effective_path
 
 
 def _cluster_token_path() -> Path:
@@ -276,7 +295,7 @@ def build_embedded_global_store_config(
     session: GlobalSession | None = None,
     *,
     cluster_token: str,
-    listen_host: str = "127.0.0.1",
+    listen_host: str = "0.0.0.0",
     listen_port: int = 0,
     metrics_port: int = 0,
 ) -> gsc_pb.GlobalStoreConfig:
@@ -284,7 +303,7 @@ def build_embedded_global_store_config(
 
     inst = session or global_session_paths()
     cfg = gsc_pb.GlobalStoreConfig()
-    cfg.server.listen.host = listen_host or "127.0.0.1"
+    cfg.server.listen.host = listen_host or "0.0.0.0"
     cfg.server.listen.port = max(0, int(listen_port or 0))
     cfg.server.max_workers = 10
     cfg.server.metrics_port = max(0, int(metrics_port or 0))

@@ -17,7 +17,6 @@ import click
 import psutil
 
 from tensorcast.cli_utils.config import (
-    build_embedded_global_store_config,
     discover_global_store_config,
     dump_global_store_config,
     load_or_create_cluster_token,
@@ -30,6 +29,7 @@ from tensorcast.cli_utils.health import (
     ping_global_store,
     wait_for_global_store,
 )
+from tensorcast.cli_utils.network import resolve_connect_host
 from tensorcast.cli_utils.paths import (
     GlobalSession,
     clear_current_global_session_if_matches,
@@ -175,40 +175,49 @@ def _resolve_config(
     """Load or build a GlobalStoreConfig and persist it under the session."""
 
     pb: gsc_pb.GlobalStoreConfig | None = None
+    cfg_source: Path | None = None
     if config_path is not None:
-        pb = GlobalStoreConfig.load_proto_from_file(str(config_path))
+        cfg_source = Path(config_path)
     else:
         discovered = discover_global_store_config()
         if discovered:
-            pb = GlobalStoreConfig.load_proto_from_file(str(discovered))
-    if pb is None:
-        pb = build_embedded_global_store_config(
-            inst,
-            cluster_token=cluster_token,
-            listen_host=listen_host or "127.0.0.1",
-            listen_port=listen_port or 0,
-            metrics_port=metrics_port or 0,
-        )
-    else:
-        if listen_host is not None:
-            pb.server.listen.host = listen_host
-        if listen_port is not None:
-            pb.server.listen.port = max(0, int(listen_port))
-        if not pb.server.listen.host:
-            pb.server.listen.host = "127.0.0.1"
-        if metrics_port is not None:
-            pb.server.metrics_port = max(0, int(metrics_port))
-        if not pb.database.db_file:
-            pb.database.db_file = str(inst.root / "global_store.duckdb")
-        if not pb.observability.logging.file:
-            pb.observability.logging.file = str(inst.logs / "global_store.out")
-        if not pb.meta.schema_version:
-            pb.meta.schema_version = "v1"
-        if not pb.meta.description:
-            pb.meta.description = "generated-by-cli"
-        pb.meta.cluster_token = cluster_token
+            cfg_source = Path(discovered)
 
-    listen_host_eff = pb.server.listen.host or "127.0.0.1"
+    if cfg_source is None:
+        raise ServiceError(
+            "No Global Store config found. Provide --config or set "
+            "TENSORCAST_GLOBAL_STORE_CONFIG. Expected examples/config/global_store_config.yaml "
+            "to be available in the repo or packaged wheel."
+        )
+
+    try:
+        pb = GlobalStoreConfig.load_proto_from_file(str(cfg_source))
+    except Exception as exc:  # noqa: BLE001
+        raise ServiceError(
+            f"Failed to load Global Store config from {cfg_source}: {exc}"
+        ) from exc
+
+    assert pb is not None
+
+    if listen_host is not None:
+        pb.server.listen.host = listen_host
+    if listen_port is not None:
+        pb.server.listen.port = max(0, int(listen_port))
+    if not pb.server.listen.host:
+        pb.server.listen.host = "0.0.0.0"
+    if metrics_port is not None:
+        pb.server.metrics_port = max(0, int(metrics_port))
+    if not pb.database.db_file:
+        pb.database.db_file = str(inst.root / "global_store.duckdb")
+    if not pb.observability.logging.file:
+        pb.observability.logging.file = str(inst.logs / "global_store.out")
+    if not pb.meta.schema_version:
+        pb.meta.schema_version = "v1"
+    if not pb.meta.description:
+        pb.meta.description = "generated-by-cli"
+    pb.meta.cluster_token = cluster_token
+
+    listen_host_eff = pb.server.listen.host or "0.0.0.0"
     if pb.server.listen.port <= 0:
         pb.server.listen.port = select_free_port(
             preferred=50051, host=listen_host_eff, probe_span=32
@@ -431,7 +440,7 @@ def start_global_store(
         _cleanup_failed_start(proc, log_threads, inst, so, se)
         raise
 
-    connect_host = pb_cfg.server.listen.host or "127.0.0.1"
+    connect_host = resolve_connect_host(pb_cfg.server.listen.host)
     connect_port = int(pb_cfg.server.listen.port or 0)
     address = f"{connect_host}:{connect_port}"
     health = wait_for_global_store(address, timeout=None, proc=proc)
@@ -449,7 +458,7 @@ def start_global_store(
         cluster_token = health.cluster_token
 
     listen_host_eff = (
-        health.listen_host if health else pb_cfg.server.listen.host or "127.0.0.1"
+        health.listen_host if health else pb_cfg.server.listen.host or "0.0.0.0"
     )
     listen_port_eff = (
         health.listen_port if health else int(pb_cfg.server.listen.port or 0) or None

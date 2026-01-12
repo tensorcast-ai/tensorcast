@@ -36,7 +36,7 @@ Non-Goals
 - `tc.init(mode="connect", address="local")`  
 - `tc.init(mode="create", daemon_config_path=None, show_daemon_logs=True, install_signal_handlers=False, fate_share_sigterm=False)`  
   Connects to an existing daemon (`connect`) or launches a new per-process daemon (`create`); sets the global daemon address used by the process Store.  
-  **Default config:** if no config path is provided and none is discoverable, the SDK falls back to an embedded minimal daemon config (loopback bind, ephemeral or standard port, default cache path) so `tc.init(mode="create")` “just works” after install.
+  **Default config:** if no config path is provided, the SDK uses the discovered config (env or `examples/config/store_daemon_config.yaml` when available); if none is found, initialization fails with a config error.
 - `tc.shutdown()`, `tc.is_initialized()`.
 - `tc.artifact(key=None, artifact_id=None, disk_path=None, fallback=None) -> Artifact`  
   Lazy handle factory; no data transfer; resolves key/disk lazily on first touch. `artifact_async(...)` mirrors it.

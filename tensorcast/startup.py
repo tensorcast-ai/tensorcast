@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Runtime startup and connection utilities for TensorCast.
@@ -156,9 +156,9 @@ def init(
 
     When launching, the SDK will pick a config in the following order:
     1) user-provided `daemon_config_path`
-    2) discovered default via `discover_default_config_path()`
-    3) embedded minimal config (loopback bind, ephemeral port, writable cache
-       under ~/.tensorcast or a tempdir).
+    2) discovered default via `discover_default_config_path()` (env or
+       examples/config/store_daemon_config.yaml when available)
+    3) error if no config is found.
 
     Args:
         mode: Required init mode. Use "connect" to attach to an existing daemon,
@@ -229,7 +229,7 @@ def init(
                 "Use mode='connect' to attach to an existing daemon."
             )
 
-        # Launch requires a config file (optional; defaults to embedded)
+        # Launch requires a config file (optional; defaults to example config when available).
         cfg_path: Path | None = None
         restrict_localhost = True
         cfg = None

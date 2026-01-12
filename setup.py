@@ -525,6 +525,12 @@ class EditableWheelCommand(editable_wheel):
         copy_schema_sql()
         editable_wheel.run(self)
 
+class BuildPyCommand(build_py):
+    description = "Builds the Python package sources"
+
+    def run(self):
+        build_py.run(self)
+        copy_example_configs(self.build_lib)
 
 class CleanCommand(Command):
     """Custom clean command to tidy up the project root."""
@@ -578,6 +584,24 @@ ext_modules = []
 
 
 package_data = {}
+
+
+EXAMPLE_CONFIG_FILENAMES = (
+    "global_store_config.yaml",
+    "store_daemon_config.yaml",
+)
+
+
+def copy_example_configs(build_lib: str) -> None:
+    src_dir = Path(dir_path) / "examples" / "config"
+    dest_dir = Path(build_lib) / "tensorcast" / "examples" / "config"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for name in EXAMPLE_CONFIG_FILENAMES:
+        src = src_dir / name
+        if not src.is_file():
+            raise FileNotFoundError(f"Missing example config: {src}")
+        copyfile(src, dest_dir / name)
+
 
 
 def find_cuda_runtime_lib_dir():

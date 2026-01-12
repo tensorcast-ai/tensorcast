@@ -70,7 +70,9 @@ def test_start_service_backfills_ports(monkeypatch, tmp_path):
     monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
     monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
-    monkeypatch.setattr(service_manager, "wait_daemon_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+    )
     monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
     monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: fake_cfg)
     monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)
@@ -123,7 +125,9 @@ def test_start_service_applies_config_overrides(monkeypatch, tmp_path):
     monkeypatch.setattr(service_manager, "ensure_cpp_daemon_binary", lambda: Path("/bin/true"))
     monkeypatch.setattr(service_manager.subprocess, "Popen", _fake_popen)
     monkeypatch.setattr(service_manager, "ensure_process_started", lambda *args, **kwargs: None)
-    monkeypatch.setattr(service_manager, "wait_daemon_ready", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        service_manager, "wait_daemon_ready", lambda host, _port, **_kwargs: host
+    )
     monkeypatch.setattr(service_manager, "start_log_threads", lambda *args, **kwargs: [])
     monkeypatch.setattr(service_manager, "get_daemon_config", lambda *args, **kwargs: None)
     monkeypatch.setattr(service_manager, "preexec_fate_sharing", lambda: None)

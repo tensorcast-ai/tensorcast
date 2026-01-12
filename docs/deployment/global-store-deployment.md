@@ -19,7 +19,7 @@ The Global Store provides:
 
 ## Configuration
 
-Use a unified file-based configuration (YAML/JSON → Proto with strict validation); CLI flags and environment variables are not supported. See `examples/config/global_store_config.yaml` and pass it via `--config`.
+Use a unified file-based configuration (YAML/JSON → Proto with strict validation); CLI flags and environment variables are not supported. See `examples/config/global_store_config.yaml` and pass it via `--config`. The example defaults `database.db_file` to null (in-memory); set a persistent path for production deployments.
 
 ## Deployment Methods
 
