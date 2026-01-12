@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -246,6 +246,8 @@ def test_runtime_rejects_mismatched_cluster_token(monkeypatch):
         return SimpleNamespace(
             listen_host="127.0.0.1",
             listen_port=50052,
+            advertise_host=None,
+            advertise_port=None,
             metrics_port=None,
             cluster_token="cluster-def",
             version="v1",

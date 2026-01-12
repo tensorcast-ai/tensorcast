@@ -86,12 +86,12 @@ All Global Store RPCs use bounded retries with exponential backoff and jitter (`
 - The retry helper is centralized in `GlobalStoreClient::execute_rpc_with_retry`, so heartbeat, registration, sync, and health probes share the same policy.
 - HA config can override heartbeat/state sync/full sync RPC timeouts and retry limits to bound recovery latency without affecting other calls.
 - Endpoint selection: the daemon currently uses the first entry in `high_availability.global_store_endpoints` as `global_store_address` (single Global Store only; additional endpoints are ignored for now).
-- Advertise constraints: `RegisterWorker` rejects loopback or unspecified addresses; `resolve_advertised_address` prefers `server.advertise.host` and otherwise uses the listen host, then validates routability.
-- Health check: `GlobalStoreClient::initialize` issues a `HealthCheck` before registration; failing the probe aborts HA startup early instead of hanging during registration. When a `meta.cluster_token` is configured, the daemon refuses to proceed unless the HealthCheck token matches, preventing accidental cross-cluster registration.
+- Advertise constraints: `RegisterWorker` rejects loopback or unspecified addresses; `resolve_advertised_address` prefers `server.advertise.host`, then a routable `server.listen.host`, then the outbound route IP to the configured Global Store endpoint, and finally the default interface IP.
+- Health check: `GlobalStoreClient::initialize` issues a `HealthCheck` before registration; failing the probe aborts HA startup early instead of hanging during registration. When a `meta.cluster_token` is configured, the daemon refuses to proceed unless the HealthCheck token matches, preventing accidental cross-cluster registration. Endpoint metadata (bind/advertise) is returned by `GetServerInfo` for operators and CLI tooling.
 
 ## Responsibilities
 
-- Global Store: persist registry; accept heartbeats and synchronize state; compute/apply changes; serve expected state for full sync; reject ambiguous loopback registrations; expose cluster token via HealthCheck.
+- Global Store: persist registry; accept heartbeats and synchronize state; compute/apply changes; serve expected state for full sync; reject ambiguous loopback registrations; expose cluster token via HealthCheck and endpoints via GetServerInfo.
 - Store Daemon: maintain authoritative publishable inventory; send enhanced heartbeats; perform incremental/full syncs; enqueue safe retire for drift/removals; re-register on desync; prefetch adds returned by sync; never unload directly from heartbeat obsolete hints.
 
 ## Failure Modes and Recovery Behavior
@@ -204,6 +204,8 @@ server:
   listen:
     host: 0.0.0.0
     port: 50051
+  advertise:
+    host: 10.0.0.5            # routable address for clients/GetServerInfo
   max_workers: 20
 worker_policy:
   heartbeat_timeout: 30s
@@ -216,6 +218,8 @@ worker_policy:
 meta:
   cluster_token: <optional-cluster-id>               # propagated via HealthCheck
 ```
+
+If `server.advertise.host` is set, it must be routable (non-loopback/unspecified) or Global Store startup fails. When unset, the server auto-detects a routable IPv4 address and logs it.
 
 ### Store Daemon
 
@@ -251,7 +255,7 @@ Set `meta.cluster_token` in the daemon config to guard against cross-cluster con
   - `tc_active_workers`, `tc_replicas_total`, `tc_replicas_per_memtype`
   - gRPC interceptors export `tc_grpc_server_handled_total` and latency histograms
 - Daemon: OTEL spans around all RPCs plus HA counters exported through OTEL (`tc_daemon_ha_heartbeat_success_total`, `tc_daemon_ha_heartbeat_failure_total`, `tc_daemon_ha_sync_success_total`, `tc_daemon_ha_sync_failure_total`).
-- Health check: `tensorcast.global_store.v1.GlobalStoreService/HealthCheck` returns `cluster_token`, listen_host/port, metrics_port, and version.
+- Health check: `tensorcast.global_store.v1.GlobalStoreService/HealthCheck` returns `cluster_token` plus status; `GetServerInfo` returns bind (`listen_*`) and routable (`advertise_*`) endpoints, metrics_port, and version.
 
 ## Troubleshooting
 

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Lifecycle management for the Global Store service (single-instance)."""
 
@@ -236,11 +236,12 @@ def _build_instance_from_health(
     if isinstance(gs_state, dict):
         db_file = gs_state.get("db_file") or None
     db_file = db_file or health.db_file
-    address = (
-        f"{health.listen_host}:{health.listen_port}"
-        if health.listen_host and health.listen_port
-        else health.address
-    )
+    if health.advertise_host and health.advertise_port:
+        address = f"{health.advertise_host}:{health.advertise_port}"
+    elif health.listen_host and health.listen_port:
+        address = f"{health.listen_host}:{health.listen_port}"
+    else:
+        address = health.address
     return GlobalStoreInstance(
         id=inst.id,
         pid=int(pid or 0),
@@ -453,6 +454,12 @@ def start_global_store(
     listen_port_eff = (
         health.listen_port if health else int(pb_cfg.server.listen.port or 0) or None
     )
+    advertise_host_eff = (
+        health.advertise_host if health and health.advertise_host else None
+    )
+    advertise_port_eff = (
+        health.advertise_port if health and health.advertise_port else None
+    )
     metrics_port_eff = (
         health.metrics_port if health else int(pb_cfg.server.metrics_port or 0) or None
     )
@@ -463,9 +470,11 @@ def start_global_store(
     )
     if listen_host_eff is None:
         raise ServiceError("Global Store listen host unavailable after configuration")
+    advertise_host_eff = advertise_host_eff or listen_host_eff
+    advertise_port_eff = advertise_port_eff or listen_port_eff
     address_eff = (
-        f"{listen_host_eff}:{listen_port_eff}"
-        if listen_port_eff is not None
+        f"{advertise_host_eff}:{advertise_port_eff}"
+        if advertise_host_eff and advertise_port_eff is not None
         else listen_host_eff
     )
     session_state = {
@@ -477,6 +486,8 @@ def start_global_store(
             "address": address_eff,
             "listen_host": listen_host_eff,
             "listen_port": listen_port_eff,
+            "advertise_host": advertise_host_eff,
+            "advertise_port": advertise_port_eff,
             "metrics_port": metrics_port_eff,
             "config_path": str(effective_cfg_path),
             "db_file": db_file,

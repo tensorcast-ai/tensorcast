@@ -27,14 +27,13 @@ Persist worker state version and checksum in the Global Store database and make 
   - `tensorcast/global_store/services/recovery_service.py`
 - Heartbeat checksum validation recomputes checksum by scanning all replicas.
   - `tensorcast/global_store/services/recovery_service.py`
-- Canonical schema is in `schema.sql`; `init_db` re-applies it at startup.
+- Canonical schema is in `schema.sql`; `init_db` re-applies it for table/index creation only.
   - `tensorcast/global_store/db_utils.py`
 
 # Phases & Milestones
 
 - [ ] Phase 1: Schema and model updates
-  - [ ] Milestone: add `state_version` and `state_checksum` columns to `schema.sql` (with `ALTER TABLE ... IF NOT EXISTS`).
-  - [ ] Milestone: keep `tensorcast/global_store/init.sql` in sync.
+  - [ ] Milestone: add `state_version` and `state_checksum` columns to the `schema.sql` CREATE TABLE definition.
   - [ ] Milestone: extend `Worker` model and `WorkerRepository` SELECTs to include the new fields.
 
 - [ ] Phase 2: Transactional sync and checksum caching
@@ -49,7 +48,7 @@ Persist worker state version and checksum in the Global Store database and make 
 
 # Tasks
 
-- Add `state_version` and `state_checksum` columns in `schema.sql` and `tensorcast/global_store/init.sql`.
+- Add `state_version` and `state_checksum` columns in `schema.sql`.
 - Update `Worker` dataclass to include `state_version` and `state_checksum`.
 - Update `WorkerRepository._row_to_model` and `_WORKER_SELECT` to read new columns.
 - Add repository helpers for reading and updating state version and checksum.
@@ -64,12 +63,12 @@ Persist worker state version and checksum in the Global Store database and make 
   - `uv run pytest tests/python/global_store/test_recovery_service_checksum.py`
   - `uv run pytest tests/python/global_store/test_grpc_service.py`
 - Rollout:
-  - Startup re-applies `schema.sql`; new columns are added with `ALTER TABLE ... IF NOT EXISTS`.
+  - Startup re-applies `schema.sql` for table/index creation; schema updates require an explicit migration or fresh DB.
   - Stored checksum is backfilled on first access when empty.
 - Backout:
   - Revert recovery service logic to in-memory versions; new columns remain unused.
 
 # Risks & Tracking
 
-- Incorrect migration could leave columns missing in existing DBs; mitigate with explicit `ALTER TABLE` statements in `schema.sql` and startup logging.
+- Schema updates require coordinated migration (or a rebuild) when existing DBs must be preserved.
 - Transaction failures could mask partial updates; mitigate with clear error returns and metrics for sync failures.

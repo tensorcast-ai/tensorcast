@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import os
 import re
@@ -13,7 +13,7 @@ from tensorcast.logger import init_logger
 logger = init_logger(__name__)
 
 
-def parse_sql_file(file_path):
+def parse_sql_file(file_path: str) -> list[str]:
     """
     Parse a SQL file and extract individual SQL statements.
 
@@ -77,7 +77,7 @@ def _resolve_schema_path() -> str:
     )
 
 
-def init_db(db: DuckDBPyConnection):
+def init_db(db: DuckDBPyConnection) -> None:
     # Check if tables already exist in this specific connection
     res = db.execute("SHOW TABLES").fetchall()
     if len(res) > 0:
@@ -92,13 +92,12 @@ def init_db(db: DuckDBPyConnection):
             try:
                 db.execute(statement)
                 logger.debug(f"Executed SQL: {statement[:50]}...")
-            except Exception as e:
-                logger.error(f"Failed to execute SQL statement: {statement}")
-                logger.error(f"Error: {e}")
+            except Exception:
+                logger.exception("Failed to execute SQL statement: %s", statement)
                 raise
 
 
-def optimize_db(db: DuckDBPyConnection):
+def optimize_db(db: DuckDBPyConnection) -> None:
     """Run periodic maintenance (VACUUM/OPTIMIZE) on hot tables.
 
     Currently targets `replica_counters`, which receives frequent updates.

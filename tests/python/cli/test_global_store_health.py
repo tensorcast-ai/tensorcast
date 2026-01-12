@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -16,8 +16,15 @@ def test_ping_global_store_prefers_service_health(monkeypatch):
             return global_store_pb2.HealthCheckResponse(
                 status=global_store_pb2.Status.STATUS_OK,
                 cluster_token="cluster-abc",
+            )
+
+        def GetServerInfo(self, _request, timeout=None):
+            return global_store_pb2.GetServerInfoResponse(
+                status=global_store_pb2.Status.STATUS_OK,
                 listen_host="127.0.0.1",
                 listen_port=6100,
+                advertise_host="127.0.0.1",
+                advertise_port=6100,
                 metrics_port=7100,
                 db_file="/tmp/db",
                 version="v1",
@@ -30,6 +37,8 @@ def test_ping_global_store_prefers_service_health(monkeypatch):
     assert isinstance(health, GlobalStoreHealth)
     assert health.cluster_token == "cluster-abc"
     assert health.listen_port == 6100
+    assert health.advertise_host == "127.0.0.1"
+    assert health.advertise_port == 6100
     assert health.metrics_port == 7100
     assert health.db_file == "/tmp/db"
 
