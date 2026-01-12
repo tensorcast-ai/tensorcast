@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Slim service management façade for StoreDaemon (Linux-only).
 
@@ -95,7 +95,7 @@ def discover_default_config_path() -> Path | None:
 
     Order:
     1) $TENSORCAST_DAEMON_CONFIG if set and exists
-    2) ~/.tensorcast/config/daemon.yaml or ~/.tensorcast/config/daemon.yml
+    2) examples/config/store_daemon_config.yaml (repo checkout or packaged wheel)
     """
     return discover_daemon_config()
 
@@ -125,7 +125,12 @@ def start_service(
     - If config listen.port is 0 or missing, pick a free TCP port and pass derived config to daemon.
     - Startup is always blocking: this call returns only once the daemon is ready (or the process exits).
     """
-    cfg = load_daemon_config(config_path)
+    try:
+        cfg = load_daemon_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        raise ServiceError(
+            f"Failed to load Store Daemon config from {config_path}: {exc}"
+        ) from exc
     cfg_modified = False
     if config_overrides:
         try:
@@ -145,13 +150,12 @@ def start_service(
 
     # Restrict to loopback if requested (SDK private launch)
     if restrict_to_localhost:
-        with contextlib.suppress(Exception):
-            if cfg.server.listen.host != "127.0.0.1":
-                cfg.server.listen.host = "127.0.0.1"
-                cfg_modified = True
-            if cfg.server.p2p_listen.host and cfg.server.p2p_listen.host != "127.0.0.1":
-                cfg.server.p2p_listen.host = "127.0.0.1"
-                cfg_modified = True
+        if cfg.server.listen.host != "127.0.0.1":
+            cfg.server.listen.host = "127.0.0.1"
+            cfg_modified = True
+        if cfg.server.p2p_listen.host and cfg.server.p2p_listen.host != "127.0.0.1":
+            cfg.server.p2p_listen.host = "127.0.0.1"
+            cfg_modified = True
 
     host = cfg.server.listen.host or "127.0.0.1"
     port = int(cfg.server.listen.port or 0)
@@ -191,13 +195,13 @@ def start_service(
             cfg.high_availability.ClearField("global_store_endpoints")
             for endpoint in endpoints:
                 try:
-                    host, port_str = endpoint.rsplit(":", 1)
-                    port_val = int(port_str)
+                    _host, _port_str = endpoint.rsplit(":", 1)
+                    _port_val = int(_port_str)
                 except Exception as exc:  # noqa: BLE001
                     raise ServiceError(f"Invalid HA endpoint '{endpoint}'") from exc
                 ep = cfg.high_availability.global_store_endpoints.add()
-                ep.host = host
-                ep.port = port_val
+                ep.host = _host
+                ep.port = _port_val
             cfg_modified = True
     if ha_enabled is False and cfg.high_availability.global_store_endpoints:
         cfg.high_availability.ClearField("global_store_endpoints")
@@ -232,17 +236,23 @@ def start_service(
 
     try:
         preexec_fn = preexec_fate_sharing if fate_share else preexec_detached
-        use_pipes = blocking or fate_share
-        stdout_target = (
-            subprocess.PIPE
-            if use_pipes
-            else (so if so is not None else subprocess.DEVNULL)
-        )
-        stderr_target = (
-            subprocess.PIPE
-            if use_pipes
-            else (se if se is not None else subprocess.DEVNULL)
-        )
+        inherit_stdio = blocking and to_console
+        use_pipes = (blocking or fate_share) and not inherit_stdio
+        if inherit_stdio:
+            # Attach daemon stdio directly to the terminal to preserve crash logs.
+            stdout_target = None
+            stderr_target = None
+        else:
+            stdout_target = (
+                subprocess.PIPE
+                if use_pipes
+                else (so if so is not None else subprocess.DEVNULL)
+            )
+            stderr_target = (
+                subprocess.PIPE
+                if use_pipes
+                else (se if se is not None else subprocess.DEVNULL)
+            )
         proc = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
@@ -355,8 +365,44 @@ def start_service(
         _cleanup_failed_start(proc, log_threads, inst, so, se)
         raise
 
-    ready = wait_daemon_ready(connect_host, port, timeout=None, proc=proc)
-    if not ready:
+    # Persist session metadata early so SDK auto-discovery works while startup continues.
+    _persist_state()
+
+    fallback_hosts: list[str] = []
+    if connect_host not in {"127.0.0.1", "localhost"}:
+        fallback_hosts.append("127.0.0.1")
+
+    progress_cb = None
+    if to_console:
+        fallback_note = (
+            f" (fallback: {', '.join(fallback_hosts)})" if fallback_hosts else ""
+        )
+        click.echo(
+            f"Waiting for daemon readiness at {connect_host}:{port}{fallback_note}...",
+            err=True,
+        )
+
+        def _progress(elapsed_s: float, last_err: Exception | None) -> None:
+            suffix = f" Last error: {last_err}" if last_err else ""
+            click.echo(
+                (
+                    "Still waiting for daemon readiness at "
+                    f"{connect_host}:{port} ({elapsed_s:.1f}s elapsed).{suffix}"
+                ),
+                err=True,
+            )
+
+        progress_cb = _progress
+
+    ready_host = wait_daemon_ready(
+        connect_host,
+        port,
+        timeout=None,
+        proc=proc,
+        progress=progress_cb,
+        extra_hosts=fallback_hosts,
+    )
+    if not ready_host:
         retcode = proc.poll()
         _cleanup_failed_start(proc, log_threads, inst, so, se)
         log_hint = f" See logs under {inst.logs}" if persist_logs else ""
@@ -368,6 +414,9 @@ def start_service(
         raise ServiceError(
             f"Daemon exited during startup (address={connect_host}:{port})." + log_hint
         )
+    if ready_host != connect_host:
+        connect_host = ready_host
+        object.__setattr__(inst, "address", f"{connect_host}:{port}")
 
     # Best-effort backfill of effective listen/p2p ports from daemon once it is serving.
     with contextlib.suppress(Exception):

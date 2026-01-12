@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for Global Store configuration management."""
 
@@ -106,6 +106,14 @@ class TestConfiguration:
         config = GlobalStoreConfig.from_file(str(p))
         assert config.port == 50055
         assert str(config.db_file) == "/path/with/spaces.db"
+
+    def test_config_expands_user_db_path(self, tmp_path, monkeypatch):
+        cfg = {"database": {"db_file": "~/global_store.db"}}
+        p = tmp_path / "cfg.yaml"
+        p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        config = GlobalStoreConfig.from_file(str(p))
+        assert str(config.db_file) == str(tmp_path / "global_store.db")
 
     def test_config_repr(self):
         """Test configuration string representation."""

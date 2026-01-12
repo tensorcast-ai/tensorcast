@@ -179,7 +179,7 @@ Key schemas (schema_version=1):
 ## Daemon lifecycle and HA injection
 
 - Daemon config is materialized per session into `effective_daemon_config.yaml`; CLI overlays apply first, ports may be user-set or discovered, and `ha_endpoints` is injected from the resolved Global Store address unless `global_store_mode="none"`.
-- Startup waits for daemon readiness via `GetServerConfig` and does not treat an open TCP port as ready, then writes runtime and session state atomically. PID records are append-only and include role, argv, and log paths.
+- Startup writes initial runtime/session state after process spawn (before readiness) so SDK/CLI discovery can see the session, then waits for readiness via `GetServerConfig` and refreshes state. PID records are append-only and include role, argv, and log paths.
 - Only one daemon instance is allowed per `$TENSORCAST_HOME`; `daemon start` refuses to launch a second instance and instead surfaces the existing session details.
 - CLI launches are detached from the caller process so daemons (and any CLI-started Global Store) stay running after the command returns unless `--blocking` is used.
 - Blocking-mode shutdown handlers are idempotent to avoid duplicate stop attempts when signals and `atexit` both fire.

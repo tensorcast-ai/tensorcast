@@ -26,10 +26,10 @@ Use the unified YAML config and start via CLI (default `--global-store-mode` is 
 uv run tensorcast-cli daemon start --global-store-mode connect --global-store-address 127.0.0.1:50051
 ```
 
-If you omit `--config`, the CLI tries `$TENSORCAST_DAEMON_CONFIG` or
-`~/.tensorcast/config/daemon.yaml` and otherwise materializes an embedded
-loopback config (port=0, storage under `~/.tensorcast`). Set listen/advertise
-addresses through the config file instead of CLI flags.
+If you omit `--config`, the CLI tries `$TENSORCAST_DAEMON_CONFIG`, then
+`examples/config/store_daemon_config.yaml` (repo checkout or packaged wheel),
+and errors if no config is found. Set listen/advertise addresses through the
+config file instead of CLI flags.
 You can also override config values inline with `--set KEY=VALUE` (repeatable).
 Example: `--set engine.memory_tiers.stable_bytes=4GB`.
 Common shortcuts: `--stable-bytes`, `--mem-pool-size-bytes`, `--enable-rdma`, `--log-level`.
@@ -42,17 +42,24 @@ namespace) that live inside the active Python environment. This allows the
 daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
 
-During startup, the CLI can mirror daemon stdout and stderr into the invoking
-terminal in addition to persisting them under `~/.tensorcast/sessions/<id>/logs`.
 By default the daemon runs in the background after `tensorcast-cli daemon start`
-returns; add `--blocking` to keep it attached to the CLI, stream logs to the
-terminal, and stop it when the CLI exits (SIGTERM with a ~35s grace before
-SIGKILL).
+returns, and logs are persisted under `~/.tensorcast/sessions/<id>/logs` (view
+them with `uv run tensorcast-cli daemon logs`). Add `--blocking` to keep the daemon
+attached to the CLI, stream logs directly to the terminal (stdio inherited to
+avoid buffered crash output), and stop it when the CLI exits (SIGTERM with a
+~35s grace before SIGKILL). In blocking mode, logs are not persisted to the
+session log files.
 
 ## Manage Daemon Sessions
 
 Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
 current session id is stored in `~/.tensorcast/current_session`.
+Session metadata is written as soon as the daemon process starts (before
+readiness), so SDK `tc.init(mode="connect")` can discover the session while
+startup continues; retry if the daemon is still initializing. The CLI emits
+periodic readiness status messages if startup takes longer than a few seconds
+and probes both the configured listen host and loopback to avoid hanging on a
+non-local listen address.
 
 Only one Store Daemon instance is allowed per `$TENSORCAST_HOME`. If you run
 `tensorcast-cli daemon start` while another daemon is already running, the CLI

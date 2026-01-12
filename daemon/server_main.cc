@@ -419,6 +419,12 @@ int main(int argc, char** argv) {
   builder.AddChannelArgument("grpc.so_reuseport", cfg.server().grpc().so_reuseport() ? 1 : 0);
   builder.RegisterService(&service);
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
+
+  if (server == nullptr) {
+    LOG(ERROR) << "Failed to start gRPC server";
+    return 2;
+  }
+
   LOG(INFO) << "tensorcast-daemon listening on " << listen_addr;
 
   // Start worker lifecycle if configured
