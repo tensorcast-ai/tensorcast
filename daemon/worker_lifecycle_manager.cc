@@ -849,6 +849,20 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_RAM);
       mi->set_device_id(0);
     }
+    if (!entry.remote_memory_keys.empty()) {
+      if (entry.remote_memory_keys.size() != entry.buffer_sizes.size()) {
+        LOG(WARNING) << "State sync skipping remote keys for " << entry.key.artifact_id
+                     << " due to mismatched sizes (keys=" << entry.remote_memory_keys.size()
+                     << " buffers=" << entry.buffer_sizes.size() << ")";
+      } else {
+        for (const auto& key : entry.remote_memory_keys) {
+          mi->add_remote_memory_keys(key);
+        }
+        for (const auto size : entry.buffer_sizes) {
+          mi->add_buffer_sizes(size);
+        }
+      }
+    }
     rep->mutable_stats()->set_max_concurrency(1);
     // Reconcile current_requests with active PID refs tracked by the service
     rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(entry.key)));

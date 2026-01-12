@@ -142,6 +142,10 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
   [[nodiscard]] std::vector<void*> get_pointer(common::memory::MemoryLocation location) const
       ABSL_LOCKS_EXCLUDED(mutex_);
 
+  // Snapshot communicator registration metadata for HA state sync.
+  [[nodiscard]] std::optional<ExportRegistration> get_comm_registration_info(
+      common::memory::MemoryLocation location) const ABSL_LOCKS_EXCLUDED(mutex_);
+
   // Exposes the shared GPU allocation handle; primarily for ensuring the
   // lifetime of UMA-managed allocations during async transfers.
   [[nodiscard]] std::shared_ptr<common::memory::GpuDeviceMemory> get_gpu_allocation_shared() const

@@ -443,6 +443,24 @@ std::vector<void*> ReplicaLoadController::get_pointer(MemoryLocation location) c
   return std::vector<void*>({base});
 }
 
+std::optional<ExportRegistration> ReplicaLoadController::get_comm_registration_info(MemoryLocation location) const {
+  absl::MutexLock lock(&mutex_);
+  switch (location) {
+    case MemoryLocation::CPU:
+      if (!cpu_.comm_registered) {
+        return std::nullopt;
+      }
+      return cpu_.comm_registration_info;
+    case MemoryLocation::GPU:
+      if (!gpu_.comm_registered) {
+        return std::nullopt;
+      }
+      return gpu_.comm_registration_info;
+    default:
+      return std::nullopt;
+  }
+}
+
 std::shared_ptr<common::memory::GpuDeviceMemory> ReplicaLoadController::get_gpu_allocation_shared() const {
   absl::MutexLock lock(&mutex_);
   return gpu_.cuda_mem;

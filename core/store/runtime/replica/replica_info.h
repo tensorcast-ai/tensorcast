@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "core/common/memory/memory_location.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -36,6 +37,8 @@ struct ReplicaInventoryEntry {
   common::memory::MemoryLocation memory_location{common::memory::MemoryLocation::NONE};
   bool is_available{false};
   ReplicaPublishState publish_state{ReplicaPublishState::kLocalOnly};
+  std::vector<std::string> remote_memory_keys;
+  std::vector<uint64_t> buffer_sizes;
 };
 
 } // namespace tensorcast::store::runtime

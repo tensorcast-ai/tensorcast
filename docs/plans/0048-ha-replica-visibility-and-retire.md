@@ -41,7 +41,7 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 - Add `ReplicaPublishState` and per-replica storage in `core/store/runtime/replica/replica_runtime.{h,cc}` (keyed by `loading::ReplicaKey` with `ReplicaKeyHash`).
 - Extend `ReplicaRuntime` with:
   - `set_replica_publish_state(...)` / `get_replica_publish_state(...)`.
-  - `get_ha_inventory()` returning a lightweight `ReplicaInventoryEntry` (artifact_id, device_key, size_bytes, memory_type, is_available, publish_state).
+  - `get_ha_inventory()` returning a lightweight `ReplicaInventoryEntry` (artifact_id, device_key, size_bytes, memory_type, is_available, publish_state, remote_memory_keys, buffer_sizes).
 - Update ingestion/registration paths to advance publish state:
   - `ReplicaRuntime::record_ingestion_result` marks `LOCAL_ONLY` when `publish_to_global_store=false`, `PUBLISH_PENDING` on successful resident ingestion.
   - `core/store/runtime/metadata/metadata_gateway.cc:handle_ingestion_result` marks `PUBLISHED` on successful registration; if registration fails or GS disconnected, keep `PUBLISH_PENDING` for sync to reconcile.
