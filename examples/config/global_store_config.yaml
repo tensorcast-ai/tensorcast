@@ -20,6 +20,12 @@ server:
     host: 0.0.0.0
     # Listen port; 0 picks an ephemeral port for tests.
     port: 50051
+  # Advertised address for clients/GetServerInfo; auto-detected if unset.
+  advertise:
+    # Routable IP/DNS name for clients; leave empty to auto-detect.
+    host: ""
+    # Advertised port; 0 uses the bound listen port.
+    port: 0
   # Thread pool size for serving RPCs; increase for many concurrent daemons/clients.
   max_workers: 20
   grpc:

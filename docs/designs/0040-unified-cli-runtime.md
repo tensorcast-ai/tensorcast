@@ -173,7 +173,7 @@ Key schemas (schema_version=1):
 - Single instance per `$TENSORCAST_HOME`, guarded by `global_store.lock` and runtime state. Healthy instances are reused; unhealthy records are cleaned before launching a new `gs-*` session.
 - Start command: `["uv", "run", "-m", "tensorcast.global_store", "--config", <path>]`, with stdout/stderr pumped to `logs/global_store.out|err`.
 - Listen host/port honor config and CLI overrides; port `0` is supported and the actual port is written back to state after `add_insecure_port`.
-- Health/readiness: gRPC health service plus a lightweight `GetVersion` fallback. Responses echo `listen_host`, `listen_port`, `metrics_port`, and `cluster_token` for split-brain detection.
+- Health/readiness: `HealthCheck` (status + `cluster_token`) plus `GetServerInfo` for `listen_*`/`advertise_*` endpoints and `metrics_port`, with a gRPC health fallback when Global Store probes fail.
 - Cluster token is implicit and persisted in runtime state; a mismatch between runtime and probed token fails fast. If a token exists but no healthy GS is reachable, the orchestrator refuses to create a new cluster unless the caller explicitly cleans state.
 
 ## Daemon lifecycle and HA injection

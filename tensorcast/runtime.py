@@ -11,7 +11,11 @@ from typing import Any, Literal
 from tensorcast.cli_utils import global_store_manager, service_manager
 from tensorcast.cli_utils.config import materialize_daemon_config
 from tensorcast.cli_utils.errors import ServiceError
-from tensorcast.cli_utils.health import ping_daemon, ping_global_store
+from tensorcast.cli_utils.health import (
+    GlobalStoreHealth,
+    ping_daemon,
+    ping_global_store,
+)
 from tensorcast.cli_utils.paths import (
     clear_current_session_if_matches,
     get_current_session_id,
@@ -295,34 +299,42 @@ def _split_address(address: str | None) -> tuple[str | None, int | None]:
         return address, None
 
 
-def _dial_address_from_health(candidate: str, health: "object") -> str:
-    """Derive a routable dial address from a candidate host:port and a health payload.
+def _dial_address_from_health(candidate: str, health: GlobalStoreHealth) -> str:
+    """Derive a routable dial address from a candidate host:port and server info payload.
 
-    Global Store health responses include listen_host/listen_port (bind address), where
-    listen_host may legitimately be "0.0.0.0". That value is not a valid dial target.
+    Global Store GetServerInfo responses expose listen_* (bind) and advertise_* (dial) addresses.
+    listen_host may legitimately be "0.0.0.0" and is not a valid dial target.
 
     Policy:
-    - Prefer the candidate host if provided (CLI / env / runtime record).
-    - Use the health port to backfill the real bound port (especially when config uses port=0).
-    - If candidate host is missing or unspecified, fall back to resolve_connect_host(...) behavior.
+    - Prefer the candidate host if provided and not unspecified (CLI / env / runtime record).
+    - Prefer advertise_host/advertise_port from server info when candidate host is missing or unspecified.
+    - Use listen_port to backfill the bound port (especially when config uses port=0).
     """
 
     host_hint, port_hint = _split_address(candidate)
     # Lazily import to avoid import cycles in CLI/runtime code paths.
-    from tensorcast.cli_utils.network import resolve_connect_host
+    from tensorcast.cli_utils.network import is_unspecified_host, resolve_connect_host
 
-    # Pick host: prefer explicit candidate host (routable), otherwise derive from health listen_host.
-    host = host_hint
-    if not host:
-        listen_host = getattr(health, "listen_host", None)
-        host = resolve_connect_host(listen_host)
+    advertise_host = health.advertise_host
+    advertise_port = health.advertise_port
+
+    explicit_host = (
+        host_hint if host_hint and not is_unspecified_host(host_hint) else None
+    )
+    if explicit_host:
+        host = explicit_host
+    elif advertise_host:
+        host = advertise_host
     else:
-        # If user passed an unspecified bind-like host, normalize it.
-        host = resolve_connect_host(host)
+        host = resolve_connect_host(health.listen_host)
 
-    # Pick port: prefer health.listen_port when available (it reflects actual bound port).
-    listen_port = getattr(health, "listen_port", None)
-    port = int(listen_port) if listen_port else (int(port_hint) if port_hint else None)
+    explicit_port = port_hint if port_hint and port_hint > 0 else None
+    port = (
+        explicit_port
+        or int(advertise_port or 0)
+        or int(health.listen_port or 0)
+        or None
+    )
 
     if host and port:
         return f"{host}:{port}"

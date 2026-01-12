@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -6,6 +6,7 @@
 #include "absl/time/time.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
@@ -25,7 +26,8 @@ TEST_CASE("TTL prefetch expiry drops placement pin", "[daemon][lifecycle][ttl]")
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
   // LipManager is required by API but not used by this test path
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:ttl";
@@ -52,7 +54,8 @@ TEST_CASE("PID exit precedence drops UseLease and RefTracker refs", "[daemon][li
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:pid";
@@ -82,7 +85,8 @@ TEST_CASE("Mixed guards: UseLease + Deadline retires on whichever fails first", 
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:mixed_use_deadline";
@@ -117,7 +121,8 @@ TEST_CASE(
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:mixed_commit_deadline";
@@ -148,7 +153,8 @@ TEST_CASE("Deadline guard generation: renew prevents stale expiry", "[daemon][li
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:renew";
@@ -182,7 +188,8 @@ TEST_CASE("Manual guard: placement lease requires explicit release", "[daemon][l
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:manual";
@@ -210,7 +217,8 @@ TEST_CASE("Manual release of UseLease drops use_count and RefTracker", "[daemon]
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:manual_use";
@@ -240,7 +248,8 @@ TEST_CASE("Finalizer idempotency on UseLease manual retire", "[daemon][lifecycle
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:idemp_use";
@@ -269,7 +278,8 @@ TEST_CASE("Deadline expiry idempotency on PlacementLease", "[daemon][lifecycle][
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:idemp_deadline";
@@ -294,7 +304,8 @@ TEST_CASE("next_deadline is InfiniteFuture for manual-only leases", "[daemon][li
   // Arrange
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const std::string artifact_id = "mi2:test:no_deadlines";

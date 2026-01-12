@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
@@ -17,7 +18,8 @@ using tensorcast::daemon::SessionLifecycleManager;
 TEST_CASE("PID guards removed on last UseLease retire", "[daemon][lifecycle][pid]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   RegistrationManager reg;
   SessionLifecycleManager mgr(sessions, refs, *lip);
 

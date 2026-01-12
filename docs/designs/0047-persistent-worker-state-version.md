@@ -69,22 +69,22 @@ Store state version and checksum in the `workers` table. This keeps identity and
 
 # Schema Changes
 
-Add columns to the canonical schema.
+Define the columns in the canonical schema (declarative; no in-place migrations).
 
 ```sql
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_version BIGINT NOT NULL DEFAULT 1;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS state_checksum TEXT NOT NULL DEFAULT '';
+state_version BIGINT NOT NULL DEFAULT 1,
+state_checksum TEXT NOT NULL DEFAULT ''
 ```
 
 # Trade-offs & Risks
 
 - Additional writes to `workers` on sync success; expected to be low frequency compared to heartbeats.
-- Migrations must handle existing databases; `ALTER TABLE ... IF NOT EXISTS` mitigates this.
+- Schema updates require an explicit migration or a fresh database; startup does not alter existing tables.
 - Stored checksum could become stale if external writers bypass recovery service; mitigate by routing changes through recovery service or validating on demand.
 
 # Compatibility & Acceptance Criteria
 
-- Existing workers default to `state_version = 1` and empty checksum on upgrade.
+- Workers default to `state_version = 1` and empty checksum.
 - Version only increments when all state changes apply successfully.
 - Heartbeat checksum comparisons use stored checksum, not full-table scans.
 - Restart retains the last known version and checksum.

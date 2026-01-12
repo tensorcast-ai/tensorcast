@@ -452,7 +452,7 @@ None. The dashboard is read‑only and uses existing gRPC/metrics. No DuckDB tab
 # Compatibility & Acceptance Criteria
 
 Compatibility
-- No changes to Global Store server behavior or schema.
+- Dashboard uses existing read-only Global Store RPCs (HealthCheck/ListActiveWorkers/replica queries); optional GetServerInfo is used only by CLI tooling.
 - Uses existing proto errors/status mapping; tolerant to future additive RPC fields.
 
 Acceptance Criteria (MVP)

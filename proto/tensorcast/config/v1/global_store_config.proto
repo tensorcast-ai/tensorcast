@@ -10,6 +10,11 @@ message GlobalServer {
   reserved 1, 4; // port, host
   reserved "port", "host";
   tensorcast.config.v1.SocketAddress listen = 10;
+  // Optional externally advertised address for clients. If unset or set to an
+  // unspecified/loopback host, the Global Store attempts to auto-detect a
+  // routable IPv4 address for GetServerInfo and logs. The port defaults to the
+  // bound listen port when not provided.
+  tensorcast.config.v1.SocketAddress advertise = 12;
   uint32 max_workers = 2;
   tensorcast.config.v1.GrpcServer grpc = 3;
   uint32 metrics_port = 11; // Prometheus metrics HTTP port (0 = auto)

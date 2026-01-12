@@ -2,6 +2,9 @@
 
 #include "daemon/worker_lifecycle_manager.h"
 
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -170,7 +173,100 @@ bool is_loopback_or_unspecified(absl::string_view addr) {
 
   return trimmed == "127.0.0.1" || trimmed == "::" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1";
 }
+
+struct ParsedEndpoint {
+  std::string host;
+  uint16_t port{0};
+};
+
+std::optional<ParsedEndpoint> parse_endpoint(std::string_view address) {
+  if (address.empty()) {
+    return std::nullopt;
+  }
+  std::string_view host;
+  std::string_view port_part;
+  if (address.front() == '[') {
+    const auto close = address.find(']');
+    if (close == std::string_view::npos) {
+      return std::nullopt;
+    }
+    host = address.substr(1, close - 1);
+    if (close + 1 >= address.size() || address[close + 1] != ':') {
+      return std::nullopt;
+    }
+    port_part = address.substr(close + 2);
+  } else {
+    const auto pos = address.rfind(':');
+    if (pos == std::string_view::npos) {
+      return std::nullopt;
+    }
+    host = address.substr(0, pos);
+    port_part = address.substr(pos + 1);
+  }
+  if (host.empty() || port_part.empty()) {
+    return std::nullopt;
+  }
+  uint32_t port = 0;
+  try {
+    port = static_cast<uint32_t>(std::stoi(std::string(port_part)));
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+  if (port == 0 || port > 65535) {
+    return std::nullopt;
+  }
+  return ParsedEndpoint{std::string(host), static_cast<uint16_t>(port)};
+}
+
+std::optional<std::string> resolve_route_ip(const ParsedEndpoint& endpoint) {
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  addrinfo* res = nullptr;
+  const std::string port_str = std::to_string(endpoint.port);
+  if (getaddrinfo(endpoint.host.c_str(), port_str.c_str(), &hints, &res) != 0) {
+    return std::nullopt;
+  }
+  absl::Cleanup cleanup = [res] { freeaddrinfo(res); };
+
+  for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+    const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd < 0) {
+      continue;
+    }
+    if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+      sockaddr_in local{};
+      socklen_t len = sizeof(local);
+      if (getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0) {
+        char buffer[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &local.sin_addr, buffer, sizeof(buffer)) != nullptr) {
+          ::close(fd);
+          return std::string(buffer);
+        }
+      }
+    }
+    ::close(fd);
+  }
+  return std::nullopt;
+}
+
 } // namespace
+
+const char* WorkerLifecycleManager::advertised_source_to_cstr(AdvertisedAddressSource source) {
+  switch (source) {
+    case AdvertisedAddressSource::kExplicit:
+      return "explicit";
+    case AdvertisedAddressSource::kListen:
+      return "listen";
+    case AdvertisedAddressSource::kRoute:
+      return "route";
+    case AdvertisedAddressSource::kDefault:
+      return "default";
+  }
+  return "unknown";
+}
 
 WorkerLifecycleManager::WorkerLifecycleManager(
     gsl::not_null<std::shared_ptr<store::StoreEngine>> engine,
@@ -202,27 +298,44 @@ std::string WorkerLifecycleManager::derive_node_id() {
   return "unknown";
 }
 
-absl::StatusOr<std::string> WorkerLifecycleManager::resolve_advertised_address(
+absl::StatusOr<WorkerLifecycleManager::ResolvedAdvertisedAddress> WorkerLifecycleManager::resolve_advertised_address(
     const WorkerLifecycleManager::Options& opts) {
-  std::string addr = opts.advertise_host;
-  if (addr.empty()) {
-    addr = WorkerLifecycleManager::host_from_listen(opts.listen_addr);
+  if (!opts.advertise_host.empty()) {
+    if (is_loopback_or_unspecified(opts.advertise_host)) {
+      return absl::InvalidArgumentError(
+          "Global Store registration requires advertise_host to be routable when configured; "
+          "loopback/unspecified values are not allowed.");
+    }
+    return ResolvedAdvertisedAddress{.host = opts.advertise_host, .source = AdvertisedAddressSource::kExplicit};
   }
 
-  if (is_loopback_or_unspecified(addr)) {
-    const std::string default_ip = communicator::misc::get_default_ip();
-    if (!default_ip.empty()) {
-      addr = default_ip;
+  const std::string listen_host = WorkerLifecycleManager::host_from_listen(opts.listen_addr);
+  if (!listen_host.empty() && !is_loopback_or_unspecified(listen_host)) {
+    return ResolvedAdvertisedAddress{.host = listen_host, .source = AdvertisedAddressSource::kListen};
+  }
+
+  if (!opts.global_store_addr.empty()) {
+    const auto endpoint = parse_endpoint(opts.global_store_addr);
+    if (endpoint.has_value() && !is_loopback_or_unspecified(endpoint->host)) {
+      const auto route_ip = resolve_route_ip(*endpoint);
+      if (route_ip.has_value() && !is_loopback_or_unspecified(*route_ip)) {
+        return ResolvedAdvertisedAddress{.host = *route_ip, .source = AdvertisedAddressSource::kRoute};
+      }
     }
   }
 
-  if (is_loopback_or_unspecified(addr)) {
+  const std::string default_ip = communicator::misc::get_default_ip();
+  if (!default_ip.empty() && !is_loopback_or_unspecified(default_ip)) {
+    return ResolvedAdvertisedAddress{.host = default_ip, .source = AdvertisedAddressSource::kDefault};
+  }
+
+  if (is_loopback_or_unspecified(listen_host)) {
     return absl::InvalidArgumentError(
         "Global Store registration requires a routable advertise_host. Provide --advertise_host with a non-loopback "
         "address or configure listen_addr accordingly.");
   }
 
-  return addr;
+  return ResolvedAdvertisedAddress{.host = listen_host, .source = AdvertisedAddressSource::kListen};
 }
 
 absl::Status WorkerLifecycleManager::start() {
@@ -237,7 +350,7 @@ absl::Status WorkerLifecycleManager::start() {
   if (!node_addr_or.ok()) {
     return node_addr_or.status();
   }
-  const std::string node_addr = *node_addr_or;
+  const std::string node_addr = node_addr_or->host;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   {
     std::lock_guard<std::mutex> lock(state_mu_);
@@ -253,6 +366,11 @@ absl::Status WorkerLifecycleManager::start() {
     return absl::InvalidArgumentError(
         "WorkerLifecycleManager requires a non-zero p2p_port when Global Store HA is enabled; configure --p2p_listen.");
   }
+
+  LOG(INFO) << "Resolved advertised address for Global Store registration: " << node_addr
+            << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
+  LOG(INFO) << "Global Store registration endpoints: listen=" << opts_.listen_addr << " advertise=" << node_addr << ":"
+            << grpc_port << " p2p_port=" << opts_.p2p_port;
 
   auto reg_or = global_store_->register_worker(
       node_id_,
@@ -917,7 +1035,7 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   if (!node_addr_or.ok()) {
     return node_addr_or.status();
   }
-  const std::string node_addr = *node_addr_or;
+  const std::string node_addr = node_addr_or->host;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   std::string previous_worker_id;
   {
@@ -928,6 +1046,8 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
     }
   }
   const bool recovery = preserve_identity && !previous_worker_id.empty();
+  LOG(INFO) << "Resolved advertised address for Global Store re-registration: " << node_addr
+            << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
   auto reg_or = global_store_->register_worker(
       node_id_,
       node_addr,

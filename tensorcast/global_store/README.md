@@ -336,7 +336,13 @@ database:
   db_file: /var/lib/tensorcast/global_store.db  # null for in-memory
 
 server:
+  # Bind address (server-side); 0.0.0.0 exposes all interfaces.
   listen:
+    host: 0.0.0.0
+    port: 50051
+  # Advertise address for clients/GetServerInfo; auto-detected if unset.
+  advertise:
+    host: 10.0.0.5
     port: 50051
   max_workers: 10
 
@@ -348,6 +354,8 @@ worker_policy:
     snapshot_retention: "600s"
     snapshot_max_rows: 200
 ```
+
+`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value.
 
 ## Extending the Global Store
 

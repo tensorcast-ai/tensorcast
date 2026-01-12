@@ -580,6 +580,13 @@ def global_status(gs_session: str | None, as_json: bool):
                 "address": health.address,
                 "listen_host": health.listen_host,
                 "listen_port": health.listen_port,
+                "advertise_host": health.advertise_host,
+                "advertise_port": health.advertise_port,
+                "advertise_address": (
+                    f"{health.advertise_host}:{health.advertise_port}"
+                    if health.advertise_host and health.advertise_port
+                    else None
+                ),
                 "metrics_port": health.metrics_port,
                 "cluster_token": health.cluster_token,
                 "version": health.version,
@@ -599,6 +606,8 @@ def global_status(gs_session: str | None, as_json: bool):
         click.echo("  state  : recorded")
     if health:
         click.echo("  health : SERVING")
+        if health.advertise_host and health.advertise_port:
+            click.echo(f"  advertise: {health.advertise_host}:{health.advertise_port}")
         if health.metrics_port:
             click.echo(f"  metrics: {health.metrics_port}")
     else:

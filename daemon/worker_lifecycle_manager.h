@@ -69,7 +69,22 @@ class WorkerLifecycleManager {
       const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory);
 
  private:
-  static absl::StatusOr<std::string> resolve_advertised_address(const WorkerLifecycleManager::Options& opts);
+  enum class AdvertisedAddressSource {
+    kExplicit,
+    kListen,
+    kRoute,
+    kDefault,
+  };
+
+  struct ResolvedAdvertisedAddress {
+    std::string host;
+    AdvertisedAddressSource source{AdvertisedAddressSource::kDefault};
+  };
+
+  static const char* advertised_source_to_cstr(AdvertisedAddressSource source);
+
+  static absl::StatusOr<ResolvedAdvertisedAddress> resolve_advertised_address(
+      const WorkerLifecycleManager::Options& opts);
 
   static std::string host_from_listen(const std::string& listen) {
     auto pos = listen.find(':');

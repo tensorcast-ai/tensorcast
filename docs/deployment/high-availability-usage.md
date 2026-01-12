@@ -15,7 +15,7 @@ TensorCast HA keeps the single Global Store resilient and consistent with Store 
 ### Global Store
 - **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and preserves persisted `state_version`/`state_checksum`.
 - **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts (heartbeats require `state_version >= 1`); incremental sync applies additions/removals with “addition over removal” semantics, transactionally bumps version/checksum on success, and no-op sync refreshes cached checksum; full-state sync returns the expected set without bumping versions.
-- **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, listen endpoints, metrics port, and version.
+- **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, while `GetServerInfo` returns bind (`listen_*`) endpoints, advertise (`advertise_*`) endpoints, metrics port, and version.
 
 ### Store Daemon
 - **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
@@ -36,6 +36,8 @@ server:
   listen:
     host: 0.0.0.0
     port: 50051
+  advertise:
+    host: 10.0.0.5            # routable address for clients/GetServerInfo
   max_workers: 20
 worker_policy:
   heartbeat_timeout: 30s
@@ -48,6 +50,8 @@ worker_policy:
 meta:
   cluster_token: <optional-cluster-id>               # echoed by HealthCheck
 ```
+
+If `server.advertise.host` is set, it must be routable (non-loopback/unspecified) or the Global Store will fail fast on startup. Leave it unset to let the service auto-detect a routable IPv4 address.
 
 ### Store Daemon (proto: `tensorcast.config.v1.DaemonConfig`)
 
@@ -75,7 +79,7 @@ high_availability:
 
 > The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address` or `--global-store-endpoints`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
 >
-> Note: `listen.host: 0.0.0.0` is a bind-all address (server-side). Clients should connect using a routable IP/DNS name (e.g. `10.0.0.5:50051`). TensorCast will not treat `0.0.0.0` as a dial target even if the Global Store reports it via health metadata.
+> Note: `listen.host: 0.0.0.0` is a bind-all address (server-side). Clients should connect using a routable IP/DNS name (e.g. `10.0.0.5:50051`). TensorCast uses `advertise_*` for dial targets and ignores `0.0.0.0` in bind metadata.
 
 ## Usage
 
@@ -167,7 +171,8 @@ resp = stub.SynchronizeWorkerState(
 
 - **Metrics**: Global Store exports Prometheus metrics (e.g., `tc_state_sync_total`, `tc_state_sync_seconds`, `tc_active_workers`, `tc_replicas_total`, `tc_grpc_server_handled_total`). Scrape `http://<host>:<metrics_port>/metrics`.
 - **Health**:
-  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/HealthCheck`
+  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/HealthCheck` (status + cluster token)
+  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/GetServerInfo` (bind/advertise endpoints, metrics, version)
   - Inventory: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/ListActiveWorkers`
 - **Daemon visibility**: OTEL spans wrap all Global Store RPCs; counters (hb_success/failure, sync_success/failure) are exported via the configured OTEL sink when enabled.
 
@@ -183,7 +188,7 @@ resp = stub.SynchronizeWorkerState(
 
 1. Add a persistent `database.db_file` and optional `meta.cluster_token` to the Global Store config, then restart with `uv run tensorcast global start --config=...`.
 2. Update daemon config to include `high_availability` and a routable `server.advertise.host`/`p2p_listen.port`, then restart with `uv run tensorcast daemon start --global-store-address <addr>`.
-3. Verify via `HealthCheck`, metrics scrape, and a forced `RequestFullStateSync` (daemon restart) before rolling out broadly.
+3. Verify via `HealthCheck` + `GetServerInfo`, metrics scrape, and a forced `RequestFullStateSync` (daemon restart) before rolling out broadly.
 
 ## Limitations
 

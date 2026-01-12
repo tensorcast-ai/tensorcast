@@ -193,6 +193,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         *,
         listen_host: str | None,
         listen_port: int | None,
+        advertise_host: str | None,
+        advertise_port: int | None,
         metrics_port: int | None,
         cluster_token: str | None,
         db_file: str | None,
@@ -201,6 +203,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self._runtime_info = {
             "listen_host": listen_host,
             "listen_port": listen_port,
+            "advertise_host": advertise_host,
+            "advertise_port": advertise_port,
             "metrics_port": metrics_port,
             "cluster_token": cluster_token,
             "db_file": db_file,
@@ -1822,30 +1826,43 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.HealthCheckRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.HealthCheckResponse:
-        """Simple health check endpoint."""
+        """Minimal health check endpoint (status + cluster token)."""
         info = getattr(self, "_runtime_info", {}) or {}
-        listen_host = info.get("listen_host") or getattr(
-            self.config, "listen_host", None
+        cluster_token = info.get("cluster_token") or self.config.cluster_token
+        return global_store_pb2.HealthCheckResponse(
+            status=global_store_pb2.Status.STATUS_OK,
+            cluster_token=cluster_token or "",
         )
-        listen_port = info.get("listen_port") or getattr(
-            self.config, "listen_port", None
-        )
-        metrics_port = info.get("metrics_port") or getattr(
-            self.config, "metrics_port", None
-        )
-        cluster_token = info.get("cluster_token") or getattr(
-            self.config, "cluster_token", None
-        )
+
+    def GetServerInfo(
+        self,
+        request: global_store_pb2.GetServerInfoRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetServerInfoResponse:
+        """Server metadata endpoint for advertised/bind addresses and diagnostics."""
+        info = getattr(self, "_runtime_info", {}) or {}
+        listen_host = info.get("listen_host") or self.config.listen_host
+        listen_port = info.get("listen_port") or self.config.listen_port
+        advertise_host = info.get("advertise_host") or self.config.advertise_host
+        advertise_port = info.get("advertise_port") or self.config.advertise_port
+        metrics_port = info.get("metrics_port") or self.config.metrics_port
         db_file = info.get("db_file") or (
-            str(self.config.db_file) if getattr(self.config, "db_file", None) else ""
+            str(self.config.db_file) if self.config.db_file else ""
         )
         version = info.get("version") or ""
         listen_address = (
             f"{listen_host}:{listen_port}" if listen_host and listen_port else ""
         )
-        return global_store_pb2.HealthCheckResponse(
+        advertise_address = (
+            f"{advertise_host}:{advertise_port}"
+            if advertise_host and advertise_port
+            else ""
+        )
+        return global_store_pb2.GetServerInfoResponse(
             status=global_store_pb2.Status.STATUS_OK,
-            cluster_token=cluster_token or "",
+            advertise_address=advertise_address,
+            advertise_host=advertise_host or "",
+            advertise_port=int(advertise_port or 0),
             listen_address=listen_address,
             listen_host=listen_host or "",
             listen_port=int(listen_port or 0),

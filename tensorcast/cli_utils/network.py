@@ -24,6 +24,13 @@ def resolve_connect_host(listen_host: str | None) -> str:
     return listen_host
 
 
+def is_unspecified_host(host: str | None) -> bool:
+    if not host:
+        return True
+    s = str(host).strip().lower()
+    return s in {"0.0.0.0", "::", "[::]", "*"}
+
+
 def pick_free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
