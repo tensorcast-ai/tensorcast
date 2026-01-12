@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -22,6 +22,7 @@
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
+#include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
@@ -43,6 +44,8 @@ class StoreEngine {
   // callers should use ReplicaHandle returned from materialize_replica().
 
   using ReplicaInfo = runtime::ReplicaInfo;
+  using ReplicaInventoryEntry = runtime::ReplicaInventoryEntry;
+  using ReplicaPublishState = runtime::ReplicaPublishState;
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Construction and Initialization
@@ -170,6 +173,8 @@ class StoreEngine {
    */
   [[nodiscard]] std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
 
+  [[nodiscard]] std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
+
   /**
    * @brief Returns a unique GPU device ordinal if the artifact resides on exactly
    *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
@@ -220,6 +225,12 @@ class StoreEngine {
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key);
   // Return total artifact size in bytes for the given replica.
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key);
+
+  void set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state);
+  [[nodiscard]] ReplicaPublishState get_replica_publish_state(const loading::ReplicaKey& key) const;
+
+  std::unique_ptr<runtime::RuntimeContextEvents::Subscription> subscribe_to_runtime_events(
+      runtime::RuntimeContextEvents::Callback callback);
 
   // Remote memory registration helpers (ReplicaKey version)
   [[nodiscard]] absl::StatusOr<ExportRegistration> enable_remote_replica_access(

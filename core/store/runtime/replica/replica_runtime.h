@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -7,8 +7,10 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/synchronization/mutex.h"
 #include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/store/communication_types.h"
@@ -48,6 +50,7 @@ class ReplicaRuntime {
   size_t get_available_memory() const;
   void update_memory_pool_metrics();
   std::vector<ReplicaInfo> get_all_replicas_info() const;
+  std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
 
   std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
   absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
@@ -58,6 +61,9 @@ class ReplicaRuntime {
   replica::MemoryState get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const;
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key) const;
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key) const;
+
+  void set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state);
+  ReplicaPublishState get_replica_publish_state(const loading::ReplicaKey& key) const;
 
   absl::StatusOr<ExportRegistration> enable_remote_replica_access(
       const loading::ReplicaKey& key,
@@ -102,6 +108,9 @@ class ReplicaRuntime {
   gsl::not_null<RuntimeContext*> context_;
   RuntimeContextEvents::Publisher event_publisher_;
   std::unique_ptr<RuntimeContextEvents::Subscription> ingestion_event_subscription_;
+  mutable absl::Mutex publish_state_mu_;
+  absl::flat_hash_map<loading::ReplicaKey, ReplicaPublishState, loading::ReplicaKeyHash> publish_states_
+      ABSL_GUARDED_BY(publish_state_mu_);
 };
 
 } // namespace tensorcast::store::runtime

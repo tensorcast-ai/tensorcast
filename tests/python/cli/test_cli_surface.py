@@ -169,7 +169,19 @@ def test_global_status_json(monkeypatch):
 
     monkeypatch.setattr(cli_mod, "_global_status_payload", _fake_payload)
     monkeypatch.setattr(
-        cli_mod, "ping_global_store", lambda *_args, **_kwargs: _Health(address="127.0.0.1:50051", listen_host="127.0.0.1", listen_port=50051, metrics_port=8000, cluster_token="tok", version="v1", db_file="/tmp/db.duckdb")
+        cli_mod,
+        "ping_global_store",
+        lambda *_args, **_kwargs: _Health(
+            address="127.0.0.1:50051",
+            listen_host="127.0.0.1",
+            listen_port=50051,
+            advertise_host="127.0.0.1",
+            advertise_port=50051,
+            metrics_port=8000,
+            cluster_token="tok",
+            version="v1",
+            db_file="/tmp/db.duckdb",
+        ),
     )
 
     runner = CliRunner()

@@ -379,6 +379,35 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     return refs_.ref_count(key);
   }
 
+  size_t use_count_for(const store::loading::ReplicaKey& key) const {
+    return lifecycle_mgr_ ? lifecycle_mgr_->use_count_for(key) : 0;
+  }
+
+  size_t placement_pin_count_for(const store::loading::ReplicaKey& key) const {
+    return lifecycle_mgr_ ? lifecycle_mgr_->placement_pin_count_for(key) : 0;
+  }
+
+  bool has_transport_lock_for(const store::loading::ReplicaKey& key) const {
+    return locks_.has_lock_for_key(key);
+  }
+
+  // Helpers for tests exercising HA retire gating.
+  void add_ref_for_testing(const store::loading::ReplicaKey& key, int32_t pid) {
+    refs_.add_ref(key, pid);
+  }
+
+  void drop_ref_for_testing(const store::loading::ReplicaKey& key, int32_t pid) {
+    refs_.drop_ref(key, pid);
+  }
+
+  SessionLifecycleManager* lifecycle_manager_for_testing() const {
+    return lifecycle_mgr_.get();
+  }
+
+  TransportLockManager& transport_lock_manager_for_testing() {
+    return locks_;
+  }
+
  private:
   gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   // Async runtime must outlive all components that hold executor keep-alives.

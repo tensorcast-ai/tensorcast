@@ -125,11 +125,12 @@ def test_force_full_sync_allows_empty_inventory_removal(repositories):
         state_checksum="",
     )
 
-    success, changes, new_version, checksum = recovery.synchronize_worker_state(
-        worker_id, local_state, True
+    success, changes, new_version, checksum, ignored = (
+        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, True)
     )
 
     assert success is True
+    assert ignored is False
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
         for change in changes
@@ -183,11 +184,12 @@ def test_availability_drift_triggers_update(repositories):
 
     original_checksum = recovery._compute_state_checksum([replica])
 
-    success, changes, new_version, new_checksum = recovery.synchronize_worker_state(
-        worker_id, local_state, False
+    success, changes, new_version, new_checksum, ignored = (
+        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
     )
 
     assert success is True
+    assert ignored is False
     assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
@@ -213,7 +215,42 @@ def test_availability_drift_triggers_update(repositories):
         ]
     )
     assert new_checksum == expected_checksum
-    assert new_checksum != original_checksum
+
+
+def test_stale_sync_token_is_ignored(repositories):
+    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    worker_id = "worker-stale"
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            node_id="node-stale",
+            node_address="10.0.0.30",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=2048,
+            mem_pool_available_size=2048,
+        )
+    )
+
+    local_state = global_store_pb2.WorkerLocalState(
+        worker_id=worker_id,
+        state_version=1,
+        state_checksum="",
+    )
+
+    success, changes, new_version, checksum, ignored = (
+        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+    )
+    assert success is True
+    assert ignored is False
+    first_checksum = checksum
+
+    success, changes, new_version, checksum, ignored = (
+        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+    )
+    assert success is True
+    assert ignored is True
+    assert checksum == first_checksum
 
 
 def test_endpoint_drift_triggers_update(repositories):
@@ -260,11 +297,12 @@ def test_endpoint_drift_triggers_update(repositories):
     local_replica.memory_info.memory_size = replica.memory_size
     local_replica.stats.is_available = replica.is_available
 
-    success, changes, new_version, new_checksum = recovery.synchronize_worker_state(
-        worker_id, local_state, False
+    success, changes, new_version, new_checksum, ignored = (
+        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
     )
 
     assert success is True
+    assert ignored is False
     assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA

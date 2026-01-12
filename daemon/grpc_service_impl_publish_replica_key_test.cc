@@ -152,18 +152,18 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
     return absl::UnimplementedError("query_chunk_locations not needed for key-mapping tests");
   }
 
-  absl::StatusOr<std::pair<uint64_t, std::string>> synchronize_worker_state(
+  absl::StatusOr<tensorcast::store::components::StateSyncResult> synchronize_worker_state(
       const tensorcast::global_store::v1::WorkerLocalState&,
       bool,
-      std::vector<tensorcast::global_store::v1::StateChange>*,
+      const tensorcast::store::components::StateSyncToken&,
       const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("synchronize_worker_state not needed for key-mapping tests");
   }
 
-  absl::StatusOr<std::pair<uint64_t, std::string>> request_full_state_sync(
+  absl::StatusOr<tensorcast::store::components::FullStateSyncResult> request_full_state_sync(
       std::string_view,
       uint64_t,
-      std::vector<tensorcast::common::v1::ReplicaInfo>*,
+      const tensorcast::store::components::StateSyncToken&,
       const tensorcast::store::components::RpcOptions&) override {
     return absl::UnimplementedError("request_full_state_sync not needed for key-mapping tests");
   }

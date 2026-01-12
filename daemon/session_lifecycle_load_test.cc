@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -6,6 +6,7 @@
 #include "absl/time/time.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/replica_session_manager.h"
@@ -21,7 +22,8 @@ using tensorcast::store::loading::ReplicaKey;
 TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
@@ -50,7 +52,8 @@ TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lif
 TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;
@@ -83,7 +86,8 @@ TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][li
 TEST_CASE("Lifecycle load: mass renewal prevents stale expiries", "[daemon][lifecycle][load]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), nullptr);
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip = std::make_unique<LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   const int kDevice = 0;

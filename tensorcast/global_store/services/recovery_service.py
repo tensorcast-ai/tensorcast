@@ -175,23 +175,47 @@ class RecoveryService:
         self,
         worker_id: str,
         local_state: global_store_pb2.WorkerLocalState,
+        sync_epoch: int,
+        sync_request_id: int,
         force_full_sync: bool = False,
-    ) -> tuple[bool, list[global_store_pb2.StateChange], int, str]:
+    ) -> tuple[bool, list[global_store_pb2.StateChange], int, str, bool]:
         """
         Synchronize worker state with global state.
 
         Args:
             worker_id: Worker ID
             local_state: Worker's local state
+            sync_epoch: Monotonic sync epoch
+            sync_request_id: Monotonic sync request id
             force_full_sync: When True, treat the provided inventory as
                 authoritative even if empty (allows drains/retirements).
 
         Returns:
-            Tuple of (success, state_changes, new_version, new_checksum)
+            Tuple of (success, state_changes, new_version, new_checksum, ignored)
         """
         _start = time.time()
         try:
             with self.worker_repository.transaction() as cursor:
+                accepted = self.worker_repository.try_advance_state_sync_token(
+                    worker_id, sync_epoch, sync_request_id, cursor
+                )
+                if not accepted:
+                    current_version = self.worker_repository.ensure_state_version(
+                        worker_id, cursor
+                    )
+                    current_checksum = self.worker_repository.get_state_checksum(
+                        worker_id, cursor
+                    )
+                    duration = time.time() - _start
+                    observe_state_sync(duration, success=True)
+                    logger.info(
+                        "Ignored stale state sync for worker %s: epoch=%d request_id=%d",
+                        worker_id,
+                        sync_epoch,
+                        sync_request_id,
+                    )
+                    return True, [], current_version, current_checksum, True
+
                 # Get current global state for this worker
                 global_replicas = self.replica_repository.get_replicas_by_worker_atomic(
                     worker_id, cursor
@@ -246,7 +270,7 @@ class RecoveryService:
                     f"0 changes, version unchanged ({new_version})"
                 )
 
-            return True, state_changes, new_version, new_checksum
+            return True, state_changes, new_version, new_checksum, False
 
         except Exception as e:
             duration = time.time() - _start if "_start" in locals() else 0.0
@@ -255,7 +279,7 @@ class RecoveryService:
             logger.exception(
                 f"State synchronization failed for worker {worker_id}: {e}"
             )
-            return False, [], 0, ""
+            return False, [], 0, "", False
 
     def _compute_state_changes(
         self,
@@ -576,17 +600,37 @@ class RecoveryService:
         return self.worker_repository.get_state_version(worker_id)
 
     def request_full_state_sync(
-        self, worker_id: str
-    ) -> tuple[bool, list[common_pb2.ReplicaInfo], int, str]:
+        self, worker_id: str, sync_epoch: int, sync_request_id: int
+    ) -> tuple[bool, list[common_pb2.ReplicaInfo], int, str, bool]:
         """
         Request full state synchronization for a worker.
 
         Returns:
-            Tuple of (success, expected_replicas, new_version, new_checksum)
+            Tuple of (success, expected_replicas, new_version, new_checksum, ignored)
         """
         _start = time.time()
         try:
             with self.worker_repository.transaction() as cursor:
+                accepted = self.worker_repository.try_advance_state_sync_token(
+                    worker_id, sync_epoch, sync_request_id, cursor
+                )
+                if not accepted:
+                    current_version = self.worker_repository.ensure_state_version(
+                        worker_id, cursor
+                    )
+                    current_checksum = self.worker_repository.get_state_checksum(
+                        worker_id, cursor
+                    )
+                    duration = time.time() - _start
+                    observe_state_sync(duration, success=True)
+                    logger.info(
+                        "Ignored stale full-state sync for worker %s: epoch=%d request_id=%d",
+                        worker_id,
+                        sync_epoch,
+                        sync_request_id,
+                    )
+                    return True, [], current_version, current_checksum, True
+
                 # Get all replicas for this worker
                 replicas = self.replica_repository.get_replicas_by_worker_atomic(
                     worker_id, cursor
@@ -619,14 +663,14 @@ class RecoveryService:
                 f"Full state sync requested for worker {worker_id}: {len(replicas)} replicas"
             )
 
-            return True, proto_replicas, current_version, new_checksum
+            return True, proto_replicas, current_version, new_checksum, False
 
         except Exception as e:
             duration = time.time() - _start if "_start" in locals() else 0.0
             observe_state_sync(duration, success=False)
 
             logger.exception(f"Full state sync failed for worker {worker_id}: {e}")
-            return False, [], 0, ""
+            return False, [], 0, "", False
 
     def is_recovery_complete(self) -> bool:
         """Check if recovery process is complete."""

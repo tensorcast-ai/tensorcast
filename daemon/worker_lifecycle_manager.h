@@ -3,6 +3,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
@@ -12,7 +13,9 @@
 #include <thread>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/store_engine.h"
 #include "daemon/grpc_service_impl.h"
 #include "gsl/pointers"
@@ -63,10 +66,25 @@ class WorkerLifecycleManager {
       std::string_view node_id,
       std::string_view node_address,
       uint32_t node_port,
-      const std::vector<store::StoreEngine::ReplicaInfo>& infos);
+      const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory);
 
  private:
-  static absl::StatusOr<std::string> resolve_advertised_address(const WorkerLifecycleManager::Options& opts);
+  enum class AdvertisedAddressSource {
+    kExplicit,
+    kListen,
+    kRoute,
+    kDefault,
+  };
+
+  struct ResolvedAdvertisedAddress {
+    std::string host;
+    AdvertisedAddressSource source{AdvertisedAddressSource::kDefault};
+  };
+
+  static const char* advertised_source_to_cstr(AdvertisedAddressSource source);
+
+  static absl::StatusOr<ResolvedAdvertisedAddress> resolve_advertised_address(
+      const WorkerLifecycleManager::Options& opts);
 
   static std::string host_from_listen(const std::string& listen) {
     auto pos = listen.find(':');
@@ -90,6 +108,8 @@ class WorkerLifecycleManager {
   void monitor_loop();
   void apply_obsolete_replicas(const std::vector<std::string>& artifact_ids);
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
+  void enqueue_retire_keys(std::vector<store::loading::ReplicaKey> keys, std::string_view context);
+  void process_retire_queue();
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
@@ -98,6 +118,9 @@ class WorkerLifecycleManager {
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
+  store::components::StateSyncToken next_state_sync_token(uint64_t epoch);
+  void mark_state_sync_progress();
+  std::optional<std::chrono::milliseconds> state_sync_stall_budget() const;
 
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const gsl::not_null<StoreDaemonServiceImpl*> service_;
@@ -151,11 +174,24 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> hb_epoch_{0};
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
+  std::atomic<uint64_t> state_sync_request_id_{0};
+  std::atomic<int64_t> state_sync_last_progress_ns_{0};
+  std::atomic<bool> state_sync_restart_pending_{false};
   std::mutex state_sync_mu_;
   std::condition_variable state_sync_cv_;
   std::mutex obsolete_mu_;
   std::vector<std::string> pending_obsolete_replicas_;
   std::atomic<bool> obsolete_pending_{false};
+
+  struct RetireEntry {
+    size_t attempts{0};
+    int64_t last_log_ts_s{0};
+  };
+
+  std::mutex retire_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, RetireEntry, store::loading::ReplicaKeyHash> retire_queue_;
+  std::atomic<bool> retire_pending_{false};
+  std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
   bool memory_tier_enabled_{false};
 
  public:

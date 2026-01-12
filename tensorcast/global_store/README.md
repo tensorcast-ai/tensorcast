@@ -187,7 +187,8 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - On Global Store startup, marks all workers/replicas as stale until they re-confirm
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
-- Persists `state_version` and `state_checksum` per worker; heartbeats use cached checksum to avoid full-table scans
+- Persists `state_version` and `state_checksum` per worker (non-null defaults); heartbeats use cached checksum to avoid full-table scans
+- Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
 - Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
 - Applies endpoint/metadata drift updates (node address/port, memory size, transport keys when reported) during sync
@@ -335,7 +336,13 @@ database:
   db_file: /var/lib/tensorcast/global_store.db  # null for in-memory
 
 server:
+  # Bind address (server-side); 0.0.0.0 exposes all interfaces.
   listen:
+    host: 0.0.0.0
+    port: 50051
+  # Advertise address for clients/GetServerInfo; auto-detected if unset.
+  advertise:
+    host: 10.0.0.5
     port: 50051
   max_workers: 10
 
@@ -347,6 +354,8 @@ worker_policy:
     snapshot_retention: "600s"
     snapshot_max_rows: 200
 ```
+
+`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host.
 
 ## Extending the Global Store
 

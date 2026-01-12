@@ -50,6 +50,8 @@ service GlobalStoreService {
 
   // Health check endpoint
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {}
+  // Server info endpoint (advertise + bind metadata)
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse) {}
 
   // ========== Chunk Directory Operations ==========
   // Query chunk locations for distributed memory pool
@@ -191,6 +193,8 @@ message SynchronizeWorkerStateRequest {
   string worker_id = 1;
   WorkerLocalState local_state = 2;
   bool force_full_sync = 3; // 强制完整同步
+  uint64 sync_epoch = 4; // 单调递增的同步世代
+  uint64 sync_request_id = 5; // 单调递增的请求序号
 }
 
 message SynchronizeWorkerStateResponse {
@@ -198,6 +202,7 @@ message SynchronizeWorkerStateResponse {
   uint64 new_state_version = 2;
   repeated StateChange state_changes = 3;
   string new_state_checksum = 4;
+  bool ignored = 5; // 过期/重复请求被忽略
 }
 
 message StateChange {
@@ -216,6 +221,8 @@ message StateChange {
 message RequestFullStateSyncRequest {
   string worker_id = 1;
   uint64 current_state_version = 2;
+  uint64 sync_epoch = 3; // 单调递增的同步世代
+  uint64 sync_request_id = 4; // 单调递增的请求序号
 }
 
 message RequestFullStateSyncResponse {
@@ -223,6 +230,7 @@ message RequestFullStateSyncResponse {
   uint64 new_state_version = 2;
   repeated tensorcast.common.v1.ReplicaInfo expected_replicas = 3;
   string new_state_checksum = 4;
+  bool ignored = 5; // 过期/重复请求被忽略
 }
 
 // Removed legacy disk-path based artifact info messages
@@ -426,12 +434,22 @@ message HealthCheckRequest {}
 message HealthCheckResponse {
   Status status = 1;
   string cluster_token = 2;
-  string listen_address = 3;
-  string listen_host = 4;
-  uint32 listen_port = 5;
-  uint32 metrics_port = 6;
-  string version = 7;
-  string db_file = 8;
+}
+
+// Server metadata and advertised endpoints for clients.
+message GetServerInfoRequest {}
+
+message GetServerInfoResponse {
+  Status status = 1;
+  string advertise_address = 2;
+  string advertise_host = 3;
+  uint32 advertise_port = 4;
+  string listen_address = 5;
+  string listen_host = 6;
+  uint32 listen_port = 7;
+  uint32 metrics_port = 8;
+  string version = 9;
+  string db_file = 10;
 }
 
 // ========== Chunk Directory Messages ==========

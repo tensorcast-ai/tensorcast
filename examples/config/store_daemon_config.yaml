@@ -18,9 +18,9 @@ server:
   # Advertised address for Global Store registration; set when auto-detect might pick a non-routable IP.
   advertise:
     # Routable host that clients and Global Store should dial; avoid loopback and link-local.
-    host: ""
-    # Port is ignored by registration; keep aligned with listen.port if you set it.
-    port: 0
+    # If empty or non-routable, the daemon resolves in order: listen.host (routable),
+    # route IP toward Global Store, then default interface IP.
+    host: null # automatically resolve
   # Dedicated P2P listen socket; use a separate NIC/port to isolate data-plane traffic.
   p2p_listen:
     # Bind host for P2P transfers; often set to the RDMA or high-bandwidth interface.

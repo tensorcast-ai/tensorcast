@@ -1,8 +1,9 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Main entry point for Global Store server."""
 
 import argparse
+import socket
 from concurrent import futures
 from typing import cast
 
@@ -26,6 +27,10 @@ from tensorcast.global_store.repositories.memory_tier_lease_repository import (
 from tensorcast.global_store.repositories.memory_tier_snapshot_repository import (
     MemoryTierSnapshotRepository,
 )
+from tensorcast.global_store.services.address_validation import (
+    is_loopback_address,
+    is_unspecified_address,
+)
 from tensorcast.global_store.services.memory_tier_service import MemoryTierService
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import (
@@ -35,6 +40,64 @@ from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 from tensorcast.proto.memory_tier.v1 import memory_tier_pb2_grpc
 
 logger = init_logger(__name__)
+
+
+def _resolve_route_ip(target_host: str, target_port: int) -> str | None:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect((target_host, target_port))
+            return sock.getsockname()[0]
+    except OSError:
+        return None
+
+
+def _resolve_default_advertise_host() -> str | None:
+    candidate = _resolve_route_ip("8.8.8.8", 80)
+    if (
+        candidate
+        and not is_loopback_address(candidate)
+        and not is_unspecified_address(candidate)
+    ):
+        return candidate
+    try:
+        hostname_ip = socket.gethostbyname(socket.gethostname())
+    except OSError:
+        hostname_ip = None
+    if (
+        hostname_ip
+        and not is_loopback_address(hostname_ip)
+        and not is_unspecified_address(hostname_ip)
+    ):
+        return hostname_ip
+    return None
+
+
+def _resolve_advertise_address(
+    *,
+    listen_host: str,
+    bound_port: int,
+    explicit_host: str | None,
+    explicit_port: int | None,
+) -> tuple[str, int, str]:
+    if explicit_host and not (
+        is_loopback_address(explicit_host) or is_unspecified_address(explicit_host)
+    ):
+        port = explicit_port if explicit_port else bound_port
+        return explicit_host, port, "explicit"
+
+    if listen_host and not (
+        is_loopback_address(listen_host) or is_unspecified_address(listen_host)
+    ):
+        port = explicit_port if explicit_port else bound_port
+        return listen_host, port, "listen"
+
+    detected = _resolve_default_advertise_host()
+    if detected:
+        port = explicit_port if explicit_port else bound_port
+        return detected, port, "default"
+
+    port = explicit_port if explicit_port else bound_port
+    return listen_host or "0.0.0.0", port, "listen"
 
 
 def main():
@@ -87,6 +150,13 @@ def main():
             config = cast(GlobalStoreConfig, copy_fn(update=cfg_updates))
         else:
             config = cast(GlobalStoreConfig, config.copy(update=cfg_updates))
+    if config.advertise_host and (
+        is_loopback_address(config.advertise_host)
+        or is_unspecified_address(config.advertise_host)
+    ):
+        raise RuntimeError(
+            f"Global Store advertise.host must be routable when configured (got '{config.advertise_host}')."
+        )
     set_config(config)
 
     # Initialize OpenTelemetry from config (no env bridging)
@@ -142,10 +212,28 @@ def main():
         health_pb2.HealthCheckResponse.SERVING,
     )
 
+    advertise_host, advertise_port, advertise_source = _resolve_advertise_address(
+        listen_host=listen_host,
+        bound_port=bound_port,
+        explicit_host=config.advertise_host,
+        explicit_port=config.advertise_port,
+    )
+
     logger.info(
         f"Global Store server started on {listen_host}:{bound_port} "
         f"with {config.max_workers} workers"
     )
+    logger.info(
+        "Global Store advertise address resolved to %s:%s (source=%s)",
+        advertise_host,
+        advertise_port,
+        advertise_source,
+    )
+    if is_loopback_address(advertise_host) or is_unspecified_address(advertise_host):
+        logger.warning(
+            "Global Store advertise address is not routable (%s); set server.advertise.host for a stable dial address.",
+            advertise_host,
+        )
     if config.db_file:
         logger.info(f"Using persistent database: {config.db_file}")
     else:
@@ -155,6 +243,8 @@ def main():
     servicer.set_runtime_info(
         listen_host=listen_host,
         listen_port=bound_port,
+        advertise_host=advertise_host,
+        advertise_port=advertise_port,
         metrics_port=metrics_port,
         cluster_token=config.cluster_token,
         db_file=str(config.db_file) if config.db_file else "",

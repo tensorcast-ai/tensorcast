@@ -2,6 +2,9 @@
 
 #include "daemon/worker_lifecycle_manager.h"
 
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -11,6 +14,7 @@
 #include <exception>
 #include <optional>
 #include <utility>
+#include <variant>
 
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_set.h"
@@ -23,9 +27,11 @@
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
+#include "absl/time/time.h"
 #include "core/communicator/misc/utils.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "folly/futures/Future.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -51,6 +57,17 @@ struct ReplicaSelectorHash {
   }
 };
 
+struct RetireGateSnapshot {
+  size_t ref_count{0};
+  size_t use_count{0};
+  size_t placement_pins{0};
+  bool has_transport_lock{false};
+
+  bool ready() const {
+    return ref_count == 0 && use_count == 0 && placement_pins == 0 && !has_transport_lock;
+  }
+};
+
 std::optional<ReplicaSelector> replica_selector_from_memory_info(
     std::string_view artifact_id,
     const commonpb::MemoryInfo& memory_info) {
@@ -70,23 +87,25 @@ std::optional<ReplicaSelector> replica_selector_from_memory_info(
   }
 }
 
-void append_local_replica_selectors(const store::StoreEngine::ReplicaInfo& info, std::vector<ReplicaSelector>* out) {
-  if (info.gpu_state != common::memory::MemoryLocation::NONE) {
-    if (info.gpu_device_id < 0) {
-      VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << info.artifact_id
-              << " device_uuid=" << info.gpu_device_uuid;
+void append_local_replica_selectors(
+    const store::StoreEngine::ReplicaInventoryEntry& entry,
+    std::vector<ReplicaSelector>* out) {
+  if (entry.memory_location == common::memory::MemoryLocation::GPU) {
+    if (entry.key.device.ordinal < 0) {
+      VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << entry.key.artifact_id;
     } else {
       out->push_back(
           ReplicaSelector{
-              .artifact_id = info.artifact_id,
+              .artifact_id = entry.key.artifact_id,
               .memory_type = commonpb::MEMORY_TYPE_GPU,
-              .device_id = info.gpu_device_id});
+              .device_id = entry.key.device.ordinal});
     }
     return;
   }
-  if (info.cpu_state != common::memory::MemoryLocation::NONE) {
+  if (entry.memory_location == common::memory::MemoryLocation::CPU) {
     out->push_back(
-        ReplicaSelector{.artifact_id = info.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
+        ReplicaSelector{
+            .artifact_id = entry.key.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
   }
 }
 
@@ -111,48 +130,6 @@ void append_replica_keys_for_selector(
     for (const auto& key : device_replicas) {
       if (key.artifact_id == selector.artifact_id) {
         out->push_back(key);
-      }
-    }
-  }
-}
-
-void append_replica_keys_for_artifact(
-    store::StoreEngine& engine,
-    std::string_view artifact_id,
-    std::vector<store::loading::ReplicaKey>* out) {
-  const auto devices = engine.get_resident_devices(artifact_id);
-  for (const auto& dev : devices) {
-    const auto device_replicas = engine.list_device_replicas(dev);
-    for (const auto& key : device_replicas) {
-      if (key.artifact_id == artifact_id) {
-        out->push_back(key);
-      }
-    }
-  }
-}
-
-void unload_replica_keys(
-    store::StoreEngine& engine,
-    absl::string_view context,
-    const std::vector<store::loading::ReplicaKey>& keys) {
-  if (keys.empty()) {
-    return;
-  }
-  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> unique;
-  unique.reserve(keys.size());
-  for (const auto& key : keys) {
-    unique.insert(key);
-  }
-  for (const auto& key : unique) {
-    int rc = engine.unload_replica(key);
-    if (rc != 0) {
-      LOG(WARNING) << context << ": unload failed rc=" << rc << " " << key;
-      try {
-        static auto meter =
-            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-        static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-        ctr->Add(1.0);
-      } catch (...) {
       }
     }
   }
@@ -196,7 +173,100 @@ bool is_loopback_or_unspecified(absl::string_view addr) {
 
   return trimmed == "127.0.0.1" || trimmed == "::" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1";
 }
+
+struct ParsedEndpoint {
+  std::string host;
+  uint16_t port{0};
+};
+
+std::optional<ParsedEndpoint> parse_endpoint(std::string_view address) {
+  if (address.empty()) {
+    return std::nullopt;
+  }
+  std::string_view host;
+  std::string_view port_part;
+  if (address.front() == '[') {
+    const auto close = address.find(']');
+    if (close == std::string_view::npos) {
+      return std::nullopt;
+    }
+    host = address.substr(1, close - 1);
+    if (close + 1 >= address.size() || address[close + 1] != ':') {
+      return std::nullopt;
+    }
+    port_part = address.substr(close + 2);
+  } else {
+    const auto pos = address.rfind(':');
+    if (pos == std::string_view::npos) {
+      return std::nullopt;
+    }
+    host = address.substr(0, pos);
+    port_part = address.substr(pos + 1);
+  }
+  if (host.empty() || port_part.empty()) {
+    return std::nullopt;
+  }
+  uint32_t port = 0;
+  try {
+    port = static_cast<uint32_t>(std::stoi(std::string(port_part)));
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+  if (port == 0 || port > 65535) {
+    return std::nullopt;
+  }
+  return ParsedEndpoint{std::string(host), static_cast<uint16_t>(port)};
+}
+
+std::optional<std::string> resolve_route_ip(const ParsedEndpoint& endpoint) {
+  addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_DGRAM;
+  hints.ai_protocol = IPPROTO_UDP;
+
+  addrinfo* res = nullptr;
+  const std::string port_str = std::to_string(endpoint.port);
+  if (getaddrinfo(endpoint.host.c_str(), port_str.c_str(), &hints, &res) != 0) {
+    return std::nullopt;
+  }
+  absl::Cleanup cleanup = [res] { freeaddrinfo(res); };
+
+  for (addrinfo* ai = res; ai != nullptr; ai = ai->ai_next) {
+    const int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd < 0) {
+      continue;
+    }
+    if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+      sockaddr_in local{};
+      socklen_t len = sizeof(local);
+      if (getsockname(fd, reinterpret_cast<sockaddr*>(&local), &len) == 0) {
+        char buffer[INET_ADDRSTRLEN];
+        if (inet_ntop(AF_INET, &local.sin_addr, buffer, sizeof(buffer)) != nullptr) {
+          ::close(fd);
+          return std::string(buffer);
+        }
+      }
+    }
+    ::close(fd);
+  }
+  return std::nullopt;
+}
+
 } // namespace
+
+const char* WorkerLifecycleManager::advertised_source_to_cstr(AdvertisedAddressSource source) {
+  switch (source) {
+    case AdvertisedAddressSource::kExplicit:
+      return "explicit";
+    case AdvertisedAddressSource::kListen:
+      return "listen";
+    case AdvertisedAddressSource::kRoute:
+      return "route";
+    case AdvertisedAddressSource::kDefault:
+      return "default";
+  }
+  return "unknown";
+}
 
 WorkerLifecycleManager::WorkerLifecycleManager(
     gsl::not_null<std::shared_ptr<store::StoreEngine>> engine,
@@ -228,27 +298,44 @@ std::string WorkerLifecycleManager::derive_node_id() {
   return "unknown";
 }
 
-absl::StatusOr<std::string> WorkerLifecycleManager::resolve_advertised_address(
+absl::StatusOr<WorkerLifecycleManager::ResolvedAdvertisedAddress> WorkerLifecycleManager::resolve_advertised_address(
     const WorkerLifecycleManager::Options& opts) {
-  std::string addr = opts.advertise_host;
-  if (addr.empty()) {
-    addr = WorkerLifecycleManager::host_from_listen(opts.listen_addr);
+  if (!opts.advertise_host.empty()) {
+    if (is_loopback_or_unspecified(opts.advertise_host)) {
+      return absl::InvalidArgumentError(
+          "Global Store registration requires advertise_host to be routable when configured; "
+          "loopback/unspecified values are not allowed.");
+    }
+    return ResolvedAdvertisedAddress{.host = opts.advertise_host, .source = AdvertisedAddressSource::kExplicit};
   }
 
-  if (is_loopback_or_unspecified(addr)) {
-    const std::string default_ip = communicator::misc::get_default_ip();
-    if (!default_ip.empty()) {
-      addr = default_ip;
+  const std::string listen_host = WorkerLifecycleManager::host_from_listen(opts.listen_addr);
+  if (!listen_host.empty() && !is_loopback_or_unspecified(listen_host)) {
+    return ResolvedAdvertisedAddress{.host = listen_host, .source = AdvertisedAddressSource::kListen};
+  }
+
+  if (!opts.global_store_addr.empty()) {
+    const auto endpoint = parse_endpoint(opts.global_store_addr);
+    if (endpoint.has_value() && !is_loopback_or_unspecified(endpoint->host)) {
+      const auto route_ip = resolve_route_ip(*endpoint);
+      if (route_ip.has_value() && !is_loopback_or_unspecified(*route_ip)) {
+        return ResolvedAdvertisedAddress{.host = *route_ip, .source = AdvertisedAddressSource::kRoute};
+      }
     }
   }
 
-  if (is_loopback_or_unspecified(addr)) {
+  const std::string default_ip = communicator::misc::get_default_ip();
+  if (!default_ip.empty() && !is_loopback_or_unspecified(default_ip)) {
+    return ResolvedAdvertisedAddress{.host = default_ip, .source = AdvertisedAddressSource::kDefault};
+  }
+
+  if (is_loopback_or_unspecified(listen_host)) {
     return absl::InvalidArgumentError(
         "Global Store registration requires a routable advertise_host. Provide --advertise_host with a non-loopback "
         "address or configure listen_addr accordingly.");
   }
 
-  return addr;
+  return ResolvedAdvertisedAddress{.host = listen_host, .source = AdvertisedAddressSource::kListen};
 }
 
 absl::Status WorkerLifecycleManager::start() {
@@ -263,7 +350,7 @@ absl::Status WorkerLifecycleManager::start() {
   if (!node_addr_or.ok()) {
     return node_addr_or.status();
   }
-  const std::string node_addr = *node_addr_or;
+  const std::string node_addr = node_addr_or->host;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   {
     std::lock_guard<std::mutex> lock(state_mu_);
@@ -279,6 +366,11 @@ absl::Status WorkerLifecycleManager::start() {
     return absl::InvalidArgumentError(
         "WorkerLifecycleManager requires a non-zero p2p_port when Global Store HA is enabled; configure --p2p_listen.");
   }
+
+  LOG(INFO) << "Resolved advertised address for Global Store registration: " << node_addr
+            << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
+  LOG(INFO) << "Global Store registration endpoints: listen=" << opts_.listen_addr << " advertise=" << node_addr << ":"
+            << grpc_port << " p2p_port=" << opts_.p2p_port;
 
   auto reg_or = global_store_->register_worker(
       node_id_,
@@ -300,27 +392,55 @@ absl::Status WorkerLifecycleManager::start() {
   // Propagate worker identity into the engine so subsequent GS registrations
   // use the real worker_id instead of a placeholder.
   engine_->set_worker_identity(reg_or->worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
+  const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
+  state_sync_epoch_.store(epoch_seed);
+  state_sync_request_id_.store(0);
+  state_sync_last_progress_ns_.store(0);
+  state_sync_restart_pending_.store(false);
+
+  runtime_event_subscription_ = engine_->subscribe_to_runtime_events([this](const store::runtime::RuntimeEvent& event) {
+    if (stop_.load()) {
+      return;
+    }
+    if (event.type != store::runtime::RuntimeEventType::kReplicaLoaded &&
+        event.type != store::runtime::RuntimeEventType::kReplicaEvicted) {
+      return;
+    }
+    const auto* payload = std::get_if<store::runtime::ReplicaLifecycleEvent>(&event.payload);
+    if (!payload) {
+      return;
+    }
+    const auto state = engine_->get_replica_publish_state(payload->key);
+    if (state == store::StoreEngine::ReplicaPublishState::kLocalOnly) {
+      return;
+    }
+    request_state_sync();
+  });
 
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
-  std::vector<commonpb::ReplicaInfo> expected;
   auto full_or = global_store_->request_full_state_sync(
       reg_or->worker_id,
       reg_or->expected_state_version,
-      &expected,
+      next_state_sync_token(state_sync_epoch_.load()),
       build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
   if (full_or.ok()) {
-    {
-      std::lock_guard<std::mutex> lock(state_mu_);
-      state_version_ = full_or->first;
-      state_checksum_ = full_or->second;
-    }
-    apply_full_state(expected);
-    const int64_t last_sync_success = static_cast<int64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    {
-      std::lock_guard<std::mutex> lock(state_mu_);
-      last_sync_success_ts_ = last_sync_success;
+    if (!full_or->ignored) {
+      {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        state_version_ = full_or->new_state_version;
+        state_checksum_ = full_or->new_state_checksum;
+      }
+      apply_full_state(full_or->expected_replicas);
+      const int64_t last_sync_success = static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        last_sync_success_ts_ = last_sync_success;
+      }
+    } else {
+      VLOG(1) << "Skipping ignored initial full-state sync for worker_id=" << reg_or->worker_id;
     }
   } else {
     LOG(WARNING) << "Initial RequestFullStateSync failed: " << full_or.status();
@@ -333,7 +453,6 @@ absl::Status WorkerLifecycleManager::start() {
 
   stop_.store(false);
   hb_epoch_.store(0);
-  state_sync_epoch_.store(0);
   hb_thread_ = std::thread(&WorkerLifecycleManager::heartbeat_loop, this);
   state_sync_thread_ = std::thread(&WorkerLifecycleManager::state_sync_loop, this, state_sync_epoch_.load());
   if (opts_.chunk_sync_interval_ms > 0) {
@@ -352,6 +471,7 @@ void WorkerLifecycleManager::stop() {
   stop_.store(true);
   stop_cv_.notify_all();
   state_sync_cv_.notify_all();
+  runtime_event_subscription_.reset();
   if (hb_thread_.joinable())
     hb_thread_.join();
   if (state_sync_thread_.joinable())
@@ -386,7 +506,7 @@ void WorkerLifecycleManager::stop() {
   }
   std::string worker_id_snapshot;
   {
-    std::lock_guard<std::mutex> lock(state_mu_);
+    std::scoped_lock lock(state_mu_);
     worker_id_snapshot = worker_id_;
   }
   if (!worker_id_snapshot.empty()) {
@@ -397,7 +517,7 @@ void WorkerLifecycleManager::stop() {
     } else {
       LOG(INFO) << "GlobalStore unregister_worker succeeded for worker_id=" << id;
       // Clear identity to prevent any subsequent attempts (e.g., destructor) from retrying.
-      std::lock_guard<std::mutex> lock(state_mu_);
+      std::scoped_lock lock(state_mu_);
       worker_id_.clear();
     }
   }
@@ -419,6 +539,34 @@ store::components::RpcOptions WorkerLifecycleManager::build_rpc_options(
     opts.max_retries = static_cast<uint32_t>(*max_retries);
   }
   return opts;
+}
+
+store::components::StateSyncToken WorkerLifecycleManager::next_state_sync_token(uint64_t epoch) {
+  return store::components::StateSyncToken{
+      .epoch = epoch,
+      .request_id = state_sync_request_id_.fetch_add(1) + 1,
+  };
+}
+
+void WorkerLifecycleManager::mark_state_sync_progress() {
+  const auto now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  state_sync_last_progress_ns_.store(now_ns);
+}
+
+std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stall_budget() const {
+  constexpr uint32_t kDefaultRpcMaxRetries = 3;
+  const int base_timeout_ms = std::max(opts_.state_sync_rpc_timeout_ms, opts_.full_sync_rpc_timeout_ms);
+  if (base_timeout_ms <= 0) {
+    return std::nullopt;
+  }
+  const uint32_t state_sync_retries = opts_.state_sync_rpc_max_retries.value_or(kDefaultRpcMaxRetries);
+  const uint32_t full_sync_retries = opts_.full_sync_rpc_max_retries.value_or(kDefaultRpcMaxRetries);
+  const uint32_t retries = std::max(state_sync_retries, full_sync_retries);
+  const int64_t attempts = static_cast<int64_t>(retries) + 1;
+  const int64_t budget_ms =
+      static_cast<int64_t>(base_timeout_ms) * attempts + std::min<int64_t>(base_timeout_ms, 1000) * attempts;
+  return std::chrono::milliseconds(budget_ms);
 }
 
 void WorkerLifecycleManager::request_state_sync() {
@@ -454,11 +602,16 @@ void WorkerLifecycleManager::heartbeat_loop() {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
       const bool accepting = !service_->is_shutting_down();
-      const auto infos = engine_->get_all_replicas_info();
+      const auto inventory = engine_->get_ha_inventory();
+      absl::flat_hash_set<std::string> registered_set;
+      registered_set.reserve(inventory.size());
+      for (const auto& entry : inventory) {
+        registered_set.insert(entry.key.artifact_id);
+      }
       std::vector<std::string> registered_ids;
-      registered_ids.reserve(infos.size());
-      for (const auto& i : infos) {
-        registered_ids.push_back(i.artifact_id);
+      registered_ids.reserve(registered_set.size());
+      for (const auto& id : registered_set) {
+        registered_ids.push_back(id);
       }
       // Compute simple checksum over current snapshot
       std::string worker_id;
@@ -472,7 +625,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
         state_version = state_version_;
         last_sync_success_ts = last_sync_success_ts_;
       }
-      const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, infos);
+      const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, inventory);
       {
         std::lock_guard<std::mutex> lock(state_mu_);
         state_checksum_ = checksum;
@@ -546,6 +699,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
 
 void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
   state_sync_alive_.store(true);
+  mark_state_sync_progress();
   const auto maintenance_interval = std::chrono::milliseconds(opts_.heartbeat_interval_ms);
   auto next_maintenance = std::chrono::steady_clock::now() + maintenance_interval;
   const auto memory_tier_cfg = engine_->get_memory_tier_config();
@@ -564,9 +718,10 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         std::unique_lock<std::mutex> lock(state_sync_mu_);
         state_sync_cv_.wait_until(lock, next_maintenance, [this, epoch]() {
           return stop_.load() || state_sync_epoch_.load() != epoch || state_sync_requests_.load() > 0 ||
-              obsolete_pending_.load();
+              obsolete_pending_.load() || retire_pending_.load();
         });
       }
+      mark_state_sync_progress();
       if (stop_.load() || state_sync_epoch_.load() != epoch) {
         break;
       }
@@ -586,6 +741,8 @@ void WorkerLifecycleManager::state_sync_loop(uint64_t epoch) {
         perform_state_sync(epoch);
         state_sync_ticks_.fetch_add(1);
       }
+
+      process_retire_queue();
 
       const auto now = std::chrono::steady_clock::now();
       if (now >= next_maintenance) {
@@ -637,7 +794,8 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   }
   state_sync_inflight_.store(true);
   absl::Cleanup inflight_guard([this]() { state_sync_inflight_.store(false); });
-  const auto infos = engine_->get_all_replicas_info();
+  mark_state_sync_progress();
+  const auto inventory = engine_->get_ha_inventory();
   std::string worker_id;
   std::string node_address;
   uint64_t state_version = 0;
@@ -651,7 +809,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     VLOG(1) << "Skipping state sync without registered worker_id";
     return;
   }
-  const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, infos);
+  const std::string checksum = compute_state_checksum(node_id_, node_address, opts_.p2p_port, inventory);
   if (state_sync_epoch_.load() == epoch) {
     std::lock_guard<std::mutex> lock(state_mu_);
     if (state_sync_epoch_.load() == epoch) {
@@ -671,49 +829,48 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
                 .count()));
     ts->set_nanos(0);
   }
-  for (const auto& i : infos) {
+  for (const auto& entry : inventory) {
+    if (entry.memory_location != common::memory::MemoryLocation::GPU &&
+        entry.memory_location != common::memory::MemoryLocation::CPU) {
+      continue;
+    }
     auto* rep = local_state.add_local_replicas();
-    rep->mutable_ref()->set_artifact_id(i.artifact_id);
+    rep->mutable_ref()->set_artifact_id(entry.key.artifact_id);
     rep->mutable_ref()->set_replica_id("");
     auto* mi = rep->mutable_memory_info();
     mi->set_node_id(node_id_);
     mi->set_node_address(node_address);
     mi->set_node_port(opts_.p2p_port);
-    mi->set_memory_size(i.size_bytes);
-    if (i.gpu_state != common::memory::MemoryLocation::NONE) {
+    mi->set_memory_size(entry.size_bytes);
+    if (entry.memory_location == common::memory::MemoryLocation::GPU) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
-      mi->set_device_id(i.gpu_device_id);
-    } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
+      mi->set_device_id(entry.key.device.ordinal);
+    } else if (entry.memory_location == common::memory::MemoryLocation::CPU) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_RAM);
-      mi->set_device_id(0);
-    } else {
-      mi->set_memory_type(commonpb::MEMORY_TYPE_DISK);
       mi->set_device_id(0);
     }
     rep->mutable_stats()->set_max_concurrency(1);
     // Reconcile current_requests with active PID refs tracked by the service
-    store::loading::ReplicaKey rkey{
-        .artifact_id = i.artifact_id,
-        .device = (i.gpu_state != common::memory::MemoryLocation::NONE)
-            ? store::DeviceRegistry::instance().gpu_key(i.gpu_device_id)
-            : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-        .replica = 0};
-    rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(rkey)));
-    rep->mutable_stats()->set_is_available(i.is_registered_for_comm);
+    rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(service_->ref_count_for(entry.key)));
+    rep->mutable_stats()->set_is_available(entry.is_available);
     rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
   }
 
-  std::vector<global_store::StateChange> changes;
-  const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && infos.empty();
+  const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && inventory.empty();
   auto sync_or = global_store_->synchronize_worker_state(
       local_state,
       force_full_sync,
-      &changes,
+      next_state_sync_token(epoch),
       build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
   if (sync_or.ok()) {
+    mark_state_sync_progress();
+    if (sync_or->ignored) {
+      VLOG(1) << "Skipping ignored state sync for worker_id=" << worker_id;
+      return;
+    }
     if (stop_.load() || state_sync_epoch_.load() != epoch) {
       return;
     }
@@ -721,8 +878,8 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       if (state_sync_epoch_.load() == epoch) {
-        state_version_ = sync_or->first;
-        state_checksum_ = sync_or->second;
+        state_version_ = sync_or->new_state_version;
+        state_checksum_ = sync_or->new_state_checksum;
         last_sync_success_ts_ = last_sync_success;
       }
     }
@@ -733,17 +890,22 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     if (stop_.load() || state_sync_epoch_.load() != epoch) {
       return;
     }
+    for (const auto& entry : inventory) {
+      if (entry.publish_state == store::StoreEngine::ReplicaPublishState::kPublishPending) {
+        engine_->set_replica_publish_state(entry.key, store::StoreEngine::ReplicaPublishState::kPublished);
+      }
+    }
     // Apply server-suggested removals
-    std::vector<store::loading::ReplicaKey> obsolete_keys;
-    obsolete_keys.reserve(changes.size());
+    std::vector<store::loading::ReplicaKey> retire_keys;
+    retire_keys.reserve(sync_or->state_changes.size());
     auto engine_for_unload = engine_.get();
-    for (const auto& ch : changes) {
+    for (const auto& ch : sync_or->state_changes) {
       switch (ch.type()) {
         case global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA: {
           const auto& ri = ch.replica_info();
           auto selector_opt = replica_selector_from_memory_info(ri.ref().artifact_id(), ri.memory_info());
           if (selector_opt.has_value()) {
-            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &obsolete_keys);
+            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &retire_keys);
           } else {
             VLOG(1) << "Skipping REMOVE for non-resident memory type: artifact_id=" << ri.ref().artifact_id()
                     << " memory_type=" << ri.memory_info().memory_type();
@@ -826,8 +988,8 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           break;
       }
     }
-    if (!obsolete_keys.empty()) {
-      unload_replica_keys(*engine_for_unload, "synchronize_worker_state", obsolete_keys);
+    if (!retire_keys.empty()) {
+      enqueue_retire_keys(std::move(retire_keys), "synchronize_worker_state");
     }
     last_sync_ts_s_.store(last_sync_success);
   } else {
@@ -837,28 +999,32 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       counter->Add(1);
     }
     // Fallback to full-state sync if server indicates desync or errors persist
-    std::vector<commonpb::ReplicaInfo> expected;
     auto full_or = global_store_->request_full_state_sync(
         worker_id,
         state_version,
-        &expected,
+        next_state_sync_token(epoch),
         build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
     if (stop_.load() || state_sync_epoch_.load() != epoch) {
       return;
     }
     if (full_or.ok()) {
+      mark_state_sync_progress();
+      if (full_or->ignored) {
+        VLOG(1) << "Skipping ignored full-state sync for worker_id=" << worker_id;
+        return;
+      }
       int64_t last_sync_success = static_cast<int64_t>(
           std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
               .count());
       {
         std::lock_guard<std::mutex> lock(state_mu_);
         if (state_sync_epoch_.load() == epoch) {
-          state_version_ = full_or->first;
-          state_checksum_ = full_or->second;
+          state_version_ = full_or->new_state_version;
+          state_checksum_ = full_or->new_state_checksum;
           last_sync_success_ts_ = last_sync_success;
         }
       }
-      apply_full_state(expected);
+      apply_full_state(full_or->expected_replicas);
       last_sync_ts_s_.store(last_sync_success);
     }
   }
@@ -869,7 +1035,7 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   if (!node_addr_or.ok()) {
     return node_addr_or.status();
   }
-  const std::string node_addr = *node_addr_or;
+  const std::string node_addr = node_addr_or->host;
   const uint32_t grpc_port = port_from_listen(opts_.listen_addr);
   std::string previous_worker_id;
   {
@@ -880,6 +1046,8 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
     }
   }
   const bool recovery = preserve_identity && !previous_worker_id.empty();
+  LOG(INFO) << "Resolved advertised address for Global Store re-registration: " << node_addr
+            << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
   auto reg_or = global_store_->register_worker(
       node_id_,
       node_addr,
@@ -903,24 +1071,28 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   service_->set_worker_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Perform a best-effort full-state sync after re-registration
-  std::vector<commonpb::ReplicaInfo> expected;
   auto full_or = global_store_->request_full_state_sync(
       new_worker_id,
       reg_or->expected_state_version,
-      &expected,
+      next_state_sync_token(state_sync_epoch_.load()),
       build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
   if (full_or.ok()) {
-    {
-      std::lock_guard<std::mutex> lock(state_mu_);
-      state_version_ = full_or->first;
-      state_checksum_ = full_or->second;
-    }
-    apply_full_state(expected);
-    const int64_t last_sync_success = static_cast<int64_t>(
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
-    {
-      std::lock_guard<std::mutex> lock(state_mu_);
-      last_sync_success_ts_ = last_sync_success;
+    if (!full_or->ignored) {
+      {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        state_version_ = full_or->new_state_version;
+        state_checksum_ = full_or->new_state_checksum;
+      }
+      apply_full_state(full_or->expected_replicas);
+      const int64_t last_sync_success = static_cast<int64_t>(
+          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+              .count());
+      {
+        std::lock_guard<std::mutex> lock(state_mu_);
+        last_sync_success_ts_ = last_sync_success;
+      }
+    } else {
+      VLOG(1) << "Skipping ignored full-state sync after re-registration: worker_id=" << new_worker_id;
     }
   }
   return absl::OkStatus();
@@ -1067,11 +1239,10 @@ void WorkerLifecycleManager::monitor_loop() {
   // Simple liveness/restart loop for lifecycle threads
   using namespace std::chrono_literals;
   uint64_t last_hb_ticks = 0;
-  uint64_t last_state_sync_ticks = 0;
   uint64_t last_sync_ticks = 0;
   auto last_hb_change = std::chrono::steady_clock::now();
-  auto last_state_sync_change = std::chrono::steady_clock::now();
   auto last_sync_change = std::chrono::steady_clock::now();
+  const auto state_sync_budget = state_sync_stall_budget();
   while (!stop_.load()) {
     // Detect stalled heartbeat: ticks not increasing for > 3 * heartbeat_interval
     if (hb_ticks_.load() != last_hb_ticks) {
@@ -1089,20 +1260,30 @@ void WorkerLifecycleManager::monitor_loop() {
       hb_restarts_.fetch_add(1);
       hb_thread_ = std::thread(&WorkerLifecycleManager::heartbeat_loop, this);
     }
-    if (state_sync_ticks_.load() != last_state_sync_ticks) {
-      last_state_sync_ticks = state_sync_ticks_.load();
-      last_state_sync_change = std::chrono::steady_clock::now();
-    } else if (
-        std::chrono::steady_clock::now() - last_state_sync_change >
-        std::chrono::milliseconds(opts_.heartbeat_interval_ms * 3)) {
-      LOG(WARNING) << "state_sync_loop appears stalled; restarting";
-      state_sync_alive_.store(false);
+    if (state_sync_budget.has_value() && state_sync_inflight_.load()) {
+      const int64_t last_progress_ns = state_sync_last_progress_ns_.load();
+      if (last_progress_ns > 0) {
+        const auto now_ns =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+                .count();
+        const auto elapsed = std::chrono::nanoseconds(now_ns - last_progress_ns);
+        if (elapsed > *state_sync_budget && !state_sync_restart_pending_.exchange(true)) {
+          const uint64_t new_epoch = state_sync_epoch_.fetch_add(1) + 1;
+          state_sync_cv_.notify_all();
+          LOG(WARNING) << "state_sync_loop exceeded budget; requesting cancel epoch=" << new_epoch
+                       << " elapsed_ms=" << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        }
+      }
     }
     if (!state_sync_alive_.load() && !stop_.load()) {
-      state_sync_epoch_.fetch_add(1);
+      uint64_t epoch = state_sync_epoch_.load();
+      if (!state_sync_restart_pending_.load()) {
+        epoch = state_sync_epoch_.fetch_add(1) + 1;
+      }
+      state_sync_restart_pending_.store(false);
       state_sync_cv_.notify_all();
       retire_thread(&state_sync_thread_);
-      state_sync_thread_ = std::thread(&WorkerLifecycleManager::state_sync_loop, this, state_sync_epoch_.load());
+      state_sync_thread_ = std::thread(&WorkerLifecycleManager::state_sync_loop, this, epoch);
     }
     // Detect stalled sync: ticks not increasing for > 3 * chunk_sync_interval
     if (opts_.chunk_sync_interval_ms > 0) {
@@ -1128,19 +1309,12 @@ void WorkerLifecycleManager::monitor_loop() {
 }
 
 void WorkerLifecycleManager::apply_obsolete_replicas(const std::vector<std::string>& artifact_ids) {
-  if (artifact_ids.empty())
+  if (artifact_ids.empty()) {
     return;
-  absl::flat_hash_set<std::string> id_set;
-  id_set.reserve(artifact_ids.size());
-  for (const auto& id : artifact_ids) {
-    id_set.insert(id);
   }
-  std::vector<store::loading::ReplicaKey> keys;
-  auto engine = engine_.get();
-  for (const auto& id : id_set) {
-    append_replica_keys_for_artifact(*engine, id, &keys);
-  }
-  unload_replica_keys(*engine, "apply_obsolete_replicas", keys);
+  LOG(INFO) << "Heartbeat reported " << artifact_ids.size()
+            << " obsolete artifacts; requesting state sync for confirmation.";
+  request_state_sync();
 }
 
 void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected) {
@@ -1154,10 +1328,10 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
   }
 
   absl::flat_hash_set<ReplicaSelector, ReplicaSelectorHash> obsolete_selectors;
-  std::vector<store::loading::ReplicaKey> obsolete_keys;
-  for (const auto& info : engine_->get_all_replicas_info()) {
+  std::vector<store::loading::ReplicaKey> retire_keys;
+  for (const auto& entry : engine_->get_ha_inventory()) {
     std::vector<ReplicaSelector> local_selectors;
-    append_local_replica_selectors(info, &local_selectors);
+    append_local_replica_selectors(entry, &local_selectors);
     for (const auto& selector : local_selectors) {
       if (expected_keys.find(selector) == expected_keys.end()) {
         obsolete_selectors.insert(selector);
@@ -1166,16 +1340,149 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
   }
   auto engine = engine_.get();
   for (const auto& selector : obsolete_selectors) {
-    append_replica_keys_for_selector(*engine, selector, &obsolete_keys);
+    append_replica_keys_for_selector(*engine, selector, &retire_keys);
   }
-  unload_replica_keys(*engine, "apply_full_state", obsolete_keys);
+  if (!retire_keys.empty()) {
+    enqueue_retire_keys(std::move(retire_keys), "apply_full_state");
+  }
+}
+
+void WorkerLifecycleManager::enqueue_retire_keys(
+    std::vector<store::loading::ReplicaKey> keys,
+    std::string_view context) {
+  if (keys.empty()) {
+    return;
+  }
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> unique;
+  unique.reserve(keys.size());
+  for (const auto& key : keys) {
+    unique.insert(key);
+  }
+
+  std::vector<store::loading::ReplicaKey> newly_added;
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    for (const auto& key : unique) {
+      if (retire_queue_.find(key) != retire_queue_.end()) {
+        continue;
+      }
+      retire_queue_.emplace(key, RetireEntry{});
+      newly_added.push_back(key);
+    }
+  }
+
+  if (newly_added.empty()) {
+    return;
+  }
+
+  for (const auto& key : newly_added) {
+    engine_->set_replica_publish_state(key, store::StoreEngine::ReplicaPublishState::kRetiring);
+    if (key.device.type == DeviceType::GPU || key.device.type == DeviceType::CPU) {
+      const auto location = (key.device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                 : common::memory::MemoryLocation::CPU;
+      auto st = engine_->disable_remote_replica_access(key, location);
+      if (!st.ok()) {
+        LOG(WARNING) << context << ": disable_remote_replica_access failed for " << key << ": " << st;
+      }
+    }
+  }
+  retire_pending_.store(true);
+  state_sync_cv_.notify_all();
+  VLOG(1) << context << ": queued retire for " << newly_added.size() << " replicas";
+}
+
+void WorkerLifecycleManager::process_retire_queue() {
+  std::vector<store::loading::ReplicaKey> keys;
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    if (retire_queue_.empty()) {
+      retire_pending_.store(false);
+      return;
+    }
+    retire_pending_.store(false);
+    keys.reserve(retire_queue_.size());
+    for (const auto& entry : retire_queue_) {
+      keys.push_back(entry.first);
+    }
+  }
+
+  for (const auto& key : keys) {
+    RetireGateSnapshot snapshot;
+    snapshot.ref_count = service_->ref_count_for(key);
+    snapshot.use_count = service_->use_count_for(key);
+    snapshot.placement_pins = service_->placement_pin_count_for(key);
+    snapshot.has_transport_lock = service_->has_transport_lock_for(key);
+
+    if (!snapshot.ready()) {
+      bool should_log = false;
+      const int64_t now_s = absl::ToUnixSeconds(absl::Now());
+      {
+        std::lock_guard<std::mutex> lock(retire_mu_);
+        auto it = retire_queue_.find(key);
+        if (it == retire_queue_.end()) {
+          continue;
+        }
+        it->second.attempts += 1;
+        if (now_s - it->second.last_log_ts_s >= 30) {
+          it->second.last_log_ts_s = now_s;
+          should_log = true;
+        }
+      }
+      if (should_log) {
+        LOG(WARNING) << "Retire blocked for " << key << " refs=" << snapshot.ref_count << " uses=" << snapshot.use_count
+                     << " pins=" << snapshot.placement_pins
+                     << " transport_lock=" << (snapshot.has_transport_lock ? 1 : 0);
+      }
+      continue;
+    }
+
+    int rc = 1;
+    try {
+      auto async_runtime = service_->async_runtime_shared();
+      if (async_runtime && !async_runtime->is_shutting_down()) {
+        auto executor = async_runtime->blocking_executor();
+        rc = folly::via(std::move(executor), [engine = engine_.get(), key]() {
+               return engine->unload_replica(key);
+             }).get();
+      } else {
+        rc = engine_->unload_replica(key);
+      }
+    } catch (const std::exception& ex) {
+      LOG(WARNING) << "Retire unload threw exception for " << key << ": " << ex.what();
+      rc = 1;
+    } catch (...) {
+      LOG(WARNING) << "Retire unload threw unknown exception for " << key;
+      rc = 1;
+    }
+
+    bool retired = (rc == 0 || rc == -1);
+    if (!retired) {
+      const auto state = engine_->get_replica_state(key, key.device.type);
+      if (state <= store::replica::MemoryState::UNALLOCATED) {
+        retired = true;
+      }
+    }
+    if (retired) {
+      std::lock_guard<std::mutex> lock(retire_mu_);
+      retire_queue_.erase(key);
+    } else {
+      LOG(WARNING) << "Retire unload failed rc=" << rc << " for " << key;
+    }
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    if (retire_queue_.empty()) {
+      retire_pending_.store(false);
+    }
+  }
 }
 
 std::string WorkerLifecycleManager::compute_state_checksum(
     std::string_view node_id,
     std::string_view node_address,
     uint32_t node_port,
-    const std::vector<store::StoreEngine::ReplicaInfo>& infos) {
+    const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory) {
   // Keep format aligned with Global Store's RecoveryService._compute_state_checksum:
   // artifact_id:node_id:node_address:node_port:device_id:memory_type:available; sorted by
   // (artifact_id, memory_type, device_id).
@@ -1187,24 +1494,29 @@ std::string WorkerLifecycleManager::compute_state_checksum(
   };
 
   std::vector<Entry> entries;
-  entries.reserve(infos.size());
+  entries.reserve(inventory.size());
 
-  for (const auto& i : infos) {
-    std::string mem_type = "DISK";
+  for (const auto& entry : inventory) {
+    std::string mem_type;
     int device_id = 0;
-    if (i.gpu_state != common::memory::MemoryLocation::NONE) {
+    if (entry.memory_location == common::memory::MemoryLocation::GPU) {
+      if (entry.key.device.ordinal < 0) {
+        continue;
+      }
       mem_type = "GPU";
-      device_id = i.gpu_device_id;
-    } else if (i.cpu_state != common::memory::MemoryLocation::NONE) {
+      device_id = entry.key.device.ordinal;
+    } else if (entry.memory_location == common::memory::MemoryLocation::CPU) {
       mem_type = "RAM";
       device_id = 0;
+    } else {
+      continue;
     }
     entries.push_back(
         Entry{
-            .artifact_id = i.artifact_id,
+            .artifact_id = entry.key.artifact_id,
             .memory_type = std::move(mem_type),
             .device_id = device_id,
-            .available = i.is_registered_for_comm,
+            .available = entry.is_available,
         });
   }
 

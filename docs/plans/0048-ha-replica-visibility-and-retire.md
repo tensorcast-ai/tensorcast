@@ -21,18 +21,18 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 
 # Phases & Milestones
 
-- [ ] Phase 1: Publishable resident inventory
-  - [ ] Milestone 1: Track local publish state in core runtime and update it from ingestion + GS registration outcomes.
-  - [ ] Milestone 2: Emit an HA inventory snapshot (publishable + resident only) and consume it in heartbeat/sync.
+- [x] Phase 1: Publishable resident inventory
+  - [x] Milestone 1: Track local publish state in core runtime and update it from ingestion + GS registration outcomes.
+  - [x] Milestone 2: Emit an HA inventory snapshot (publishable + resident only) and consume it in heartbeat/sync.
 
-- [ ] Phase 2: Safe retire pipeline
-  - [ ] Milestone 1: Route `REMOVE_REPLICA` and full-sync diffs into a retire queue (no immediate unload).
-  - [ ] Milestone 2: Process retire queue with safety gates and best-effort remote access disable.
-  - [ ] Milestone 3: Treat `obsolete_replicas` as diagnostic-only; no direct unloads.
+- [x] Phase 2: Safe retire pipeline
+  - [x] Milestone 1: Route `REMOVE_REPLICA` and full-sync diffs into a retire queue (no immediate unload).
+  - [x] Milestone 2: Process retire queue with safety gates and best-effort remote access disable.
+  - [x] Milestone 3: Treat `obsolete_replicas` as diagnostic-only; no direct unloads.
 
-- [ ] Phase 3: Validation + doc updates
-  - [ ] Milestone 1: Add unit tests for inventory filtering, publish state transitions, and retire gating.
-  - [ ] Milestone 2: Update HA and module docs to reflect the new semantics.
+- [x] Phase 3: Validation + doc updates
+  - [x] Milestone 1: Add unit tests for inventory filtering, publish state transitions, and retire gating.
+  - [x] Milestone 2: Update HA and module docs to reflect the new semantics.
 
 # Implementation Tasks
 
@@ -77,7 +77,7 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 
 - Tests (C++):
   - `daemon/worker_lifecycle_manager_sync_test.cc`: verify `obsolete_replicas` no longer unloads and REMOVE/full-sync diffs only mark retire.
-  - `daemon/eviction_task_behavior_test.cc`: reuse patterns to assert retire gating honors ref/lease/lock.
+  - `daemon/worker_lifecycle_manager_sync_test.cc`: assert retire gating honors ref/lock blockers and releases after gates clear.
   - `core/store/runtime/replica/replica_runtime_test.cc`: validate `get_ha_inventory` filters non-resident and publish state transitions.
   - `core/store/runtime/metadata/metadata_gateway_test.cc`: verify registration failures leave `PUBLISH_PENDING`.
 - Docs:
@@ -112,7 +112,13 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 
 # Owner Checklist
 
-- [ ] Code changes mapped to modules and tests above
-- [ ] HA docs and module READMEs updated per doc sync rule
-- [ ] No new configs introduced outside unified config design (0004)
-- [ ] C++ naming conventions verified for new APIs
+- [x] Code changes mapped to modules and tests above
+- [x] HA docs and module READMEs updated per doc sync rule
+- [x] No new configs introduced outside unified config design (0004)
+- [x] C++ naming conventions verified for new APIs
+
+# Status
+
+- Completed Phases 1–3; HA inventory now publish-state backed and retire queue enforces ref/use/pin/lock gates.
+- Tests added/updated for publish-state transitions, HA inventory filtering, retire gating, and obsolete heartbeat behavior.
+- Tests: `bazel test //daemon:worker_lifecycle_manager_sync_test`, `bazel test //daemon:eviction_task_behavior_test`, `bazel test //core/store/runtime/replica:replica_runtime_test`, `bazel test //core/store/runtime/metadata:metadata_gateway_test` (pass).

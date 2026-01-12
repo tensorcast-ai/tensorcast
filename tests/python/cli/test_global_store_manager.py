@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ def test_start_global_store_records_state(monkeypatch, tmp_path):
         address="127.0.0.1:50051",
         listen_host="127.0.0.1",
         listen_port=50051,
+        advertise_host="127.0.0.1",
+        advertise_port=50051,
         metrics_port=8000,
         cluster_token="cluster-token",
         version="v1",

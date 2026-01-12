@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -7,6 +7,7 @@
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "daemon/ipc_region_registry.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/replica_session_manager.h"
 #include "daemon/session_lifecycle.h"
@@ -18,7 +19,9 @@ using tensorcast::daemon::SessionLifecycleManager;
 TEST_CASE("Eviction notify fires when protections drop to zero", "[daemon][lifecycle][notify]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
   RefTracker refs;
-  auto lip = std::make_unique<tensorcast::daemon::LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>());
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip =
+      std::make_unique<tensorcast::daemon::LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
   SessionLifecycleManager mgr(sessions, refs, *lip);
 
   // Register a notify callback

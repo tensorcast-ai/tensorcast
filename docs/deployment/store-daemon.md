@@ -148,6 +148,8 @@ All runtime parameters are configured via the unified config. The daemon only
 accepts `--config=/path/to/file`. See `examples/config/store_daemon_config.yaml`.
 Enum fields accept friendly values and are normalized (case-insensitive): `observability.otel.exporter_protocol: grpc | http/protobuf`, `observability.logging.level: debug|info|warn|error`.
 
+When HA is enabled, the daemon advertises a routable address to the Global Store. If `server.advertise.host` is set but non-routable, startup fails; if it is unset, the daemon resolves it using a routable `server.listen.host`, the outbound route IP to the Global Store endpoint, and finally the default interface IP. The resolved advertise address is logged at startup.
+
 For long-lived clients, prefer a non-zero `server.grpc.max_connection_idle` and
 explicit keepalive settings (for example `keepalive_time: 30s`,
 `keepalive_timeout: 10s`) to avoid idle GOAWAY churn. The Python SDK reuses a

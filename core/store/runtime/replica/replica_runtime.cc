@@ -103,6 +103,51 @@ std::vector<ReplicaInfo> ReplicaRuntime::get_all_replicas_info() const {
   return result;
 }
 
+std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
+  std::vector<ReplicaInventoryEntry> result;
+
+  const auto replica_keys = registry().get_lru_instances();
+  result.reserve(replica_keys.size());
+
+  auto is_present = [](replica::MemoryState st) {
+    return st == replica::MemoryState::ALLOCATED || st == replica::MemoryState::LOADING ||
+        st == replica::MemoryState::LOADED;
+  };
+
+  for (const auto& key : replica_keys) {
+    auto replica_or = registry().find(key);
+    if (!replica_or.ok()) {
+      continue;
+    }
+    const auto& replica = replica_or.value();
+
+    const bool is_gpu = key.device.type == DeviceType::GPU;
+    if (is_gpu && key.device.ordinal < 0) {
+      continue;
+    }
+    const auto location = is_gpu ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+    const auto state = replica->get_memory_state(location);
+    if (!is_present(state)) {
+      continue;
+    }
+
+    const auto publish_state = get_replica_publish_state(key);
+    if (publish_state == ReplicaPublishState::kLocalOnly || publish_state == ReplicaPublishState::kRetiring) {
+      continue;
+    }
+
+    ReplicaInventoryEntry entry;
+    entry.key = key;
+    entry.size_bytes = get_replica_size_or_zero(key);
+    entry.memory_location = location;
+    entry.is_available = communication_manager()->is_enabled() && state == replica::MemoryState::LOADED;
+    entry.publish_state = publish_state;
+    result.push_back(std::move(entry));
+  }
+
+  return result;
+}
+
 std::vector<DeviceKey> ReplicaRuntime::get_resident_devices(std::string_view artifact_id) const {
   absl::flat_hash_set<DeviceKey, DeviceKeyHash> unique_devices;
   std::vector<DeviceKey> devices;
@@ -291,6 +336,20 @@ absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_size(const loading::Replica
     return size_or.status();
   }
   return *size_or;
+}
+
+void ReplicaRuntime::set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state) {
+  absl::MutexLock lock(&publish_state_mu_);
+  publish_states_[key] = state;
+}
+
+ReplicaPublishState ReplicaRuntime::get_replica_publish_state(const loading::ReplicaKey& key) const {
+  absl::MutexLock lock(&publish_state_mu_);
+  auto it = publish_states_.find(key);
+  if (it == publish_states_.end()) {
+    return ReplicaPublishState::kLocalOnly;
+  }
+  return it->second;
 }
 
 absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
@@ -544,6 +603,11 @@ void ReplicaRuntime::record_ingestion_result(const IngestionResultEvent& event) 
       from_p2p ? "remote" : "disk", device_scope, success ? "finalize" : "error", event.duration_seconds, view_scope);
 
   if (success) {
+    if (event.replica_key.has_value()) {
+      set_replica_publish_state(
+          *event.replica_key,
+          event.publish_to_global_store ? ReplicaPublishState::kPublishPending : ReplicaPublishState::kLocalOnly);
+    }
     update_memory_pool_metrics();
     if (event.replica_key.has_value()) {
       publish_replica_event(

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Global Store configuration settings (file-based only)."""
 
@@ -40,6 +40,8 @@ class GlobalStoreConfig(BaseModel):
     # Server settings
     listen_host: str = "127.0.0.1"
     listen_port: int = 50051
+    advertise_host: str | None = None
+    advertise_port: int | None = None
     max_workers: int = 10
 
     # Performance settings
@@ -93,9 +95,16 @@ class GlobalStoreConfig(BaseModel):
         # Server
         listen_host = "127.0.0.1"
         listen_port = 50051
+        advertise_host: str | None = None
+        advertise_port: int | None = None
         if pb.server.HasField("listen"):
             listen_host = pb.server.listen.host or listen_host
             listen_port = int(pb.server.listen.port or 0) or 0
+        if pb.server.HasField("advertise"):
+            advertise_host = pb.server.advertise.host or None
+            advertise_port = (
+                int(pb.server.advertise.port) if pb.server.advertise.port > 0 else None
+            )
         # Preserve default when field is absent; accept explicit 0 when provided
         server_section = data.get("server", {}) if isinstance(data, dict) else {}
         has_max_workers = isinstance(server_section, dict) and (
@@ -162,6 +171,8 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
+            advertise_host=advertise_host,
+            advertise_port=advertise_port,
             max_workers=max_workers,
             transport_wait_retry_interval_ms=200,
             optimize_interval_ms=3_600_000,

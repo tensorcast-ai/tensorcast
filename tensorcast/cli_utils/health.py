@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import subprocess
 import time
 from dataclasses import dataclass
@@ -25,6 +26,8 @@ class GlobalStoreHealth:
     address: str
     listen_host: str | None
     listen_port: int | None
+    advertise_host: str | None
+    advertise_port: int | None
     metrics_port: int | None
     cluster_token: str | None
     version: str | None
@@ -94,25 +97,42 @@ def ping_global_store(
         stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
         resp = stub.HealthCheck(global_store_pb2.HealthCheckRequest(), timeout=timeout)
         if resp.status == global_store_pb2.Status.STATUS_OK:
-            listen_port = int(resp.listen_port) if resp.listen_port else port_hint
-            metrics_port = int(resp.metrics_port) if resp.metrics_port else None
-            listen_host = resp.listen_host or host_hint or connect_host
-            listen_addr = resp.listen_address or None
-            if listen_addr and ":" in listen_addr:
-                try:
-                    lh, lp = listen_addr.rsplit(":", 1)
-                    listen_host = lh or listen_host
-                    listen_port = listen_port or int(lp)
-                except Exception:
-                    pass
+            listen_host = host_hint or connect_host
+            listen_port = port_hint
+            advertise_host = None
+            advertise_port = None
+            metrics_port = None
+            version = None
+            db_file = None
+
+            info = None
+            with contextlib.suppress(Exception):
+                info = stub.GetServerInfo(
+                    global_store_pb2.GetServerInfoRequest(), timeout=timeout
+                )
+            if info is not None and info.status == global_store_pb2.Status.STATUS_OK:
+                if info.listen_host:
+                    listen_host = info.listen_host
+                if info.listen_port:
+                    listen_port = int(info.listen_port)
+                if info.advertise_host:
+                    advertise_host = info.advertise_host
+                if info.advertise_port:
+                    advertise_port = int(info.advertise_port)
+                metrics_port = int(info.metrics_port) if info.metrics_port else None
+                version = info.version or None
+                db_file = info.db_file or None
+
             return GlobalStoreHealth(
                 address=target,
                 listen_host=listen_host,
                 listen_port=listen_port,
+                advertise_host=advertise_host,
+                advertise_port=advertise_port,
                 metrics_port=metrics_port,
                 cluster_token=resp.cluster_token or None,
-                version=resp.version or None,
-                db_file=resp.db_file or None,
+                version=version,
+                db_file=db_file,
             )
     except Exception:
         pass
@@ -131,6 +151,8 @@ def ping_global_store(
                 address=target,
                 listen_host=connect_host,
                 listen_port=port_hint,
+                advertise_host=None,
+                advertise_port=None,
                 metrics_port=None,
                 cluster_token=None,
                 version=None,
