@@ -105,7 +105,7 @@ If any gate is non-zero, the replica remains `RETIRING` and is retried later.
 New or adjusted interfaces are expected in daemon/core:
 
 - `enum class ReplicaPublishState`
-- `struct ReplicaInventoryEntry`
+- `struct ReplicaInventoryEntry` (includes remote_memory_keys/buffer_sizes for HA P2P metadata)
 - `get_ha_inventory()` in `ReplicaRuntime` or `StoreEngine`
 - `set_replica_publish_state(...)` for per-replica updates
 - `mark_replica_retiring(...)` for transition into retire queue

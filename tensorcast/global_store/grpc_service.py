@@ -12,6 +12,7 @@ import ipaddress
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional, cast
 from uuid import UUID
 
@@ -132,12 +133,17 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self._runtime_info: dict[str, Any] = {}
 
         # Initialize database connection
-        if db_file is None:
+        db_path: Path | None = None
+        if db_file:
+            db_path = Path(db_file).expanduser()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if db_path is None:
             logger.info("Using in-memory DuckDB database")
             self.connection = duckdb.connect()
         else:
-            logger.info(f"Using persistent DuckDB database at: {db_file}")
-            self.connection = duckdb.connect(str(db_file))
+            logger.info("Using persistent DuckDB database at: %s", db_path)
+            self.connection = duckdb.connect(str(db_path))
 
         # Initialize database schema
         cursor = self.connection.cursor()

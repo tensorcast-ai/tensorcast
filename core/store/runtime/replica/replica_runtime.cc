@@ -140,7 +140,20 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
     entry.key = key;
     entry.size_bytes = get_replica_size_or_zero(key);
     entry.memory_location = location;
-    entry.is_available = communication_manager()->is_enabled() && state == replica::MemoryState::LOADED;
+    std::optional<ExportRegistration> comm_info;
+    if (communication_manager()->is_enabled()) {
+      comm_info = replica->get_memory_manager().get_comm_registration_info(location);
+    }
+    const bool comm_ready = comm_info.has_value() && !comm_info->remote_memory_keys.empty() &&
+        comm_info->remote_memory_keys.size() == comm_info->buffer_sizes.size();
+    entry.is_available = communication_manager()->is_enabled() && state == replica::MemoryState::LOADED && comm_ready;
+    if (comm_ready) {
+      entry.remote_memory_keys = comm_info->remote_memory_keys;
+      entry.buffer_sizes.reserve(comm_info->buffer_sizes.size());
+      for (const auto size : comm_info->buffer_sizes) {
+        entry.buffer_sizes.push_back(static_cast<uint64_t>(size));
+      }
+    }
     entry.publish_state = publish_state;
     result.push_back(std::move(entry));
   }

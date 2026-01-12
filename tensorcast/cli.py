@@ -163,8 +163,9 @@ def daemon():
     type=click.Path(exists=True, path_type=Path),
     help=(
         "Path to unified daemon config (YAML/JSON). "
-        "If omitted, tries $TENSORCAST_DAEMON_CONFIG or ~/.tensorcast/config/daemon.yaml, "
-        "falling back to an embedded default."
+        "If omitted, tries $TENSORCAST_DAEMON_CONFIG, "
+        "then examples/config/store_daemon_config.yaml (repo or packaged wheel). "
+        "Errors if no config is found."
     ),
 )
 @click.option(
@@ -494,7 +495,13 @@ def global_group():
 
 @global_group.command("start")
 @click.option(
-    "--config", type=click.Path(path_type=Path), help="Global Store config path"
+    "--config",
+    type=click.Path(path_type=Path),
+    help=(
+        "Global Store config path (defaults to $TENSORCAST_GLOBAL_STORE_CONFIG, "
+        "or examples/config/global_store_config.yaml (repo or packaged wheel) when available). "
+        "Errors if no config is found."
+    ),
 )
 @click.option("--listen-host", default=None, help="Listen host override")
 @click.option(

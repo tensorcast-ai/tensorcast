@@ -333,7 +333,7 @@ Configuration uses `tensorcast.config.v1.GlobalStoreConfig` proto, loaded from Y
 
 ```yaml
 database:
-  db_file: /var/lib/tensorcast/global_store.db  # null for in-memory
+  db_file: null  # null for in-memory
 
 server:
   # Bind address (server-side); 0.0.0.0 exposes all interfaces.
@@ -355,7 +355,7 @@ worker_policy:
     snapshot_max_rows: 200
 ```
 
-`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host.
+`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
 
 ## Extending the Global Store
 

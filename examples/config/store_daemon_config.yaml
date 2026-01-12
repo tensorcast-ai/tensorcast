@@ -149,8 +149,8 @@ communicator:
     buffers_per_flow: 4
     # Cap concurrent in-flight segments; 0 inherits buffers_per_flow.
     max_window_segments: 0
-    # Cap concurrent GPU channels so pool sizing is predictable (0 = auto).
-    expected_gpu_channels: 0
+    # Cap concurrent GPU channels so pool sizing is predictable (8 for 8-GPU defaults; 0 = auto).
+    expected_gpu_channels: 8
   rdma:
     # Outstanding WRs per QP; increase for bandwidth, decrease to reduce CPU/latency.
     outstanding_wr: 64

@@ -91,7 +91,9 @@ class GlobalStoreConfig(BaseModel):
 
         # Map to Pydantic
         # Database
-        db_file = Path(pb.database.db_file) if pb.database.db_file else None
+        db_file = (
+            Path(pb.database.db_file).expanduser() if pb.database.db_file else None
+        )
         # Server
         listen_host = "127.0.0.1"
         listen_port = 50051

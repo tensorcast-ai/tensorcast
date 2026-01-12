@@ -8,7 +8,7 @@ import contextlib
 import socket
 import subprocess
 import time
-from typing import Any
+from typing import Any, Callable, Iterable
 
 import grpc
 
@@ -44,31 +44,59 @@ def wait_daemon_ready(
     timeout: float | None = 20.0,
     *,
     proc: subprocess.Popen[Any] | None = None,
-) -> bool:
+    progress: Callable[[float, Exception | None], None] | None = None,
+    progress_interval: float = 5.0,
+    extra_hosts: Iterable[str] | None = None,
+) -> str | None:
     deadline = None if timeout is None else time.time() + timeout
-    addr = f"{host}:{port}"
+    start_ts = time.time()
+    last_report = start_ts
     last_err: Exception | None = None
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for candidate in (host, *(extra_hosts or [])):
+        if not candidate:
+            continue
+        if candidate in seen:
+            continue
+        candidates.append(candidate)
+        seen.add(candidate)
     if proc is not None and proc.poll() is not None:
-        return False
-    channel = grpc.insecure_channel(addr)
-    stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
+        return None
+    stubs: list[
+        tuple[str, grpc.Channel, store_daemon_pb2_grpc.StoreDaemonServiceStub]
+    ] = []
+    for candidate in candidates:
+        addr = f"{candidate}:{port}"
+        channel = grpc.insecure_channel(addr)
+        stubs.append(
+            (candidate, channel, store_daemon_pb2_grpc.StoreDaemonServiceStub(channel))
+        )
     try:
         while deadline is None or time.time() < deadline:
             if proc is not None and proc.poll() is not None:
-                return False
-            try:
-                stub.GetServerConfig(
-                    store_daemon_pb2.GetServerConfigRequest(), timeout=0.8
-                )
-                return True
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                if proc is not None and proc.poll() is not None:
-                    return False
-                time.sleep(0.2)
+                return None
+            for candidate, _channel, stub in stubs:
+                try:
+                    stub.GetServerConfig(
+                        store_daemon_pb2.GetServerConfigRequest(), timeout=0.8
+                    )
+                    return candidate
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    if proc is not None and proc.poll() is not None:
+                        return None
+            now = time.time()
+            if progress is not None and now - last_report >= max(
+                progress_interval, 0.5
+            ):
+                progress(now - start_ts, last_err)
+                last_report = now
+            time.sleep(0.2)
     finally:
-        with contextlib.suppress(Exception):
-            channel.close()
+        for _candidate, channel, _stub in stubs:
+            with contextlib.suppress(Exception):
+                channel.close()
     # For debugging purposes; caller can log if desired
     _ = last_err
-    return False
+    return None

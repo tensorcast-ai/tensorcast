@@ -561,6 +561,14 @@ class EditableWheelCommand(editable_wheel):
         copy_schema_sql()
         editable_wheel.run(self)
 
+class BuildPyCommand(build_py):
+    description = "Builds the Python package sources"
+
+    def run(self):
+        ensure_proto_python_generated()
+        build_py.run(self)
+        copy_example_configs(self.build_lib)
+
 
 class CleanCommand(Command):
     """Custom clean command to tidy up the project root."""
