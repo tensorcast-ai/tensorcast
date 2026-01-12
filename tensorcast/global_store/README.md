@@ -355,7 +355,7 @@ worker_policy:
     snapshot_max_rows: 200
 ```
 
-`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value.
+`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host.
 
 ## Extending the Global Store
 

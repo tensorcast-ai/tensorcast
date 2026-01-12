@@ -79,7 +79,7 @@ high_availability:
 
 > The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address` or `--global-store-endpoints`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
 >
-> Note: `listen.host: 0.0.0.0` is a bind-all address (server-side). Clients should connect using a routable IP/DNS name (e.g. `10.0.0.5:50051`). TensorCast uses `advertise_*` for dial targets and ignores `0.0.0.0` in bind metadata.
+> Note: `listen.host: 0.0.0.0` is a bind-all address (server-side). Clients should connect using a routable IP/DNS name (e.g. `10.0.0.5:50051`). TensorCast uses `advertise_*` for dial targets when routable and ignores unspecified values like `0.0.0.0` or `::` in bind/advertise metadata, falling back to a connectable host.
 
 ## Usage
 

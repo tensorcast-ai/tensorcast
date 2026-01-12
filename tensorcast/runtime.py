@@ -307,7 +307,8 @@ def _dial_address_from_health(candidate: str, health: GlobalStoreHealth) -> str:
 
     Policy:
     - Prefer the candidate host if provided and not unspecified (CLI / env / runtime record).
-    - Prefer advertise_host/advertise_port from server info when candidate host is missing or unspecified.
+    - Prefer advertise_host/advertise_port from server info when candidate host is missing or unspecified,
+      and the advertised host is routable (not unspecified).
     - Use listen_port to backfill the bound port (especially when config uses port=0).
     """
 
@@ -323,7 +324,7 @@ def _dial_address_from_health(candidate: str, health: GlobalStoreHealth) -> str:
     )
     if explicit_host:
         host = explicit_host
-    elif advertise_host:
+    elif advertise_host and not is_unspecified_host(advertise_host):
         host = advertise_host
     else:
         host = resolve_connect_host(health.listen_host)
