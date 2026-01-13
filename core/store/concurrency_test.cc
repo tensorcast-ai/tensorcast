@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // StoreEngine concurrency tests (A-series)
 // Test concurrent materialize_replica() and unload_replica() operations.
@@ -349,9 +349,9 @@ TEST_CASE("A4: Concurrent unload_replica() same replica", "[store_engine][concur
     t.join();
   }
 
-  // Exactly one thread should succeed in unloading
-  REQUIRE(successful_unloads.load() == 1);
-  REQUIRE(failed_unloads.load() == num_threads - 1);
+  // unload_replica is idempotent for existing replicas; all callers should succeed.
+  REQUIRE(successful_unloads.load() == num_threads);
+  REQUIRE(failed_unloads.load() == 0);
 
   // Artifact should no longer be loaded
   auto loaded_devices = store->get_resident_devices(artifact_id);
