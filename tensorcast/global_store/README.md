@@ -131,16 +131,18 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
    WorkerHeartbeat           UnregisterWorker
    (resets timeout)                │
        │                           ▼
-       │                   [worker deleted]
+       │                   [worker marked inactive]
        │                   [replicas marked unavailable]
        │
        ▼
   (heartbeat timeout exceeded)
        │
        ▼
-  [cleanup thread removes worker]
+  [cleanup thread marks worker inactive]
   [replicas marked unavailable]
 ```
+
+Inactive workers remain in the registry with `inactive_at` set so routing can filter them while avoiding delete/update conflicts.
 
 **Design decision: batched heartbeats.** Workers send heartbeats every ~5 seconds. Writing each immediately would create unnecessary database load. Instead, `WorkerService` buffers heartbeats in memory and a background thread flushes batches every ~100ms. This trades sub-second staleness for dramatically reduced write amplification.
 
@@ -153,7 +155,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 **Key behaviors:**
 - Generates unique worker IDs incorporating node identity and UUID suffix (avoids collisions across restarts)
 - Validates address uniqueness—two workers cannot register the same `(address, port)` from different nodes
-- Detects stale workers via heartbeat timeout and cleans up their replicas
+- Detects stale workers via heartbeat timeout, marks them inactive, and cleans up their replicas
 
 ### ArtifactService
 
@@ -172,6 +174,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
 - Finds available replica with capacity below `max_concurrency`
 - Atomically claims the replica (increment counter) and creates transport record
 - Supports blocking wait with timeout for high-contention scenarios
+- Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
 - Cleans up stale transports as safety net for crashed clients
 
 **Load balancing strategy:**
@@ -277,7 +280,7 @@ class BaseRepository:
         return self.connection.cursor()  # Thread-local cursor
 ```
 
-DuckDB cursors are independent views—operations on one cursor don't affect others. This avoids explicit locking for most operations.
+DuckDB cursors are independent views—operations on one cursor don't affect others. Worker-table writes are serialized to avoid delete/update conflicts; most reads remain lock-free.
 
 ### Atomic Replica Selection
 
@@ -306,7 +309,7 @@ This introduces sub-second staleness but dramatically reduces database pressure 
 
 The Global Store runs several daemon threads:
 
-1. **Maintenance Thread**: Cleans up inactive workers, force-completes expired transports, runs VACUUM on hot tables
+1. **Maintenance Thread**: Marks inactive workers, force-completes expired transports, runs VACUUM on hot tables
 2. **Heartbeat Batch Thread**: Flushes buffered heartbeats every ~100ms
 
 ### Metrics
@@ -355,7 +358,7 @@ worker_policy:
     snapshot_max_rows: 200
 ```
 
-`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
+`server.listen` is the bind address, while `server.advertise` is the routable address returned by GetServerInfo and used for clients when it is routable. If `advertise.host` is set but non-routable, startup fails. If it is unset, the server attempts to auto-detect a suitable IPv4 address and logs the resolved value; clients ignore unspecified advertised hosts (for example, `0.0.0.0`) and fall back to a connectable listen host. When `database.db_file` is set, `~` is expanded and its parent directory is created on startup. When `database.db_file` is null/empty, the CLI leaves it unset and the Global Store uses in-memory DuckDB. When `tensorcast-cli global start` runs without `--config`, it uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. The example file defaults to `listen.host: 0.0.0.0` and `db_file: null`.
 
 ## Extending the Global Store
 

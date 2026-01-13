@@ -12,6 +12,7 @@
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/common/memory/pinned_memory_authority.h"
 #include "core/store/components/communication_manager.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/memory_tier_config.h"
 
 namespace tensorcast::store {
@@ -69,6 +70,10 @@ struct StoreEngineOptions {
   // the StoreEngine will operate in standalone mode without remote
   // coordination and P2P source discovery.
   std::string global_store_address;
+
+  // Optional externally created Global Store client so callers can share a
+  // single channel (e.g., daemon worker lifecycle + StoreEngine).
+  std::shared_ptr<components::IGlobalStoreClient> global_store_client{nullptr};
 
   // (Phase-3) Optional externally created CommunicationManager so multiple
   // StoreEngine instances can share the same underlying Communicator

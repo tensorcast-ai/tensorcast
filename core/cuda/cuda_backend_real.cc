@@ -450,7 +450,7 @@ absl::Status open_ipc_mem_handle(void** dev_ptr, cudaIpcMemHandle_t handle, unsi
     }
   }
   SC_RETURN_IF_CUDA_ERROR(cudaIpcOpenMemHandle(dev_ptr, handle, flags));
-  LOG(INFO) << "open_ipc_mem_handle: handle=0x" << handle_hex << " ptr=" << *dev_ptr << " flags=" << flags;
+  VLOG(1) << "open_ipc_mem_handle: handle=0x" << handle_hex << " ptr=" << *dev_ptr << " flags=" << flags;
   return absl::OkStatus();
 }
 

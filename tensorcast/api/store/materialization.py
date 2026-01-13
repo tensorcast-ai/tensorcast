@@ -135,7 +135,7 @@ class FallbackResolver:
         detail: Mapping[str, object],
     ) -> None:
         logger.info(
-            "store.fallback",
+            "store.materialize.source",
             extra={
                 "tc.store.daemon": self._runtime.daemon_endpoint,
                 "tc.store.mode": mode,
@@ -1291,7 +1291,7 @@ class MaterializationPipeline:
                 )
                 if span is not None:
                     span.add_event(
-                        "store.fallback.disk",
+                        "store.materialize.disk_fallback",
                         {
                             "tc.artifact.id": resolved_artifact_id or "",
                             "tc.store.disk_path_present": True,

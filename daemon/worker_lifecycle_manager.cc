@@ -280,6 +280,9 @@ WorkerLifecycleManager::WorkerLifecycleManager(
 
 gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
     const Options& opts) {
+  if (opts.global_store_client) {
+    return gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>>{opts.global_store_client};
+  }
   ABSL_CHECK(!opts.global_store_addr.empty()) << "WorkerLifecycleManager requires a Global Store address";
 
   store::components::GlobalStoreClientConfig cfg;

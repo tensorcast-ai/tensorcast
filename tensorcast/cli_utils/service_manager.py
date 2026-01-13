@@ -373,6 +373,7 @@ def start_service(
         fallback_hosts.append("127.0.0.1")
 
     progress_cb = None
+    last_wait_err: Exception | None = None
     if to_console:
         fallback_note = (
             f" (fallback: {', '.join(fallback_hosts)})" if fallback_hosts else ""
@@ -383,11 +384,12 @@ def start_service(
         )
 
         def _progress(elapsed_s: float, last_err: Exception | None) -> None:
-            suffix = f" Last error: {last_err}" if last_err else ""
+            nonlocal last_wait_err
+            last_wait_err = last_err
             click.echo(
                 (
                     "Still waiting for daemon readiness at "
-                    f"{connect_host}:{port} ({elapsed_s:.1f}s elapsed).{suffix}"
+                    f"{connect_host}:{port} ({elapsed_s:.1f}s elapsed)."
                 ),
                 err=True,
             )
@@ -406,13 +408,17 @@ def start_service(
         retcode = proc.poll()
         _cleanup_failed_start(proc, log_threads, inst, so, se)
         log_hint = f" See logs under {inst.logs}" if persist_logs else ""
+        err_hint = f" Last readiness error: {last_wait_err}" if last_wait_err else ""
         if retcode is not None:
             raise ServiceError(
                 f"Daemon exited with code {retcode} during startup (address={connect_host}:{port})."
                 + log_hint
+                + err_hint
             )
         raise ServiceError(
-            f"Daemon exited during startup (address={connect_host}:{port})." + log_hint
+            f"Daemon exited during startup (address={connect_host}:{port})."
+            + log_hint
+            + err_hint
         )
     if ready_host != connect_host:
         connect_host = ready_host

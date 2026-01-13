@@ -316,6 +316,12 @@ absl::Status RuntimeContext::initialize_communication_manager() {
 }
 
 absl::Status RuntimeContext::initialize_global_store_client() {
+  if (options_.global_store_client) {
+    global_store_client_ = options_.global_store_client;
+    global_store_client_->update_local_endpoint(
+        worker_identity_.node_id, worker_identity_.node_address, worker_identity_.grpc_port, worker_identity_.p2p_port);
+    return absl::OkStatus();
+  }
   if (options_.global_store_address.empty()) {
     return absl::OkStatus();
   }

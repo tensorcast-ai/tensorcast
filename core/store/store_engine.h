@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <string_view>
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -220,6 +221,7 @@ class StoreEngine {
   // NEW ReplicaKey-centric APIs (Multi-Device Binding)
   // ─────────────────────────────────────────────────────────────────────
   int wait_replica_ready(const loading::ReplicaKey& key);
+  absl::Status unload_replica_status(const loading::ReplicaKey& key);
   int unload_replica(const loading::ReplicaKey& key);
   [[nodiscard]] replica::MemoryState get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const;
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key);

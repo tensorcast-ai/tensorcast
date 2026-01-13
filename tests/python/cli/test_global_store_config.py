@@ -7,12 +7,12 @@ import socket
 from pathlib import Path
 
 from tensorcast.cli_utils import config as cfg_utils
-from tensorcast.cli_utils.paths import global_session_paths
+from tensorcast.cli_utils.paths import global_session_paths, runtime_root
 
 
 def test_cluster_token_persisted_with_hmac(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
-    token_path = tmp_path / "runtime" / "cluster_token"
+    token_path = runtime_root() / "cluster_token"
 
     token = cfg_utils.load_or_create_cluster_token()
     payload = json.loads(token_path.read_text(encoding="utf-8"))

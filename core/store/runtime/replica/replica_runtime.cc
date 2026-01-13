@@ -2,6 +2,7 @@
 
 #include "core/store/runtime/replica/replica_runtime.h"
 
+#include <format>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -250,12 +251,17 @@ int ReplicaRuntime::wait_replica_ready(const loading::ReplicaKey& key) const {
   return st.ok() ? 0 : 1;
 }
 
-int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
+absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& key) const {
   auto replica_or = registry().find(key);
   if (!replica_or.ok()) {
     VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
             << " not found in registry: " << replica_or.status();
-    return 1;
+    return absl::NotFoundError(
+        std::format(
+            "ReplicaRuntime::unload_replica: artifact={} device={} not found in registry: {}",
+            key.artifact_id,
+            key.device.ordinal,
+            replica_or.status().ToString()));
   }
 
   const auto& replica = replica_or.value();
@@ -282,7 +288,7 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
     if (observed_state <= replica::MemoryState::UNALLOCATED) {
       VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
               << ": no allocation observed after probe window; treating as no-op unload.";
-      return -1;
+      return absl::OkStatus();
     }
 
     before_state = observed_state;
@@ -295,23 +301,53 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
     absl::Status wait_status = replica->wait_until_loaded(loc, kUnloadRetryTimeout);
 
     if (!wait_status.ok() && !absl::IsFailedPrecondition(wait_status)) {
+      const auto current_state = replica->get_memory_state(loc);
       VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
               << ": wait for load completion returned " << wait_status;
-      return -1;
+      return absl::Status(
+          wait_status.code(),
+          std::format(
+              "ReplicaRuntime::unload_replica: wait_until_loaded failed for artifact={} device={} location={} "
+              "state={} status={}",
+              key.artifact_id,
+              key.device.ordinal,
+              common::memory::location_to_string(loc),
+              replica::state_to_string(current_state),
+              wait_status.ToString()));
     }
 
     release_status = replica->release_memory(loc);
   }
 
   if (!release_status.ok()) {
+    const auto current_state = replica->get_memory_state(loc);
     VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
             << ": unload failed with " << release_status;
+    return absl::Status(
+        release_status.code(),
+        std::format(
+            "ReplicaRuntime::unload_replica: release_memory failed for artifact={} device={} location={} state={} "
+            "status={}",
+            key.artifact_id,
+            key.device.ordinal,
+            common::memory::location_to_string(loc),
+            replica::state_to_string(current_state),
+            release_status.ToString()));
   }
 
-  if (release_status.ok()) {
-    publish_replica_event(RuntimeEventType::kReplicaEvicted, key, replica_size);
+  publish_replica_event(RuntimeEventType::kReplicaEvicted, key, replica_size);
+  return absl::OkStatus();
+}
+
+int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
+  absl::Status unload_status = unload_replica_status(key);
+  if (unload_status.ok()) {
+    return 0;
   }
-  return release_status.ok() ? 0 : -1;
+  if (absl::IsNotFound(unload_status)) {
+    return 1;
+  }
+  return -1;
 }
 
 replica::MemoryState ReplicaRuntime::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {

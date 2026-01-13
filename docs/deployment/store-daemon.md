@@ -43,8 +43,8 @@ daemon to resolve ``libstore_engine``, ``libtorch`` and CUDA components even
 when only the binary is present on disk.
 
 By default the daemon runs in the background after `tensorcast-cli daemon start`
-returns, and logs are persisted under `~/.tensorcast/sessions/<id>/logs` (view
-them with `uv run tensorcast-cli daemon logs`). Add `--blocking` to keep the daemon
+returns, and logs are persisted under `~/.tensorcast/hosts/<host_id>/sessions/<id>/logs`
+(view them with `uv run tensorcast-cli daemon logs`). Add `--blocking` to keep the daemon
 attached to the CLI, stream logs directly to the terminal (stdio inherited to
 avoid buffered crash output), and stop it when the CLI exits (SIGTERM with a
 ~35s grace before SIGKILL). In blocking mode, logs are not persisted to the
@@ -52,23 +52,26 @@ session log files.
 
 ## Manage Daemon Sessions
 
-Daemon sessions are tracked under `~/.tensorcast/sessions/<session_id>` and the
-current session id is stored in `~/.tensorcast/current_session`.
+Daemon sessions are tracked under `~/.tensorcast/hosts/<host_id>/sessions/<session_id>` and the
+current session id is stored in `~/.tensorcast/hosts/<host_id>/current_session`
+(where `<host_id>` is derived from the hostname and machine-id).
 Session metadata is written as soon as the daemon process starts (before
 readiness), so SDK `tc.init(mode="connect")` can discover the session while
 startup continues; retry if the daemon is still initializing. The CLI emits
 periodic readiness status messages if startup takes longer than a few seconds
 and probes both the configured listen host and loopback to avoid hanging on a
-non-local listen address.
+non-local listen address. Transient readiness probe errors are suppressed during
+startup and only surfaced if the daemon fails to become ready.
 
-Only one Store Daemon instance is allowed per `$TENSORCAST_HOME`. If you run
-`tensorcast-cli daemon start` while another daemon is already running, the CLI
+Only one Store Daemon instance is allowed per host-scoped runtime root under
+`$TENSORCAST_HOME`. If you run `tensorcast-cli daemon start` while another daemon
+is already running, the CLI
 returns an error and prints the existing daemon session details; reuse that
 instance or stop it before starting a new one.
 
 When `tensorcast-cli daemon stop` is invoked without a session id, the CLI
-resolves the active daemon from `~/.tensorcast/runtime/state.json` first, then
-falls back to `~/.tensorcast/current_session`.
+resolves the active daemon from `~/.tensorcast/hosts/<host_id>/runtime/state.json`
+first, then falls back to `~/.tensorcast/hosts/<host_id>/current_session`.
 
 Common commands:
 

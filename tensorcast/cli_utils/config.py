@@ -5,7 +5,7 @@
 - Discover default daemon / Global Store config paths
 - Build embedded daemon / Global Store configs for local launches
 - Allocate deterministic ports for daemon/Global Store
-- Manage the implicit cluster token persisted under ~/.tensorcast/runtime
+- Manage the implicit cluster token persisted under the host-scoped runtime root
 """
 
 from __future__ import annotations
@@ -259,7 +259,8 @@ def load_or_create_cluster_token(existing: str | None = None) -> str:
     """Load the implicit cluster token, creating it if missing.
 
     - Token is 128-bit random hex with HMAC checksum to detect corruption.
-    - Stored at ~/.tensorcast/runtime/cluster_token with mode 0600.
+    - Stored at the host-scoped runtime root (e.g. ~/.tensorcast/hosts/<host_id>/runtime/cluster_token)
+      with mode 0600.
     - If *existing* is provided and no file exists, it is persisted verbatim.
     """
 

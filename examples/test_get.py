@@ -9,3 +9,4 @@ key = "demo:model:002"
 
 handle = tc.artifact(key=key)
 loaded = handle.tensor_dict(device=device)
+print(loaded)

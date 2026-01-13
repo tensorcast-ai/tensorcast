@@ -137,7 +137,10 @@ graph TB
   - Implementation is provided by `runtime::metadata::RegistrationBackend`, which owns pending registration state, TTL enforcement, view ingestion, and emits registration events through `MetadataGateway`. Global Store publication stays confined to `runtime::metadata::MetadataGateway`, so registration flows never reach into the Global Store client directly.
 
 - Replica queries and management (ReplicaKey-centric):
-  - `wait_replica_ready`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`, `get_replica_size`
+  - `wait_replica_ready`, `unload_replica_status`, `unload_replica`, `get_replica_state`, `get_replica_gpu_ptr`,
+    `get_replica_size`
+  - `unload_replica_status` returns rich `absl::Status` failure context (location/state/release errors); the int-returning
+    `unload_replica` preserves legacy 0/1/-1 semantics.
   - `get_resident_devices(artifact_id)`, `list_device_replicas(DeviceKey)`
   - UMA telemetry (authoritative):
     - `get_chunk_states_telemetry(artifact_id)` returns the UMA CPU snapshot (identical to `get_chunk_states_cpu_uma`)

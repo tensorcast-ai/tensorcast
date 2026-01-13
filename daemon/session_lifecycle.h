@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Unified session lifecycle: consolidates session TTL, registration join TTL,
 // and PID-based liveness into a single manager and background task.
@@ -85,6 +85,11 @@ class PidMonitor final {
       }
       use_pidfd_.store(false);
     }
+    if (use_pidfd_.load()) {
+      VLOG(1) << "PidMonitor: pidfd enabled";
+    } else {
+      LOG(WARNING) << "PidMonitor: pidfd unavailable; falling back to /proc polling";
+    }
     th_ = std::thread([this]() { this->run_loop_(); });
   }
 
@@ -139,6 +144,9 @@ class PidMonitor final {
           ABSL_LOG_IF(WARNING, !_tc_st.ok()) << "PidMonitor: epoll add pidfd: " << _tc_st;
         }
       } else {
+        const int err = errno;
+        VLOG(1) << "PidMonitor: pidfd_open failed for pid=" << pid << ": "
+                << absl::ErrnoToStatus(err, "pidfd_open failed");
         // pidfd unavailable for this pid (maybe it already died); leave in watched_ for poll fallback
       }
     }
@@ -804,6 +812,7 @@ class SessionLifecycleManager {
         }
       }
     }
+    size_t lease_count = 0;
     {
       std::unordered_set<LeaseId> leases_to_retire;
       {
@@ -815,12 +824,15 @@ class SessionLifecycleManager {
           }
         }
       }
+      lease_count = leases_to_retire.size();
       for (LeaseId id : leases_to_retire) {
         retire_lease_(id, /*reason=*/"pid_exit");
       }
     }
     // Best-effort: drop RefTracker references for this pid
     auto keys = refs_.keys();
+    VLOG(1) << "SessionLifecycle: pid_exit pid=" << pid << " guards=" << guards.size() << " leases=" << lease_count
+            << " ref_keys=" << keys.size();
     for (const auto& key : keys) {
       refs_.drop_ref(key, pid);
     }

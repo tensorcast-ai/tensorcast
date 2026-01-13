@@ -78,6 +78,8 @@ Contract highlights:
 - `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
 - `MaterializeIntoTarget` requires canonical layouts and `artifact_id` in Phase 1, skips verification, and returns `DATA_LOSS` on post-start failures after poisoning the region to prevent reuse.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
+- `UnloadReplica` surfaces detailed failure reasons (state/location/release status) via gRPC status messages so clients can
+  diagnose unload failures without daemon-side logs.
 
 ### Variant Views
 
