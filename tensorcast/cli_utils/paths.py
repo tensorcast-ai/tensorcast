@@ -1,22 +1,26 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Session and path management utilities for TensorCast CLI.
 
 This module centralizes filesystem layout, current-session bookkeeping, and
-helpers to construct per-session directories.
+helpers to construct per-session directories. Runtime state is host-scoped to
+avoid collisions when multiple machines share the same filesystem.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
+import socket
 from dataclasses import dataclass
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 from tensorcast.cli_utils.filesys import read_json_locked, write_text_atomic
 
 HOME_DIRNAME = ".tensorcast"
+HOSTS_DIRNAME = "hosts"
 ENV_HOME_VAR = "TENSORCAST_HOME"
 
 
@@ -33,14 +37,46 @@ def home_dir() -> Path:
     return p
 
 
+def _sanitize_component(value: str) -> str:
+    safe = value.replace(os.sep, "_")
+    if os.altsep:
+        safe = safe.replace(os.altsep, "_")
+    return safe
+
+
+def _read_machine_id() -> str | None:
+    try:
+        path = Path("/etc/machine-id")
+        if path.exists():
+            data = path.read_text(encoding="utf-8").strip()
+            return data or None
+    except Exception:
+        return None
+    return None
+
+
+@lru_cache(maxsize=1)
+def _host_id() -> str:
+    hostname = socket.gethostname().strip() or "unknown"
+    machine_id = _read_machine_id()
+    raw = f"{hostname}-{machine_id}" if machine_id else hostname
+    return _sanitize_component(raw)
+
+
+def host_root() -> Path:
+    root = home_dir() / HOSTS_DIRNAME / _host_id()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
 def runtime_root() -> Path:
-    root = home_dir() / "runtime"
+    root = host_root() / "runtime"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def locks_dir() -> Path:
-    root = home_dir() / "locks"
+    root = host_root() / "locks"
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -68,23 +104,23 @@ def global_store_lock_path() -> Path:
 
 
 def sessions_root() -> Path:
-    p = home_dir() / "sessions"
+    p = host_root() / "sessions"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def global_sessions_root() -> Path:
-    p = home_dir() / "global_sessions"
+    p = host_root() / "global_sessions"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
 
 def current_session_path() -> Path:
-    return home_dir() / "current_session"
+    return host_root() / "current_session"
 
 
 def current_global_session_path() -> Path:
-    return home_dir() / "current_global_session"
+    return host_root() / "current_global_session"
 
 
 def _read_text_optional(path: Path) -> str | None:

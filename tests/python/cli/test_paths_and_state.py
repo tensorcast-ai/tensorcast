@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -17,6 +17,8 @@ def test_home_dir_and_current_session_are_atomic(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORCAST_HOME", str(tmp_path))
     home = paths.home_dir()
     assert home == tmp_path
+    host_root = paths.host_root()
+    assert host_root.parent == tmp_path / "hosts"
 
     runtime_lock = paths.runtime_lock_path()
     assert runtime_lock.exists()
@@ -24,6 +26,7 @@ def test_home_dir_and_current_session_are_atomic(monkeypatch, tmp_path):
 
     paths.set_current_session_id("sess-123")
     assert paths.get_current_session_id() == "sess-123"
+    assert paths.current_session_path().parent == host_root
     assert (paths.current_session_path().stat().st_mode & 0o777) == 0o600
 
 

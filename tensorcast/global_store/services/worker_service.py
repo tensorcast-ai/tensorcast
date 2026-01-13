@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Service for worker operations."""
 
@@ -71,23 +71,35 @@ class WorkerService:
         )
 
         if existing:
+            reset_state_tracking = False
             # Reject cross-host duplicate on same address:port
             if existing.node_id != worker.node_id:
-                logger.error(
-                    "Address/port already registered by a different worker: %s:%d (existing_id=%s existing_node=%s, new_node=%s).",
-                    worker.node_address,
-                    worker.grpc_port,
-                    existing.worker_id,
-                    existing.node_id,
-                    worker.node_id,
-                )
-                # Surface as validation error so gRPC layer returns STATUS_ERROR
-                raise ValidationError(
-                    "Address/port already registered by another worker"
-                )
+                if existing.inactive_at is not None:
+                    reset_state_tracking = True
+                    logger.warning(
+                        "Reassigning inactive worker_id=%s from node=%s to node=%s at %s:%d.",
+                        existing.worker_id,
+                        existing.node_id,
+                        worker.node_id,
+                        existing.node_address,
+                        existing.grpc_port,
+                    )
+                else:
+                    logger.error(
+                        "Address/port already registered by a different worker: %s:%d (existing_id=%s existing_node=%s, new_node=%s).",
+                        worker.node_address,
+                        worker.grpc_port,
+                        existing.worker_id,
+                        existing.node_id,
+                        worker.node_id,
+                    )
+                    # Surface as validation error so gRPC layer returns STATUS_ERROR
+                    raise ValidationError(
+                        "Address/port already registered by another worker"
+                    )
 
             # Warn if this looks like a duplicate registration while the existing worker is still active
-            if existing.last_heartbeat:
+            if existing.last_heartbeat and existing.inactive_at is None:
                 try:
                     age_sec = max(
                         0.0, time.time() - existing.last_heartbeat.timestamp()
@@ -121,7 +133,9 @@ class WorkerService:
             existing.accepting_new_requests = True
 
             logger.debug(f"Updating existing worker {existing.worker_id}")
-            return self.worker_repository.update(existing)
+            return self.worker_repository.update(
+                existing, reset_state_tracking=reset_state_tracking
+            )
         else:
             # Create new worker
             # Use UUID-based suffix to avoid collisions across nodes registering in the same second
@@ -130,7 +144,7 @@ class WorkerService:
             return self.worker_repository.create(worker)
 
     def find_worker_by_address(
-        self, node_address: str, grpc_port: int
+        self, node_address: str, grpc_port: int, *, include_inactive: bool = True
     ) -> Worker | None:
         """
         Find a worker by address and port.
@@ -138,11 +152,14 @@ class WorkerService:
         Args:
             node_address: Node address
             grpc_port: gRPC port
+            include_inactive: Include inactive worker rows
 
         Returns:
             Worker if found, None otherwise
         """
-        return self.worker_repository.find_by_address_port(node_address, grpc_port)
+        return self.worker_repository.find_by_address_port(
+            node_address, grpc_port, include_inactive=include_inactive
+        )
 
     def heartbeat(
         self,
@@ -204,8 +221,8 @@ class WorkerService:
         # Mark all replicas as unavailable
         self.replica_repository.mark_unavailable_by_worker(worker_id)
 
-        # Delete worker
-        success = self.worker_repository.delete(worker_id)
+        # Mark worker inactive
+        success = self.worker_repository.mark_inactive(worker_id)
 
         if success:
             logger.debug(f"Unregistered worker {worker_id}")
@@ -228,20 +245,20 @@ class WorkerService:
 
     def cleanup_inactive_workers(self) -> list[str]:
         """
-        Clean up inactive workers and their replicas.
+        Mark inactive workers and clean up their replicas.
 
         Returns:
             List of cleaned up worker IDs
         """
-        # Delete inactive workers
-        deleted = self.worker_repository.delete_inactive(
+        # Mark inactive workers
+        deleted = self.worker_repository.mark_inactive_by_timeout(
             self.config.heartbeat_timeout_ms / 1000
         )
 
         # Mark replicas as unavailable
         for worker_id, node_id in deleted:
             self.replica_repository.mark_unavailable_by_worker(worker_id)
-            logger.info(f"Cleaned up inactive worker {worker_id} on {node_id}")
+            logger.info(f"Marked inactive worker {worker_id} on {node_id}")
 
         return [worker_id for worker_id, _ in deleted]
 

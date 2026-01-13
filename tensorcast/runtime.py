@@ -20,6 +20,7 @@ from tensorcast.cli_utils.paths import (
     clear_current_session_if_matches,
     get_current_session_id,
     runtime_lock_path,
+    runtime_root,
     runtime_state_path,
     session_paths,
 )
@@ -454,7 +455,7 @@ def _resolve_global_store(
     if cluster_token_hint and not allow_gs_fallback:
         raise ServiceError(
             "Found existing Global Store cluster token but no healthy instance is reachable. "
-            "Clear ~/.tensorcast/runtime if you intend to create a new cluster, or provide "
+            f"Clear {runtime_root()} if you intend to create a new cluster, or provide "
             "a reachable --global-store-address."
         )
 

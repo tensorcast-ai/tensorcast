@@ -199,7 +199,7 @@ observability:
     # Optional enriched sink file with trace/span IDs; leave empty to disable.
     sink_file: ""
     # VLOG verbosity level; 0 disables VLOG.
-    vlog_level: 0
+    vlog_level: 1
   # OpenTelemetry export settings.
   otel:
     # Enable OTLP export; when false, other OTel settings are ignored.

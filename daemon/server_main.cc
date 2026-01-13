@@ -19,6 +19,7 @@
 #include "core/common/trace/trace_manager.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/communication_manager.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/grpc_service_impl.h"
@@ -300,6 +301,14 @@ int main(int argc, char** argv) {
     gs_addr = absl::StrCat(ep.host(), ":", ep.port());
   }
   opts.global_store_address = gs_addr;
+  std::shared_ptr<store::components::IGlobalStoreClient> shared_global_store_client;
+  if (!gs_addr.empty()) {
+    store::components::GlobalStoreClientConfig gs_client_cfg;
+    gs_client_cfg.global_store_address = gs_addr;
+    gs_client_cfg.cluster_token = cfg.meta().cluster_token();
+    shared_global_store_client = std::make_shared<store::components::GlobalStoreClient>(std::move(gs_client_cfg));
+    opts.global_store_client = shared_global_store_client;
+  }
 
   // Configure logging level/VLOG and optional sinks, then initialize OTel
   common::initialize_logging_from_config(cfg.observability().logging());
@@ -469,6 +478,7 @@ int main(int argc, char** argv) {
     }
     lopts.force_full_sync_on_empty_inventory = cfg.high_availability().force_full_sync_on_empty_inventory();
     lopts.cluster_token = cfg.meta().cluster_token();
+    lopts.global_store_client = shared_global_store_client;
     lifecycle = std::make_unique<daemon::WorkerLifecycleManager>(
         gsl::not_null<std::shared_ptr<store::StoreEngine>>{engine},
         gsl::not_null<daemon::StoreDaemonServiceImpl*>{&service},

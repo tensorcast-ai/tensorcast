@@ -4,6 +4,7 @@
 
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
@@ -21,6 +22,76 @@ def _to_uuid(value: str | UUID) -> UUID:
     is safe for both input variants.  See 250720-isinstance-removal.md §11.
     """
     return UUID(str(value))
+
+
+@dataclass(frozen=True)
+class TransportReplicaSnapshot:
+    replica_id: str
+    node_id: str
+    node_address: str
+    node_port: int
+    memory_type: str
+    device_id: int
+    is_available: bool
+    current_requests: int
+    max_concurrency: int
+    worker_id: str
+    worker_present: bool
+    worker_accepting: bool
+    heartbeat_age_sec: float
+    heartbeat_fresh: bool
+
+    def format_for_log(self) -> str:
+        worker_label = self.worker_id if self.worker_id else "missing"
+        heartbeat_age = f"{self.heartbeat_age_sec:.1f}s"
+        if self.heartbeat_age_sec < 0:
+            heartbeat_age = "n/a"
+        return (
+            "replica_id="
+            f"{self.replica_id} "
+            f"node={self.node_address}:{self.node_port} "
+            f"mem={self.memory_type}/{self.device_id} "
+            f"available={self.is_available} "
+            f"load={self.current_requests}/{self.max_concurrency} "
+            f"worker={worker_label} "
+            f"accepting={self.worker_accepting} "
+            f"hb_age={heartbeat_age} "
+            f"hb_fresh={self.heartbeat_fresh}"
+        )
+
+
+@dataclass(frozen=True)
+class TransportEligibilitySnapshot:
+    artifact_id: str
+    total_replicas: int
+    eligible_replicas: int
+    available_replicas: int
+    capacity_replicas: int
+    over_capacity_replicas: int
+    worker_present_replicas: int
+    worker_missing_replicas: int
+    accepting_workers: int
+    fresh_heartbeat_replicas: int
+    stale_heartbeat_replicas: int
+    sample_replicas: list[TransportReplicaSnapshot]
+
+    def format_for_log(self) -> str:
+        samples = ", ".join(sample.format_for_log() for sample in self.sample_replicas)
+        if not samples:
+            samples = "none"
+        return (
+            f"replicas_total={self.total_replicas} "
+            f"eligible={self.eligible_replicas} "
+            f"available={self.available_replicas} "
+            f"capacity={self.capacity_replicas} "
+            f"over_capacity={self.over_capacity_replicas} "
+            f"workers_present={self.worker_present_replicas} "
+            f"workers_missing={self.worker_missing_replicas} "
+            f"accepting_workers={self.accepting_workers} "
+            f"fresh_heartbeats={self.fresh_heartbeat_replicas} "
+            f"stale_heartbeats={self.stale_heartbeat_replicas} "
+            f"samples=[{samples}]"
+        )
 
 
 class ReplicaRepository(BaseRepository):
@@ -143,6 +214,7 @@ class ReplicaRepository(BaseRepository):
                   AND COALESCE(rc.current_requests, 0) < r.max_concurrency
                   AND r.is_available = TRUE
                   AND w.accepting_new_requests = TRUE
+                  AND w.inactive_at IS NULL
                   AND EXTRACT(epoch FROM w.last_heartbeat) > ?
                 ORDER BY
                     -- 1) Prefer GPU over RAM over DISK (same as before)
@@ -188,6 +260,143 @@ class ReplicaRepository(BaseRepository):
             columns = [desc[0] for desc in result.description]
             return self._row_to_model(full_row, columns)
         return None
+
+    def get_transport_eligibility_snapshot(
+        self,
+        artifact_id: str,
+        heartbeat_timeout_seconds: float,
+        sample_limit: int = 10,
+    ) -> TransportEligibilitySnapshot:
+        """Return a snapshot of replica eligibility for transport debugging."""
+        cursor = self.get_cursor()
+        cutoff = time.time() - heartbeat_timeout_seconds
+
+        summary_row = cursor.execute(
+            """
+            SELECT
+                COUNT(*) AS total_replicas,
+                SUM(CASE WHEN r.is_available THEN 1 ELSE 0 END) AS available_replicas,
+                SUM(CASE WHEN COALESCE(rc.current_requests, 0) < r.max_concurrency THEN 1 ELSE 0 END)
+                    AS capacity_replicas,
+                SUM(CASE WHEN COALESCE(rc.current_requests, 0) >= r.max_concurrency THEN 1 ELSE 0 END)
+                    AS over_capacity_replicas,
+                SUM(CASE WHEN w.worker_id IS NOT NULL THEN 1 ELSE 0 END) AS worker_present_replicas,
+                SUM(CASE WHEN w.worker_id IS NULL THEN 1 ELSE 0 END) AS worker_missing_replicas,
+                SUM(CASE WHEN w.worker_id IS NOT NULL AND w.accepting_new_requests = TRUE THEN 1 ELSE 0 END)
+                    AS accepting_workers,
+                SUM(CASE
+                        WHEN w.worker_id IS NOT NULL AND w.last_heartbeat IS NOT NULL
+                             AND EXTRACT(epoch FROM w.last_heartbeat) > ?
+                             AND w.inactive_at IS NULL
+                        THEN 1 ELSE 0 END) AS fresh_heartbeat_replicas,
+                SUM(CASE
+                        WHEN w.worker_id IS NOT NULL
+                             AND (w.last_heartbeat IS NULL OR EXTRACT(epoch FROM w.last_heartbeat) <= ?)
+                             AND w.inactive_at IS NULL
+                        THEN 1 ELSE 0 END) AS stale_heartbeat_replicas,
+                SUM(CASE
+                        WHEN r.is_available = TRUE
+                             AND COALESCE(rc.current_requests, 0) < r.max_concurrency
+                             AND w.accepting_new_requests = TRUE
+                             AND w.inactive_at IS NULL
+                             AND w.last_heartbeat IS NOT NULL
+                             AND EXTRACT(epoch FROM w.last_heartbeat) > ?
+                        THEN 1 ELSE 0 END) AS eligible_replicas
+            FROM artifact_replicas r
+            LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
+            LEFT JOIN workers w ON r.worker_id = w.worker_id
+            WHERE r.artifact_id = ?
+            """,
+            [cutoff, cutoff, cutoff, artifact_id],
+        ).fetchone()
+
+        if summary_row is None:
+            summary_row = (0,) * 10
+
+        total_replicas = int(summary_row[0] or 0)
+        available_replicas = int(summary_row[1] or 0)
+        capacity_replicas = int(summary_row[2] or 0)
+        over_capacity_replicas = int(summary_row[3] or 0)
+        worker_present_replicas = int(summary_row[4] or 0)
+        worker_missing_replicas = int(summary_row[5] or 0)
+        accepting_workers = int(summary_row[6] or 0)
+        fresh_heartbeat_replicas = int(summary_row[7] or 0)
+        stale_heartbeat_replicas = int(summary_row[8] or 0)
+        eligible_replicas = int(summary_row[9] or 0)
+
+        sample_rows = []
+        if sample_limit > 0:
+            sample_rows = cursor.execute(
+                """
+                SELECT
+                    r.replica_id,
+                    r.node_id,
+                    r.node_address,
+                    r.node_port,
+                    r.memory_type,
+                    r.device_id,
+                    r.is_available,
+                    COALESCE(rc.current_requests, 0) AS current_requests,
+                    r.max_concurrency,
+                    COALESCE(w.worker_id, '') AS worker_id,
+                    COALESCE(w.accepting_new_requests, FALSE) AS worker_accepting,
+                    w.last_heartbeat
+                FROM artifact_replicas r
+                LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
+                LEFT JOIN workers w ON r.worker_id = w.worker_id
+                WHERE r.artifact_id = ?
+                ORDER BY r.updated_at ASC
+                LIMIT ?
+                """,
+                [artifact_id, sample_limit],
+            ).fetchall()
+
+        now_ts = time.time()
+        sample_replicas: list[TransportReplicaSnapshot] = []
+        for row in sample_rows:
+            last_heartbeat = row[11]
+            heartbeat_age_sec = -1.0
+            heartbeat_fresh = False
+            if last_heartbeat is not None:
+                last_heartbeat_ts = last_heartbeat.timestamp()
+                heartbeat_age_sec = max(0.0, now_ts - last_heartbeat_ts)
+                heartbeat_fresh = last_heartbeat_ts > cutoff
+            worker_id = row[9] or ""
+            worker_present = bool(worker_id)
+            worker_accepting = bool(row[10]) if worker_present else False
+            sample_replicas.append(
+                TransportReplicaSnapshot(
+                    replica_id=str(row[0]),
+                    node_id=row[1] or "",
+                    node_address=row[2] or "",
+                    node_port=int(row[3] or 0),
+                    memory_type=str(row[4] or ""),
+                    device_id=int(row[5] or 0),
+                    is_available=bool(row[6]),
+                    current_requests=int(row[7] or 0),
+                    max_concurrency=int(row[8] or 0),
+                    worker_id=worker_id,
+                    worker_present=worker_present,
+                    worker_accepting=worker_accepting,
+                    heartbeat_age_sec=heartbeat_age_sec,
+                    heartbeat_fresh=heartbeat_fresh,
+                )
+            )
+
+        return TransportEligibilitySnapshot(
+            artifact_id=artifact_id,
+            total_replicas=total_replicas,
+            eligible_replicas=eligible_replicas,
+            available_replicas=available_replicas,
+            capacity_replicas=capacity_replicas,
+            over_capacity_replicas=over_capacity_replicas,
+            worker_present_replicas=worker_present_replicas,
+            worker_missing_replicas=worker_missing_replicas,
+            accepting_workers=accepting_workers,
+            fresh_heartbeat_replicas=fresh_heartbeat_replicas,
+            stale_heartbeat_replicas=stale_heartbeat_replicas,
+            sample_replicas=sample_replicas,
+        )
 
     def create(self, replica: Replica) -> Replica:
         """Create a new replica."""

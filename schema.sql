@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS workers (
     accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    inactive_at TIMESTAMP WITH TIME ZONE,
     state_version BIGINT NOT NULL DEFAULT 1,
     state_checksum TEXT NOT NULL DEFAULT '',
     state_sync_epoch BIGINT NOT NULL DEFAULT 0,
@@ -36,12 +37,15 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE(node_address, grpc_port)
 );
 
+-- Ensure new worker lifecycle columns exist on upgrades.
+ALTER TABLE workers ADD COLUMN IF NOT EXISTS inactive_at TIMESTAMP WITH TIME ZONE;
 
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_node_id ON workers (node_id);
 CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
+CREATE INDEX IF NOT EXISTS idx_workers_inactive_at ON workers (inactive_at);
 -- Memory tier telemetry snapshots (short retention)
 CREATE TABLE IF NOT EXISTS memory_tier_snapshots (
     node_id TEXT NOT NULL,

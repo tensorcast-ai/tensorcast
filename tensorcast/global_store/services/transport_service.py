@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Service for transport operations."""
 
@@ -116,6 +116,26 @@ class TransportService:
                     observe_transport_wait(artifact_id, wait_sec)
                     raise NotFoundError(
                         f"No replicas registered for artifact {artifact_id}"
+                    )
+
+                try:
+                    snapshot = (
+                        self.replica_repository.get_transport_eligibility_snapshot(
+                            artifact_id=artifact_id,
+                            heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms
+                            / 1000,
+                        )
+                    )
+                    logger.warning(
+                        "Transport request timed out for %s after %sms. %s",
+                        artifact_id,
+                        wait_timeout_ms,
+                        snapshot.format_for_log(),
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to build transport eligibility snapshot for %s",
+                        artifact_id,
                     )
 
                 inc_transport_request(artifact_id, "timeout")

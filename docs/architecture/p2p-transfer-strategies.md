@@ -58,6 +58,7 @@ WITH candidate AS (
       AND COALESCE(rc.current_requests, 0) < r.max_concurrency
       AND r.is_available = TRUE
       AND w.accepting_new_requests = TRUE
+      AND w.inactive_at IS NULL
       AND EXTRACT(epoch FROM w.last_heartbeat) > ?
     ORDER BY
         CASE
