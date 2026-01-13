@@ -23,12 +23,12 @@ TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. T
 
 - **Goals**
   - Single orchestrator for CLI + SDK covering Global Store resolution/start and daemon startup/stop.
-  - Deterministic filesystem contract (`~/.tensorcast`) with versioned state, append-only PID records, and atomic current-session pointers.
+  - Deterministic filesystem contract (host-scoped under `$TENSORCAST_HOME/hosts/<host_id>`) with versioned state, append-only PID records, and atomic current-session pointers.
   - Hard split-brain guard: implicit cluster token recorded in runtime state and echoed by health/version probes.
   - Minimal, predictable commands: `start`, `stop`, `status`, `logs`, `restart` for both daemon and Global Store.
   - Owner-aware stop: the daemon stop path tears down the Global Store only if this session started it.
 - **Non-Goals**
-  - Multi-session orchestration for the Global Store (one instance per `$TENSORCAST_HOME`).
+  - Multi-session orchestration for the Global Store (one instance per host-scoped runtime root under `$TENSORCAST_HOME/hosts/<host_id>`).
   - Remote cluster lifecycle management; CLI only manages local processes.
   - Compatibility shims for legacy flat CLI flags or pre-refactor layouts.
   - Hot-reload of daemon or Global Store configs.
@@ -91,7 +91,8 @@ RuntimeSession start(
 
 ## Runtime layout & state contracts
 
-Rooted at `$TENSORCAST_HOME` (default `~/.tensorcast`):
+Rooted at `$TENSORCAST_HOME/hosts/<host_id>` (default `~/.tensorcast/hosts/<host_id>`,
+where `<host_id>` is derived from hostname + machine-id):
 
 ```
 runtime/state.json         # authority: daemon + global_store + fingerprints + cluster_token
@@ -170,7 +171,7 @@ Key schemas (schema_version=1):
 
 ## Global Store lifecycle
 
-- Single instance per `$TENSORCAST_HOME`, guarded by `global_store.lock` and runtime state. Healthy instances are reused; unhealthy records are cleaned before launching a new `gs-*` session.
+- Single instance per host-scoped runtime root, guarded by `global_store.lock` and runtime state. Healthy instances are reused; unhealthy records are cleaned before launching a new `gs-*` session.
 - Start command: `["uv", "run", "-m", "tensorcast.global_store", "--config", <path>]`, with stdout/stderr pumped to `logs/global_store.out|err`.
 - Listen host/port honor config and CLI overrides; port `0` is supported and the actual port is written back to state after `add_insecure_port`.
 - Health/readiness: `HealthCheck` (status + `cluster_token`) plus `GetServerInfo` for `listen_*`/`advertise_*` endpoints and `metrics_port`, with a gRPC health fallback when Global Store probes fail.
@@ -180,7 +181,7 @@ Key schemas (schema_version=1):
 
 - Daemon config is materialized per session into `effective_daemon_config.yaml`; CLI overlays apply first, ports may be user-set or discovered, and `ha_endpoints` is injected from the resolved Global Store address unless `global_store_mode="none"`.
 - Startup writes initial runtime/session state after process spawn (before readiness) so SDK/CLI discovery can see the session, then waits for readiness via `GetServerConfig` and refreshes state. PID records are append-only and include role, argv, and log paths.
-- Only one daemon instance is allowed per `$TENSORCAST_HOME`; `daemon start` refuses to launch a second instance and instead surfaces the existing session details.
+- Only one daemon instance is allowed per host-scoped runtime root; `daemon start` refuses to launch a second instance and instead surfaces the existing session details.
 - CLI launches are detached from the caller process so daemons (and any CLI-started Global Store) stay running after the command returns unless `--blocking` is used.
 - Blocking-mode shutdown handlers are idempotent to avoid duplicate stop attempts when signals and `atexit` both fire.
 - In blocking mode, Ctrl+C triggers a SIGTERM and the CLI waits for a graceful shutdown (up to ~35s) before escalating to SIGKILL so workers can unregister cleanly.
@@ -216,7 +217,8 @@ flowchart TD
 
 # Trade-offs & Risks
 
-- Single embedded Global Store per home: simplifies orchestration but requires separate `$TENSORCAST_HOME` for multi-tenant use.
+- Single embedded Global Store per host-scoped runtime root: simplifies orchestration but requires separate
+  `$TENSORCAST_HOME` for multi-tenant use on the same host.
 - Cluster token strictness means unreachable-but-recorded clusters block automatic recreation; manual cleanup is required to form a new cluster.
 - `global_store_mode="none"` disables HA and is meant only for offline/local flows; users must opt in explicitly to avoid surprising partial HA.
 - Port discovery relies on daemon/GS reporting bound ports; misconfigured binaries that omit these fields will degrade diagnostics.

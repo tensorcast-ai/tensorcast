@@ -47,6 +47,8 @@ class WorkerLifecycleManager {
     // Optional cluster identity guard; if set, daemon will refuse to register
     // with a Global Store reporting a different token.
     std::string cluster_token;
+    // Optional shared Global Store client to reuse across the daemon.
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
   };
 
   WorkerLifecycleManager(

@@ -1739,7 +1739,14 @@ grpc::Status MaterializationController::unload(
       SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
       const auto status = d_.lifecycle->release_use_lease(subj, req.pid());
       if (!status.ok()) {
-        LOG(ERROR) << "failed to release use lease: " << status;
+        if (absl::IsNotFound(status)) {
+          VLOG(1) << "release_use_lease not found: artifact_id=" << key.artifact_id << " dev=" << key.device.ordinal
+                  << " pid=" << req.pid() << " replica_uuid=" << req.replica_uuid();
+        } else {
+          LOG(WARNING) << "failed to release use lease: artifact_id=" << key.artifact_id
+                       << " dev=" << key.device.ordinal << " pid=" << req.pid()
+                       << " replica_uuid=" << req.replica_uuid() << " status=" << status;
+        }
       }
     }
     if (d_.refs.ref_count(key) > 0) {
@@ -1748,8 +1755,8 @@ grpc::Status MaterializationController::unload(
       return Status::OK;
     }
   }
-  const int rc = d_.engine.unload_replica(key);
-  if (rc == 0) {
+  const absl::Status unload_status = d_.engine.unload_replica_status(key);
+  if (unload_status.ok()) {
     if (!req.replica_uuid().empty()) {
       const bool erased = d_.sessions.erase(req.replica_uuid());
       if (!erased) {
@@ -1761,7 +1768,7 @@ grpc::Status MaterializationController::unload(
     return Status::OK;
   }
   resp.set_code(1);
-  return {StatusCode::INTERNAL, absl::StrFormat("unload_replica() returned %d", rc)};
+  return to_grpc_status(unload_status);
 }
 
 grpc::Status MaterializationController::wait_verification(

@@ -473,6 +473,10 @@ int StoreEngine::wait_replica_ready(const ReplicaKey& key) {
   return replica_runtime_->wait_replica_ready(key);
 }
 
+absl::Status StoreEngine::unload_replica_status(const ReplicaKey& key) {
+  return replica_runtime_->unload_replica_status(key);
+}
+
 int StoreEngine::unload_replica(const ReplicaKey& key) {
   return replica_runtime_->unload_replica(key);
 }

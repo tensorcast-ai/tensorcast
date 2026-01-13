@@ -45,6 +45,7 @@ class Worker:
     # Timestamps
     registered_at: Optional[datetime] = None
     last_heartbeat: Optional[datetime] = None
+    inactive_at: Optional[datetime] = None
 
     # HA state tracking
     state_version: int = 1

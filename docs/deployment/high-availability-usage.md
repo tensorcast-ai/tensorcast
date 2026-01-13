@@ -90,8 +90,10 @@ uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml
 ```
 
 - Use a persistent DuckDB path (`database.db_file`) for recovery.
-- The CLI persists `cluster_token` under `~/.tensorcast/runtime/cluster_token` to detect split-brain and returns the metrics port in the startup log.
-- Add `--blocking` to keep the Global Store attached to the CLI and stop it when the CLI exits.
+- The CLI persists `cluster_token` under `~/.tensorcast/hosts/<host_id>/runtime/cluster_token`
+  (where `<host_id>` is derived from hostname + machine-id) to detect split-brain and returns
+  the metrics port in the startup log.
+- Add `--blocking` to keep the Global Store attached to the CLI and stop it when the CLI exits (Ctrl+C triggers shutdown and session cleanup).
 - If you omit `--config`, the CLI uses `$TENSORCAST_GLOBAL_STORE_CONFIG` when set, otherwise `examples/config/global_store_config.yaml` (repo checkout or packaged wheel); if neither is found, startup fails. Defaults come from that file (including `listen.host: 0.0.0.0`).
 - The example config defaults `database.db_file` to null (in-memory); set a persistent path for HA. When set, `~` is expanded and parent directories are created on startup.
 

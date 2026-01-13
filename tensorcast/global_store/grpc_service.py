@@ -1460,7 +1460,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 existing = self.worker_service.find_worker_by_address(
                     worker.node_address, worker.grpc_port
                 )
-                if existing and existing.node_id != worker.node_id:
+                if (
+                    existing
+                    and existing.node_id != worker.node_id
+                    and existing.inactive_at is None
+                ):
                     logger.error(
                         "Registration conflict: %s:%d already owned by worker_id=%s (node=%s); attempted by node=%s.",
                         worker.node_address,
@@ -1651,7 +1655,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             # Pre-fetch worker details for enriched logging
             worker_before = None
             try:
-                worker_before = self.worker_repository.find_by_id(request.worker_id)
+                worker_before = self.worker_repository.find_by_id(
+                    request.worker_id, include_inactive=True
+                )
             except Exception:
                 # Best-effort; proceed even if lookup fails
                 worker_before = None

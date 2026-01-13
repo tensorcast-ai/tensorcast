@@ -37,6 +37,7 @@ from tensorcast.cli_utils.paths import (
     global_session_paths,
     global_store_lock_path,
     runtime_lock_path,
+    runtime_root,
     runtime_state_path,
     set_current_global_session_id,
 )
@@ -133,6 +134,47 @@ def _process_group_contains_global_store(pgid: int, *, config_path: str | None) 
     return False
 
 
+def _normalize_config_paths(config_paths: set[str]) -> set[str]:
+    normalized: set[str] = set()
+    for cfg in config_paths:
+        if not cfg:
+            continue
+        resolved = None
+        with contextlib.suppress(Exception):
+            resolved = str(Path(cfg).expanduser().resolve())
+        normalized.add(resolved or cfg)
+    return normalized
+
+
+def _find_global_store_pgids(config_paths: set[str]) -> set[int]:
+    normalized = _normalize_config_paths(config_paths)
+    if not normalized:
+        return set()
+    pgids: set[int] = set()
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            pid = int(proc.info.get("pid") or 0)
+        except Exception:
+            continue
+        if pid <= 0:
+            continue
+        cmdline = proc.info.get("cmdline") or []
+        if not isinstance(cmdline, list) or not cmdline:
+            continue
+        cmd_str = " ".join(str(part) for part in cmdline)
+        if "tensorcast.global_store" not in cmd_str:
+            continue
+        if not any(cfg in cmd_str for cfg in normalized):
+            continue
+        try:
+            pgid = os.getpgid(pid)
+        except ProcessLookupError:
+            continue
+        if pgid > 0:
+            pgids.add(pgid)
+    return pgids
+
+
 def _current_global_session_id() -> str | None:
     path = current_global_session_path()
     if not path.exists():
@@ -207,8 +249,6 @@ def _resolve_config(
         pb.server.listen.host = "0.0.0.0"
     if metrics_port is not None:
         pb.server.metrics_port = max(0, int(metrics_port))
-    if not pb.database.db_file:
-        pb.database.db_file = str(inst.root / "global_store.duckdb")
     if not pb.observability.logging.file:
         pb.observability.logging.file = str(inst.logs / "global_store.out")
     if not pb.meta.schema_version:
@@ -315,9 +355,10 @@ def start_global_store(
         )
         if state_token:
             if provided_cluster_token and state_token != provided_cluster_token:
+                token_path = runtime_root() / "cluster_token"
                 raise ServiceError(
-                    "Global Store cluster token mismatch; clear ~/.tensorcast/runtime/cluster_token "
-                    "if you intend to replace the existing cluster."
+                    "Global Store cluster token mismatch; clear "
+                    f"{token_path} if you intend to replace the existing cluster."
                 )
             cluster_token = state_token
         if session_id and existing_gid and existing_addr and session_id != existing_gid:
@@ -336,9 +377,10 @@ def start_global_store(
                     and health.cluster_token
                     and health.cluster_token != cluster_token
                 ):
+                    token_path = runtime_root() / "cluster_token"
                     raise ServiceError(
                         "Global Store is running with a different cluster token; "
-                        "clear ~/.tensorcast/runtime/cluster_token to reset."
+                        f"clear {token_path} to reset."
                     )
                 set_current_global_session_id(inst.id)
                 return _build_instance_from_health(
@@ -472,10 +514,8 @@ def start_global_store(
     metrics_port_eff = (
         health.metrics_port if health else int(pb_cfg.server.metrics_port or 0) or None
     )
-    db_file = (
-        (health.db_file if health else None)
-        or pb_cfg.database.db_file
-        or str(inst.root / "global_store.duckdb")
+    db_file = (health.db_file if health and health.db_file else None) or (
+        pb_cfg.database.db_file or None
     )
     if listen_host_eff is None:
         raise ServiceError("Global Store listen host unavailable after configuration")
@@ -588,11 +628,15 @@ def stop_global_store(
         data = read_json_default(inst.pids_json, {"processes": []})
         procs = data.get("processes", [])
         targets: list[int] = []
+        target_pgids: set[int] = set()
+        config_paths: set[str] = set()
         for proc in reversed(procs):
             pid = int(proc.get("pid", 0))
             if pid <= 0:
                 continue
             config_path = _extract_config_path(proc.get("cmd"))
+            if config_path:
+                config_paths.add(config_path)
             pgid = None
             try:
                 pgid = os.getpgid(pid)
@@ -607,6 +651,16 @@ def stop_global_store(
                 ):
                     continue
             targets.append(pid)
+            if force:
+                kill_force(int(pgid))
+            else:
+                if not kill_gracefully(int(pgid), grace=10.0):
+                    kill_force(int(pgid))
+            if pgid is not None and int(pgid) > 0:
+                target_pgids.add(int(pgid))
+
+        extra_pgids = _find_global_store_pgids(config_paths) - target_pgids
+        for pgid in sorted(extra_pgids):
             if force:
                 kill_force(int(pgid))
             else:

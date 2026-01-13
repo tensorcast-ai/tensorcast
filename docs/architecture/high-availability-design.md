@@ -103,7 +103,7 @@ All Global Store RPCs use bounded retries with exponential backoff and jitter (`
   - When the Global Store comes back, the next enhanced heartbeat can return `NOT_FOUND`; the daemon automatically re-registers with preserved identity and performs a full-state sync to reconcile drift before resuming normal heartbeats.
 
 - **Store Daemon crash or shutdown**
-  - Heartbeats stop; Global Store marks the worker stale after `heartbeat_timeout` and removes it from transport selection. Existing replicas remain in the registry but are not assigned because `find_available_for_transport()` filters by heartbeat freshness.
+- Heartbeats stop; Global Store marks the worker stale after `heartbeat_timeout`, sets it inactive, and removes it from transport selection. Existing replicas remain in the registry but are not assigned because `find_available_for_transport()` filters by heartbeat freshness and inactivity.
   - Stuck transports sourced from the crashed daemon are force-completed by the Global Store sweeper; P2P sessions targeting the crashed daemon fail at connection time and surface an error to callers.
   - On restart, the daemon re-registers, runs full-state sync, and prunes obsolete replicas locally so it rejoins routing without manual cleanup.
 

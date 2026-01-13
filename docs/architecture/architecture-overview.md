@@ -159,7 +159,7 @@ Client                                 Store Daemon                        Globa
 Variant-aware requests carry `hints.variant.view_id`; the daemon attempts a view transport first, falls back to canonical routing when unsupported, and registers view residency after ingestion via the shared publish context.
 
 ## Load Balancing & Concurrency
-- Prioritization: GPU > RAM > DISK, then by per‑replica load ratio; replicas are only eligible when the worker’s last heartbeat is fresh and `accepting_new_requests` is true.
+- Prioritization: GPU > RAM > DISK, then by per‑replica load ratio; replicas are only eligible when the worker’s last heartbeat is fresh, `accepting_new_requests` is true, and the worker is active (`inactive_at` unset).
 - Each replica tracks `max_concurrency` and `current_requests`; selection is atomic
 - Daemon enforces transport locks; engine limits per‑GPU active transfers (1/session)
 - **Further reading**: [P2P Transfer Strategies](./p2p-transfer-strategies.md)
