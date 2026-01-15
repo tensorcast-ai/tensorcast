@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Rewritten tests for StoreEngine using the new multi-device `materialize_replica()` API.
 
@@ -18,6 +18,7 @@
 #include "absl/time/time.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
@@ -49,7 +50,7 @@ static absl::Status wait_ready(
     absl::Duration timeout = absl::Seconds(60));
 
 static DeviceKey make_gpu_key(int ordinal) {
-  return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
+  return tensorcast::store::DeviceRegistry::instance().gpu_key(ordinal);
 }
 
 static StoreEngine make_store(
@@ -341,7 +342,7 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
   REQUIRE(wait_ready(gpu_handle).ok());
   REQUIRE(gpu_handle.gpu_base_ptr != nullptr);
 
-  DeviceKey gpu0{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
+  DeviceKey gpu0 = make_gpu_key(0);
   ReplicaKey key{.artifact_id = artifact_id, .view_id = std::nullopt, .device = gpu0, .replica = 0};
   REQUIRE(store.wait_replica_ready(key) == 0);
 

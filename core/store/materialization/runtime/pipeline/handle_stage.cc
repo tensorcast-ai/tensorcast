@@ -4,8 +4,10 @@
 
 #include <optional>
 
+#include "absl/log/log.h"
 #include "absl/status/statusor.h"
 #include "core/cuda/cuda_ipc.h"
+#include "core/store/replica/unified_memory_authority.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
 
@@ -34,6 +36,27 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
     if (ipc_or.ok()) {
       handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
     }
+  } else {
+    auto uma = ctx.replica->get_memory_manager().memory_authority();
+    if (uma) {
+      auto region_or = uma->get_cpu_memfd_region(handle.replica_key);
+      if (region_or.ok()) {
+        handle.cpu_memfd_region = loading::CpuMemfdRegion{
+            .fd = region_or->fd,
+            .size_bytes = region_or->size_bytes,
+            .offset_bytes = region_or->offset_bytes,
+        };
+        if (ctx.options != nullptr && ctx.options->cpu_shared_memory_enabled) {
+          VLOG(1) << "HandleStage: attached CPU memfd region for key=" << handle.replica_key
+                  << " size_bytes=" << region_or->size_bytes << " offset_bytes=" << region_or->offset_bytes;
+        }
+      } else if (ctx.options != nullptr && ctx.options->cpu_shared_memory_enabled) {
+        LOG(WARNING) << "HandleStage: cpu_shared_memory_enabled but get_cpu_memfd_region failed for key="
+                     << handle.replica_key << ": " << region_or.status();
+      }
+    } else if (ctx.options != nullptr && ctx.options->cpu_shared_memory_enabled) {
+      LOG(WARNING) << "HandleStage: cpu_shared_memory_enabled but UMA is unavailable for key=" << handle.replica_key;
+    }
   }
 
   if (ctx.resolved_view_plan.has_value() && !ctx.resolved_view_plan->is_identity) {
@@ -42,9 +65,9 @@ absl::StatusOr<loading::ReplicaHandle> HandleStage::build(IngestionContext& ctx)
   if (!handle.view_index_json.has_value() && ctx.source_type == SourceType::kDisk) {
     if (ctx.verification.canonical_index_json.has_value()) {
       handle.view_index_json = ctx.verification.canonical_index_json;
-      LOG(INFO) << "HandleStage: attached canonical index from disk for artifact=" << ctx.artifact_identifier;
+      VLOG(1) << "HandleStage: attached canonical index from disk for artifact=" << ctx.artifact_identifier;
     } else {
-      LOG(INFO) << "HandleStage: no canonical index available for disk source artifact=" << ctx.artifact_identifier;
+      VLOG(1) << "HandleStage: no canonical index available for disk source artifact=" << ctx.artifact_identifier;
     }
   }
   if (ctx.verification.view_data_hash.has_value()) {

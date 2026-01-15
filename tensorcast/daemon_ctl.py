@@ -636,6 +636,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -657,6 +658,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -678,6 +680,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -697,6 +700,7 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> (
         store_daemon_pb2.MaterializeReplicaResponse
         | bytes
@@ -724,12 +728,17 @@ class DaemonCtl:
                 preference_value = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
+            device_uuid_value = (
+                ""
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else device_uuid
+            )
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid,
-                device_uuid=device_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                device_uuid=device_uuid_value,
+                target_device_type=target_device_type,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
                 preference=preference_value,
             )
@@ -787,6 +796,10 @@ class DaemonCtl:
             assert response.mem_handle is not None
             if return_response:
                 return response
+            if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+                raise ValueError(
+                    "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+                )
             return response.mem_handle.cuda_ipc_handle, load_status
 
         logger.info("Artifact loaded: %s, %s", artifact_id, replica_uuid)
@@ -794,13 +807,21 @@ class DaemonCtl:
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            success = self.confirm_replica_loaded(disk_path or "", replica_uuid)
+            success = self.confirm_replica_loaded(
+                disk_path or "",
+                replica_uuid,
+                target_device_type=target_device_type,
+            )
             if not success:
                 raise RuntimeError(
                     f"Failed to confirm artifact loading for {artifact_id}"
                 )
         if return_response:
             return response
+        if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+            raise ValueError(
+                "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+            )
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
@@ -818,6 +839,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
 
     @overload
@@ -834,6 +856,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
 
     @overload
@@ -850,6 +873,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> tuple[bytes, str, str]: ...
 
     def materialize_by_key_v2(
@@ -864,6 +888,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> (
         store_daemon_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
@@ -889,13 +914,19 @@ class DaemonCtl:
                 preference_value = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
+            device_id_value = (
+                0
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else int(device_id)
+            )
             request = store_daemon_pb2.MaterializeByKeyRequest(
                 key=key,
-                device_id=int(device_id),
+                device_id=device_id_value,
                 pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
                 pid=pid,
                 replica_uuid=replica_uuid,
                 preference=preference_value,
+                target_device_type=target_device_type,
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
@@ -960,19 +991,31 @@ class DaemonCtl:
             assert response.mem_handle is not None
             if return_response:
                 return response
+            if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+                raise ValueError(
+                    "materialize_by_key_v2 must use return_response=True for non-GPU targets"
+                )
             return (handle_bytes, load_status, used_disk_path, artifact_id)
 
         if (
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            success = self.confirm_replica_loaded(used_disk_path, replica_uuid)
+            success = self.confirm_replica_loaded(
+                used_disk_path,
+                replica_uuid,
+                target_device_type=target_device_type,
+            )
             if not success:
                 raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
 
         assert response.mem_handle is not None
         if return_response:
             return response
+        if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+            raise ValueError(
+                "materialize_by_key_v2 must use return_response=True for non-GPU targets"
+            )
         return (handle_bytes, used_disk_path, artifact_id)
 
     def resolve_artifact_from_disk_v2(
@@ -1111,12 +1154,18 @@ class DaemonCtl:
             return response
         return (handle_bytes, used_disk_path, artifact_id)
 
-    def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
+    def confirm_replica_loaded(
+        self,
+        disk_path: str,
+        replica_uuid: str,
+        *,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+    ) -> bool:
         with self._client_span("Client/ConfirmReplica") as span:
             request = store_daemon_pb2.ConfirmReplicaRequest(
                 disk_path=disk_path,
                 replica_uuid=replica_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                target_device_type=target_device_type,
             )
             try:
                 _ = self._unary_call(
@@ -1159,6 +1208,12 @@ class DaemonCtl:
                     mem_pool_size=int(getattr(response, "mem_pool_size", 0)),
                     artifact_chunk_bytes=int(
                         getattr(response, "artifact_chunk_bytes", 0)
+                    ),
+                    local_handle_socket_path=str(
+                        getattr(response, "local_handle_socket_path", "") or ""
+                    ),
+                    cpu_shared_memory_enabled=bool(
+                        getattr(response, "cpu_shared_memory_enabled", False)
                     ),
                 )
 

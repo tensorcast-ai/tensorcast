@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ from tensorcast._c_ext import get_device_uuid_map
 
 from ._errors import DeviceMismatch
 
+CPU_DEVICE_ID = -1
 
-def resolve_device(device: int | torch.device) -> int:
+
+def resolve_device(device: int | torch.device, *, allow_cpu: bool = False) -> int:
     if device is None:
         raise DeviceMismatch("device is required")
     if isinstance(device, torch.device):
         if device.type == "cpu":
+            if allow_cpu:
+                return CPU_DEVICE_ID
             raise DeviceMismatch("CPU device is not supported for this operation")
         return device.index if device.index is not None else 0
     return int(device)

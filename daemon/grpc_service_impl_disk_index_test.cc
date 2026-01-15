@@ -57,7 +57,7 @@ TEST_CASE(
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
   req.set_disk_path(artifact_dir.string());
-  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
 
   grpc::ServerContext ctx;

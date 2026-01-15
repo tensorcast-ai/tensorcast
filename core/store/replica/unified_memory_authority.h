@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -41,6 +41,12 @@ namespace tensorcast::store::replica {
  */
 class UnifiedMemoryAuthority {
  public:
+  struct Options {
+    // When true, CPU allocations are backed by memfd + MAP_SHARED so they can be
+    // exported cross-process for zero-copy CPU materialization.
+    bool cpu_shared_memory_enabled{false};
+  };
+
   struct ArtifactLayout {
     uint64_t artifact_bytes{0};
     size_t artifact_chunk_bytes{0};
@@ -94,6 +100,7 @@ class UnifiedMemoryAuthority {
   std::vector<ChunkRecordView> snapshot_cpu_chunks(const loading::ReplicaKey& key) const;
 
   explicit UnifiedMemoryAuthority(size_t artifact_chunk_bytes);
+  explicit UnifiedMemoryAuthority(size_t artifact_chunk_bytes, Options options);
   ~UnifiedMemoryAuthority() = default;
 
   // Disable copy/move
@@ -253,6 +260,14 @@ class UnifiedMemoryAuthority {
    */
   absl::StatusOr<size_t> get_artifact_size(const loading::ReplicaKey& key) const;
 
+  struct CpuMemfdRegion {
+    int fd{-1};
+    uint64_t size_bytes{0};
+    uint64_t offset_bytes{0};
+  };
+
+  absl::StatusOr<CpuMemfdRegion> get_cpu_memfd_region(const loading::ReplicaKey& key) const;
+
   /**
    * @brief Get DRAM base pointer.
    *
@@ -366,6 +381,8 @@ class UnifiedMemoryAuthority {
     struct CpuRegion {
       void* base{nullptr};
       size_t bytes{0};
+      int memfd{-1};
+      uint64_t offset_bytes{0};
     };
 
     CpuRegion cpu_region;
@@ -412,7 +429,11 @@ class UnifiedMemoryAuthority {
 
   class CpuArena {
    public:
-    explicit CpuArena(size_t chunk_bytes);
+    struct Options {
+      bool cpu_shared_memory_enabled{false};
+    };
+
+    explicit CpuArena(size_t chunk_bytes, Options options);
 
     absl::Status allocate_region(ReplicaAllocation& alloc, size_t bytes) const;
     void release_region(ReplicaAllocation& alloc) const;
@@ -439,6 +460,7 @@ class UnifiedMemoryAuthority {
 
     absl::Status ensure_bounds(const ReplicaAllocation& alloc, uint64_t va_offset, size_t bytes) const;
     void release_pins(ReplicaAllocation& alloc, absl::Span<const uint32_t> chunk_indices) const;
+    Options options_;
     size_t chunk_bytes_{0};
   };
 

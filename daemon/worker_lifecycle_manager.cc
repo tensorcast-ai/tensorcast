@@ -499,12 +499,12 @@ void WorkerLifecycleManager::stop() {
   for (const auto& info : engine_->get_all_replicas_info()) {
     if (!info.is_registered_for_comm)
       continue;
-    store::DeviceKey dev = store::DeviceRegistry::instance().gpu_key(info.gpu_device_id);
-    store::loading::ReplicaKey key{.artifact_id = info.artifact_id, .device = dev, .replica = 0};
-    auto st = engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+    if (info.key.device.type != DeviceType::GPU) {
+      continue;
+    }
+    auto st = engine_->disable_remote_replica_access(info.key, common::memory::MemoryLocation::GPU);
     if (!st.ok()) {
-      LOG(WARNING) << "disable_remote_replica_access failed during stop: artifact_id=" << info.artifact_id
-                   << " dev=" << info.gpu_device_id << ": " << st;
+      LOG(WARNING) << "disable_remote_replica_access failed during stop: key=" << info.key << ": " << st;
     }
   }
   std::string worker_id_snapshot;
@@ -969,13 +969,13 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
               continue;
             if (li.gpu_state == common::memory::MemoryLocation::NONE)
               continue;
-            auto dev = store::DeviceRegistry::instance().gpu_key(li.gpu_device_id);
-            store::loading::ReplicaKey key{.artifact_id = li.artifact_id, .device = dev, .replica = 0};
+            if (li.key.device.type != DeviceType::GPU) {
+              continue;
+            }
             if (!ri.stats().is_available() && li.is_registered_for_comm) {
-              auto st = engine_->disable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+              auto st = engine_->disable_remote_replica_access(li.key, common::memory::MemoryLocation::GPU);
               if (!st.ok()) {
-                LOG(WARNING) << "disable_remote_replica_access failed: artifact_id=" << li.artifact_id
-                             << " dev=" << li.gpu_device_id << ": " << st;
+                LOG(WARNING) << "disable_remote_replica_access failed: key=" << li.key << ": " << st;
                 try {
                   static auto meter =
                       opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -985,10 +985,9 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
                 }
               }
             } else if (ri.stats().is_available() && !li.is_registered_for_comm) {
-              auto info_or = engine_->enable_remote_replica_access(key, common::memory::MemoryLocation::GPU);
+              auto info_or = engine_->enable_remote_replica_access(li.key, common::memory::MemoryLocation::GPU);
               if (!info_or.ok()) {
-                LOG(WARNING) << "enable_remote_replica_access failed: artifact_id=" << li.artifact_id
-                             << " dev=" << li.gpu_device_id << ": " << info_or.status();
+                LOG(WARNING) << "enable_remote_replica_access failed: key=" << li.key << ": " << info_or.status();
                 try {
                   static auto meter =
                       opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -1216,7 +1215,7 @@ void WorkerLifecycleManager::chunk_sync_loop() {
           u.artifact_id = info.artifact_id;
           u.chunk_idx = static_cast<uint32_t>(i);
           u.state = states[i];
-          u.device_uuid = info.gpu_device_uuid;
+          u.device_uuid = info.key.device.uuid;
           u.replica = 0;
           updates.push_back(std::move(u));
         }

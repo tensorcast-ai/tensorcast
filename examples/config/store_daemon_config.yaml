@@ -63,6 +63,9 @@ engine:
   artifact_chunk_bytes: 256MB
   # Default depth for StreamingPinnedBuffer instances created by StoreEngine.
   streaming_buffer_chunks: 16
+  # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
+  cpu_shared_memory:
+    enabled: false
   # Memory tiers define stable/preemptible behavior; tune for DRAM pressure and HA telemetry.
   memory_tiers:
     # When false, CPU chunks stay resident (no preemptible marking); use for stability or debugging.
@@ -136,6 +139,15 @@ lifecycle:
   sessions_ttl: 60s
   # Transport lock TTL; long enough for worst-case transfers but short enough to recover from leaks.
   locks_ttl: 120s
+  # Local-only Unix domain socket for handle FD handoff and lease release (required for cpu_shared_memory).
+  handle_leases:
+    # Socket path must have a daemon-owned parent directory (not world-writable); create the directory beforehand.
+    local_handle_socket_path: /data/models/.tensorcast/local_handle.sock
+    # Handle lease TTL as a crash-safety fallback; live clients release leases when tensors are freed.
+    # Set to 0s to disable TTL (leases rely on explicit release and PID-exit cleanup).
+    ttl: 0s
+    # Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
+    max_mints_per_second: 0
 
 # Communicator transport configuration (TCP/RDMA).
 communicator:

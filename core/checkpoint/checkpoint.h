@@ -112,7 +112,28 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::string, uint64_t>>& meta_state_dict,
     const std::unordered_map<int, std::uint64_t>& memory_base_address,
     const std::unordered_map<int, std::unordered_map<std::string, uint64_t>>& tensor_device_offsets,
-    bool from_ipc_shm);
+    bool from_ipc_shm,
+    std::string lease_token = "",
+    std::string local_handle_socket_path = "");
+
+/**
+ * @brief Restore CPU tensors from a local memfd mapping and bind a daemon handle lease to tensor lifetime.
+ *
+ * The returned tensors share a refcounted owner that:
+ *  - unmaps the memfd mapping, and
+ *  - releases the daemon handle lease via the local handle socket (best-effort)
+ * when the last tensor is destroyed.
+ */
+std::unordered_map<std::string, torch::Tensor> restore_tensors_from_cpu_fd_with_lease(
+    const std::unordered_map<
+        std::string,
+        std::tuple<std::vector<int64_t>, std::vector<int64_t>, std::string, uint64_t>>& meta_state_dict,
+    int fd,
+    uint64_t size_bytes,
+    uint64_t offset_bytes,
+    const std::unordered_map<std::string, uint64_t>& tensor_device_offsets,
+    std::string lease_token,
+    std::string local_handle_socket_path);
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(
     const std::unordered_map<

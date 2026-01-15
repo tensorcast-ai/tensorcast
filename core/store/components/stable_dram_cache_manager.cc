@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/components/stable_dram_cache_manager.h"
 
@@ -200,7 +200,12 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
       }
     }
     const absl::Status evict_status = evict_for_bytes(
-        request.size_bytes, request.key, absl::Now(), request.policy.overflow_policy == StableOverflowPolicy::kSpill);
+        request.size_bytes,
+        request.key,
+        absl::Now(),
+        request.policy.overflow_policy == StableOverflowPolicy::kSpill,
+        EvictionMode::kAdmission,
+        "admission");
     if (evict_status.ok()) {
       lease_or = acquire_stable_lease(request.key, request.replica);
     } else if (request.policy.overflow_policy == StableOverflowPolicy::kSpill) {
@@ -317,7 +322,12 @@ bool StableDramCacheManager::is_evictable(const loading::ReplicaKey& key, absl::
   if (!entry.has_value()) {
     return true;
   }
-  return is_entry_evictable(*entry, now);
+  return is_entry_evictable(*entry, now, EvictionMode::kAdmission);
+}
+
+absl::Status StableDramCacheManager::preempt_for_export(uint64_t required_bytes, const loading::ReplicaKey& exclude) {
+  return evict_for_bytes(
+      required_bytes, exclude, absl::Now(), /*spill_only=*/false, EvictionMode::kPreemptForExport, "export_preempt");
 }
 
 void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, absl::string_view reason) {
@@ -395,7 +405,9 @@ absl::Status StableDramCacheManager::evict_for_bytes(
     uint64_t required_bytes,
     const loading::ReplicaKey& exclude,
     absl::Time now,
-    bool spill_only) {
+    bool spill_only,
+    EvictionMode mode,
+    absl::string_view reason) {
   if (required_bytes == 0) {
     return absl::OkStatus();
   }
@@ -420,7 +432,7 @@ absl::Status StableDramCacheManager::evict_for_bytes(
       }
       entry = it->second;
     }
-    if (!is_entry_evictable(entry, now)) {
+    if (!is_entry_evictable(entry, now, mode)) {
       continue;
     }
     if (spill_only && !is_spill_evictable(entry, spill_evictable)) {
@@ -459,7 +471,7 @@ absl::Status StableDramCacheManager::evict_for_bytes(
     }
     freed += entry.stable_bytes;
     LOG(INFO) << "stable_cache.evicted artifact_id=" << key.artifact_id << " size_bytes=" << entry.size_bytes
-              << " reason=admission";
+              << " reason=" << std::string(reason);
     if (freed >= required_bytes) {
       return absl::OkStatus();
     }
@@ -468,7 +480,13 @@ absl::Status StableDramCacheManager::evict_for_bytes(
   return absl::ResourceExhaustedError("stable cache eviction could not free enough bytes");
 }
 
-bool StableDramCacheManager::is_entry_evictable(const CacheEntry& entry, absl::Time now) const {
+bool StableDramCacheManager::is_entry_evictable(const CacheEntry& entry, absl::Time now, EvictionMode mode) const {
+  if (entry.policy.required) {
+    return false;
+  }
+  if (mode == EvictionMode::kPreemptForExport) {
+    return true;
+  }
   if (entry.policy.retention_policy == StableRetentionPolicy::kPinned) {
     return false;
   }

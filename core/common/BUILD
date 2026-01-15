@@ -459,3 +459,14 @@ sc_cc_library(
         "@yaml-cpp//:yaml-cpp",
     ],
 )
+
+cc_test(
+    name = "daemon_config_io_test",
+    size = "small",
+    srcs = ["config/daemon_config_io_test.cc"],
+    deps = [
+        ":daemon_config_io_lib",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)

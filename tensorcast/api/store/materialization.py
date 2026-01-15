@@ -189,6 +189,7 @@ class MaterializationPipeline:
             cancel_event=None,
             options_override=options,
             tensor_names=tensor_names,
+            allow_cpu=True,
         )
         state = self._payload_state_dict(payload)
         if tensor_names:
@@ -233,6 +234,7 @@ class MaterializationPipeline:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            allow_cpu=True,
         )
 
     def get_view(
@@ -276,6 +278,7 @@ class MaterializationPipeline:
             placement=placement_enum,
             canonical_index_hint=resolved.canonical_index_bytes,
             disk_path_hint=resolved.disk_path_hint,
+            allow_cpu=True,
         )
         return self._payload_state_dict(payload)
 
@@ -295,6 +298,7 @@ class MaterializationPipeline:
 
         def _task() -> dict[str, torch.Tensor]:
             materialized: MaterializationPayload | None = None
+            state: dict[str, torch.Tensor] | None = None
             try:
                 materialized, _ = self._perform_get_with_retry(
                     artifact_id=artifact_id,
@@ -305,6 +309,7 @@ class MaterializationPipeline:
                     cancel_event=cancel_event,
                     options_override=options,
                     tensor_names=tensor_names,
+                    allow_cpu=True,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized
@@ -316,7 +321,8 @@ class MaterializationPipeline:
                     )
                     materialized = None
                     raise CancelledError
-                return self._payload_state_dict(materialized)
+                state = self._payload_state_dict(materialized)
+                return state
             except CancelledError as exc:
                 raise ArtifactError(
                     "Retrieval cancelled",
@@ -330,7 +336,7 @@ class MaterializationPipeline:
             finally:
                 with mat_lock:
                     mat_ref["value"] = None
-                if materialized is not None:
+                if materialized is not None and state is None:
                     self._release_materialized(
                         materialized, self._runtime.ensure_client()
                     )
@@ -667,6 +673,8 @@ class MaterializationPipeline:
         self,
         selector: torch.device | str | None,
         fallback: FallbackOptions | None,
+        *,
+        allow_cpu: bool = False,
     ) -> int:
         def _has_disk_fallback() -> bool:
             if not fallback:
@@ -678,8 +686,10 @@ class MaterializationPipeline:
 
         if selector is None:
             if not torch.cuda.is_available():
+                if allow_cpu:
+                    return -1
                 if _has_disk_fallback():
-                    # Disk fallback provides the bytes for CPU materialization.
+                    # Legacy fallback: treat CPU as cuda:0 for disk-based retrieval paths.
                     return 0
                 raise ArtifactError(
                     "CUDA device required for retrieval",
@@ -689,6 +699,8 @@ class MaterializationPipeline:
             return int(torch.cuda.current_device())
         if isinstance(selector, torch.device):
             if selector.type != "cuda":
+                if selector.type == "cpu" and allow_cpu:
+                    return -1
                 if selector.type == "cpu" and _has_disk_fallback():
                     return 0
                 raise ArtifactError(
@@ -700,6 +712,8 @@ class MaterializationPipeline:
         if isinstance(selector, str):
             device = torch.device(selector)
             if device.type != "cuda":
+                if device.type == "cpu" and allow_cpu:
+                    return -1
                 if device.type == "cpu" and _has_disk_fallback():
                     return 0
                 raise ArtifactError(
@@ -1358,6 +1372,7 @@ class MaterializationPipeline:
         result = self._materialize_fn(
             client=client,
             daemon_address=self._runtime.daemon_endpoint,
+            server_config=self._runtime.capabilities.server_config,
             device_id=device_id,
             artifact_id=request_artifact_id,
             key=None if requested_disk and disk_path else key,
@@ -1528,6 +1543,7 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        allow_cpu: bool = False,
     ) -> tuple[MaterializationPayload, int]:
         policy = self._runtime.retry_policies.get(
             method, self._runtime.retry_policies.get("get")
@@ -1597,6 +1613,7 @@ class MaterializationPipeline:
                         view_data_hash=view_data_hash,
                         view_index_hint=view_index_hint,
                         replica_uuid=replica_uuid,
+                        allow_cpu=allow_cpu,
                     )
                     summary = self._summarize_materialized(materialized, tensor_names)
                     selection_label = summary["selection"]
@@ -1746,13 +1763,16 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        allow_cpu: bool = False,
     ) -> tuple[MaterializationPayload, int]:
         resolved_fallback = fallback or self._runtime.opts.fallback
         artifact_id, key = self._resolve_identifiers(
             artifact_id, key, resolved_fallback, disk_path_hint=disk_path_hint
         )
         self._fallback.ensure_supported(resolved_fallback)
-        device_id = self._resolve_device_selector(device, resolved_fallback)
+        device_id = self._resolve_device_selector(
+            device, resolved_fallback, allow_cpu=allow_cpu
+        )
         options = self._build_get_options(resolved_fallback, options_override)
         try:
             materialized = self._materialize(

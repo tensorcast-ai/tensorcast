@@ -132,6 +132,7 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
   LOG(INFO) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
   LOG(INFO) << "I/O threads: " << num_thread_ << ", tx_slice_bytes: " << tx_slice_bytes_ / communicator::misc::MB
             << "MB";
+  LOG(INFO) << "CPU shared memory enabled: " << (options_.cpu_shared_memory_enabled ? "true" : "false");
 
   auto init_status = runtime_env_->initialize();
   CHECK(init_status.ok()) << "Failed to initialize RuntimeEnv: " << init_status;
@@ -336,7 +337,7 @@ absl::StatusOr<components::MemoryTierLeaseDescriptor> StoreEngine::acquire_memor
     return result;
   }
 
-  auto lease_or = uma->acquire_stable_lease(cpu_key, absl::MakeSpan(result.chunk_ids));
+  auto lease_or = acquire_replica_stable_lease(cpu_key, absl::MakeSpan(result.chunk_ids));
   if (!lease_or.ok()) {
     return lease_or.status();
   }
@@ -514,6 +515,24 @@ absl::StatusOr<ExportRegistration> StoreEngine::enable_remote_replica_access(
 
 absl::Status StoreEngine::disable_remote_replica_access(const ReplicaKey& key, MemoryLocation location) {
   return replica_runtime_->disable_remote_replica_access(key, location);
+}
+
+absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> StoreEngine::set_replica_exported(
+    const ReplicaKey& key,
+    MemoryLocation location,
+    absl::Span<const uint32_t> chunks,
+    bool on) {
+  return replica_runtime_->set_replica_exported(key, location, chunks, on);
+}
+
+absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> StoreEngine::acquire_replica_stable_lease(
+    const ReplicaKey& key,
+    absl::Span<const uint32_t> chunks) {
+  return replica_runtime_->acquire_replica_stable_lease(key, chunks);
+}
+
+absl::Status StoreEngine::release_replica_stable_lease(const replica::UnifiedMemoryAuthority::StableLease& lease) {
+  return replica_runtime_->release_replica_stable_lease(lease);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

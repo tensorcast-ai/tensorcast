@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include "core/cuda/cuda_api.h"
+#include "core/store/device_registry.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -109,6 +110,8 @@ absl::Status DeviceManager::initialize() {
 
     GpuInfo& info = gpu_info_map_[i];
     info.uuid = std::string(uuid_str);
+
+    DeviceRegistry::instance().register_gpu(i, info.uuid);
 
     LOG(INFO) << "GPU " << i << ": " << props.name << ", UUID: " << info.uuid;
 

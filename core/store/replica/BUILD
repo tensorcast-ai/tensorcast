@@ -195,6 +195,7 @@ sc_cc_library(
         "//core/communicator:engine_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store:communication_types",
+        "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:memory_types",
         "//core/store:store_engine_options",

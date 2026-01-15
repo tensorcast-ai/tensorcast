@@ -10,6 +10,7 @@
 
 #include "core/store/store_engine.h"
 #include "daemon/device_resolver.h"
+#include "daemon/handle_lease_registry.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/ref_tracker.h"
@@ -31,6 +32,8 @@ class MaterializationController {
     IpcRegionRegistry& regions;
     std::atomic<bool>& is_shutting_down;
     SessionLifecycleManager* lifecycle{nullptr};
+    HandleLeaseRegistry* handle_leases{nullptr};
+    bool cpu_shared_memory_enabled{false};
     std::filesystem::path storage_path;
   };
 

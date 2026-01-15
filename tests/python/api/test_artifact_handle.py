@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -219,7 +219,8 @@ def test_tensor_subset_materialization_and_release():
 
     assert set(result.keys()) == {"bar"}
     assert pipeline.calls and pipeline.calls[0]["tensor_names"] == ("bar",)
-    assert ("replica-1", "") in runtime._client.unloaded
+    assert runtime._client.unloaded == []
+    assert pipeline.released == []
 
 
 def test_tensor_into_materializes_subset_only():

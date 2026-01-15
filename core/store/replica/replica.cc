@@ -11,6 +11,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
+#include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
@@ -123,17 +124,18 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create ReplicaLoadController ---
   auto view_id = config.view_id;
 
-  DeviceKey dev_key;
   const bool gpu_requested = (config.device_type == DeviceType::GPU) || (config.local_device_id >= 0);
+  DeviceKey dev_key;
   if (gpu_requested) {
     // Either explicit GPU target or legacy configs that only set local_device_id.
     // Bind the Replica to that GPU so CUDA stream initialisation works for GPU copies.
-    dev_key.type = DeviceType::GPU;
-    dev_key.ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
+    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
+    dev_key = DeviceRegistry::instance().gpu_key(ordinal);
   } else {
     // Default / explicit CPU target (or unsupported type which we map to CPU for now).
     dev_key.type = DeviceType::CPU;
     dev_key.ordinal = -1;
+    dev_key.uuid.clear();
   }
 
   auto memory_manager = std::make_shared<ReplicaLoadController>(
@@ -147,7 +149,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.streaming_buffer_chunks,
       effective_size,
       view_id,
-      config.memory_tier_config);
+      config.memory_tier_config,
+      config.cpu_shared_memory_enabled);
 
   // --- Create Replica Instance ---
   // Build ReplicaKey for this replica/device

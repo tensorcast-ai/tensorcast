@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import array
+import contextlib
+import fcntl
 import os
+import socket
+import struct
 import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -11,15 +16,20 @@ import torch
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast._c_ext import get_cuda_memory_ptr, restore_tensors
+from tensorcast._c_ext import (
+    get_cuda_memory_ptr,
+    restore_tensors,
+    restore_tensors_from_cpu_fd_with_lease,
+)
 from tensorcast.api._config import GetArtifactOptions
-from tensorcast.api._device import device_uuid_for, resolve_device
+from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for, resolve_device
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import ServerConfig
 
 
 @dataclass(frozen=True)
@@ -57,6 +67,80 @@ class MaterializationPayload:
     ticket_expires_at_ts: float | None = None
 
 
+_LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {
+    0: "ok",
+    1: "not_found",
+    2: "failed_precondition",
+    3: "permission_denied",
+    4: "internal",
+}
+
+
+def _ensure_fd_cloexec(fd: int) -> None:
+    flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+    fcntl.fcntl(fd, fcntl.F_SETFD, flags | fcntl.FD_CLOEXEC)
+
+
+def _request_cpu_memfd_fd(
+    *,
+    local_handle_socket_path: str,
+    lease_token: bytes,
+) -> int:
+    if not local_handle_socket_path:
+        raise DaemonUnavailable("Local handle socket path is required for CPU memfd")
+    if not lease_token:
+        raise DaemonUnavailable("Daemon returned empty lease_token for CPU memfd")
+    if len(lease_token) > 1024:
+        raise DaemonUnavailable("lease_token too large for local handle protocol")
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1.0)
+        try:
+            sock.connect(local_handle_socket_path)
+        except OSError as exc:
+            raise DaemonUnavailable(
+                f"Failed to connect LocalHandle socket at {local_handle_socket_path}"
+            ) from exc
+        msg = bytes([1]) + struct.pack("=I", len(lease_token)) + lease_token
+        try:
+            sock.sendall(msg)
+        except OSError as exc:
+            raise DaemonUnavailable("LocalHandle GetCpuMemfdFd send failed") from exc
+
+        recv_flags = getattr(socket, "MSG_CMSG_CLOEXEC", 0)
+        try:
+            data, ancdata, _, _ = sock.recvmsg(
+                1, socket.CMSG_SPACE(struct.calcsize("i")), recv_flags
+            )
+        except (OSError, TimeoutError) as exc:
+            raise DaemonUnavailable("LocalHandle GetCpuMemfdFd recv failed") from exc
+        if not data:
+            raise DaemonUnavailable("Local handle server returned empty response")
+        code = int(data[0])
+        if code != 0:
+            label = _LOCAL_HANDLE_RESP_LABELS.get(code, f"unknown({code})")
+            raise DaemonUnavailable(f"LocalHandle GetCpuMemfdFd failed: {label}")
+
+        recv_fds: list[int] = []
+        for level, ctype, cmsg_data in ancdata:
+            if level == socket.SOL_SOCKET and ctype == socket.SCM_RIGHTS:
+                fds = array.array("i")
+                fds.frombytes(cmsg_data)
+                recv_fds.extend(int(fd) for fd in fds)
+
+        if not recv_fds:
+            raise DaemonUnavailable(
+                "LocalHandle GetCpuMemfdFd returned no file descriptor"
+            )
+
+        fd = recv_fds[0]
+        for extra_fd in recv_fds[1:]:
+            with contextlib.suppress(OSError):
+                os.close(extra_fd)
+        _ensure_fd_cloexec(fd)
+        return fd
+
+
 def _tensor_payload_from_proto(
     proto: store_daemon_pb2.TensorPayloadDescriptor,
     *,
@@ -79,6 +163,7 @@ def materialize_artifact_v2(
     *,
     client: DaemonCtl,
     daemon_address: str,
+    server_config: ServerConfig | None = None,
     device_id: int | torch.device,
     artifact_id: str | None,
     key: str | None,
@@ -108,7 +193,12 @@ def materialize_artifact_v2(
     tracer = trace.get_tracer(__name__)
 
     opts = options or GetArtifactOptions()
-    dev_id = resolve_device(device_id)
+    dev_id = resolve_device(device_id, allow_cpu=True)
+    target_device_type = (
+        store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+        if dev_id == CPU_DEVICE_ID
+        else store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
+    )
     (
         pinned_ms,
         enable_ver,
@@ -155,10 +245,15 @@ def materialize_artifact_v2(
             | store_daemon_pb2.MaterializeByKeyResponse
         )
         if artifact_id is not None:
+            device_uuid = (
+                ""
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else device_uuid_for(dev_id)
+            )
             response = client.materialize_by_artifact_id_v2(
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid_value,
-                device_uuid=device_uuid_for(dev_id),
+                device_uuid=device_uuid,
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 view=view,
@@ -171,6 +266,7 @@ def materialize_artifact_v2(
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
+                target_device_type=target_device_type,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
@@ -182,7 +278,9 @@ def materialize_artifact_v2(
             response = client.materialize_by_key_v2(
                 key=key or "",
                 replica_uuid=replica_uuid_value,
-                device_id=int(dev_id),
+                device_id=0
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else int(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 return_response=True,
@@ -190,6 +288,7 @@ def materialize_artifact_v2(
                 source_policy=source_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
+                target_device_type=target_device_type,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeByKeyResponse):
                 raise DaemonUnavailable(
@@ -203,7 +302,11 @@ def materialize_artifact_v2(
             response = client.materialize_by_artifact_id_v2(
                 artifact_id="",
                 replica_uuid=replica_uuid_value,
-                device_uuid=device_uuid_for(dev_id),
+                device_uuid=(
+                    ""
+                    if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                    else device_uuid_for(dev_id)
+                ),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 view=view,
@@ -216,6 +319,7 @@ def materialize_artifact_v2(
                 tensor_names=tensor_names,
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
+                target_device_type=target_device_type,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
@@ -247,13 +351,66 @@ def materialize_artifact_v2(
         except Exception:  # noqa: BLE001
             ticket_expires_at_ts = None
 
-    handle_bytes = b""
-    if response.HasField("mem_handle"):
-        handle_bytes = response.mem_handle.cuda_ipc_handle
-    if wait_for_completion and not handle_bytes:
-        raise DaemonUnavailable(
-            "Daemon returned empty mem_handle for materialization v2"
-        )
+    mem_handle = response.mem_handle if response.HasField("mem_handle") else None
+    handle_kind = mem_handle.WhichOneof("handle") if mem_handle is not None else None
+    lease_token = bytes(mem_handle.lease_token) if mem_handle is not None else b""
+    local_handle_socket_path = (
+        server_config.local_handle_socket_path if server_config is not None else ""
+    )
+    cpu_shared_memory_enabled = bool(
+        server_config.cpu_shared_memory_enabled if server_config is not None else False
+    )
+
+    cuda_ipc_handle = b""
+    cpu_memfd_size_bytes = 0
+    cpu_memfd_offset_bytes = 0
+    if mem_handle is not None:
+        if handle_kind == "cuda_ipc_handle":
+            cuda_ipc_handle = bytes(mem_handle.cuda_ipc_handle)
+        elif handle_kind == "cpu_memfd":
+            cpu_memfd_size_bytes = int(mem_handle.cpu_memfd.size_bytes)
+            cpu_memfd_offset_bytes = int(mem_handle.cpu_memfd.offset_bytes)
+
+    if wait_for_completion:
+        if mem_handle is None or handle_kind is None:
+            raise DaemonUnavailable(
+                "Daemon returned empty mem_handle for materialization v2"
+            )
+        if (
+            target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+            and handle_kind != "cpu_memfd"
+        ):
+            raise DaemonUnavailable(
+                "Daemon returned non-CPU handle for CPU materialization v2"
+            )
+        if (
+            target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
+            and handle_kind != "cuda_ipc_handle"
+        ):
+            raise DaemonUnavailable(
+                "Daemon returned non-GPU handle for GPU materialization v2"
+            )
+        if handle_kind == "cuda_ipc_handle" and not cuda_ipc_handle:
+            raise DaemonUnavailable(
+                "Daemon returned empty cuda_ipc_handle for materialization v2"
+            )
+        if handle_kind == "cpu_memfd":
+            if not cpu_shared_memory_enabled:
+                raise DaemonUnavailable(
+                    "Daemon cpu_shared_memory_enabled is false for CPU materialization v2"
+                )
+            if not local_handle_socket_path:
+                raise DaemonUnavailable(
+                    "Daemon local_handle_socket_path is missing for CPU materialization v2"
+                )
+            if not lease_token:
+                raise DaemonUnavailable(
+                    "Daemon returned empty lease_token for CPU materialization v2"
+                )
+            if cpu_memfd_size_bytes <= 0:
+                raise DaemonUnavailable(
+                    "Daemon returned empty cpu_memfd handle for CPU materialization v2"
+                )
 
     view_data_hash: str | None = None
     try:
@@ -296,44 +453,93 @@ def materialize_artifact_v2(
     # Translate descriptors from proto into SDK form.
     device_uuid: str | None
     try:
-        resolved_device = resolve_device(device_id)
-        device_uuid = device_uuid_for(resolved_device)
+        if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU:
+            device_uuid = None
+        else:
+            device_uuid = device_uuid_for(dev_id)
     except Exception:  # noqa: BLE001
         device_uuid = None
     descriptors = [
         _tensor_payload_from_proto(desc, default_device_uuid=device_uuid)
         for desc in response.payloads
     ]
-    cuda_memory_ptr = (
-        get_cuda_memory_ptr(dev_id, handle_bytes) if handle_bytes else None
-    )
+
+    meta_state_dict = {
+        desc.name: (
+            list(desc.shape),
+            list(desc.stride),
+            desc.dtype,
+            int(desc.storage_offset),
+        )
+        for desc in descriptors
+    }
+    tensor_offsets_by_name: Mapping[str, int] = {
+        desc.name: int(desc.buffer_offset) for desc in descriptors
+    }
+
+    tensors_cache: dict[str, torch.Tensor] | None = None
 
     def _iter() -> PayloadIterator:
-        if cuda_memory_ptr is None:
+        nonlocal tensors_cache
+        if not wait_for_completion:
             raise DaemonUnavailable(
-                "Materialization payload is missing a mem_handle; tensor data is not available"
+                "wait_for_completion=true is required to create tensor views"
             )
-        meta_state_dict = {
-            desc.name: (
-                list(desc.shape),
-                list(desc.stride),
-                desc.dtype,
-                int(desc.storage_offset),
-            )
-            for desc in descriptors
-        }
-        tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
-            dev_id: {desc.name: int(desc.buffer_offset) for desc in descriptors}
-        }
-        memory_ptrs: Mapping[int | torch.device, int] = {dev_id: cuda_memory_ptr}
-        tensors = restore_tensors(
-            meta_state_dict,
-            memory_ptrs,
-            tensor_offsets,
-            True,
-        )
+        if tensors_cache is None:
+            if handle_kind == "cuda_ipc_handle":
+                if dev_id == CPU_DEVICE_ID:
+                    raise DaemonUnavailable(
+                        "GPU materialization returned a CUDA IPC handle but device is CPU"
+                    )
+                if not cuda_ipc_handle:
+                    raise DaemonUnavailable(
+                        "Materialization payload is missing a cuda_ipc_handle"
+                    )
+                if lease_token and not local_handle_socket_path:
+                    raise DaemonUnavailable(
+                        "lease_token present but local_handle_socket_path is missing"
+                    )
+                cuda_memory_ptr = get_cuda_memory_ptr(dev_id, cuda_ipc_handle)
+                tensor_offsets: Mapping[int | torch.device, Mapping[str, int]] = {
+                    dev_id: tensor_offsets_by_name
+                }
+                memory_ptrs: Mapping[int | torch.device, int] = {
+                    dev_id: cuda_memory_ptr
+                }
+                tensors_cache = restore_tensors(
+                    meta_state_dict,
+                    memory_ptrs,
+                    tensor_offsets,
+                    True,
+                    lease_token=lease_token,
+                    local_handle_socket_path=local_handle_socket_path,
+                )
+            elif handle_kind == "cpu_memfd":
+                if not cpu_shared_memory_enabled:
+                    raise DaemonUnavailable("cpu_shared_memory_enabled is false")
+                if not local_handle_socket_path:
+                    raise DaemonUnavailable("local_handle_socket_path is missing")
+                if not lease_token:
+                    raise DaemonUnavailable("lease_token is missing for CPU memfd")
+                fd = _request_cpu_memfd_fd(
+                    local_handle_socket_path=local_handle_socket_path,
+                    lease_token=lease_token,
+                )
+                tensors_cache = restore_tensors_from_cpu_fd_with_lease(
+                    meta_state_dict,
+                    fd=fd,
+                    size_bytes=cpu_memfd_size_bytes,
+                    offset_bytes=cpu_memfd_offset_bytes,
+                    tensor_device_offsets=tensor_offsets_by_name,
+                    lease_token=lease_token,
+                    local_handle_socket_path=local_handle_socket_path,
+                )
+            else:
+                raise DaemonUnavailable(
+                    "Materialization payload is missing a mem_handle"
+                )
         for desc in descriptors:
-            yield desc, tensors[desc.name]
+            yield desc, tensors_cache[desc.name]
 
     if opts.enable_verification:
         verification_timeout_ms = opts.pinned_allocation_timeout_ms + 30000

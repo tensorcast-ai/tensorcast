@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -31,6 +32,7 @@
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/deadline_utils.h"
+#include "daemon/grpc_peer_utils.h"
 #include "daemon/status_utils.h"
 #include "nlohmann/json.hpp"
 
@@ -146,31 +148,51 @@ void record_lease_create_failed() {
 void register_session_and_refs(
     SessionsService& sessions,
     RefTracker& refs,
-    SessionLifecycleManager* lifecycle,
     const store::loading::ReplicaKey& replica_key,
     std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal,
     const std::string& replica_uuid,
     int32_t pid,
-    std::string_view log_context) {
+    bool allow_pid_ref) {
   if (!replica_uuid.empty()) {
     sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
   }
-  if (pid <= 0) {
+  if (!allow_pid_ref || pid <= 0) {
     return;
   }
   refs.add_ref(replica_key, pid);
-  if (!lifecycle || replica_key.device.type != DeviceType::GPU) {
-    return;
+}
+
+absl::StatusOr<std::vector<uint32_t>> build_export_chunks_for_replica(
+    store::StoreEngine& engine,
+    const store::loading::ReplicaKey& key,
+    std::optional<uint64_t> size_bytes_override = std::nullopt) {
+  uint64_t size_bytes = 0;
+  if (size_bytes_override.has_value()) {
+    size_bytes = *size_bytes_override;
+  } else {
+    auto size_or = engine.get_replica_size(key);
+    if (!size_or.ok()) {
+      return size_or.status();
+    }
+    size_bytes = *size_or;
   }
-  SessionLifecycleManager::ReplicaSubject subj{
-      .artifact_id = replica_key.artifact_id, .device_id = replica_key.device.ordinal};
-  auto lid_or = lifecycle->create_use_lease(subj, pid);
-  if (!lid_or.ok()) {
-    LOG(WARNING) << "create_use_lease failed (" << log_context << "): artifact_id=" << replica_key.artifact_id
-                 << " dev=" << replica_key.device.ordinal << ": " << lid_or.status();
-    record_lease_create_failed();
+  const uint64_t chunk_bytes = static_cast<uint64_t>(engine.get_artifact_chunk_bytes());
+  if (chunk_bytes == 0) {
+    return absl::FailedPreconditionError("artifact_chunk_bytes is zero");
   }
-  // TTL prefetch pins via request flag removed; only UseLease is created.
+  const uint64_t num_chunks = (size_bytes + chunk_bytes - 1) / chunk_bytes;
+  if (num_chunks == 0) {
+    return absl::InvalidArgumentError("replica size is zero");
+  }
+  if (num_chunks > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
+    return absl::InvalidArgumentError("replica has too many chunks");
+  }
+  std::vector<uint32_t> chunks;
+  chunks.reserve(static_cast<size_t>(num_chunks));
+  for (uint32_t i = 0; i < static_cast<uint32_t>(num_chunks); ++i) {
+    chunks.push_back(i);
+  }
+  return chunks;
 }
 
 struct DescriptorMetadata {
@@ -850,6 +872,31 @@ grpc::Status MaterializationController::materialize_replica(
   }
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
+  const bool cpu_target = dev.type == DeviceType::CPU;
+  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  const int32_t effective_pid = loopback_peer ? req.pid() : 0;
+  if (req.wait_for_completion() && !loopback_peer) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
+  }
+  if (cpu_target) {
+    if (!loopback_peer) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::PERMISSION_DENIED, "CPU shared-memory materialization is local-only"};
+    }
+    if (effective_pid <= 0) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::INVALID_ARGUMENT, "pid is required for CPU handle leases"};
+    }
+    if (!d_.cpu_shared_memory_enabled) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "cpu_shared_memory is disabled"};
+    }
+    if (d_.handle_leases == nullptr) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
+    }
+  }
 
   std::optional<std::filesystem::path> normalized_disk_path;
   if (request_has_disk) {
@@ -1029,13 +1076,15 @@ grpc::Status MaterializationController::materialize_replica(
 
   // Artifact LIP fast path: try cross-device consumption
   const bool view_requested = view_spec.has_value() || request_view_id.has_value();
-  if (has_artifact && !view_requested) {
+  std::optional<store::loading::ReplicaKey> lip_replica_key;
+  if (has_artifact && !view_requested && dev.type == DeviceType::GPU) {
     auto satisfied = d_.lip.try_satisfy_from_lip(
         resolved_artifact_id,
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
+          lip_replica_key = rkey;
           register_session_and_refs(
-              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP path");
+              d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -1048,6 +1097,26 @@ grpc::Status MaterializationController::materialize_replica(
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
+      bool lease_created = false;
+      if (d_.handle_leases != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
+        auto token_or = d_.handle_leases->mint_cuda_ipc_lease(*lip_replica_key, effective_pid);
+        if (token_or.ok()) {
+          resp.mutable_mem_handle()->set_lease_token(*token_or);
+          lease_created = true;
+        } else {
+          LOG(WARNING) << "mint_cuda_ipc_lease failed (LIP path): key=" << *lip_replica_key << " pid=" << effective_pid
+                       << ": " << token_or.status();
+          record_lease_create_failed();
+        }
+      }
+      if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
+        auto lid_or = d_.lifecycle->create_use_lease(*lip_replica_key, effective_pid);
+        if (!lid_or.ok()) {
+          LOG(WARNING) << "create_use_lease failed (LIP path): key=" << *lip_replica_key << " pid=" << effective_pid
+                       << ": " << lid_or.status();
+          record_lease_create_failed();
+        }
+      }
       return finalize_response();
     }
   }
@@ -1101,29 +1170,84 @@ grpc::Status MaterializationController::materialize_replica(
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
   register_session_and_refs(
-      d_.sessions,
-      d_.refs,
-      d_.lifecycle,
-      handle.replica_key,
-      handle.ready_signal,
-      req.replica_uuid(),
-      req.pid(),
-      "engine path");
+      d_.sessions, d_.refs, handle.replica_key, handle.ready_signal, req.replica_uuid(), effective_pid, loopback_peer);
   if (has_disk)
     resp.set_disk_path(normalized_disk_path->string());
-  resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-  if (handle.cuda_ipc_handle.is_valid()) {
-    auto handle_view = handle.cuda_ipc_handle.as_string_view();
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
+  if (cpu_target) {
+    if (!handle.cpu_memfd_region.has_value()) {
+      LOG(WARNING) << "MaterializationController: cpu_target but engine handle missing cpu_memfd_region for key="
+                   << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
+                   << " gpu_state=" << static_cast<int>(handle.gpu_state);
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "CPU memfd handle unavailable for replica"};
+    }
+    const auto& region = *handle.cpu_memfd_region;
+    auto chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key);
+    if (!chunks_or.ok()) {
+      chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key, region.size_bytes);
+    }
+    if (!chunks_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(chunks_or.status());
+    }
+    HandleLeaseRegistry::CpuMemfdDescriptor memfd_desc{
+        .fd = region.fd,
+        .size_bytes = region.size_bytes,
+        .offset_bytes = region.offset_bytes,
+    };
+    auto token_or = d_.handle_leases->mint_cpu_memfd_lease(handle.replica_key, effective_pid, memfd_desc, *chunks_or);
+    if (!token_or.ok()) {
+      // Best-effort rollback: drop ref and unload.
+      if (!req.replica_uuid().empty()) {
+        (void)d_.sessions.erase(req.replica_uuid());
+      }
+      if (effective_pid > 0) {
+        d_.refs.drop_ref(handle.replica_key, effective_pid);
+      }
+      (void)d_.engine.unload_replica(handle.replica_key);
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(token_or.status());
+    }
+    auto* cpu = resp.mutable_mem_handle()->mutable_cpu_memfd();
+    cpu->set_size_bytes(region.size_bytes);
+    cpu->set_offset_bytes(region.offset_bytes);
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+  } else {
+    if (handle.cuda_ipc_handle.is_valid()) {
+      auto handle_view = handle.cuda_ipc_handle.as_string_view();
+      resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
+    }
+    bool lease_created = false;
+    if (d_.handle_leases != nullptr && effective_pid > 0) {
+      auto token_or = d_.handle_leases->mint_cuda_ipc_lease(handle.replica_key, effective_pid);
+      if (token_or.ok()) {
+        resp.mutable_mem_handle()->set_lease_token(*token_or);
+        lease_created = true;
+      } else {
+        LOG(WARNING) << "mint_cuda_ipc_lease failed (engine path): key=" << handle.replica_key
+                     << " pid=" << effective_pid << ": " << token_or.status();
+        record_lease_create_failed();
+      }
+    }
+    if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0) {
+      auto lid_or = d_.lifecycle->create_use_lease(handle.replica_key, effective_pid);
+      if (!lid_or.ok()) {
+        LOG(WARNING) << "create_use_lease failed (engine path): key=" << handle.replica_key << " pid=" << effective_pid
+                     << ": " << lid_or.status();
+        record_lease_create_failed();
+      }
+    }
   }
+  resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.view_index_json.has_value()) {
     resp.set_view_index_json(*handle.view_index_json);
   }
-  if (resp.view_index_json().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
-    // Prefer disk-local canonical index to avoid Global Store dependency for disk loads.
+  if (resp.view_index_json().empty() && normalized_disk_path.has_value()) {
+    // Prefer disk-local canonical index to avoid Global Store dependency when the client provides a disk_path,
+    // even if the engine serves the request from an already-loaded local replica.
     if (disk_index.has_value()) {
       resp.set_view_index_json(disk_index->canonical_index_json);
-    } else if (normalized_disk_path.has_value()) {
+    } else {
       auto local_index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
       if (local_index_or.ok()) {
         resp.set_view_index_json(local_index_or->canonical_index_json);
@@ -1134,15 +1258,15 @@ grpc::Status MaterializationController::materialize_replica(
                      << ": " << local_index_or.status();
       }
     }
-    if (resp.view_index_json().empty()) {
-      auto index_or = d_.engine.get_canonical_index_by_id(handle.replica_key.artifact_id);
-      if (index_or.ok()) {
-        resp.set_view_index_json(*index_or);
-        VLOG(1) << "MaterializationController: filled view_index_json from engine for disk artifact_id="
-                << handle.replica_key.artifact_id;
-      } else {
-        LOG(WARNING) << "Failed to fetch canonical index for disk materialization response: " << index_or.status();
-      }
+  }
+  if (resp.view_index_json().empty() && handle.source == store::loading::MaterializationSource::kDisk) {
+    auto index_or = d_.engine.get_canonical_index_by_id(handle.replica_key.artifact_id);
+    if (index_or.ok()) {
+      resp.set_view_index_json(*index_or);
+      VLOG(1) << "MaterializationController: filled view_index_json from engine for disk artifact_id="
+              << handle.replica_key.artifact_id;
+    } else {
+      LOG(WARNING) << "Failed to fetch canonical index for disk materialization response: " << index_or.status();
     }
   }
   if (handle.view_data_hash.has_value()) {
@@ -1157,6 +1281,17 @@ grpc::Status MaterializationController::materialize_by_key(
     v2::MaterializeByKeyResponse& resp) {
   auto& span = rctx.span();
   span->SetAttribute("tc.key", req.key());
+  const v2::DeviceType requested_type = (req.target_device_type() == v2::DeviceType::DEVICE_TYPE_CPU)
+      ? v2::DeviceType::DEVICE_TYPE_CPU
+      : v2::DeviceType::DEVICE_TYPE_GPU;
+  const bool cpu_target = requested_type == v2::DeviceType::DEVICE_TYPE_CPU;
+  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
+  const int32_t effective_pid = loopback_peer ? req.pid() : 0;
+  if (req.wait_for_completion() && !loopback_peer) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
+  }
+  span->SetAttribute("tc.device.type", static_cast<int64_t>(requested_type));
   const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
   span->SetAttribute("tc.store.preference", static_cast<int64_t>(policy.preference));
   span->SetAttribute("tc.store.allow_p2p", policy.allow_p2p);
@@ -1174,6 +1309,24 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   if (req.key().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+  if (cpu_target) {
+    if (!loopback_peer) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::PERMISSION_DENIED, "CPU shared-memory materialization is local-only"};
+    }
+    if (effective_pid <= 0) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::INVALID_ARGUMENT, "pid is required for CPU handle leases"};
+    }
+    if (!d_.cpu_shared_memory_enabled) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "cpu_shared_memory is disabled"};
+    }
+    if (d_.handle_leases == nullptr) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
+    }
   }
 
   auto finalize_response = [&]() -> grpc::Status {
@@ -1218,14 +1371,16 @@ grpc::Status MaterializationController::materialize_by_key(
     used_disk_path = normalized_or->string();
   }
 
-  // Try LIP fast path first
-  {
+  // Try LIP fast path first (GPU only)
+  std::optional<store::loading::ReplicaKey> lip_replica_key;
+  if (!cpu_target) {
     auto satisfied = d_.lip.try_satisfy_from_lip(
         mapping.artifact_id,
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
+          lip_replica_key = rkey;
           register_session_and_refs(
-              d_.sessions, d_.refs, d_.lifecycle, rkey, nullptr, req.replica_uuid(), req.pid(), "LIP by-key");
+              d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
         },
         resp.mutable_mem_handle());
     if (!satisfied.ok()) {
@@ -1242,16 +1397,41 @@ grpc::Status MaterializationController::materialize_by_key(
       resp.set_used_disk_path(used_disk_path);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
+      bool lease_created = false;
+      if (d_.handle_leases != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
+        auto token_or = d_.handle_leases->mint_cuda_ipc_lease(*lip_replica_key, effective_pid);
+        if (token_or.ok()) {
+          resp.mutable_mem_handle()->set_lease_token(*token_or);
+          lease_created = true;
+        } else {
+          LOG(WARNING) << "mint_cuda_ipc_lease failed (LIP by-key): key=" << *lip_replica_key
+                       << " pid=" << effective_pid << ": " << token_or.status();
+          record_lease_create_failed();
+        }
+      }
+      if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
+        auto lid_or = d_.lifecycle->create_use_lease(*lip_replica_key, effective_pid);
+        if (!lid_or.ok()) {
+          LOG(WARNING) << "create_use_lease failed (LIP by-key): key=" << *lip_replica_key << " pid=" << effective_pid
+                       << ": " << lid_or.status();
+          record_lease_create_failed();
+        }
+      }
       return finalize_response();
     }
   }
 
   // Engine path
-  // Validate device_id
-  if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
-    return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+  store::DeviceKey dev;
+  if (cpu_target) {
+    dev = d_.devices.From(v2::DeviceType::DEVICE_TYPE_CPU, /*uuid=*/"", /*ordinal_hint=*/std::nullopt);
+  } else {
+    // Validate device_id
+    if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
+      return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+    }
+    dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
   }
-  const auto dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
   store::loading::MaterializeHints hints;
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
@@ -1271,17 +1451,67 @@ grpc::Status MaterializationController::materialize_by_key(
   }
   const auto& handle = *result;
   register_session_and_refs(
-      d_.sessions,
-      d_.refs,
-      d_.lifecycle,
-      handle.replica_key,
-      handle.ready_signal,
-      req.replica_uuid(),
-      req.pid(),
-      "engine by-key");
-  if (handle.cuda_ipc_handle.is_valid()) {
-    auto handle_view = handle.cuda_ipc_handle.as_string_view();
-    resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
+      d_.sessions, d_.refs, handle.replica_key, handle.ready_signal, req.replica_uuid(), effective_pid, loopback_peer);
+  if (cpu_target) {
+    if (!handle.cpu_memfd_region.has_value()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return {StatusCode::FAILED_PRECONDITION, "CPU memfd handle unavailable for replica"};
+    }
+    const auto& region = *handle.cpu_memfd_region;
+    auto chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key);
+    if (!chunks_or.ok()) {
+      chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key, region.size_bytes);
+    }
+    if (!chunks_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(chunks_or.status());
+    }
+    HandleLeaseRegistry::CpuMemfdDescriptor memfd_desc{
+        .fd = region.fd,
+        .size_bytes = region.size_bytes,
+        .offset_bytes = region.offset_bytes,
+    };
+    auto token_or = d_.handle_leases->mint_cpu_memfd_lease(handle.replica_key, effective_pid, memfd_desc, *chunks_or);
+    if (!token_or.ok()) {
+      if (!req.replica_uuid().empty()) {
+        (void)d_.sessions.erase(req.replica_uuid());
+      }
+      if (effective_pid > 0) {
+        d_.refs.drop_ref(handle.replica_key, effective_pid);
+      }
+      (void)d_.engine.unload_replica(handle.replica_key);
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(token_or.status());
+    }
+    auto* cpu = resp.mutable_mem_handle()->mutable_cpu_memfd();
+    cpu->set_size_bytes(region.size_bytes);
+    cpu->set_offset_bytes(region.offset_bytes);
+    resp.mutable_mem_handle()->set_lease_token(*token_or);
+  } else {
+    if (handle.cuda_ipc_handle.is_valid()) {
+      auto handle_view = handle.cuda_ipc_handle.as_string_view();
+      resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
+    }
+    bool lease_created = false;
+    if (d_.handle_leases != nullptr && effective_pid > 0) {
+      auto token_or = d_.handle_leases->mint_cuda_ipc_lease(handle.replica_key, effective_pid);
+      if (token_or.ok()) {
+        resp.mutable_mem_handle()->set_lease_token(*token_or);
+        lease_created = true;
+      } else {
+        LOG(WARNING) << "mint_cuda_ipc_lease failed (engine by-key): key=" << handle.replica_key
+                     << " pid=" << effective_pid << ": " << token_or.status();
+        record_lease_create_failed();
+      }
+    }
+    if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0) {
+      auto lid_or = d_.lifecycle->create_use_lease(handle.replica_key, effective_pid);
+      if (!lid_or.ok()) {
+        LOG(WARNING) << "create_use_lease failed (engine by-key): key=" << handle.replica_key
+                     << " pid=" << effective_pid << ": " << lid_or.status();
+        record_lease_create_failed();
+      }
+    }
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(mapping.artifact_id);
@@ -1307,6 +1537,11 @@ grpc::Status MaterializationController::materialize_into_target(
     record_materialize_into_target(
         "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(policy_status);
+  }
+  if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
+    record_materialize_into_target(
+        "error", "non_loopback_peer", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::PERMISSION_DENIED, "MaterializeIntoTarget is local-only (loopback/UDS)"};
   }
 
   const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
@@ -1734,20 +1969,21 @@ grpc::Status MaterializationController::unload(
     }
   }
   if (req.has_pid()) {
-    d_.refs.drop_ref(key, req.pid());
-    if (d_.lifecycle && key.device.type == DeviceType::GPU) {
-      SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
-      const auto status = d_.lifecycle->release_use_lease(subj, req.pid());
-      if (!status.ok()) {
-        if (absl::IsNotFound(status)) {
-          VLOG(1) << "release_use_lease not found: artifact_id=" << key.artifact_id << " dev=" << key.device.ordinal
-                  << " pid=" << req.pid() << " replica_uuid=" << req.replica_uuid();
-        } else {
-          LOG(WARNING) << "failed to release use lease: artifact_id=" << key.artifact_id
-                       << " dev=" << key.device.ordinal << " pid=" << req.pid()
-                       << " replica_uuid=" << req.replica_uuid() << " status=" << status;
-        }
+    bool lease_released = false;
+    if (d_.lifecycle) {
+      const auto status = d_.lifecycle->release_use_lease(key, req.pid());
+      if (status.ok()) {
+        lease_released = true;
+      } else if (absl::IsNotFound(status)) {
+        VLOG(1) << "release_use_lease not found: artifact_id=" << key.artifact_id << " dev=" << key.device.ordinal
+                << " pid=" << req.pid() << " replica_uuid=" << req.replica_uuid();
+      } else {
+        LOG(WARNING) << "failed to release use lease: artifact_id=" << key.artifact_id << " dev=" << key.device.ordinal
+                     << " pid=" << req.pid() << " replica_uuid=" << req.replica_uuid() << " status=" << status;
       }
+    }
+    if (!lease_released) {
+      d_.refs.drop_ref(key, req.pid());
     }
     if (d_.refs.ref_count(key) > 0) {
       resp.set_code(0);

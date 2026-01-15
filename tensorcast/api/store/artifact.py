@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -264,6 +264,7 @@ class Artifact:
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
         )
+        state: dict[str, torch.Tensor] | None = None
         try:
             self._update_metadata_from_payload(payload, runtime)
             state = pipeline._payload_state_dict(payload)
@@ -271,7 +272,8 @@ class Artifact:
                 return state
             return {name: state[name] for name in requested_names}
         finally:
-            pipeline._release_materialized(payload, runtime.ensure_client())
+            if state is None:
+                pipeline._release_materialized(payload, runtime.ensure_client())
 
     def tensor(
         self,

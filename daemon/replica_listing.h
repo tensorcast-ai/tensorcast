@@ -10,7 +10,6 @@
 #include <string>
 #include <vector>
 
-#include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/store_engine.h"
 #include "daemon/ref_tracker.h"
@@ -25,8 +24,6 @@ inline void FillLoadedReplicasV2(
     const v2::GetLoadedReplicasV2Request& req,
     v2::GetLoadedReplicasV2Response& resp,
     bool use_cursor_pagination) {
-  using store::DeviceRegistry;
-
   struct Entry {
     std::string artifact_id;
     int device_id;
@@ -48,11 +45,7 @@ inline void FillLoadedReplicasV2(
     if (req.has_device_id_filter() && device_id != req.device_id_filter())
       continue;
 
-    store::loading::ReplicaKey key;
-    key.artifact_id = info.artifact_id;
-    key.device = (device_id >= 0) ? DeviceRegistry::instance().gpu_key(device_id)
-                                  : store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-    key.replica = 0;
+    const store::loading::ReplicaKey& key = info.key;
 
     Entry e;
     e.artifact_id = info.artifact_id;

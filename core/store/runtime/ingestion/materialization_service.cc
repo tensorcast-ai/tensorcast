@@ -22,6 +22,7 @@
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
 #include "core/store/replica/transfer_helpers.h"
+#include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
 #include "nlohmann/json.hpp"
 
@@ -435,6 +436,18 @@ ReplicaHandle MaterializationService::build_handle(
     auto ipc_or = replica->get_memory_manager().get_ipc_handle();
     if (ipc_or.ok()) {
       handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+    }
+  } else {
+    auto uma = replica->get_memory_manager().memory_authority();
+    if (uma) {
+      auto region_or = uma->get_cpu_memfd_region(handle.replica_key);
+      if (region_or.ok()) {
+        handle.cpu_memfd_region = loading::CpuMemfdRegion{
+            .fd = region_or->fd,
+            .size_bytes = region_or->size_bytes,
+            .offset_bytes = region_or->offset_bytes,
+        };
+      }
     }
   }
 

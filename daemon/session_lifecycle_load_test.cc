@@ -33,10 +33,9 @@ TEST_CASE("Lifecycle load: bulk placement TTL expiry under sweep", "[daemon][lif
   keys.reserve(N);
   for (int i = 0; i < N; ++i) {
     const std::string art = "mi2:load:pin:" + std::to_string(i);
-    SessionLifecycleManager::ReplicaSubject subj{.artifact_id = art, .device_id = kDevice};
-    auto id_or = mgr.create_placement_lease(subj, absl::Milliseconds(50));
-    REQUIRE(id_or.ok());
     ReplicaKey key{.artifact_id = art, .device = DeviceRegistry::instance().gpu_key(kDevice), .replica = 0};
+    auto id_or = mgr.create_placement_lease(key, absl::Milliseconds(50));
+    REQUIRE(id_or.ok());
     keys.push_back(key);
   }
 
@@ -64,10 +63,9 @@ TEST_CASE("Lifecycle load: bulk UseLease retirements via PID exit", "[daemon][li
   for (int i = 0; i < N; ++i) {
     const std::string art = "mi2:load:use:" + std::to_string(i);
     const int32_t pid = 100000 + i;
-    SessionLifecycleManager::ReplicaSubject subj{.artifact_id = art, .device_id = kDevice};
-    auto id_or = mgr.create_use_lease(subj, pid);
-    REQUIRE(id_or.ok());
     ReplicaKey key{.artifact_id = art, .device = DeviceRegistry::instance().gpu_key(kDevice), .replica = 0};
+    auto id_or = mgr.create_use_lease(key, pid);
+    REQUIRE(id_or.ok());
     refs.add_ref(key, pid);
     items.emplace_back(key, pid);
   }
@@ -96,13 +94,12 @@ TEST_CASE("Lifecycle load: mass renewal prevents stale expiries", "[daemon][life
   leases.reserve(N);
   for (int i = 0; i < N; ++i) {
     const std::string art = "mi2:load:renew:" + std::to_string(i);
-    SessionLifecycleManager::ReplicaSubject subj{.artifact_id = art, .device_id = kDevice};
-    auto id_or = mgr.create_placement_lease(subj, absl::Milliseconds(30));
+    ReplicaKey key{.artifact_id = art, .device = DeviceRegistry::instance().gpu_key(kDevice), .replica = 0};
+    auto id_or = mgr.create_placement_lease(key, absl::Milliseconds(30));
     REQUIRE(id_or.ok());
     auto id = *id_or;
     // Extend TTL significantly in a subsequent pass to create stale heap entries
     REQUIRE(mgr.renew_placement(id, absl::Milliseconds(200)).ok());
-    ReplicaKey key{.artifact_id = art, .device = DeviceRegistry::instance().gpu_key(kDevice), .replica = 0};
     leases.emplace_back(id, key);
   }
 

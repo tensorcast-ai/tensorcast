@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -58,6 +58,13 @@ class StableDramCacheManager {
 
   absl::StatusOr<AdmissionResult> admit(const AdmissionRequest& request);
 
+  // Export-preemption hook: reclaim stable tier bytes by evicting cache entries so
+  // correctness-critical exports (e.g., CPU memfd handles) can acquire UMA stable leases.
+  //
+  // This is intentionally best-effort and is only expected to evict cache-managed
+  // entries; it will not release unrelated stable leases (e.g., active exports).
+  absl::Status preempt_for_export(uint64_t required_bytes, const loading::ReplicaKey& exclude);
+
   bool is_evictable(const loading::ReplicaKey& key, absl::Time now) const;
   void on_replica_evicted(const loading::ReplicaKey& key, absl::string_view reason = "");
   void set_spill_evictable_callback(SpillEvictableCallback callback);
@@ -65,6 +72,8 @@ class StableDramCacheManager {
   uint64_t bytes_used() const;
 
  private:
+  enum class EvictionMode : uint8_t { kAdmission, kPreemptForExport };
+
   struct CacheEntry {
     loading::ReplicaKey key;
     uint64_t size_bytes{0};
@@ -82,8 +91,10 @@ class StableDramCacheManager {
       uint64_t required_bytes,
       const loading::ReplicaKey& exclude,
       absl::Time now,
-      bool spill_only);
-  bool is_entry_evictable(const CacheEntry& entry, absl::Time now) const;
+      bool spill_only,
+      EvictionMode mode,
+      absl::string_view reason);
+  bool is_entry_evictable(const CacheEntry& entry, absl::Time now, EvictionMode mode) const;
   static bool is_spill_evictable(const CacheEntry& entry, const SpillEvictableCallback& spill_evictable);
 
   void record_bytes_delta(int64_t delta) const;
