@@ -105,6 +105,9 @@ tensorcast::common::ArtifactVerificationInfo generate_verification_info_from_dis
 
 /**
  * @brief Restore tensors from GPU memory into PyTorch tensors.
+ *
+ * This API supports a single device per call; callers must pass exactly one
+ * entry in memory_base_address and tensor_device_offsets.
  */
 std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const std::unordered_map<

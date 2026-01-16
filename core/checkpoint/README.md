@@ -17,6 +17,7 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
 - **CUDA IPC restores**: Uses the shared `core/cuda` IPC handle bytes/mapping abstraction so tensors share a single
   reference-counted owner and the mapping is closed exactly once after the last tensor is released.
+- **restore_tensors single-device contract**: `restore_tensors` requires a single device per call; use one call per device when working with multi-GPU mappings.
 - **CPU shared-memory restores (memfd)**: Restores CPU tensors from a local `memfd` file descriptor and binds a daemon
   handle lease to the lifetime of the returned tensors (RAII).
 - **Fake CUDA test mode**: When `TENSORCAST_CUDA_BACKEND=fake` is active in tests, device restores use shared-memory mappings and `device_id` restores fall back to CPU tensors.

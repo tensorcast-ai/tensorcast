@@ -245,7 +245,7 @@ def materialize_artifact_v2(
             | store_daemon_pb2.MaterializeByKeyResponse
         )
         if artifact_id is not None:
-            device_uuid = (
+            request_device_uuid = (
                 ""
                 if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
                 else device_uuid_for(dev_id)
@@ -253,7 +253,7 @@ def materialize_artifact_v2(
             response = client.materialize_by_artifact_id_v2(
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid_value,
-                device_uuid=device_uuid,
+                device_uuid=request_device_uuid,
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
                 view=view,

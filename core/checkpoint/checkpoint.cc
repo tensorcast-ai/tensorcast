@@ -34,6 +34,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -44,6 +45,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/absl_check.h"
 
 #pragma clang diagnostic push
@@ -621,6 +623,96 @@ absl::Status release_handle_lease_token(
   return absl::InternalError("local handle lease release failed");
 }
 
+struct LeaseOwnerState {
+  LeaseOwnerState(
+      std::function<void()> cleanup,
+      std::string lease_token,
+      std::string local_handle_socket_path,
+      std::string log_prefix)
+      : cleanup(std::move(cleanup)),
+        lease_token(std::move(lease_token)),
+        local_handle_socket_path(std::move(local_handle_socket_path)),
+        log_prefix(std::move(log_prefix)) {}
+
+  LeaseOwnerState(const LeaseOwnerState&) = delete;
+  LeaseOwnerState& operator=(const LeaseOwnerState&) = delete;
+
+  ~LeaseOwnerState() {
+    if (cleanup) {
+      cleanup();
+    }
+    absl::Status lease_status = release_handle_lease_token(
+        local_handle_socket_path, lease_token, std::chrono::milliseconds(kLocalHandleTimeoutMs));
+    if (!lease_status.ok()) {
+      VLOG(1) << log_prefix << ": lease release failed: " << lease_status;
+    }
+  }
+
+  std::function<void()> cleanup;
+  std::string lease_token;
+  std::string local_handle_socket_path;
+  std::string log_prefix;
+};
+
+std::shared_ptr<LeaseOwnerState> make_cpu_memfd_owner(
+    void* map_base,
+    size_t map_len,
+    std::string lease_token,
+    std::string local_handle_socket_path) {
+  return std::make_shared<LeaseOwnerState>(
+      [map_base, map_len]() {
+        if (map_base != nullptr && map_base != MAP_FAILED) {
+          if (::munmap(map_base, map_len) != 0) {
+            PLOG(WARNING) << "restore_tensors_from_cpu_fd_with_lease: munmap failed";
+          }
+        }
+      },
+      std::move(lease_token),
+      std::move(local_handle_socket_path),
+      "restore_tensors_from_cpu_fd_with_lease");
+}
+
+std::shared_ptr<LeaseOwnerState> make_fake_cuda_owner(
+    void* base_ptr,
+    bool from_ipc_shm,
+    std::string lease_token,
+    std::string local_handle_socket_path) {
+  return std::make_shared<LeaseOwnerState>(
+      [base_ptr, from_ipc_shm]() {
+        absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(base_ptr) : cuda::free(base_ptr);
+        if (!status.ok()) {
+          LOG(WARNING) << "fake restore_tensors: release failed: " << status;
+        }
+      },
+      std::move(lease_token),
+      std::move(local_handle_socket_path),
+      "fake restore_tensors");
+}
+
+std::shared_ptr<LeaseOwnerState> make_cuda_owner(
+    void* base_ptr,
+    bool from_ipc_shm,
+    int device,
+    std::string lease_token,
+    std::string local_handle_socket_path) {
+  return std::make_shared<LeaseOwnerState>(
+      [base_ptr, from_ipc_shm, device]() {
+        if (device >= 0) {
+          absl::Status device_status = cuda::set_device(device);
+          if (!device_status.ok()) {
+            LOG(WARNING) << "CUDA cleanup set_device failed: " << device_status.message();
+          }
+        }
+        absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(base_ptr) : cuda::free(base_ptr);
+        if (!status.ok()) {
+          LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
+        }
+      },
+      std::move(lease_token),
+      std::move(local_handle_socket_path),
+      "restore_tensors");
+}
+
 } // namespace
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors(
@@ -632,10 +724,13 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
     const bool from_ipc_shm,
     std::string lease_token,
     std::string local_handle_socket_path) {
+  ABSL_CHECK_EQ(memory_base_address.size(), 1u) << "restore_tensors requires a single device in memory_base_address";
+  ABSL_CHECK_EQ(tensor_device_offsets.size(), 1u)
+      << "restore_tensors requires a single device in tensor_device_offsets";
   if (cuda::is_fake()) {
     // Fake CUDA path: tensors are backed by a shared-memory mapping instead of real VRAM.
     std::unordered_map<std::string, torch::Tensor> state_dict;
-    std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
+    std::unordered_map<std::uint64_t, std::shared_ptr<LeaseOwnerState>> owners;
 
     for (const auto& [device, tensor_offset] : tensor_device_offsets) {
       for (const auto& p : tensor_offset) {
@@ -653,23 +748,11 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         const std::uint64_t data_address = base_address + offset + (storage_offset_elems * element_size);
         torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
 
-        std::shared_ptr<void> owner;
+        std::shared_ptr<LeaseOwnerState> owner;
         auto it = owners.find(base_address);
         if (it == owners.end()) {
-          owner = std::shared_ptr<void>(
-              reinterpret_cast<void*>(base_address),
-              [from_ipc_shm, lease_token = lease_token, local_handle_socket_path = local_handle_socket_path](
-                  void* ptr) {
-                absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
-                if (!status.ok()) {
-                  LOG(WARNING) << "fake restore_tensors: release failed: " << status;
-                }
-                absl::Status lease_status = release_handle_lease_token(
-                    local_handle_socket_path, lease_token, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-                if (!lease_status.ok()) {
-                  VLOG(1) << "fake restore_tensors: lease release failed: " << lease_status;
-                }
-              });
+          owner = make_fake_cuda_owner(
+              reinterpret_cast<void*>(base_address), from_ipc_shm, lease_token, local_handle_socket_path);
           owners.emplace(base_address, owner);
         } else {
           owner = it->second;
@@ -688,7 +771,7 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
   }
 
   std::unordered_map<std::string, torch::Tensor> state_dict;
-  std::unordered_map<std::uint64_t, std::shared_ptr<void>> owners;
+  std::unordered_map<std::uint64_t, std::shared_ptr<LeaseOwnerState>> owners;
   for (const auto& [device, tensor_offset] : tensor_device_offsets) {
     for (const auto& p : tensor_offset) {
       const std::string name = p.first;
@@ -705,29 +788,11 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors(
         torch::Device tensor_device(torch::kCUDA, device);
         // LOG(INFO) << "Restore tensor " << name << " to device " << device << " with offset " << offset;
 
-        std::shared_ptr<void> owner;
+        std::shared_ptr<LeaseOwnerState> owner;
         auto it = owners.find(base_address);
         if (it == owners.end()) {
-          owner = std::shared_ptr<void>(
-              reinterpret_cast<void*>(base_address),
-              [from_ipc_shm, device, lease_token = lease_token, local_handle_socket_path = local_handle_socket_path](
-                  void* ptr) {
-                if (device >= 0) {
-                  absl::Status device_status = cuda::set_device(device);
-                  if (!device_status.ok()) {
-                    LOG(WARNING) << "CUDA cleanup set_device failed: " << device_status.message();
-                  }
-                }
-                absl::Status status = from_ipc_shm ? cuda::close_ipc_mem_handle(ptr) : cuda::free(ptr);
-                if (!status.ok()) {
-                  LOG(ERROR) << "CUDA memory cleanup failed: " << status.message();
-                }
-                absl::Status lease_status = release_handle_lease_token(
-                    local_handle_socket_path, lease_token, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-                if (!lease_status.ok()) {
-                  VLOG(1) << "restore_tensors: lease release failed: " << lease_status;
-                }
-              });
+          owner = make_cuda_owner(
+              reinterpret_cast<void*>(base_address), from_ipc_shm, device, lease_token, local_handle_socket_path);
           owners.emplace(base_address, owner);
         } else {
           owner = it->second;
@@ -760,139 +825,117 @@ std::unordered_map<std::string, torch::Tensor> restore_tensors_from_cpu_fd_with_
     std::string local_handle_socket_path) {
   const std::string lease_token_copy = lease_token;
   const std::string socket_path_copy = local_handle_socket_path;
-
-  try {
-    if (fd < 0) {
-      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: fd must be >= 0");
-    }
-    if (size_bytes == 0) {
-      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: size_bytes must be > 0");
-    }
-
-    const long page_size = ::sysconf(_SC_PAGESIZE);
-    if (page_size <= 0) {
-      const int err = errno;
-      ::close(fd);
-      (void)release_handle_lease_token(
-          socket_path_copy, lease_token_copy, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-      throw std::runtime_error(absl::ErrnoToStatus(err, "sysconf(_SC_PAGESIZE) failed").ToString());
-    }
-    const uint64_t page = static_cast<uint64_t>(page_size);
-    const uint64_t aligned_offset = (offset_bytes / page) * page;
-    const uint64_t delta = offset_bytes - aligned_offset;
-
-    if (size_bytes > std::numeric_limits<uint64_t>::max() - delta) {
-      ::close(fd);
-      (void)release_handle_lease_token(
-          socket_path_copy, lease_token_copy, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: mapping length overflow");
-    }
-    const uint64_t map_len_u64 = size_bytes + delta;
-    if (map_len_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-      ::close(fd);
-      (void)release_handle_lease_token(
-          socket_path_copy, lease_token_copy, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: mapping length too large");
-    }
-    const size_t map_len = static_cast<size_t>(map_len_u64);
-
-    void* map_base =
-        ::mmap(nullptr, map_len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, static_cast<off_t>(aligned_offset));
-    const int mmap_err = errno;
-    ::close(fd);
-    if (map_base == MAP_FAILED) {
-      (void)release_handle_lease_token(
-          socket_path_copy, lease_token_copy, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-      throw std::runtime_error(absl::ErrnoToStatus(mmap_err, "mmap(MAP_PRIVATE) failed").ToString());
-    }
-
-    (void)::madvise(map_base, map_len, MADV_DONTFORK);
-
-    auto* data_base = static_cast<uint8_t*>(map_base) + delta;
-
-    std::shared_ptr<void> owner = std::shared_ptr<void>(
-        map_base,
-        [map_len, lease_token = std::move(lease_token), local_handle_socket_path = std::move(local_handle_socket_path)](
-            void* ptr) mutable {
-          if (ptr != nullptr && ptr != MAP_FAILED) {
-            if (::munmap(ptr, map_len) != 0) {
-              PLOG(WARNING) << "restore_tensors_from_cpu_fd_with_lease: munmap failed";
-            }
-          }
-          absl::Status lease_status = release_handle_lease_token(
-              local_handle_socket_path, lease_token, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-          if (!lease_status.ok()) {
-            VLOG(1) << "restore_tensors_from_cpu_fd_with_lease: lease release failed: " << lease_status;
-          }
-        });
-
-    std::unordered_map<std::string, torch::Tensor> state_dict;
-    state_dict.reserve(tensor_device_offsets.size());
-
-    for (const auto& [name, offset] : tensor_device_offsets) {
-      auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
-      at::ScalarType dtype = string_to_scalar_type(type_str);
-
-      const size_t element_size = c10::elementSize(dtype);
-      if (element_size == 0) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: element size is zero");
-      }
-      if (storage_offset_elems > std::numeric_limits<uint64_t>::max() / element_size) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: storage offset overflow");
-      }
-      const uint64_t storage_offset_bytes = storage_offset_elems * element_size;
-      if (offset > std::numeric_limits<uint64_t>::max() - storage_offset_bytes) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor offset overflow");
-      }
-      const uint64_t data_offset = offset + storage_offset_bytes;
-
-      int64_t num_elements = 1;
-      if (sizes.empty()) {
-        num_elements = 1;
-      } else {
-        for (int64_t s : sizes) {
-          if (s == 0) {
-            num_elements = 0;
-            break;
-          }
-          num_elements *= s;
-        }
-      }
-      num_elements = std::max<int64_t>(num_elements, 0);
-
-      const uint64_t num_elems_u64 = static_cast<uint64_t>(num_elements);
-      if (num_elems_u64 > std::numeric_limits<uint64_t>::max() / element_size) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor byte length overflow");
-      }
-      const uint64_t tensor_size_bytes = num_elems_u64 * element_size;
-      if (data_offset > std::numeric_limits<uint64_t>::max() - tensor_size_bytes) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor range overflow");
-      }
-      const uint64_t end_pos = data_offset + tensor_size_bytes;
-      if (end_pos > size_bytes) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor range out of bounds");
-      }
-      if (data_offset > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
-        throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor offset too large");
-      }
-
-      void* data_ptr = data_base + static_cast<size_t>(data_offset);
-      torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
-      torch::Tensor tensor = torch::from_blob(
-          data_ptr,
-          torch::IntArrayRef(sizes),
-          torch::IntArrayRef(strides),
-          [owner](void*) mutable { owner.reset(); },
-          options);
-      state_dict[name] = tensor;
-    }
-
-    return state_dict;
-  } catch (...) {
+  absl::Cleanup lease_guard = absl::MakeCleanup([lease_token_copy, socket_path_copy]() {
     (void)release_handle_lease_token(
         socket_path_copy, lease_token_copy, std::chrono::milliseconds(kLocalHandleTimeoutMs));
-    throw;
+  });
+
+  if (fd < 0) {
+    throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: fd must be >= 0");
   }
+  if (size_bytes == 0) {
+    throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: size_bytes must be > 0");
+  }
+
+  const long page_size = ::sysconf(_SC_PAGESIZE);
+  if (page_size <= 0) {
+    const int err = errno;
+    ::close(fd);
+    throw std::runtime_error(absl::ErrnoToStatus(err, "sysconf(_SC_PAGESIZE) failed").ToString());
+  }
+  const uint64_t page = static_cast<uint64_t>(page_size);
+  const uint64_t aligned_offset = (offset_bytes / page) * page;
+  const uint64_t delta = offset_bytes - aligned_offset;
+
+  if (size_bytes > std::numeric_limits<uint64_t>::max() - delta) {
+    ::close(fd);
+    throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: mapping length overflow");
+  }
+  const uint64_t map_len_u64 = size_bytes + delta;
+  if (map_len_u64 > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+    ::close(fd);
+    throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: mapping length too large");
+  }
+  const size_t map_len = static_cast<size_t>(map_len_u64);
+
+  void* map_base =
+      ::mmap(nullptr, map_len, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, static_cast<off_t>(aligned_offset));
+  const int mmap_err = errno;
+  ::close(fd);
+  if (map_base == MAP_FAILED) {
+    throw std::runtime_error(absl::ErrnoToStatus(mmap_err, "mmap(MAP_PRIVATE) failed").ToString());
+  }
+
+  (void)::madvise(map_base, map_len, MADV_DONTFORK);
+
+  auto* data_base = static_cast<uint8_t*>(map_base) + delta;
+
+  std::shared_ptr<LeaseOwnerState> owner =
+      make_cpu_memfd_owner(map_base, map_len, std::move(lease_token), std::move(local_handle_socket_path));
+  std::move(lease_guard).Cancel();
+
+  std::unordered_map<std::string, torch::Tensor> state_dict;
+  state_dict.reserve(tensor_device_offsets.size());
+
+  for (const auto& [name, offset] : tensor_device_offsets) {
+    auto [sizes, strides, type_str, storage_offset_elems] = meta_state_dict.at(name);
+    at::ScalarType dtype = string_to_scalar_type(type_str);
+
+    const size_t element_size = c10::elementSize(dtype);
+    if (element_size == 0) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: element size is zero");
+    }
+    if (storage_offset_elems > std::numeric_limits<uint64_t>::max() / element_size) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: storage offset overflow");
+    }
+    const uint64_t storage_offset_bytes = storage_offset_elems * element_size;
+    if (offset > std::numeric_limits<uint64_t>::max() - storage_offset_bytes) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor offset overflow");
+    }
+    const uint64_t data_offset = offset + storage_offset_bytes;
+
+    int64_t num_elements = 1;
+    if (sizes.empty()) {
+      num_elements = 1;
+    } else {
+      for (int64_t s : sizes) {
+        if (s == 0) {
+          num_elements = 0;
+          break;
+        }
+        num_elements *= s;
+      }
+    }
+    num_elements = std::max<int64_t>(num_elements, 0);
+
+    const uint64_t num_elems_u64 = static_cast<uint64_t>(num_elements);
+    if (num_elems_u64 > std::numeric_limits<uint64_t>::max() / element_size) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor byte length overflow");
+    }
+    const uint64_t tensor_size_bytes = num_elems_u64 * element_size;
+    if (data_offset > std::numeric_limits<uint64_t>::max() - tensor_size_bytes) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor range overflow");
+    }
+    const uint64_t end_pos = data_offset + tensor_size_bytes;
+    if (end_pos > size_bytes) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor range out of bounds");
+    }
+    if (data_offset > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      throw std::runtime_error("restore_tensors_from_cpu_fd_with_lease: tensor offset too large");
+    }
+
+    void* data_ptr = data_base + static_cast<size_t>(data_offset);
+    torch::TensorOptions options = torch::TensorOptions().device(torch::kCPU).dtype(dtype);
+    torch::Tensor tensor = torch::from_blob(
+        data_ptr,
+        torch::IntArrayRef(sizes),
+        torch::IntArrayRef(strides),
+        [owner](void*) mutable { owner.reset(); },
+        options);
+    state_dict[name] = tensor;
+  }
+
+  return state_dict;
 }
 
 std::unordered_map<std::string, torch::Tensor> restore_tensors_from_disk(

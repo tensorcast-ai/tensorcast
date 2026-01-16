@@ -51,17 +51,17 @@ message Lifecycle {
   // If unset, service uses a conservative default (1s).
   google.protobuf.Duration eviction_loop_interval = 11;
 
-	  message HandleLeases {
-	    // Unix domain socket path for local handle plane (FD handoff + lease release).
-	    // When empty, the local handle plane is disabled and the daemon will not issue
-	    // handle leases (MemCopyHandle.lease_token).
-	    string local_handle_socket_path = 1;
-	    // TTL for handle leases issued by the daemon (best-effort crash safety).
-	    // When unset or set to 0s, TTL is disabled and handle leases rely on explicit release and PID-exit cleanup.
-	    google.protobuf.Duration ttl = 2;
-	    // Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
-	    uint32 max_mints_per_second = 3;
-	  }
+  message HandleLeases {
+    // Unix domain socket path for local handle plane (FD handoff + lease release).
+    // When empty, the local handle plane is disabled and the daemon will not issue
+    // handle leases (MemCopyHandle.lease_token).
+    string local_handle_socket_path = 1;
+    // TTL for handle leases issued by the daemon (best-effort crash safety).
+    // When unset or set to 0s, TTL is disabled and handle leases rely on explicit release and PID-exit cleanup.
+    google.protobuf.Duration ttl = 2;
+    // Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
+    uint32 max_mints_per_second = 3;
+  }
   HandleLeases handle_leases = 20;
 }
 
