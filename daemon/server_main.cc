@@ -1,14 +1,19 @@
 // Copyright (c) 2025-2026, TensorCast Team.
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <memory>
+#include <optional>
+#include <ranges>
 #include <string>
 
 #include <fcntl.h>
 #include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -18,6 +23,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
 #include "core/common/config/daemon_config_io.h"
@@ -76,6 +82,127 @@ absl::Status probe_memfd_shared_mapping() {
   return absl::OkStatus();
 }
 
+absl::Status ensure_local_handle_parent_dir(const std::filesystem::path& dir) {
+  std::error_code ec;
+  const bool exists = std::filesystem::exists(dir, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("stat failed for ", dir.string()));
+  }
+  if (!exists) {
+    std::filesystem::create_directories(dir, ec);
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("create_directories failed for ", dir.string()));
+    }
+    if (::chmod(dir.c_str(), 0700) < 0) {
+      return absl::ErrnoToStatus(errno, absl::StrCat("chmod(0700) failed for ", dir.string()));
+    }
+  }
+  if (!std::filesystem::is_directory(dir, ec)) {
+    if (ec) {
+      return absl::ErrnoToStatus(ec.value(), absl::StrCat("stat failed for ", dir.string()));
+    }
+    return absl::InvalidArgumentError(absl::StrCat("local handle parent is not a directory: ", dir.string()));
+  }
+  struct stat st{};
+  if (::stat(dir.c_str(), &st) < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("stat failed for ", dir.string()));
+  }
+  const uid_t uid = ::geteuid();
+  if (st.st_uid != uid) {
+    return absl::PermissionDeniedError(absl::StrCat("local handle parent dir not owned by daemon uid: ", dir.string()));
+  }
+  if ((st.st_mode & S_IWOTH) != 0 && (st.st_mode & S_ISVTX) == 0) {
+    return absl::PermissionDeniedError(
+        absl::StrCat("local handle parent dir is world-writable without sticky bit: ", dir.string()));
+  }
+  return absl::OkStatus();
+}
+
+std::optional<std::string> read_machine_id() {
+  std::ifstream in("/etc/machine-id");
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+  std::string line;
+  std::getline(in, line);
+  const auto trimmed = [&line]() {
+    auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    auto begin = std::ranges::find_if(line, not_space);
+    auto end = std::ranges::find_if(std::ranges::reverse_view(line), not_space).base();
+    if (begin >= end) {
+      return std::string();
+    }
+    return std::string(begin, end);
+  }();
+  if (trimmed.empty()) {
+    return std::nullopt;
+  }
+  return std::make_optional(trimmed);
+}
+
+std::string sanitize_component(std::string value) {
+  for (char& c : value) {
+    if (c == '/' || c == '\\') {
+      c = '_';
+    }
+  }
+  return value;
+}
+
+std::string host_id() {
+  char hostname[256];
+  if (::gethostname(hostname, sizeof(hostname)) != 0) {
+    return "unknown";
+  }
+  hostname[sizeof(hostname) - 1] = '\0';
+  std::string host = hostname[0] ? hostname : "unknown";
+  if (auto machine_id = read_machine_id(); machine_id.has_value()) {
+    host = absl::StrCat(host, "-", *machine_id);
+  }
+  return sanitize_component(std::move(host));
+}
+
+absl::StatusOr<std::filesystem::path> tensorcast_home_dir() {
+  if (const char* override = std::getenv("TENSORCAST_HOME"); override && *override) {
+    return std::filesystem::path(override);
+  }
+  const char* home = std::getenv("HOME");
+  if (!home || !*home) {
+    return absl::InvalidArgumentError("HOME is not set; cannot resolve TensorCast runtime root");
+  }
+  return std::filesystem::path(home) / ".tensorcast";
+}
+
+absl::StatusOr<std::filesystem::path> discover_daemon_state_dir() {
+  const char* instance = std::getenv("TENSORCAST_INSTANCE");
+  if (!instance || !*instance) {
+    return absl::InvalidArgumentError("TENSORCAST_INSTANCE is not set; auto-discovery requires a daemon session id");
+  }
+  auto home_or = tensorcast_home_dir();
+  if (!home_or.ok()) {
+    return home_or.status();
+  }
+  const std::string hid = host_id();
+  if (hid.empty()) {
+    return absl::InvalidArgumentError("Host id is empty; cannot resolve TensorCast runtime root");
+  }
+  return *home_or / "hosts" / hid / "sessions" / instance / "session";
+}
+
+absl::StatusOr<std::string> discover_local_handle_socket_path() {
+  auto state_dir_or = discover_daemon_state_dir();
+  if (!state_dir_or.ok()) {
+    return state_dir_or.status();
+  }
+  const std::filesystem::path& dir = *state_dir_or;
+  absl::Status st = ensure_local_handle_parent_dir(dir);
+  if (!st.ok()) {
+    return st;
+  }
+  std::filesystem::path sock = dir / "local_handle.sock";
+  return sock.string();
+}
+
 absl::StatusOr<std::optional<uint64_t>> read_cgroup_v2_memory_max() {
   std::ifstream in("/proc/self/cgroup");
   if (!in.is_open()) {
@@ -130,38 +257,39 @@ int main(int argc, char** argv) {
     LOG(ERROR) << "Failed to load config: " << cfg_or.status();
     return 2;
   }
-  const auto& cfg = *cfg_or;
+  auto cfg = *cfg_or;
   const std::filesystem::path storage_root_cfg = cfg.server().storage_path();
+  std::filesystem::path storage_root;
   if (storage_root_cfg.empty()) {
-    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path is required";
-    return 2;
-  }
-  std::error_code storage_ec;
-  const bool storage_exists = std::filesystem::exists(storage_root_cfg, storage_ec);
-  if (storage_ec) {
-    LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
-               << "): " << storage_ec.message();
-    return 2;
-  }
-  if (!storage_exists) {
-    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path does not exist: " << storage_root_cfg.string();
-    return 2;
-  }
-  const bool storage_is_dir = std::filesystem::is_directory(storage_root_cfg, storage_ec);
-  if (storage_ec) {
-    LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
-               << "): " << storage_ec.message();
-    return 2;
-  }
-  if (!storage_is_dir) {
-    LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path must be a directory: " << storage_root_cfg.string();
-    return 2;
-  }
-  std::filesystem::path storage_root = std::filesystem::weakly_canonical(storage_root_cfg, storage_ec);
-  if (storage_ec) {
-    LOG(ERROR) << "INVALID_ARGUMENT: Failed to canonicalize server.storage_path (" << storage_root_cfg.string()
-               << "): " << storage_ec.message();
-    return 2;
+    LOG(INFO) << "server.storage_path is empty; disk materialization is disabled";
+  } else {
+    std::error_code storage_ec;
+    const bool storage_exists = std::filesystem::exists(storage_root_cfg, storage_ec);
+    if (storage_ec) {
+      LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
+                 << "): " << storage_ec.message();
+      return 2;
+    }
+    if (!storage_exists) {
+      LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path does not exist: " << storage_root_cfg.string();
+      return 2;
+    }
+    const bool storage_is_dir = std::filesystem::is_directory(storage_root_cfg, storage_ec);
+    if (storage_ec) {
+      LOG(ERROR) << "INVALID_ARGUMENT: Failed to stat server.storage_path (" << storage_root_cfg.string()
+                 << "): " << storage_ec.message();
+      return 2;
+    }
+    if (!storage_is_dir) {
+      LOG(ERROR) << "INVALID_ARGUMENT: server.storage_path must be a directory: " << storage_root_cfg.string();
+      return 2;
+    }
+    storage_root = std::filesystem::weakly_canonical(storage_root_cfg, storage_ec);
+    if (storage_ec) {
+      LOG(ERROR) << "INVALID_ARGUMENT: Failed to canonicalize server.storage_path (" << storage_root_cfg.string()
+                 << "): " << storage_ec.message();
+      return 2;
+    }
   }
 
   // Block SIGINT/SIGTERM in this main thread BEFORE starting any threads so that
@@ -312,6 +440,17 @@ int main(int argc, char** argv) {
   opts.streaming_buffer_chunks = streaming_buffer_chunks;
   opts.pinned_memory_timeout = pinned_allocation_timeout_ms;
   opts.cpu_shared_memory_enabled = cfg.engine().cpu_shared_memory().enabled();
+  if (opts.cpu_shared_memory_enabled && cfg.lifecycle().handle_leases().local_handle_socket_path().empty()) {
+    auto path_or = discover_local_handle_socket_path();
+    if (!path_or.ok()) {
+      LOG(ERROR) << "INVALID_ARGUMENT: lifecycle.handle_leases.local_handle_socket_path is empty and auto-discovery "
+                    "failed: "
+                 << path_or.status();
+      return 2;
+    }
+    cfg.mutable_lifecycle()->mutable_handle_leases()->set_local_handle_socket_path(*path_or);
+    LOG(INFO) << "Auto-selected lifecycle.handle_leases.local_handle_socket_path=" << *path_or;
+  }
   if (cfg.engine().has_memory_tiers()) {
     store::MemoryTierConfig tiers;
     const auto& mt = cfg.engine().memory_tiers();
@@ -328,8 +467,9 @@ int main(int argc, char** argv) {
       return 2;
     }
     if (cfg.lifecycle().handle_leases().local_handle_socket_path().empty()) {
-      LOG(ERROR)
-          << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires lifecycle.handle_leases.local_handle_socket_path";
+      LOG(ERROR) << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires "
+                    "lifecycle.handle_leases.local_handle_socket_path (auto-discovery needs TENSORCAST_INSTANCE; "
+                    "set explicitly when daemon and client run in different pods)";
       return 2;
     }
     const absl::Status memfd_probe = probe_memfd_shared_mapping();

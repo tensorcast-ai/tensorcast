@@ -38,7 +38,11 @@ The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/stor
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
 - `ResolveArtifactFromDisk`: validates disk path and returns canonical index.
 - `ConfirmReplica` / `WaitReplicaVerification`: readiness + verification waits.
-- `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports.
+- `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports. When the socket path is unset in config, the daemon auto-selects
+  `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to
+  `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or
+  `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on
+  `TENSORCAST_INSTANCE`); set it explicitly for cross-pod deployments.
 
 The SDK builds these requests in `tensorcast/api/_materialize.py` and
 `tensorcast/api/store/materialization.py`.
@@ -87,7 +91,8 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
 1. **Validate inputs**: require `artifact_id` or disk path; `prefer_p2p` requires
    `artifact_id`; device UUID/ID must be valid.
 2. **Normalize disk path**: disk paths are normalized under `storage_path` and
-   rejected if they escape the configured root.
+   rejected if they escape the configured root; when `server.storage_path` is
+   empty, disk paths are rejected and disk materialization is disabled.
 3. **Disk descriptor checks**:
    - If `verify_checksums=true`, `artifact_descriptor.json` is required and
      validated against the computed index multihash.

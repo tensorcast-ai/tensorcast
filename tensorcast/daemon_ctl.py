@@ -1203,18 +1203,34 @@ class DaemonCtl:
                 raise RuntimeError("GetServerConfig failed") from e
             else:
                 # Map both legacy and new fields for smooth migration
+                local_handle_socket_path = str(
+                    getattr(response, "local_handle_socket_path", "") or ""
+                )
+                cpu_shared_memory_enabled = bool(
+                    getattr(response, "cpu_shared_memory_enabled", False)
+                )
+                if not local_handle_socket_path and cpu_shared_memory_enabled:
+                    try:
+                        from tensorcast.cli_utils.paths import (
+                            discover_local_handle_socket_path,
+                            get_session_address,
+                        )
+
+                        session_address = get_session_address()
+                        if session_address and session_address == self.server_address:
+                            discovered = discover_local_handle_socket_path()
+                            if discovered is not None:
+                                local_handle_socket_path = str(discovered)
+                    except Exception:
+                        pass
                 return ServerConfig(
                     tx_slice_bytes=int(getattr(response, "tx_slice_bytes", 0)),
                     mem_pool_size=int(getattr(response, "mem_pool_size", 0)),
                     artifact_chunk_bytes=int(
                         getattr(response, "artifact_chunk_bytes", 0)
                     ),
-                    local_handle_socket_path=str(
-                        getattr(response, "local_handle_socket_path", "") or ""
-                    ),
-                    cpu_shared_memory_enabled=bool(
-                        getattr(response, "cpu_shared_memory_enabled", False)
-                    ),
+                    local_handle_socket_path=local_handle_socket_path,
+                    cpu_shared_memory_enabled=cpu_shared_memory_enabled,
                 )
 
     # ------------------------------------------------------------------
