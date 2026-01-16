@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import gc
 import os
 import socket
@@ -25,6 +27,32 @@ def _recv_exact(sock: socket.socket, nbytes: int) -> bytes:
             break
         out.extend(chunk)
     return bytes(out)
+
+
+def _memfd_create(name: str) -> int:
+    flags = getattr(os, "MFD_CLOEXEC", 0x0001) | getattr(os, "MFD_ALLOW_SEALING", 0x0002)
+    if hasattr(os, "memfd_create"):
+        return os.memfd_create(name, flags)
+
+    libc_name = ctypes.util.find_library("c")
+    if libc_name is None:
+        raise OSError("libc not found for memfd_create fallback")
+    libc = ctypes.CDLL(libc_name, use_errno=True)
+    if hasattr(libc, "memfd_create"):
+        libc.memfd_create.argtypes = [ctypes.c_char_p, ctypes.c_uint]
+        libc.memfd_create.restype = ctypes.c_int
+        fd = libc.memfd_create(name.encode(), flags)
+    else:
+        sys_nr = getattr(os, "SYS_memfd_create", None)
+        if sys_nr is None:
+            raise OSError("SYS_memfd_create unavailable for memfd_create fallback")
+        libc.syscall.argtypes = [ctypes.c_long, ctypes.c_char_p, ctypes.c_uint]
+        libc.syscall.restype = ctypes.c_long
+        fd = libc.syscall(sys_nr, name.encode(), flags)
+    if fd < 0:
+        err = ctypes.get_errno()
+        raise OSError(err, "memfd_create failed")
+    return int(fd)
 
 
 def test_cpu_memfd_lease_release_is_raii() -> None:
@@ -62,7 +90,7 @@ def test_cpu_memfd_lease_release_is_raii() -> None:
     assert ready.wait(timeout=3.0)
 
     size_bytes = 4096
-    fd = os.memfd_create("tc_cpu_memfd_lease_raii")
+    fd = _memfd_create("tc_cpu_memfd_lease_raii")
     try:
         os.ftruncate(fd, size_bytes)
         os.lseek(fd, 0, os.SEEK_SET)

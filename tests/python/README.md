@@ -14,11 +14,11 @@ source .venv/bin/activate
 ### Running All Tests
 ```bash
 # Run all Python tests
-python -m pytest tests/python
+uv run pytest tests/python
 
 # Run with verbose output
-python -m pytest tests/python -v
+uv run pytest tests/python -v
 
 # Run with detailed output and capture print statements
-python -m pytest tests/python -v -s
+uv run pytest tests/python -v -s
 ```
