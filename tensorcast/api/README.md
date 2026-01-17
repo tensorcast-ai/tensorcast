@@ -50,6 +50,7 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 - Selective fetch (`tensor_names`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
 - Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePolicy` (preference + allow flags). Disk‑first sets `preference=PREFER_DISK` and all disk reads stay in the daemon data path.
+- `MemCopyHandle` is lease-aware: the daemon returns a handle (`cuda_ipc_handle` for GPU or `cpu_memfd` for CPU) plus an opaque `lease_token`. The SDK binds that lease token to the returned `torch.Tensor` lifetimes and releases it over the daemon’s local handle plane (UDS).
 
 ## Region-backed get_into
 
@@ -76,10 +77,19 @@ behavior:
 
 `Artifact.tensor*`/`tensor_dict*` default to materializing replicas onto CUDA
 devices. On hosts without `torch.cuda.is_available()`, callers must either
-provide disk fallback options (so bytes can be streamed from disk) or explicitly
-select a CPU target alongside those fallback settings. Otherwise the API raises
-`ArtifactError("CUDA device required for retrieval")` immediately, keeping
-callers from running deeper into retry loops that can never succeed.
+provide disk fallback options (so bytes can be streamed from disk) or select a
+CPU target (`device="cpu"`) when the daemon is configured with CPU shared-memory
+materialization (`engine.cpu_shared_memory.enabled=true`). If
+`lifecycle.handle_leases.local_handle_socket_path` is empty, the daemon
+auto-selects `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs
+(daemon_state_dir defaults to `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session`
+or `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery
+relies on `TENSORCAST_INSTANCE`); set it
+explicitly when daemon and client SDK run in different pods.
+When connecting to the current local session and the daemon does not advertise
+the socket path, the SDK falls back to the same daemon_state_dir location.
+Otherwise the API raises `ArtifactError("CUDA device required for retrieval")`
+immediately, keeping callers from running deeper into retry loops that can never succeed.
 
 ## View Retrieval
 

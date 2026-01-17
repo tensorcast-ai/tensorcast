@@ -331,6 +331,9 @@ Status StoreDaemonServiceImpl::GetServerConfig(
 
 // Destructor: stop sweepers
 StoreDaemonServiceImpl::~StoreDaemonServiceImpl() {
+  if (local_handle_server_) {
+    local_handle_server_->stop();
+  }
   stop_sweepers();
   engine_->set_stable_cache_spill_evictable({});
 }

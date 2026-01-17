@@ -949,7 +949,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("canonical_index_json"),
           py::arg("view_ops"),
           "Compute bidirectional view registration plan using the core ViewPlanner")
-      .def("restore_tensors", &tensorcast::checkpoint::restore_tensors, "Restore a state dict")
+      .def(
+          "restore_tensors",
+          &tensorcast::checkpoint::restore_tensors,
+          py::arg("meta_state_dict"),
+          py::arg("memory_base_address"),
+          py::arg("tensor_device_offsets"),
+          py::arg("from_ipc_shm"),
+          py::arg("lease_token") = std::string(),
+          py::arg("local_handle_socket_path") = std::string(),
+          "Restore a state dict")
+      .def(
+          "restore_tensors_from_cpu_fd_with_lease",
+          &tensorcast::checkpoint::restore_tensors_from_cpu_fd_with_lease,
+          py::arg("meta_state_dict"),
+          py::arg("fd"),
+          py::arg("size_bytes"),
+          py::arg("offset_bytes"),
+          py::arg("tensor_device_offsets"),
+          py::arg("lease_token"),
+          py::arg("local_handle_socket_path"),
+          "Restore a CPU state dict from a memfd mapping and bind daemon handle lease lifetime")
       .def(
           "restore_tensors_from_disk",
           &tensorcast::checkpoint::restore_tensors_from_disk,

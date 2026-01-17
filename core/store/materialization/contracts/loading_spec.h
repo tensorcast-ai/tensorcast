@@ -151,6 +151,12 @@ struct ReplicaKeyHash {
   }
 };
 
+struct CpuMemfdRegion {
+  int fd{-1};
+  uint64_t size_bytes{0};
+  uint64_t offset_bytes{0};
+};
+
 struct ReplicaHandle {
   ReplicaKey replica_key;
   std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal;
@@ -158,6 +164,7 @@ struct ReplicaHandle {
   replica::MemoryState gpu_state{replica::MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
   CudaIpcHandle cuda_ipc_handle;
+  std::optional<CpuMemfdRegion> cpu_memfd_region;
   std::optional<std::string> view_index_json;
   std::optional<std::string> view_data_hash;
   MaterializationSource source{MaterializationSource::kUnspecified};

@@ -68,9 +68,36 @@ def restore_tensors(
     memory_base_address: Mapping[int | torch.device, int],
     tensor_device_offsets: Mapping[int | torch.device, Mapping[str, int]],
     from_ipc_shm: bool,
+    lease_token: bytes | None = None,
+    local_handle_socket_path: str | None = None,
 ) -> dict[str, torch.Tensor]:
     return _load_c_ext().restore_tensors(
-        meta_state_dict, memory_base_address, tensor_device_offsets, from_ipc_shm
+        meta_state_dict,
+        memory_base_address,
+        tensor_device_offsets,
+        from_ipc_shm,
+        lease_token or b"",
+        local_handle_socket_path or "",
+    )
+
+
+def restore_tensors_from_cpu_fd_with_lease(
+    meta_state_dict: Mapping[str, tuple[Sequence[int], Sequence[int], str, int]],
+    fd: int,
+    size_bytes: int,
+    offset_bytes: int,
+    tensor_device_offsets: Mapping[str, int],
+    lease_token: bytes,
+    local_handle_socket_path: str,
+) -> dict[str, torch.Tensor]:
+    return _load_c_ext().restore_tensors_from_cpu_fd_with_lease(
+        meta_state_dict,
+        int(fd),
+        int(size_bytes),
+        int(offset_bytes),
+        tensor_device_offsets,
+        lease_token,
+        local_handle_socket_path,
     )
 
 
@@ -133,6 +160,7 @@ __all__ = [
     "get_device_uuid_map",
     "inspect_or_generate_descriptor",
     "restore_tensors",
+    "restore_tensors_from_cpu_fd_with_lease",
     "restore_tensors_from_disk",
     "save_model_to_disk",
 ]

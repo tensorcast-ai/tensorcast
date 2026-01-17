@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/store/device_registry.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/replica_session_manager.h"
@@ -11,6 +12,8 @@ using tensorcast::daemon::PidMonitor;
 using tensorcast::daemon::RefTracker;
 using tensorcast::daemon::ReplicaSessionManager;
 using tensorcast::daemon::SessionLifecycleManager;
+using tensorcast::store::DeviceRegistry;
+using tensorcast::store::loading::ReplicaKey;
 
 TEST_CASE("PidMonitor unwatch called on last guard retire", "[daemon][lifecycle][pid]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
@@ -26,7 +29,7 @@ TEST_CASE("PidMonitor unwatch called on last guard retire", "[daemon][lifecycle]
   mgr.attach_pid_monitor(&mon);
 
   const int32_t pid = 556677;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = "mi2:test:pm", .device_id = 0};
+  ReplicaKey subj{.artifact_id = "mi2:test:pm", .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
 
   auto id_or = mgr.create_use_lease(subj, pid);
   REQUIRE(id_or.ok());

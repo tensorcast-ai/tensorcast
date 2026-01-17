@@ -281,6 +281,12 @@ void normalize_duration_fields(nlohmann::json& root) {
       if (lf.contains(f))
         to_duration(lf[f]);
     }
+    if (lf.contains("handle_leases") && lf["handle_leases"].is_object()) {
+      auto& hl = lf["handle_leases"];
+      if (hl.contains("ttl")) {
+        to_duration(hl["ttl"]);
+      }
+    }
   }
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {

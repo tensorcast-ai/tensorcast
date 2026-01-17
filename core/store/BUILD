@@ -129,7 +129,9 @@ sc_cc_library(
     hdrs = ["components/device_manager.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":device_registry",
         "//core/cuda:cuda_api_lib",
+        "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
     ],
 )

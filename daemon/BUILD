@@ -18,6 +18,12 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "grpc_peer_utils_lib",
+    srcs = ["grpc_peer_utils.cc"],
+    hdrs = ["grpc_peer_utils.h"],
+)
+
+sc_cc_library(
     name = "grpc_service_impl",
     srcs = ["grpc_service_impl.cc"],
     hdrs = ["grpc_service_impl.h"],
@@ -27,9 +33,11 @@ sc_cc_library(
         ":device_resolver_hdr",
         ":grpc_metrics_hdr",
         ":grpc_span_hdr",
+        ":handle_lease_registry_lib",
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
+        ":local_handle_server_lib",
         ":materialization_controller_lib",
         ":persistence_manager_lib",
         ":ref_tracker_hdr",
@@ -59,6 +67,35 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "handle_lease_registry_lib",
+    srcs = ["handle_lease_registry.cc"],
+    hdrs = ["handle_lease_registry.h"],
+    deps = [
+        ":session_lifecycle_hdr",
+        "//core/common:memory_location_lib",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica:unified_memory_authority",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/random:random",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+        "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "local_handle_server_lib",
+    srcs = ["local_handle_server.cc"],
+    hdrs = ["local_handle_server.h"],
+    deps = [
+        ":handle_lease_registry_lib",
+        "@abseil-cpp//absl/strings",
     ],
 )
 
@@ -445,6 +482,8 @@ sc_cc_library(
     deps = [
         ":deadline_utils_hdr",
         ":device_resolver_hdr",
+        ":grpc_peer_utils_lib",
+        ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
@@ -497,6 +536,15 @@ sc_cc_library(
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
+    ],
+)
+
+cc_test(
+    name = "grpc_peer_utils_test",
+    srcs = ["grpc_peer_utils_test.cc"],
+    deps = [
+        ":grpc_peer_utils_lib",
+        "@catch2//:catch2_main",
     ],
 )
 
@@ -741,6 +789,65 @@ cc_test(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_cpu_memfd_e2e_test",
+    srcs = ["grpc_service_impl_cpu_memfd_e2e_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_cpu_memfd_stable_budget_test",
+    srcs = ["grpc_service_impl_cpu_memfd_stable_budget_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_cpu_memfd_fd_pressure_test",
+    srcs = ["grpc_service_impl_cpu_memfd_fd_pressure_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "local_handle_lease_ttl_expiry_test",
+    srcs = ["local_handle_lease_ttl_expiry_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "local_handle_unknown_token_test",
+    srcs = ["local_handle_unknown_token_test.cc"],
+    deps = [
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
     ],
 )
 

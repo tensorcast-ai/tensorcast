@@ -284,7 +284,7 @@ Compared to the classic `TensorWriter`, this pipeline overlaps compute, PCIe tra
 
 `checkpoint_py.cc` exposes the full C++ API to Python via **pybind11**. The binding lives in `tensorcast.csrc` and provides:
 
-* `save_tensors` / `restore_tensors` – Original synchronous APIs.
+* `save_tensors` / `restore_tensors` – Original synchronous APIs (single device per `restore_tensors` call).
 * `save_model_to_disk` – Unified disk persistence entrypoint (writes tensor data, canonical index, and descriptor).
 * CUDA utilities – `allocate_cuda_memory`, `get_cuda_memory_handle`, `get_cuda_memory_ptr`, and `close_cuda_memory_handle` for zero-copy data exchange across processes.
 * Replica verification helpers – `generate_artifact_verification_info` and `verify_artifact_data_from_gpu`.

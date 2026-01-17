@@ -54,6 +54,7 @@ sc_cc_library(
         "//core/common:artifact_identity_lib",
         "//core/common:memory_location_lib",
         "//core/store:device_manager",
+        "//core/store:device_registry",
         "//core/store:device_types",
         "@abseil-cpp//absl/strings",
     ],

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/synchronization/mutex.h"
@@ -15,9 +16,11 @@
 #include "core/store/store_engine.h"
 #include "daemon/background_scheduler.h"
 #include "daemon/device_resolver.h"
+#include "daemon/handle_lease_registry.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/lip_bridge.h"
 #include "daemon/lip_manager.h"
+#include "daemon/local_handle_server.h"
 #include "daemon/persistence_manager.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/registration_manager.h"
@@ -68,6 +71,17 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     // Shared storage root for disk paths (required).
     std::filesystem::path storage_path;
 
+    // Local handle plane (UDS) for FD handoff + lease release.
+    std::string local_handle_socket_path;
+    // When unset, the daemon uses a conservative default (see HandleLeaseRegistry::Options).
+    // When set to 0ms, TTL is disabled and handle leases rely on explicit ReleaseHandle / PID-exit cleanup.
+    std::optional<std::chrono::milliseconds> handle_lease_ttl;
+    // Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
+    uint32_t handle_lease_max_mints_per_second{0};
+
+    // CPU shared-memory materialization (memfd-backed UMA CPU arena).
+    bool cpu_shared_memory_enabled{false};
+
     // API behavior flags
     // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable
     // ordering (artifact_id, device_id). If false (default), uses numeric
@@ -110,6 +124,34 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
 
     verif_tracker_->set_serial_executor(async_runtime_->serial_executor());
     start_sweepers();
+
+    if (opts_.cpu_shared_memory_enabled && opts_.local_handle_socket_path.empty()) {
+      LOG(FATAL) << "cpu_shared_memory_enabled requires lifecycle.handle_leases.local_handle_socket_path to be set";
+    }
+
+    if (!opts_.local_handle_socket_path.empty()) {
+      HandleLeaseRegistry::Options hl_opts;
+      hl_opts.capacity = 4096;
+      if (opts_.handle_lease_ttl.has_value()) {
+        const auto ttl_ms = *opts_.handle_lease_ttl;
+        if (ttl_ms.count() < 0) {
+          LOG(FATAL) << "handle_lease_ttl must be >= 0ms";
+        }
+        hl_opts.ttl = absl::Milliseconds(static_cast<int64_t>(ttl_ms.count()));
+      }
+      hl_opts.max_mints_per_second = opts_.handle_lease_max_mints_per_second;
+      handle_leases_ = std::make_unique<HandleLeaseRegistry>(hl_opts, *engine_, *lifecycle_mgr_);
+      local_handle_server_ = std::make_unique<LocalHandleServer>(
+          LocalHandleServer::Options{
+              .socket_path = opts_.local_handle_socket_path,
+              .cpu_shared_memory_enabled = opts_.cpu_shared_memory_enabled,
+          },
+          *handle_leases_);
+      const absl::Status st = local_handle_server_->start();
+      if (!st.ok()) {
+        LOG(FATAL) << "Failed to start LocalHandleServer at " << opts_.local_handle_socket_path << ": " << st;
+      }
+    }
     persistence_mgr_ = std::make_unique<PersistenceManager>(
         scheduler_.get(),
         lip_mgr_.get().get(),
@@ -137,6 +179,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
         .regions = *region_registry_,
         .is_shutting_down = is_shutting_down_,
         .lifecycle = lifecycle_mgr_.get(),
+        .handle_leases = handle_leases_.get(),
+        .cpu_shared_memory_enabled = opts_.cpu_shared_memory_enabled,
         .storage_path = opts_.storage_path};
     materialization_controller_ = std::make_unique<MaterializationController>(dep);
     RegistrationController::Dep rdep{
@@ -158,7 +202,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
         .uptime =
             [this]() {
               return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start_time_);
-            }};
+            },
+        .local_handle_socket_path = [this]() { return this->opts_.local_handle_socket_path; },
+        .cpu_shared_memory_enabled = [this]() { return this->opts_.cpu_shared_memory_enabled; }};
     status_controller_ = std::make_unique<StatusController>(sdep);
   }
 
@@ -173,6 +219,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     }
     is_shutting_down_.store(true);
     stop_sweepers();
+    if (local_handle_server_) {
+      local_handle_server_->stop();
+    }
     if (async_runtime_) {
       async_runtime_->shutdown();
     }
@@ -408,6 +457,12 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     return locks_;
   }
 
+  void sweep_session_lifecycle_for_test() {
+    if (lifecycle_mgr_) {
+      lifecycle_mgr_->sweep_once();
+    }
+  }
+
  private:
   gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   // Async runtime must outlive all components that hold executor keep-alives.
@@ -444,6 +499,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
 
   // Registration lifecycle state manager (Begin/Feed/KeepAlive/Commit)
   gsl::not_null<std::unique_ptr<RegistrationManager>> reg_mgr_;
+
+  std::unique_ptr<HandleLeaseRegistry> handle_leases_;
+  std::unique_ptr<LocalHandleServer> local_handle_server_;
 
   // LIP registry moved into LipManager
 

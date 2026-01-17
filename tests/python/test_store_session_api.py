@@ -527,7 +527,7 @@ def test_artifact_tensor_dict_async_releases_replica(
         artifact.tensor_dict_async(device=torch.device("cuda", 0))
     )
     assert torch.allclose(result["w"], torch.ones(2, dtype=torch.float32))
-    assert ("rep-100", "") in env.client.unload_calls
+    assert env.client.unload_calls == []
 
 
 def test_artifact_tensor_into_unloads_replica(

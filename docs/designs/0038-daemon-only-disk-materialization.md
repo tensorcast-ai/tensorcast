@@ -163,9 +163,9 @@ flowchart TD
   5. Emits `MaterializeReplicaResponse` with `source` field so clients know the actual data path.
 
 ### Shared Disk Root Enforcement
-- The daemon requires `server.storage_path` as the shared disk root mounted on every node.
+- When `server.storage_path` is set, it is treated as the shared disk root mounted on every node.
 - Every incoming `disk_path` is resolved against this root (relative paths are joined) and canonicalized.
-- Requests are rejected with `INVALID_ARGUMENT` when the resolved path falls outside the shared root.
+- Requests are rejected with `INVALID_ARGUMENT` when the resolved path falls outside the shared root; if `server.storage_path` is empty, all `disk_path` requests are rejected and disk materialization is disabled.
 - The daemon returns the canonical absolute path in responses so callers observe a stable, shared-disk location.
 - Configuration surface: `server.storage_path` in `DaemonConfig` (YAML/JSON) maps into daemon service options and validation.
 
@@ -245,7 +245,7 @@ The SDK sends a simple RPC with `disk_path` and `preference`; all metadata extra
 | **Daemon regression affects disk-only workflows** | Add dedicated Bazel tests plus Python integration tests to cover disk preference paths. |
 | **Temporary lack of offline loader** | Keep `tensorcast.api._io_disk.load_dict_from_disk()` for regression tests; document that production flows require a daemon. |
 | **Increased daemon responsibilities** | Disk flows already existed in C++; this change simply exposes them through the unified RPC path. |
-| **Shared root misconfiguration** | Provide counters/logs for denied paths and document that `server.storage_path` must be a shared mount on every node. |
+| **Shared root misconfiguration** | Provide counters/logs for denied paths and document that `server.storage_path` must be a shared mount on every node when disk materialization is enabled. |
 | **SDK/daemon version mismatch** | Out of scope: single-version deployments mean all components update together. |
 
 # Compatibility & Acceptance Criteria

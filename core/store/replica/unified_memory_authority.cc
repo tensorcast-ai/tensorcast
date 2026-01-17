@@ -1,9 +1,12 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
 
+#include <fcntl.h>
+#include <linux/memfd.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
@@ -30,9 +33,13 @@ namespace tensorcast::store::replica {
 using tensorcast::common::SystemCapabilities;
 
 UnifiedMemoryAuthority::UnifiedMemoryAuthority(size_t artifact_chunk_bytes)
+    : UnifiedMemoryAuthority(artifact_chunk_bytes, Options{}) {}
+
+UnifiedMemoryAuthority::UnifiedMemoryAuthority(size_t artifact_chunk_bytes, Options options)
     : chunk_size_bytes_(
           artifact_chunk_bytes == 0 ? tensorcast::common::consts::kArtifactChunkDefault : artifact_chunk_bytes),
-      cpu_arena_(chunk_size_bytes_) {}
+      cpu_arena_(chunk_size_bytes_, CpuArena::Options{.cpu_shared_memory_enabled = options.cpu_shared_memory_enabled}) {
+}
 
 absl::Status UnifiedMemoryAuthority::allocate(const loading::ReplicaKey& key, size_t bytes) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -275,6 +282,24 @@ void* UnifiedMemoryAuthority::get_cpu_base_ptr(const loading::ReplicaKey& key) c
   }
 
   return it->second.cpu_region.base;
+}
+
+absl::StatusOr<UnifiedMemoryAuthority::CpuMemfdRegion> UnifiedMemoryAuthority::get_cpu_memfd_region(
+    const loading::ReplicaKey& key) const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto it = allocations_.find(key);
+  if (it == allocations_.end()) {
+    return absl::NotFoundError(absl::StrFormat("Replica %s not found in unified memory", key.artifact_id));
+  }
+  const auto& region = it->second.cpu_region;
+  if (region.memfd < 0 || region.base == nullptr || region.bytes == 0) {
+    return absl::FailedPreconditionError("CPU memfd region is not available for this replica");
+  }
+  return CpuMemfdRegion{
+      .fd = region.memfd,
+      .size_bytes = static_cast<uint64_t>(region.bytes),
+      .offset_bytes = region.offset_bytes,
+  };
 }
 
 void* UnifiedMemoryAuthority::get_gpu_base_ptr(const loading::ReplicaKey& key, int device_id) const {
@@ -1264,7 +1289,8 @@ absl::Status UnifiedMemoryAuthority::write_cpu_span(
   return absl::OkStatus();
 }
 
-UnifiedMemoryAuthority::CpuArena::CpuArena(size_t chunk_bytes) : chunk_bytes_(chunk_bytes) {}
+UnifiedMemoryAuthority::CpuArena::CpuArena(size_t chunk_bytes, Options options)
+    : options_(std::move(options)), chunk_bytes_(chunk_bytes) {}
 
 absl::Status UnifiedMemoryAuthority::CpuArena::allocate_region(ReplicaAllocation& alloc, size_t bytes) const {
   if (alloc.cpu_region.base != nullptr) {
@@ -1273,14 +1299,47 @@ absl::Status UnifiedMemoryAuthority::CpuArena::allocate_region(ReplicaAllocation
   if (bytes == 0) {
     alloc.cpu_region.base = nullptr;
     alloc.cpu_region.bytes = 0;
+    alloc.cpu_region.memfd = -1;
+    alloc.cpu_region.offset_bytes = 0;
     return absl::OkStatus();
   }
+  if (options_.cpu_shared_memory_enabled) {
+    int fd = static_cast<int>(::syscall(SYS_memfd_create, "tensorcast_uma", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    if (fd < 0) {
+      return absl::ErrnoToStatus(errno, "memfd_create failed while reserving UMA CPU arena");
+    }
+    if (::ftruncate(fd, static_cast<off_t>(bytes)) != 0) {
+      const int err = errno;
+      ::close(fd);
+      return absl::ErrnoToStatus(err, "ftruncate failed while sizing UMA memfd arena");
+    }
+    constexpr int kRequiredSeals = F_SEAL_GROW | F_SEAL_SHRINK;
+    if (::fcntl(fd, F_ADD_SEALS, kRequiredSeals) != 0) {
+      const int err = errno;
+      ::close(fd);
+      return absl::ErrnoToStatus(err, "fcntl(F_ADD_SEALS) failed while sealing UMA memfd arena");
+    }
+    void* addr = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (addr == MAP_FAILED) {
+      const int err = errno;
+      ::close(fd);
+      return absl::ErrnoToStatus(err, "mmap(MAP_SHARED) failed while reserving UMA CPU memfd arena");
+    }
+    alloc.cpu_region.base = addr;
+    alloc.cpu_region.bytes = bytes;
+    alloc.cpu_region.memfd = fd;
+    alloc.cpu_region.offset_bytes = 0;
+    return absl::OkStatus();
+  }
+
   void* addr = ::mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (addr == MAP_FAILED) {
     return absl::ErrnoToStatus(errno, "mmap failed while reserving UMA CPU arena");
   }
   alloc.cpu_region.base = addr;
   alloc.cpu_region.bytes = bytes;
+  alloc.cpu_region.memfd = -1;
+  alloc.cpu_region.offset_bytes = 0;
   return absl::OkStatus();
 }
 
@@ -1290,8 +1349,13 @@ void UnifiedMemoryAuthority::CpuArena::release_region(ReplicaAllocation& alloc) 
       PLOG(WARNING) << "munmap failed while releasing UMA CPU arena";
     }
   }
+  if (alloc.cpu_region.memfd >= 0) {
+    ::close(alloc.cpu_region.memfd);
+  }
   alloc.cpu_region.base = nullptr;
   alloc.cpu_region.bytes = 0;
+  alloc.cpu_region.memfd = -1;
+  alloc.cpu_region.offset_bytes = 0;
 }
 
 absl::Status UnifiedMemoryAuthority::CpuArena::ensure_bounds(
@@ -1329,6 +1393,9 @@ absl::Status UnifiedMemoryAuthority::CpuArena::write_span(
   size_t aligned_len = static_cast<size_t>(page_aligned_end - page_aligned_off);
   void* aligned_addr = static_cast<char*>(alloc.cpu_region.base) + page_aligned_off;
   if (::mprotect(aligned_addr, aligned_len, PROT_READ | PROT_WRITE) != 0) {
+    if (alloc.cpu_region.memfd >= 0) {
+      return absl::ErrnoToStatus(errno, "UMA write: mprotect failed for memfd-backed CPU arena");
+    }
     void* mapped =
         ::mmap(aligned_addr, aligned_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
     if (mapped == MAP_FAILED || mapped != aligned_addr) {
@@ -1367,7 +1434,15 @@ absl::Status UnifiedMemoryAuthority::CpuArena::mark_preemptible(
     }
     void* addr = static_cast<char*>(alloc.cpu_region.base) + static_cast<size_t>(i) * chunk_bytes_;
     int rc = 0;
-    if (SystemCapabilities::instance().madv_free_available()) {
+    if (alloc.cpu_region.memfd >= 0) {
+      int madv_flag = MADV_DONTNEED;
+#ifdef MADV_PAGEOUT
+      if (SystemCapabilities::instance().madv_pageout_available()) {
+        madv_flag = MADV_PAGEOUT;
+      }
+#endif
+      rc = ::madvise(addr, chunk_bytes_, madv_flag);
+    } else if (SystemCapabilities::instance().madv_free_available()) {
       rc = ::madvise(addr, chunk_bytes_, MADV_FREE);
       if (rc != 0 && errno == EINVAL) {
         rc = ::madvise(addr, chunk_bytes_, MADV_DONTNEED);

@@ -87,6 +87,10 @@ message GetServerConfigResponse {
   uint64 artifact_chunk_bytes = 4;
   // Canonical transfer slice/window size (pinned pool block size).
   uint64 tx_slice_bytes = 5;
+  // Unix domain socket path for local handle plane (FD handoff + lease release).
+  string local_handle_socket_path = 6;
+  // True when CPU shared-memory materialization is enabled.
+  bool cpu_shared_memory_enabled = 7;
 }
 
 message RegisterRequest {
@@ -195,7 +199,17 @@ enum PersistenceState {
 }
 
 message MemCopyHandle {
-  bytes cuda_ipc_handle = 1;
+  oneof handle {
+    bytes cuda_ipc_handle = 1;
+    CpuMemfdHandle cpu_memfd = 2;
+  }
+  // Opaque capability token bound to the daemon-side handle lifetime.
+  bytes lease_token = 3;
+}
+
+message CpuMemfdHandle {
+  uint64 size_bytes = 1;
+  uint64 offset_bytes = 2;
 }
 
 message NarrowOp {
@@ -874,6 +888,7 @@ message MaterializeByKeyRequest {
   int32 pinned_allocation_timeout_ms = 3;
   string replica_uuid = 4;
   int32 pid = 5;
+  DeviceType target_device_type = 6;
 
   // Selective materialization
   repeated string tensor_names = 10;

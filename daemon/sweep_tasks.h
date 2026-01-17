@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Sweep tasks: objectify background lambdas into testable task classes
 
@@ -132,8 +132,7 @@ class EvictionTask final : public IBackgroundTask {
           continue;
         if (info.gpu_device_id != dev)
           continue;
-        store::loading::ReplicaKey key{
-            .artifact_id = info.artifact_id, .device = store::DeviceRegistry::instance().gpu_key(dev), .replica = 0};
+        const store::loading::ReplicaKey& key = info.key;
         // Evict only when no active use or placement pins
         if (refs_.ref_count(key) > 0)
           continue;

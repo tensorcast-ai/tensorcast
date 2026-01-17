@@ -17,7 +17,8 @@ server:
   p2p_listen:
     host: 0.0.0.0  # Bind to all interfaces for RDMA
     port: 65090
-  storage_path: /data/models
+  # Shared root directory for daemon-owned artifacts; leave empty to disable disk materialization (P2P-only).
+  storage_path: ""
   num_threads: 32
 
 engine:

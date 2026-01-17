@@ -34,6 +34,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "absl/time/time.h"
+#include "core/store/device_registry.h"
 #include "daemon/common/safe_sys.h"
 #include "daemon/lip_manager.h"
 #include "daemon/ref_tracker.h"
@@ -325,10 +326,7 @@ class SessionLifecycleManager {
   using LeaseId = uint64_t;
   using GuardId = uint64_t;
 
-  struct ReplicaSubject {
-    std::string artifact_id;
-    int device_id{-1};
-  };
+  using ReplicaSubject = store::loading::ReplicaKey;
 
   struct CommitSubject {
     std::string artifact_id;
@@ -412,8 +410,10 @@ class SessionLifecycleManager {
   }
 
   // API shape (skeleton)
-  [[nodiscard]] absl::StatusOr<LeaseId> create_use_lease(const ReplicaSubject& subj, pid_t pid)
-      ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::StatusOr<LeaseId> create_use_lease(
+      const ReplicaSubject& subj,
+      pid_t pid,
+      std::vector<std::function<absl::Status()>> extra_finalizers = {}) ABSL_LOCKS_EXCLUDED(mu_) {
     PidMonitor* mon = nullptr;
     LeaseId created_id = 0;
     {
@@ -436,13 +436,16 @@ class SessionLifecycleManager {
       mon = monitor_;
       // Finalizer: drop ref for this pid+subject, then attempt immediate reclaim if eligible
       r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
-        store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = subj.device_id, .uuid = ""};
-        store::loading::ReplicaKey key{.artifact_id = subj.artifact_id, .device = dev_key, .replica = 0};
-        refs_.drop_ref(key, pid);
-        // Attempt immediate reclaim if no active uses or pins remain and a daemon-owned replica exists
-        maybe_unload_daemon_replica_(subj);
+        refs_.drop_ref(subj, pid);
+        // Attempt immediate reclaim if no active uses or pins remain and a daemon-owned GPU replica exists.
+        if (subj.device.type == DeviceType::GPU) {
+          maybe_unload_daemon_replica_(subj);
+        }
         return absl::OkStatus();
       });
+      for (auto& f : extra_finalizers) {
+        r.finalizers.emplace_back(std::move(f));
+      }
       created_id = r.id;
       by_id_[r.id] = std::move(r);
       inc_use_(subj);
@@ -454,8 +457,11 @@ class SessionLifecycleManager {
   }
 
   // Create a Use lease bound to pid with an additional Deadline guard (TTL-based join).
-  [[nodiscard]] absl::StatusOr<LeaseId> create_ttl_use_lease(const ReplicaSubject& subj, pid_t pid, absl::Duration ttl)
-      ABSL_LOCKS_EXCLUDED(mu_) {
+  [[nodiscard]] absl::StatusOr<LeaseId> create_ttl_use_lease(
+      const ReplicaSubject& subj,
+      pid_t pid,
+      absl::Duration ttl,
+      std::vector<std::function<absl::Status()>> extra_finalizers = {}) ABSL_LOCKS_EXCLUDED(mu_) {
     if (ttl <= absl::ZeroDuration())
       return absl::InvalidArgumentError("ttl must be > 0");
     PidMonitor* mon = nullptr;
@@ -492,12 +498,15 @@ class SessionLifecycleManager {
       mon = monitor_;
       // Finalizer: drop RefTracker and attempt immediate reclaim
       r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
-        store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = subj.device_id, .uuid = ""};
-        store::loading::ReplicaKey key{.artifact_id = subj.artifact_id, .device = dev_key, .replica = 0};
-        refs_.drop_ref(key, pid);
-        maybe_unload_daemon_replica_(subj);
+        refs_.drop_ref(subj, pid);
+        if (subj.device.type == DeviceType::GPU) {
+          maybe_unload_daemon_replica_(subj);
+        }
         return absl::OkStatus();
       });
+      for (auto& f : extra_finalizers) {
+        r.finalizers.emplace_back(std::move(f));
+      }
       created_id = r.id;
       by_id_[r.id] = std::move(r);
       inc_use_(subj);
@@ -560,7 +569,11 @@ class SessionLifecycleManager {
       LeaseRec r;
       r.id = next_id_++;
       r.kind = LeaseKind::kCommit;
-      r.subj = ReplicaSubject{.artifact_id = subj.artifact_id, .device_id = subj.device_id};
+      r.subj = store::loading::ReplicaKey{
+          .artifact_id = subj.artifact_id,
+          .device = store::DeviceRegistry::instance().gpu_key(subj.device_id),
+          .replica = 0,
+      };
       r.pid = pid;
       // Guards: PID liveness
       GuardRec g;
@@ -575,9 +588,10 @@ class SessionLifecycleManager {
       mon = monitor_;
       // Finalizer: remove device-unique commit index in LipManager for matching owner
       r.finalizers.emplace_back([this, r]() -> absl::Status {
-        const bool revoked = lip_.revoke_commit_lease_if_owner_matches(r.subj.artifact_id, r.subj.device_id, r.pid);
+        const bool revoked =
+            lip_.revoke_commit_lease_if_owner_matches(r.subj.artifact_id, r.subj.device.ordinal, r.pid);
         if (revoked) {
-          VLOG(2) << "Commit lease revoked for artifact=" << r.subj.artifact_id << " dev=" << r.subj.device_id
+          VLOG(2) << "Commit lease revoked for artifact=" << r.subj.artifact_id << " dev=" << r.subj.device.ordinal
                   << " owner_pid=" << r.pid;
         }
         return absl::OkStatus();
@@ -701,7 +715,7 @@ class SessionLifecycleManager {
           continue;
         if (rec.pid != pid)
           continue;
-        if (rec.subj.artifact_id != subj.artifact_id || rec.subj.device_id != subj.device_id)
+        if (!(rec.subj == subj))
           continue;
         match = kv.first;
         break;
@@ -848,20 +862,20 @@ class SessionLifecycleManager {
 
   // Query counters for eviction and status
   [[nodiscard]] size_t use_count_for(const store::loading::ReplicaKey& key) const ABSL_LOCKS_EXCLUDED(mu_) {
-    auto subj = subj_from_key_(key);
-    if (!subj)
+    if (key.device.type != DeviceType::GPU) {
       return 0;
+    }
     absl::MutexLock lock(&mu_);
-    auto it = counters_.find(subject_key_(*subj));
+    auto it = counters_.find(key);
     return (it == counters_.end() ? 0 : static_cast<size_t>(it->second.use_count));
   }
 
   [[nodiscard]] size_t placement_pin_count_for(const store::loading::ReplicaKey& key) const ABSL_LOCKS_EXCLUDED(mu_) {
-    auto subj = subj_from_key_(key);
-    if (!subj)
+    if (key.device.type != DeviceType::GPU) {
       return 0;
+    }
     absl::MutexLock lock(&mu_);
-    auto it = counters_.find(subject_key_(*subj));
+    auto it = counters_.find(key);
     return (it == counters_.end() ? 0 : static_cast<size_t>(it->second.placement_pins));
   }
 
@@ -871,36 +885,26 @@ class SessionLifecycleManager {
     int placement_pins{0};
   };
 
-  static std::string subject_key_(const ReplicaSubject& s) {
-    return absl::StrCat(s.artifact_id, "#", s.device_id);
-  }
-
   void inc_use_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    auto& c = counters_[subject_key_(s)];
+    auto& c = counters_[s];
     ++c.use_count;
   }
 
   void dec_use_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    auto it = counters_.find(subject_key_(s));
+    auto it = counters_.find(s);
     if (it != counters_.end() && it->second.use_count > 0)
       --it->second.use_count;
   }
 
   void inc_pin_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    auto& c = counters_[subject_key_(s)];
+    auto& c = counters_[s];
     ++c.placement_pins;
   }
 
   void dec_pin_(const ReplicaSubject& s) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    auto it = counters_.find(subject_key_(s));
+    auto it = counters_.find(s);
     if (it != counters_.end() && it->second.placement_pins > 0)
       --it->second.placement_pins;
-  }
-
-  static std::optional<ReplicaSubject> subj_from_key_(const store::loading::ReplicaKey& key) {
-    if (key.device.type != DeviceType::GPU)
-      return std::nullopt;
-    return ReplicaSubject{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
   }
 
   void sync_pid_watches_() ABSL_LOCKS_EXCLUDED(mu_) {
@@ -974,7 +978,8 @@ class SessionLifecycleManager {
   absl::flat_hash_map<GuardId, GuardRec> guard_by_id_ ABSL_GUARDED_BY(mu_);
   std::priority_queue<Due> deadlines_ ABSL_GUARDED_BY(mu_);
   PidMonitor* monitor_ ABSL_GUARDED_BY(mu_){nullptr};
-  absl::flat_hash_map<std::string, Counts> counters_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<store::loading::ReplicaKey, Counts, store::loading::ReplicaKeyHash> counters_
+      ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<pid_t, std::unordered_set<GuardId>> pid_index_ ABSL_GUARDED_BY(mu_);
   std::function<void(const ReplicaSubject&)> eviction_notify_ ABSL_GUARDED_BY(mu_);
   std::function<void(absl::Time)> schedule_hook_ ABSL_GUARDED_BY(mu_);
@@ -1039,7 +1044,7 @@ class SessionLifecycleManager {
         dec_pin_(it->second.subj);
       // If this was the last protection for the subject, capture subject for eviction notify
       if (subj_opt.has_value()) {
-        auto cit = counters_.find(subject_key_(*subj_opt));
+        auto cit = counters_.find(*subj_opt);
         if (cit != counters_.end() && cit->second.use_count == 0 && cit->second.placement_pins == 0) {
           subj_to_notify = *subj_opt;
         }
@@ -1099,12 +1104,15 @@ class SessionLifecycleManager {
     // Engine may be absent in tests or minimal setups
     if (engine_ == nullptr)
       return;
+    if (subj.device.type != DeviceType::GPU) {
+      return;
+    }
     // Snapshot counters under lock
     int uses = 0;
     int pins = 0;
     {
       absl::MutexLock lock(&mu_);
-      auto it = counters_.find(subject_key_(subj));
+      auto it = counters_.find(subj);
       if (it != counters_.end()) {
         uses = it->second.use_count;
         pins = it->second.placement_pins;
@@ -1112,17 +1120,14 @@ class SessionLifecycleManager {
     }
     if (uses != 0 || pins != 0)
       return;
-    // Build key and check residency; only unload if GPU memory is present
-    store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = subj.device_id, .uuid = ""};
-    store::loading::ReplicaKey key{.artifact_id = subj.artifact_id, .device = dev_key, .replica = 0};
-    auto state = engine_->get_replica_state(key, DeviceType::GPU);
+    // Check residency; only unload if GPU memory is present.
+    auto state = engine_->get_replica_state(subj, DeviceType::GPU);
     if (state <= store::replica::MemoryState::UNALLOCATED) {
       return; // not allocated/loaded on GPU
     }
-    int rc = engine_->unload_replica(key);
+    int rc = engine_->unload_replica(subj);
     if (rc != 0) {
-      LOG(WARNING) << "maybe_unload_daemon_replica: unload_replica rc=" << rc << " artifact_id=" << key.artifact_id
-                   << " device_id=" << subj.device_id;
+      LOG(WARNING) << "maybe_unload_daemon_replica: unload_replica rc=" << rc << " key=" << subj;
       try {
         static auto meter =
             opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");

@@ -23,6 +23,7 @@
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
+#include "core/store/replica/unified_memory_authority.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
@@ -241,6 +242,18 @@ class StoreEngine {
   [[nodiscard]] absl::Status disable_remote_replica_access(
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location);
+
+  [[nodiscard]] absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> set_replica_exported(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
+      absl::Span<const uint32_t> chunks,
+      bool on);
+
+  [[nodiscard]] absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> acquire_replica_stable_lease(
+      const loading::ReplicaKey& key,
+      absl::Span<const uint32_t> chunks);
+
+  [[nodiscard]] absl::Status release_replica_stable_lease(const replica::UnifiedMemoryAuthority::StableLease& lease);
 
   // Register a loaded replica with the Global Store if connected. When
   // artifact_id_override is provided it must be a canonical `mi2:` identifier

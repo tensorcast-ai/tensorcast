@@ -283,3 +283,19 @@ def get_session_address(session_id: str | None = None) -> str | None:
         return addr if isinstance(addr, str) else None
     except Exception:
         return None
+
+
+def daemon_state_dir(session_id: str) -> Path:
+    """Return the daemon session state directory without creating the session dir."""
+    return sessions_root() / session_id / "session"
+
+
+def discover_local_handle_socket_path(session_id: str | None = None) -> Path | None:
+    """Discover the default local handle socket path for a daemon session."""
+    sid = session_id or get_current_session_id()
+    if not sid:
+        return None
+    state_dir = daemon_state_dir(sid)
+    if not state_dir.exists():
+        return None
+    return state_dir / "local_handle.sock"

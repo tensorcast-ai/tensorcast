@@ -32,13 +32,10 @@ TEST_CASE("TTL prefetch expiry drops placement pin", "[daemon][lifecycle][ttl]")
 
   const std::string artifact_id = "mi2:test:ttl";
   const int device_id = 0;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
-
-  // Build a ReplicaKey to query counters
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
   // Act: create a placement lease with a very short TTL
-  auto id_or = mgr.create_placement_lease(subj, absl::Milliseconds(20));
+  auto id_or = mgr.create_placement_lease(key, absl::Milliseconds(20));
   REQUIRE(id_or.ok());
   REQUIRE(mgr.placement_pin_count_for(key) == 1);
 
@@ -62,11 +59,10 @@ TEST_CASE("PID exit precedence drops UseLease and RefTracker refs", "[daemon][li
   const int device_id = 0;
   const int32_t pid = 123456;
 
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
   // Seed a UseLease and a RefTracker entry for this pid
-  auto use_id_or = mgr.create_use_lease(subj, pid);
+  auto use_id_or = mgr.create_use_lease(key, pid);
   REQUIRE(use_id_or.ok());
   refs.add_ref(key, pid);
 
@@ -92,10 +88,9 @@ TEST_CASE("Mixed guards: UseLease + Deadline retires on whichever fails first", 
   const std::string artifact_id = "mi2:test:mixed_use_deadline";
   const int device_id = 0;
   const int32_t pid = 333777;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
-  auto id_or = mgr.create_use_lease(subj, pid);
+  auto id_or = mgr.create_use_lease(key, pid);
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   // Track ref to observe finalizer dropping it
@@ -159,11 +154,10 @@ TEST_CASE("Deadline guard generation: renew prevents stale expiry", "[daemon][li
 
   const std::string artifact_id = "mi2:test:renew";
   const int device_id = 0;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
   // Create a placement lease with short TTL
-  auto id_or = mgr.create_placement_lease(subj, absl::Milliseconds(50));
+  auto id_or = mgr.create_placement_lease(key, absl::Milliseconds(50));
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   REQUIRE(mgr.placement_pin_count_for(key) == 1);
@@ -194,11 +188,10 @@ TEST_CASE("Manual guard: placement lease requires explicit release", "[daemon][l
 
   const std::string artifact_id = "mi2:test:manual";
   const int device_id = 0;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
   // Create a manual placement lease (no TTL)
-  auto id_or = mgr.create_placement_lease(subj, absl::ZeroDuration());
+  auto id_or = mgr.create_placement_lease(key, absl::ZeroDuration());
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   REQUIRE(mgr.placement_pin_count_for(key) == 1);
@@ -224,10 +217,9 @@ TEST_CASE("Manual release of UseLease drops use_count and RefTracker", "[daemon]
   const std::string artifact_id = "mi2:test:manual_use";
   const int device_id = 0;
   const int32_t pid = 424242;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
-  auto id_or = mgr.create_use_lease(subj, pid);
+  auto id_or = mgr.create_use_lease(key, pid);
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   // Seed RefTracker to observe finalizer effect
@@ -255,10 +247,9 @@ TEST_CASE("Finalizer idempotency on UseLease manual retire", "[daemon][lifecycle
   const std::string artifact_id = "mi2:test:idemp_use";
   const int device_id = 0;
   const int32_t pid = 515151;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
-  auto id_or = mgr.create_use_lease(subj, pid);
+  auto id_or = mgr.create_use_lease(key, pid);
   REQUIRE(id_or.ok());
   auto lease_id = *id_or;
   refs.add_ref(key, pid);
@@ -284,10 +275,9 @@ TEST_CASE("Deadline expiry idempotency on PlacementLease", "[daemon][lifecycle][
 
   const std::string artifact_id = "mi2:test:idemp_deadline";
   const int device_id = 0;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
   ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
-  auto id_or = mgr.create_placement_lease(subj, absl::Milliseconds(20));
+  auto id_or = mgr.create_placement_lease(key, absl::Milliseconds(20));
   REQUIRE(id_or.ok());
   REQUIRE(mgr.placement_pin_count_for(key) == 1);
 
@@ -310,9 +300,9 @@ TEST_CASE("next_deadline is InfiniteFuture for manual-only leases", "[daemon][li
 
   const std::string artifact_id = "mi2:test:no_deadlines";
   const int device_id = 0;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = artifact_id, .device_id = device_id};
+  ReplicaKey key{.artifact_id = artifact_id, .device = DeviceRegistry::instance().gpu_key(device_id), .replica = 0};
 
-  auto id_or = mgr.create_placement_lease(subj, absl::ZeroDuration());
+  auto id_or = mgr.create_placement_lease(key, absl::ZeroDuration());
   REQUIRE(id_or.ok());
   // No time-based guards exist; next_deadline should be InfiniteFuture
   REQUIRE(mgr.next_deadline() == absl::InfiniteFuture());

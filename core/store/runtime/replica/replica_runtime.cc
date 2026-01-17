@@ -2,6 +2,7 @@
 
 #include "core/store/runtime/replica/replica_runtime.h"
 
+#include <algorithm>
 #include <format>
 #include <limits>
 #include <optional>
@@ -15,8 +16,56 @@
 #include "absl/time/time.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/components/eviction_service.h"
+#include "core/store/device_registry.h"
 
 namespace tensorcast::store::runtime {
+
+namespace {
+
+DeviceKey normalize_device_key(DeviceKey key) {
+  if (key.type == DeviceType::GPU) {
+    if (key.ordinal < 0) {
+      key.ordinal = 0;
+    }
+    return DeviceRegistry::instance().normalize(key);
+  }
+  if (key.type == DeviceType::CPU) {
+    return DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  }
+  return key;
+}
+
+loading::ReplicaKey normalize_replica_key(const loading::ReplicaKey& key) {
+  loading::ReplicaKey normalized = key;
+  normalized.device = normalize_device_key(key.device);
+  return normalized;
+}
+
+uint64_t compute_bytes_for_chunks(
+    const replica::UnifiedMemoryAuthority::ArtifactLayout& layout,
+    absl::Span<const uint32_t> chunk_ids) {
+  if (layout.artifact_chunk_bytes == 0 || layout.artifact_bytes == 0) {
+    return 0;
+  }
+  std::vector<uint32_t> ids(chunk_ids.begin(), chunk_ids.end());
+  std::sort(ids.begin(), ids.end());
+  ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+  uint64_t total = 0;
+  for (uint32_t idx : ids) {
+    const uint64_t start = static_cast<uint64_t>(idx) * static_cast<uint64_t>(layout.artifact_chunk_bytes);
+    if (start >= layout.artifact_bytes) {
+      continue;
+    }
+    const uint64_t end =
+        std::min<uint64_t>(layout.artifact_bytes, start + static_cast<uint64_t>(layout.artifact_chunk_bytes));
+    if (end > start) {
+      total += end - start;
+    }
+  }
+  return total;
+}
+
+} // namespace
 
 ReplicaRuntime::ReplicaRuntime(gsl::not_null<RuntimeContext*> context)
     : ReplicaRuntime(Config{.runtime_context = context}) {}
@@ -55,6 +104,7 @@ std::vector<ReplicaInfo> ReplicaRuntime::get_all_replicas_info() const {
 
     const auto& replica = replica_or.value();
     ReplicaInfo info;
+    info.key = key;
     info.artifact_id = key.artifact_id;
 
     auto size_result = replica->get_artifact_size();
@@ -214,7 +264,7 @@ absl::StatusOr<int> ReplicaRuntime::get_unique_gpu_residency(std::string_view ar
 
 std::vector<loading::ReplicaKey> ReplicaRuntime::list_device_replicas(const DeviceKey& device) const {
   std::vector<loading::ReplicaKey> list;
-  const auto inst_keys = registry().find_by_device(device);
+  const auto inst_keys = registry().find_by_device(normalize_device_key(device));
   for (const auto& key : inst_keys) {
     auto replica_or = registry().find(key);
     if (!replica_or.ok()) {
@@ -240,27 +290,30 @@ std::vector<loading::ReplicaKey> ReplicaRuntime::list_device_replicas(const Devi
 }
 
 int ReplicaRuntime::wait_replica_ready(const loading::ReplicaKey& key) const {
-  auto replica_or = registry().find(key);
+  const auto normalized_key = normalize_replica_key(key);
+  auto replica_or = registry().find(normalized_key);
   if (!replica_or.ok()) {
     return 1;
   }
   const auto& replica = replica_or.value();
-  common::memory::MemoryLocation loc =
-      (key.device.type == DeviceType::CPU) ? common::memory::MemoryLocation::CPU : common::memory::MemoryLocation::GPU;
+  common::memory::MemoryLocation loc = (normalized_key.device.type == DeviceType::CPU)
+      ? common::memory::MemoryLocation::CPU
+      : common::memory::MemoryLocation::GPU;
   absl::Status st = replica->wait_until_loaded(loc, absl::InfiniteDuration());
   return st.ok() ? 0 : 1;
 }
 
 absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& key) const {
-  auto replica_or = registry().find(key);
+  const auto normalized_key = normalize_replica_key(key);
+  auto replica_or = registry().find(normalized_key);
   if (!replica_or.ok()) {
-    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
-            << " not found in registry: " << replica_or.status();
+    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << normalized_key.artifact_id
+            << " device=" << normalized_key.device.ordinal << " not found in registry: " << replica_or.status();
     return absl::NotFoundError(
         std::format(
             "ReplicaRuntime::unload_replica: artifact={} device={} not found in registry: {}",
-            key.artifact_id,
-            key.device.ordinal,
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal,
             replica_or.status().ToString()));
   }
 
@@ -269,8 +322,9 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
   if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
     replica_size = *size_or;
   }
-  common::memory::MemoryLocation loc =
-      (key.device.type == DeviceType::CPU) ? common::memory::MemoryLocation::CPU : common::memory::MemoryLocation::GPU;
+  common::memory::MemoryLocation loc = (normalized_key.device.type == DeviceType::CPU)
+      ? common::memory::MemoryLocation::CPU
+      : common::memory::MemoryLocation::GPU;
 
   replica::MemoryState before_state = replica->get_memory_state(loc);
 
@@ -286,7 +340,8 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
     }
 
     if (observed_state <= replica::MemoryState::UNALLOCATED) {
-      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
+      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << normalized_key.artifact_id
+              << " device=" << normalized_key.device.ordinal
               << ": no allocation observed after probe window; treating as no-op unload.";
       return absl::OkStatus();
     }
@@ -302,15 +357,15 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
 
     if (!wait_status.ok() && !absl::IsFailedPrecondition(wait_status)) {
       const auto current_state = replica->get_memory_state(loc);
-      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
-              << ": wait for load completion returned " << wait_status;
+      VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << normalized_key.artifact_id
+              << " device=" << normalized_key.device.ordinal << ": wait for load completion returned " << wait_status;
       return absl::Status(
           wait_status.code(),
           std::format(
               "ReplicaRuntime::unload_replica: wait_until_loaded failed for artifact={} device={} location={} "
               "state={} status={}",
-              key.artifact_id,
-              key.device.ordinal,
+              normalized_key.artifact_id,
+              normalized_key.device.ordinal,
               common::memory::location_to_string(loc),
               replica::state_to_string(current_state),
               wait_status.ToString()));
@@ -321,26 +376,26 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
 
   if (!release_status.ok()) {
     const auto current_state = replica->get_memory_state(loc);
-    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << key.artifact_id << " device=" << key.device.ordinal
-            << ": unload failed with " << release_status;
+    VLOG(1) << "ReplicaRuntime::unload_replica artifact=" << normalized_key.artifact_id
+            << " device=" << normalized_key.device.ordinal << ": unload failed with " << release_status;
     return absl::Status(
         release_status.code(),
         std::format(
             "ReplicaRuntime::unload_replica: release_memory failed for artifact={} device={} location={} state={} "
             "status={}",
-            key.artifact_id,
-            key.device.ordinal,
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal,
             common::memory::location_to_string(loc),
             replica::state_to_string(current_state),
             release_status.ToString()));
   }
 
-  publish_replica_event(RuntimeEventType::kReplicaEvicted, key, replica_size);
+  publish_replica_event(RuntimeEventType::kReplicaEvicted, normalized_key, replica_size);
   return absl::OkStatus();
 }
 
 int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
-  absl::Status unload_status = unload_replica_status(key);
+  absl::Status unload_status = unload_replica_status(normalize_replica_key(key));
   if (unload_status.ok()) {
     return 0;
   }
@@ -351,7 +406,7 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
 }
 
 replica::MemoryState ReplicaRuntime::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {
-  auto replica_or = registry().find(key);
+  auto replica_or = registry().find(normalize_replica_key(key));
   if (!replica_or.ok()) {
     return replica::MemoryState::UNINITIALIZED;
   }
@@ -364,7 +419,7 @@ absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_gpu_ptr(const loading::Repl
   if (key.device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("ReplicaKey does not reference a GPU device");
   }
-  auto replica_or = registry().find(key);
+  auto replica_or = registry().find(normalize_replica_key(key));
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
@@ -376,7 +431,7 @@ absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_gpu_ptr(const loading::Repl
 }
 
 absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_size(const loading::ReplicaKey& key) const {
-  auto replica_or = registry().find(key);
+  auto replica_or = registry().find(normalize_replica_key(key));
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
@@ -389,12 +444,12 @@ absl::StatusOr<uint64_t> ReplicaRuntime::get_replica_size(const loading::Replica
 
 void ReplicaRuntime::set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state) {
   absl::MutexLock lock(&publish_state_mu_);
-  publish_states_[key] = state;
+  publish_states_[normalize_replica_key(key)] = state;
 }
 
 ReplicaPublishState ReplicaRuntime::get_replica_publish_state(const loading::ReplicaKey& key) const {
   absl::MutexLock lock(&publish_state_mu_);
-  auto it = publish_states_.find(key);
+  auto it = publish_states_.find(normalize_replica_key(key));
   if (it == publish_states_.end()) {
     return ReplicaPublishState::kLocalOnly;
   }
@@ -404,17 +459,18 @@ ReplicaPublishState ReplicaRuntime::get_replica_publish_state(const loading::Rep
 absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location) const {
+  const auto normalized_key = normalize_replica_key(key);
   auto comm = communication_manager();
   if (!comm || !comm->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
-  auto replica_or = registry().find(key);
+  auto replica_or = registry().find(normalized_key);
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
   auto registration_or = replica_or.value()->enable_remote_memory_access(location, comm->get_engine());
   if (registration_or.ok()) {
-    publish_remote_access_event(key, location, true);
+    publish_remote_access_event(normalized_key, location, true);
   }
   return registration_or;
 }
@@ -422,19 +478,93 @@ absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(
 absl::Status ReplicaRuntime::disable_remote_replica_access(
     const loading::ReplicaKey& key,
     common::memory::MemoryLocation location) const {
+  const auto normalized_key = normalize_replica_key(key);
   auto comm = communication_manager();
   if (!comm || !comm->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
   }
-  auto replica_or = registry().find(key);
+  auto replica_or = registry().find(normalized_key);
   if (!replica_or.ok()) {
     return absl::NotFoundError("Replica not found");
   }
   absl::Status status = replica_or.value()->disable_remote_memory_access(location, comm->get_engine());
   if (status.ok()) {
-    publish_remote_access_event(key, location, false);
+    publish_remote_access_event(normalized_key, location, false);
   }
   return status;
+}
+
+absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> ReplicaRuntime::set_replica_exported(
+    const loading::ReplicaKey& key,
+    common::memory::MemoryLocation location,
+    absl::Span<const uint32_t> chunks,
+    bool on) const {
+  const auto normalized_key = normalize_replica_key(key);
+  auto replica_or = registry().find(normalized_key);
+  if (!replica_or.ok()) {
+    return absl::NotFoundError("Replica not found");
+  }
+  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  if (!uma) {
+    return absl::FailedPreconditionError("UMA is unavailable for replica");
+  }
+  return uma->set_exported(normalized_key, location, chunks, on);
+}
+
+absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acquire_replica_stable_lease(
+    const loading::ReplicaKey& key,
+    absl::Span<const uint32_t> chunks) const {
+  const auto normalized_key = normalize_replica_key(key);
+  auto replica_or = registry().find(normalized_key);
+  if (!replica_or.ok()) {
+    return absl::NotFoundError("Replica not found");
+  }
+  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  if (!uma) {
+    return absl::FailedPreconditionError("UMA is unavailable for replica");
+  }
+  auto lease_or = uma->acquire_stable_lease(normalized_key, chunks);
+  if (lease_or.ok() || !absl::IsResourceExhausted(lease_or.status())) {
+    return lease_or;
+  }
+  auto stable_cache = context_->stable_cache_manager();
+  if (!stable_cache) {
+    return lease_or;
+  }
+  auto layout_or = uma->get_layout(normalized_key);
+  if (!layout_or.ok()) {
+    return lease_or;
+  }
+  const uint64_t required_bytes = compute_bytes_for_chunks(*layout_or, chunks);
+  if (required_bytes == 0) {
+    return lease_or;
+  }
+  const absl::Status evict_status = stable_cache->preempt_for_export(required_bytes, normalized_key);
+  if (!evict_status.ok()) {
+    LOG(WARNING) << "stable_cache.preempt_for_export failed: key=" << normalized_key << " bytes=" << required_bytes
+                 << " status=" << evict_status;
+    return lease_or;
+  }
+  return uma->acquire_stable_lease(normalized_key, chunks);
+}
+
+absl::Status ReplicaRuntime::release_replica_stable_lease(
+    const replica::UnifiedMemoryAuthority::StableLease& lease) const {
+  const auto normalized_key = normalize_replica_key(lease.key);
+  auto replica_or = registry().find(normalized_key);
+  if (!replica_or.ok()) {
+    return absl::NotFoundError("Replica not found");
+  }
+  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  if (!uma) {
+    return absl::FailedPreconditionError("UMA is unavailable for replica");
+  }
+  if (normalized_key == lease.key) {
+    return uma->release_stable_lease(lease);
+  }
+  auto adjusted = lease;
+  adjusted.key = normalized_key;
+  return uma->release_stable_lease(adjusted);
 }
 
 absl::Status ReplicaRuntime::try_evict_memory_for_replica(size_t required_size) {
@@ -467,7 +597,14 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
     replica::ReplicaConfig config) {
   DeviceKey device_key;
   device_key.type = config.device_type;
-  device_key.ordinal = (config.device_type == DeviceType::GPU) ? config.local_device_id : -1;
+  if (config.device_type == DeviceType::GPU) {
+    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
+    device_key = DeviceRegistry::instance().gpu_key(ordinal);
+  } else {
+    device_key.type = DeviceType::CPU;
+    device_key.ordinal = -1;
+    device_key.uuid.clear();
+  }
   loading::ReplicaKey inst_key{
       .artifact_id = artifact_identifier,
       .view_id = config.view_id,
@@ -477,6 +614,7 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
   if (!config.memory_tier_config.has_value() && context_->options().memory_tier_config.has_value()) {
     config.memory_tier_config = context_->options().memory_tier_config;
   }
+  config.cpu_shared_memory_enabled = context_->options().cpu_shared_memory_enabled;
 
   if (auto existing_or = registry().find(inst_key); existing_or.ok()) {
     return existing_or.value();

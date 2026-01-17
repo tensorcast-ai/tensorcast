@@ -45,7 +45,7 @@ constexpr uint16_t kTestP2PPort = 45000;
 } // namespace
 
 static DeviceKey make_gpu_key(int ordinal) {
-  return DeviceKey{.type = DeviceType::GPU, .ordinal = ordinal, /*uuid=*/.uuid = ""};
+  return DeviceRegistry::instance().gpu_key(ordinal);
 }
 
 struct ArtifactFixture {

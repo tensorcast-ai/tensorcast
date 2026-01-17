@@ -27,6 +27,8 @@ class StatusController {
     std::function<bool()> is_registered;
     std::function<std::string()> worker_id;
     std::function<std::chrono::seconds()> uptime;
+    std::function<std::string()> local_handle_socket_path;
+    std::function<bool()> cpu_shared_memory_enabled;
   };
 
   explicit StatusController(Dep d) : d_(std::move(d)) {}
@@ -38,6 +40,8 @@ class StatusController {
     // Canonical fields (no gRPC frame size surfaced)
     resp.set_artifact_chunk_bytes(static_cast<uint64_t>(e.get_artifact_chunk_bytes()));
     resp.set_tx_slice_bytes(static_cast<uint64_t>(e.get_tx_slice_bytes()));
+    resp.set_local_handle_socket_path(d_.local_handle_socket_path());
+    resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled());
     rctx.mark_success();
     return grpc::Status::OK;
   }

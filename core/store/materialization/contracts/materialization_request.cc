@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/contracts/materialization_request.h"
 
@@ -6,6 +6,7 @@
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_identity.h"
 #include "core/store/components/device_manager.h"
+#include "core/store/device_registry.h"
 
 namespace tensorcast::store::loading {
 
@@ -16,8 +17,9 @@ absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(
     const components::DeviceManager& device_manager) {
   MaterializationRequest request;
   request.mode_ = mode;
-  request.target_device_ = target_device;
   request.hints_ = hints;
+
+  DeviceKey normalized_device = target_device;
 
   const std::optional<VariantIdentity>& variant = hints.variant;
   if (variant.has_value()) {
@@ -64,27 +66,36 @@ absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(
     return absl::InvalidArgumentError("MaterializeHints must provide artifact_id or disk_path for LOAD modes");
   }
 
-  switch (target_device.type) {
+  switch (normalized_device.type) {
     case DeviceType::GPU: {
+      if (normalized_device.uuid.empty() && normalized_device.ordinal < 0) {
+        return absl::InvalidArgumentError(absl::StrCat("Invalid GPU device ordinal: ", normalized_device.ordinal));
+      }
+      normalized_device = DeviceRegistry::instance().normalize(normalized_device);
       const int num_gpus = device_manager.get_num_gpus();
-      if (target_device.ordinal < 0 || target_device.ordinal >= num_gpus) {
-        return absl::InvalidArgumentError(absl::StrCat("Invalid GPU device ordinal: ", target_device.ordinal));
+      if (normalized_device.ordinal < 0 || normalized_device.ordinal >= num_gpus) {
+        return absl::InvalidArgumentError(absl::StrCat("Invalid GPU device ordinal: ", normalized_device.ordinal));
       }
       break;
     }
-    case DeviceType::CPU:
+    case DeviceType::CPU: {
+      normalized_device.type = DeviceType::CPU;
+      normalized_device.ordinal = -1;
+      normalized_device.uuid.clear();
       break;
+    }
     default:
       return absl::InvalidArgumentError("Unsupported target device type for materialize_replica()");
   }
 
-  request.target_location_ = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                                     : common::memory::MemoryLocation::CPU;
+  request.target_device_ = normalized_device;
+  request.target_location_ = (normalized_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
+                                                                         : common::memory::MemoryLocation::CPU;
 
   request.replica_key_ = ReplicaKey{
       .artifact_id = request.canonical_artifact_id_,
       .view_id = request.requested_view_id_,
-      .device = target_device,
+      .device = normalized_device,
       .replica = 0};
 
   return request;

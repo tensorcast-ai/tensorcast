@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 // Basic UMA unit test validating allocation and chunk mapping state.
 
@@ -56,6 +56,46 @@ TEST_CASE("UMA stable lease guards against preemptible marking", "[uma][stable]"
       .replica = 0};
 
   const uint64_t bytes = tensorcast::common::consts::kArtifactChunkDefault * 2;
+  REQUIRE(uma.allocate(key, bytes).ok());
+
+  auto lease_or = uma.acquire_stable_lease(key, std::vector<uint32_t>{0});
+  REQUIRE(lease_or.ok());
+  auto state0 = uma.get_cpu_chunk_state(key, 0);
+  REQUIRE(state0.ok());
+  REQUIRE(*state0 == tensorcast::store::replica::ChunkState::STABLE);
+
+  auto ledger_before = uma.get_ledger_version(key);
+  REQUIRE(ledger_before.ok());
+
+  REQUIRE(uma.mark_cpu_chunks_preemptible(key, 1.0F).ok());
+  auto state0_after = uma.get_cpu_chunk_state(key, 0);
+  auto state1_after = uma.get_cpu_chunk_state(key, 1);
+  REQUIRE(state0_after.ok());
+  REQUIRE(state1_after.ok());
+  REQUIRE(*state0_after == tensorcast::store::replica::ChunkState::STABLE);
+  REQUIRE(*state1_after == tensorcast::store::replica::ChunkState::PREEMPTIBLE);
+
+  auto ledger_after = uma.get_ledger_version(key);
+  REQUIRE(ledger_after.ok());
+  REQUIRE(*ledger_after > *ledger_before);
+
+  REQUIRE(uma.release_stable_lease(*lease_or).ok());
+  auto released_state = uma.get_cpu_chunk_state(key, 0);
+  REQUIRE(released_state.ok());
+  REQUIRE(*released_state == tensorcast::store::replica::ChunkState::HOT);
+}
+
+TEST_CASE("UMA stable lease guards against preemptible marking (memfd)", "[uma][stable][memfd]") {
+  constexpr size_t kChunkBytes = 1ULL << 20;
+  UnifiedMemoryAuthority uma(kChunkBytes, UnifiedMemoryAuthority::Options{.cpu_shared_memory_enabled = true});
+
+  ReplicaKey key{
+      .artifact_id = std::string("uma_stable_memfd_test"),
+      .view_id = std::nullopt,
+      .device = {tensorcast::DeviceType::CPU, -1, ""},
+      .replica = 0};
+
+  const uint64_t bytes = static_cast<uint64_t>(kChunkBytes) * 2;
   REQUIRE(uma.allocate(key, bytes).ok());
 
   auto lease_or = uma.acquire_stable_lease(key, std::vector<uint32_t>{0});

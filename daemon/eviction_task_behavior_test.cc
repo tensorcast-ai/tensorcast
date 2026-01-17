@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -60,8 +60,7 @@ TEST_CASE("EvictionTask skips when UseLease is active", "[daemon][eviction]") {
   // lifecycle without immediate reclaim
   SessionLifecycleManager mgr(sessions, refs, lip);
   // Create UseLease
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
-  auto use_id = mgr.create_use_lease(subj, /*pid=*/1111);
+  auto use_id = mgr.create_use_lease(key, /*pid=*/1111);
   REQUIRE(use_id.ok());
 
   EvictionTask task(*engine, refs, &mgr, /*limit=*/0.0);
@@ -81,8 +80,7 @@ TEST_CASE("EvictionTask skips when Placement pin is active", "[daemon][eviction]
   RefTracker refs;
   tensorcast::daemon::LipManager lip(engine, nullptr);
   SessionLifecycleManager mgr(sessions, refs, lip);
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = key.artifact_id, .device_id = key.device.ordinal};
-  auto pin_id = mgr.create_placement_lease(subj, absl::Minutes(10));
+  auto pin_id = mgr.create_placement_lease(key, absl::Minutes(10));
   REQUIRE(pin_id.ok());
 
   EvictionTask task(*engine, refs, &mgr, /*limit=*/0.0);

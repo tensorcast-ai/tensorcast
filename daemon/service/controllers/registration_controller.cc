@@ -1525,8 +1525,7 @@ grpc::Status RegistrationController::commit(
       store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
       d_.refs.add_ref(key, meta.owner_pid);
       if (d_.lifecycle && meta.ttl_ms > 0 && out.device.type == DeviceType::GPU) {
-        SessionLifecycleManager::ReplicaSubject subj{.artifact_id = out.artifact_id, .device_id = out.device.ordinal};
-        auto lease_or = d_.lifecycle->create_ttl_use_lease(subj, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+        auto lease_or = d_.lifecycle->create_ttl_use_lease(key, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
         if (lease_or.ok()) {
           meta.use_lease_id = *lease_or;
         } else {
@@ -1602,21 +1601,26 @@ grpc::Status RegistrationController::revoke(
 REVOKE_DONE:
   if (meta_opt.has_value() && meta_opt->joined_existing) {
     const auto& m = *meta_opt;
+    store::DeviceKey dev_key = store::DeviceRegistry::instance().gpu_key(m.device_id);
+    store::loading::ReplicaKey key{.artifact_id = m.artifact_id_mi2, .device = dev_key, .replica = 0};
     // Release lifecycle UseLease precisely, if recorded
+    bool lease_released = false;
     if (m.use_lease_id != 0) {
       d_.lifecycle->release_lease(static_cast<SessionLifecycleManager::LeaseId>(m.use_lease_id));
+      lease_released = true;
     } else {
       // Fallback by subject+pid
-      SessionLifecycleManager::ReplicaSubject subj{.artifact_id = m.artifact_id_mi2, .device_id = m.device_id};
-      auto st = d_.lifecycle->release_use_lease(subj, m.owner_pid);
-      if (!st.ok()) {
+      auto st = d_.lifecycle->release_use_lease(key, m.owner_pid);
+      if (st.ok()) {
+        lease_released = true;
+      } else {
         LOG(WARNING) << "release_use_lease failed (revoke fallback): artifact_id=" << m.artifact_id_mi2
                      << " dev=" << m.device_id << ": " << st;
       }
     }
-    store::DeviceKey dev_key{.type = DeviceType::GPU, .ordinal = m.device_id, .uuid = ""};
-    store::loading::ReplicaKey key{.artifact_id = m.artifact_id_mi2, .device = dev_key, .replica = 0};
-    d_.refs.drop_ref(key, m.owner_pid);
+    if (!lease_released) {
+      d_.refs.drop_ref(key, m.owner_pid);
+    }
   }
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");

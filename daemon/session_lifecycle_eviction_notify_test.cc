@@ -7,6 +7,7 @@
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "core/store/device_registry.h"
 #include "daemon/ipc_region_registry.h"
 #include "daemon/ref_tracker.h"
 #include "daemon/replica_session_manager.h"
@@ -15,6 +16,8 @@
 using tensorcast::daemon::RefTracker;
 using tensorcast::daemon::ReplicaSessionManager;
 using tensorcast::daemon::SessionLifecycleManager;
+using tensorcast::store::DeviceRegistry;
+using tensorcast::store::loading::ReplicaKey;
 
 TEST_CASE("Eviction notify fires when protections drop to zero", "[daemon][lifecycle][notify]") {
   ReplicaSessionManager sessions(std::chrono::seconds(60));
@@ -35,7 +38,7 @@ TEST_CASE("Eviction notify fires when protections drop to zero", "[daemon][lifec
   });
 
   // Create a placement pin with short TTL to reach zero protections on expiry
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = "mi2:test:notify", .device_id = 0};
+  ReplicaKey subj{.artifact_id = "mi2:test:notify", .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
   auto pin_id_or = mgr.create_placement_lease(subj, absl::Milliseconds(20));
   REQUIRE(pin_id_or.ok());
 

@@ -22,6 +22,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/replica/memory_state.h"
 #include "core/store/replica/replica.h"
+#include "core/store/replica/unified_memory_authority.h"
 #include "core/store/runtime/context/runtime_context.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_info.h"
@@ -71,6 +72,18 @@ class ReplicaRuntime {
       common::memory::MemoryLocation location) const;
   absl::Status disable_remote_replica_access(const loading::ReplicaKey& key, common::memory::MemoryLocation location)
       const;
+
+  absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> set_replica_exported(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
+      absl::Span<const uint32_t> chunks,
+      bool on) const;
+
+  absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> acquire_replica_stable_lease(
+      const loading::ReplicaKey& key,
+      absl::Span<const uint32_t> chunks) const;
+
+  absl::Status release_replica_stable_lease(const replica::UnifiedMemoryAuthority::StableLease& lease) const;
 
   absl::Status try_evict_memory_for_replica(size_t required_size);
 

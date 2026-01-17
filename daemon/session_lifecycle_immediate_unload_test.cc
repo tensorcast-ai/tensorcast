@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -65,12 +65,11 @@ TEST_CASE("Immediate unload on last UseLease with no pins", "[daemon][lifecycle]
 
   // Create a UseLease for a dummy pid; no placement pins are created
   const int32_t pid = 98765;
-  SessionLifecycleManager::ReplicaSubject subj{.artifact_id = committed.artifact_id, .device_id = 0};
-  auto lid_or = mgr.create_use_lease(subj, pid);
+  auto lid_or = mgr.create_use_lease(key, pid);
   REQUIRE(lid_or.ok());
 
   // Act: retire the UseLease; finalizer should attempt immediate unload
-  REQUIRE(mgr.release_use_lease(subj, pid).ok());
+  REQUIRE(mgr.release_use_lease(key, pid).ok());
 
   // Assert: engine no longer reports GPU residency (unloaded)
   auto state_after = engine_ptr->get_replica_state(key, DeviceType::GPU);

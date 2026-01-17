@@ -123,7 +123,8 @@ ReplicaLoadController::ReplicaLoadController(
     size_t streaming_buffer_chunks,
     uint64_t artifact_size,
     std::optional<std::string> view_id,
-    std::optional<MemoryTierConfig> memory_tier_config)
+    std::optional<MemoryTierConfig> memory_tier_config,
+    bool cpu_shared_memory_enabled)
     : artifact_size_(artifact_size),
       memory_tier_config_(std::move(memory_tier_config)),
       async_runtime_(std::move(async_runtime)),
@@ -132,7 +133,10 @@ ReplicaLoadController::ReplicaLoadController(
       pinned_memory_timeout_(pinned_memory_timeout),
       streaming_buffer_chunks_(std::max<size_t>(1, streaming_buffer_chunks)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
-      memory_coordinator_(std::make_shared<UnifiedMemoryAuthority>(artifact_chunk_bytes_)),
+      memory_coordinator_(
+          std::make_shared<UnifiedMemoryAuthority>(
+              artifact_chunk_bytes_,
+              UnifiedMemoryAuthority::Options{.cpu_shared_memory_enabled = cpu_shared_memory_enabled})),
       transfer_service_(
           std::make_shared<TransferService>(
               pinned_pool_,

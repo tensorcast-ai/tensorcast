@@ -77,6 +77,10 @@ struct ReplicaConfig {
   // - Performance tuning parameters
   // - Memory tier enforcement
   std::optional<MemoryTierConfig> memory_tier_config;
+
+  // When true, UMA CPU allocations are backed by memfd + MAP_SHARED so they can
+  // be exported cross-process for zero-copy CPU tensor materialization.
+  bool cpu_shared_memory_enabled{false};
 };
 
 } // namespace tensorcast::store::replica
