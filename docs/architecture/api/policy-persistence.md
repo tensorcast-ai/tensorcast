@@ -72,7 +72,7 @@ Fields:
 Profiles are convenience presets. Expansion happens in both the SDK and daemon:
 
 - SDK: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py) (`StorePolicy.from_profile`)
-- Daemon: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc) (`profile_defaults`)
+- Daemon: [daemon/state/store_policy_resolver.cc](../../../daemon/state/store_policy_resolver.cc) (`profile_defaults`)
 
 At a high level:
 
@@ -106,7 +106,7 @@ pinned = tensorcast.StorePolicy(profile="pinned")
 Validation rules are enforced in two places:
 
 - SDK: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py)
-- Daemon: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc)
+- Daemon: [daemon/state/store_policy_resolver.cc](../../../daemon/state/store_policy_resolver.cc)
 
 Key constraints:
 
@@ -210,7 +210,7 @@ non-local tiers are satisfied.
 ## Code Map
 
 - Policy model: [tensorcast/api/_config.py](../../../tensorcast/api/_config.py)
-- Policy resolver: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc)
-- Persistence manager: [daemon/persistence_manager.cc](../../../daemon/persistence_manager.cc)
+- Policy resolver: [daemon/state/store_policy_resolver.cc](../../../daemon/state/store_policy_resolver.cc)
+- Persistence manager: [daemon/state/persistence_manager.cc](../../../daemon/state/persistence_manager.cc)
 - Global Store placement service: [tensorcast/global_store/services/placement_service.py](../../../tensorcast/global_store/services/placement_service.py)
 - Daemon RPCs: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast/daemon/v2/store_daemon.proto)

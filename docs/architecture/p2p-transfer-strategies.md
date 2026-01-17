@@ -42,7 +42,7 @@ sequenceDiagram
 - `RegistrationBackend::commit` optionally calls `Replica::enable_remote_memory_access`, which uses `MemoryExportRegistry::export_chunks` to coalesce chunk ranges and register them with the communicator (`core/store/replica/memory_export_registry.cc`).
 - CPU exports register tensors without MR (`register_mr=false`) and hold UMA keepalive + stable leases; GPU exports register MR when RDMA is enabled and set `direct_rdma_enabled` when staging is not required.
 - When `enable_p2p` is true, registration publishes a memory replica via `GlobalStoreClient::register_memory_replica` including `remote_memory_keys`, `buffer_sizes`, and optional `verification_json` (`core/store/runtime/metadata/registration_backend.cc`, `core/store/runtime/metadata/metadata_gateway.cc`).
-- `WorkerLifecycleManager` toggles local export on availability changes via `enable_remote_replica_access` and `disable_remote_replica_access`, and includes existing `remote_memory_keys`/`buffer_sizes` in HA state sync when available; it does not mint new keys on its own (`daemon/worker_lifecycle_manager.cc`).
+- `WorkerLifecycleManager` toggles local export on availability changes via `enable_remote_replica_access` and `disable_remote_replica_access`, and includes existing `remote_memory_keys`/`buffer_sizes` in HA state sync when available; it does not mint new keys on its own (`daemon/ha/worker_lifecycle_manager.cc`).
 
 ## Transport request and replica selection (Global Store)
 

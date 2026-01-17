@@ -118,4 +118,4 @@ Logs and traces:
 - SDK metrics: [tensorcast/api/_metrics.py](../../../tensorcast/api/_metrics.py)
 - Daemon local-stable metrics: [daemon/service/controllers/registration_controller.cc](../../../daemon/service/controllers/registration_controller.cc)
 - Daemon materialization metrics: [daemon/service/controllers/materialization_controller.cc](../../../daemon/service/controllers/materialization_controller.cc)
-- Persistence metrics: [daemon/persistence_manager.cc](../../../daemon/persistence_manager.cc)
+- Persistence metrics: [daemon/state/persistence_manager.cc](../../../daemon/state/persistence_manager.cc)

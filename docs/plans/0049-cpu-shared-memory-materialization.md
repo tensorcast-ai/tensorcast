@@ -12,8 +12,8 @@ related_code:
   - core/store/replica/unified_memory_authority.cc
   - core/store/materialization/runtime/pipeline/handle_stage.cc
   - daemon/service/controllers/materialization_controller.cc
-  - daemon/session_lifecycle.h
-  - daemon/ref_tracker.h
+  - daemon/state/session_lifecycle.h
+  - daemon/state/ref_tracker.h
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - tensorcast/api/_materialize.py
   - tensorcast/api/store/materialization.py
@@ -43,10 +43,10 @@ unavailable.
     the local handle plane without ad-hoc env vars.
   - `MaterializeByKeyRequest.target_device_type` allows CPU targets for key-based loads.
 - **Daemon local handle plane + handle leases are implemented**:
-  - `daemon/local_handle_server.{h,cc}` serves a daemon-owned Unix domain socket for:
+  - `daemon/state/local_handle_server.{h,cc}` serves a daemon-owned Unix domain socket for:
     - `GetCpuMemfdFd(lease_token)` FD handoff via `SCM_RIGHTS`
     - `ReleaseHandle(lease_token)` best-effort lease retirement
-  - `daemon/handle_lease_registry.{h,cc}` mints unguessable `lease_token`s, integrates with
+  - `daemon/state/handle_lease_registry.{h,cc}` mints unguessable `lease_token`s, integrates with
     `SessionLifecycleManager::create_ttl_use_lease(...)`, and refcounts CPU export state per `store::loading::ReplicaKey`.
   - Peer checks are enforced via `SO_PEERCRED` (UID must match daemon euid).
 - **UMA CPU shared-memory backing is implemented**:
@@ -78,7 +78,7 @@ unavailable.
 - **Reuse existing daemon subsystems** instead of introducing parallel ones:
   - Use `SessionLifecycleManager` + `PidMonitor` + `BackgroundScheduler` (`TaskKind::kSessionLifecycle`) for PID/TTL
     cleanup.
-  - Reuse `RefTracker` as the eviction “do not reclaim while borrowed” gate (`daemon/sweep_tasks.h`).
+  - Reuse `RefTracker` as the eviction “do not reclaim while borrowed” gate (`daemon/state/sweep_tasks.h`).
 - **Local-only data plane**: FD handoff and lease release happen over UDS (no gRPC FD hacks); enforce socket filesystem
   permissions (`0600`) and validate peers with `SO_PEERCRED`.
 - **Bounded blocking**: any “release lease” path invoked from tensor destruction must be best-effort and bounded
@@ -115,7 +115,7 @@ unavailable.
       - Do not rely on gRPC-provided pid for security; optionally bind `lease_token -> uid` on first successful LocalHandle
         request.
     - Integrate with daemon lifecycle:
-      - Start/stop the LocalHandle server alongside existing sweepers (`daemon/grpc_service_impl.cc` start/stop paths).
+      - Start/stop the LocalHandle server alongside existing sweepers (`daemon/service/grpc_service_impl.cc` start/stop paths).
       - Reuse the unified `SessionLifecycleTask` for TTL/PID cleanup of handle leases (avoid adding a second periodic
         sweeper).
     - Integrate PID-exit cleanup via `PidMonitor` and TTL sweep via `BackgroundScheduler`.
@@ -144,7 +144,7 @@ unavailable.
   - [x] Milestone 3: Implement daemon LocalHandle FD exchange:
     - Add `GetCpuMemfdFd(lease_token)` via `SCM_RIGHTS`.
     - Add handle-token registry + per-replica export refcount semantics, mirroring the proven patterns in
-      `daemon/ipc_region_registry.{h,cc}` (token minting, TTL, refcount, idempotent release).
+      `daemon/state/ipc_region_registry.{h,cc}` (token minting, TTL, refcount, idempotent release).
 
 - [x] Phase 3: UMA shareable CPU backing + export locking + stable budget semantics
   - [x] Milestone 1: Replace CpuArena::allocate_region with shareable memfd-backed mapping and record backing metadata
@@ -168,7 +168,7 @@ unavailable.
 
 - [x] Phase 5: Tests and docs
   - [x] Milestone 1: Add C++ tests (include an end-to-end smoke test) for:
-    - **E2E (daemon + engine + LocalHandle + memfd)**: `daemon/grpc_service_impl_cpu_memfd_e2e_test.cc`
+    - **E2E (daemon + engine + LocalHandle + memfd)**: `daemon/service/grpc_service_impl_cpu_memfd_e2e_test.cc`
       - Setup a minimal disk artifact using `core/testing/common.{h,cc}`:
         - Create `tensor.data_0` with deterministic content (`create_dummy_file(path, size, start_char)`).
         - Write `tensor_index.json` + `artifact_descriptor.json` via
@@ -198,15 +198,15 @@ unavailable.
         - Call `ReleaseHandle(lease_token)` over LocalHandle and assert success.
         - Call `ReleaseHandle(lease_token)` again and assert idempotent behavior (OK or NOT_FOUND; pick one and codify).
         - After release, `GetCpuMemfdFd(lease_token)` must fail (NOT_FOUND/FAILED_PRECONDITION).
-    - **Stable budget gating**: `daemon/grpc_service_impl_cpu_memfd_stable_budget_test.cc`
+    - **Stable budget gating**: `daemon/service/grpc_service_impl_cpu_memfd_stable_budget_test.cc`
       - Configure `stable_bytes` smaller than the requested export coverage and assert `MaterializeReplica(...CPU...)`
         fails with `RESOURCE_EXHAUSTED` (and returns no usable `cpu_memfd` handle).
       - This test is the acceptance check that CPU exports are admission-controlled by `engine.memory_tiers.stable_bytes`.
-    - **TTL/crash safety**: `daemon/local_handle_lease_ttl_expiry_test.cc`
+    - **TTL/crash safety**: `daemon/state/local_handle_lease_ttl_expiry_test.cc`
       - Configure a short handle-lease TTL via `lifecycle.handle_leases` and assert that after expiry:
         - `GetCpuMemfdFd(lease_token)` fails (NOT_FOUND/DEADLINE_EXCEEDED).
         - A fresh materialization issues a new token that succeeds (ensures old exports don’t linger forever).
-    - **Basic LocalHandle correctness**: `daemon/local_handle_unknown_token_test.cc`
+    - **Basic LocalHandle correctness**: `daemon/state/local_handle_unknown_token_test.cc`
       - Unknown/random `lease_token` must be rejected (NOT_FOUND) and must not crash the daemon.
   - [x] Milestone 2: Add Python tests for Artifact.tensor_dict(device="cpu").
   - [x] Milestone 3: Update docs/architecture/api/materialization-flow.md, tensorcast/api/README.md,
@@ -226,9 +226,9 @@ unavailable.
     - Add proactive guardrails (warn/fail) when approaching `RLIMIT_NOFILE`.
     - Track/export metrics for active leases + CPU exports (`tc_handle_leases_active_gauge`, `tc_handle_cpu_exports_active_gauge`).
   - [x] Milestone 4: Stress/soak validation.
-    - Multi-client fan-out: multiple lease tokens per replica remain valid until the last release (`daemon/grpc_service_impl_cpu_memfd_e2e_test.cc`).
+    - Multi-client fan-out: multiple lease tokens per replica remain valid until the last release (`daemon/service/grpc_service_impl_cpu_memfd_e2e_test.cc`).
     - Long-lived tensors + GC-delayed destruction: lease release is bound to tensor lifetime (`tests/python/test_cpu_memfd_lease_raii.py`).
-    - Stable budget exhaustion and recovery when leases are released/expired (`daemon/grpc_service_impl_cpu_memfd_stable_budget_test.cc`).
+    - Stable budget exhaustion and recovery when leases are released/expired (`daemon/service/grpc_service_impl_cpu_memfd_stable_budget_test.cc`).
 
 # Tasks
 
@@ -244,18 +244,18 @@ unavailable.
   - Extend the typed Python model `tensorcast/types.py:ServerConfig` and mapping in `tensorcast/daemon_ctl.py:get_server_config`.
   - Ensure `tensorcast/api/store/runtime.py` caches the extended `ServerConfig` so materialization can reuse it.
 - [x] Implement LocalHandle service (UDS):
-  - Add a dedicated daemon module (e.g., `daemon/local_handle_server.{h,cc}`) with a narrow interface; avoid mixing UDS
+  - Add a dedicated daemon module (e.g., `daemon/state/local_handle_server.{h,cc}`) with a narrow interface; avoid mixing UDS
     framing/parsing into `grpc_service_impl.cc`.
   - `GetCpuMemfdFd(lease_token)` via `SCM_RIGHTS`
   - `ReleaseHandle(lease_token)` to drop daemon refs/leases
   - Integrate peer credential checks via `SO_PEERCRED` (UID required; PID best-effort) and enforce uid==daemon user.
   - Ensure all accepted/received FDs are `CLOEXEC` (`accept4(..., SOCK_CLOEXEC)` and `recvmsg(..., MSG_CMSG_CLOEXEC)` where available).
   - Handle stale socket files safely (unlink only when path is a socket owned by daemon user).
-  - Start/stop the LocalHandle server with daemon lifecycle (`daemon/grpc_service_impl.cc`) and ensure shutdown is
+  - Start/stop the LocalHandle server with daemon lifecycle (`daemon/service/grpc_service_impl.cc`) and ensure shutdown is
     idempotent.
-- [x] Implement handle leases on top of `daemon/session_lifecycle.h`:
-  - Add a focused token registry module (e.g., `daemon/handle_lease_registry.{h,cc}`) modeled after
-    `daemon/ipc_region_registry.{h,cc}` for minting/unminting tokens and tracking refcounts/TTLs.
+- [x] Implement handle leases on top of `daemon/state/session_lifecycle.h`:
+  - Add a focused token registry module (e.g., `daemon/state/handle_lease_registry.{h,cc}`) modeled after
+    `daemon/state/ipc_region_registry.{h,cc}` for minting/unminting tokens and tracking refcounts/TTLs.
   - Key cleanup by full `store::loading::ReplicaKey` (includes view_id + device.uuid), not `{artifact_id, device_id}`.
   - Fix existing lifecycle finalizers that reconstruct `ReplicaKey` without uuid so they cannot diverge from `RefTracker`.
     - Concretely: `create_use_lease` / `create_ttl_use_lease` should capture the exact `ReplicaKey` used in

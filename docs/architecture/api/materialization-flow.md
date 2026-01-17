@@ -104,7 +104,7 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
 4. **LIP fast path** (local IPC):
    - If a local LIP lease exists and the target GPU is different, the daemon
      copies LIP segments into a new coalesced GPU buffer and returns a CUDA IPC
-     handle (`daemon/lip_bridge.cc`, `daemon/lip_manager.cc`).
+     handle (`daemon/state/lip_bridge.cc`, `daemon/state/lip_manager.cc`).
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
@@ -271,7 +271,7 @@ CUDA region registered by the client:
 - SDK pipeline: `tensorcast/api/store/materialization.py`
 - SDK RPC wrapper: `tensorcast/api/_materialize.py`
 - Daemon controller: `daemon/service/controllers/materialization_controller.cc`
-- LIP fast path: `daemon/lip_bridge.cc`, `daemon/lip_manager.cc`
+- LIP fast path: `daemon/state/lip_bridge.cc`, `daemon/state/lip_manager.cc`
 - Materialization service: `core/store/runtime/ingestion/materialization_service.cc`
 - Ingestion pipeline: `core/store/materialization/runtime/pipeline/ingestion_pipeline.cc`
 - Transfer and pump: `core/store/replica/transfer_service.cc`, `core/store/materialization/dataplane/runtime/pump.cc`

@@ -3,11 +3,11 @@ slug: ha-heartbeat-sync-decoupling
 title: HA Heartbeat and State Sync Decoupling (Plan)
 areas: ["daemon", "core", "global_store"]
 related_code:
-  - daemon/worker_lifecycle_manager.{h,cc}
-  - daemon/server_main.cc
+  - daemon/ha/worker_lifecycle_manager.{h,cc}
+  - daemon/app/server_main.cc
   - core/store/components/global_store_client.{h,cc}
   - proto/tensorcast/config/v1/daemon_config.proto
-  - daemon/worker_lifecycle_manager_sync_test.cc
+  - daemon/ha/worker_lifecycle_manager_sync_test.cc
 links:
   design: ../designs/0046-ha-heartbeat-sync-decoupling.md
 ---
@@ -19,9 +19,9 @@ Split heartbeat and state sync responsibilities so heartbeats stay responsive, s
 # Current State & Grounding
 
 - Heartbeat loop handles heartbeat, state sync, memory tier publish, and lease reconcile in one thread.
-  - `daemon/worker_lifecycle_manager.cc`
+  - `daemon/ha/worker_lifecycle_manager.cc`
 - Monitor loop restarts by `join`ing the stalled thread, which can block indefinitely if RPCs hang.
-  - `daemon/worker_lifecycle_manager.cc`
+  - `daemon/ha/worker_lifecycle_manager.cc`
 - Global Store client uses a single default `rpc_timeout` and `max_retries` across all methods.
   - `core/store/components/global_store_client.{h,cc}`
 - HA config already exists but lacks per-RPC timeout settings.

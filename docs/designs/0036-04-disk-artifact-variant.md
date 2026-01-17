@@ -6,7 +6,7 @@ related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/materialization.py
   - tensorcast/api/_io_disk.py
-  - daemon/grpc_service_impl.cc
+  - daemon/service/grpc_service_impl.cc
   - core/store/materialization/dataplane/loaders/disk_loader.h
 links:
   predecessor: ./0036-03-lazy-artifact-handle.md

@@ -30,7 +30,7 @@ Building on the UMA preemptible mechanism described in `docs/internals/preemptib
 
 ### Global Store / daemon coordination
 
-- `daemon/worker_lifecycle_manager.cc:122-150` only fills `get_mem_pool_size()` / `get_available_memory()` when registering a worker, and heartbeats only report a single `mem_pool_available_size`, so there is no way to communicate stable vs. preemptible capacity.
+- `daemon/ha/worker_lifecycle_manager.cc:122-150` only fills `get_mem_pool_size()` / `get_available_memory()` when registering a worker, and heartbeats only report a single `mem_pool_available_size`, so there is no way to communicate stable vs. preemptible capacity.
 - The `workers` table inside `schema.sql` only contains `mem_pool_total_size` / `mem_pool_available_size`, and the `chunk_directory` table only has an integer `chunk_state` (0=HOT...4=EVICTED). There is no understanding of leases or memory tiers.
 - The Global Store Python services (`tensorcast/global_store/services/worker_service.py`, `tensorcast/global_store/repositories/chunk_directory_repository.py`) are built around those fields and lack any `MemoryTierStatus` or lease-related RPCs.
 
@@ -306,7 +306,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_tier_leases_node_artifact ON memory_tier_l
 | Loader / strategy | `core/store/materialization/planning/chunk_aware_strategy.cc` | Replace the hard-coded `preemptible_ratio` with `MemoryTierConfig` logic; skip `mark_cpu_preemptible` when disabled. |
 | Replica controller | `core/store/replica/replica_load_controller.cc` | Read the new config, gate `enable_preemptible_memory`, and support the `Keep`/`StableOnly` branch when invoking `post_gpu_load_policy`. |
 | UMA ledger | `core/store/replica/unified_memory_authority.{h,cc}` | Extend `ChunkRecord` with `StableLease` / `Resident` states; `mark_cpu_chunks_preemptible` obeys the config; `post_gpu_load_policy` gets the new branch. |
-| Daemon → GS heartbeat | `daemon/worker_lifecycle_manager.cc` | Heartbeats include stable/preemptible capacity and the config switch; call the new `MemoryTierService` RPC. |
+| Daemon → GS heartbeat | `daemon/ha/worker_lifecycle_manager.cc` | Heartbeats include stable/preemptible capacity and the config switch; call the new `MemoryTierService` RPC. |
 | Global Store schema | `schema.sql`, `tensorcast/global_store/services/worker_service.py`, `repositories/*` | Extend the `workers` table, add `memory_tier_snapshots` / `memory_tier_leases` tables, and update repositories/services + gRPC surface. |
 | Telemetry & control plane | `tensorcast/global_store/services/memory_tier_service.py` (new) | Implement `PublishMemoryTierStatus`, `RequestMemoryTierLease`, `AcknowledgeMemoryTierLease`, `RevokeMemoryTierLease`, `ListOutstandingLeases`, aligned with the DuckDB schema. |
 | Configuration system | `proto/tensorcast/config/v1/daemon_config.proto`, `core/common/config/daemon_config_io.cc`, `tensorcast/global_store/config/settings.py` | Define the `memory_tiers` fields in the unified config, update parsing/validation to follow design 0004. |

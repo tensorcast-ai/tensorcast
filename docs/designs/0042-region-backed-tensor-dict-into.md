@@ -14,7 +14,7 @@ related_code:
   - tensorcast/api/_materialize.py
   - tensorcast/daemon_ctl.py
   - daemon/service/controllers/materialization_controller.cc
-  - daemon/ipc_region_registry.h
+  - daemon/state/ipc_region_registry.h
   - core/store/materialization/**
 created: 2025-12-21
 last_updated: 2025-12-21
