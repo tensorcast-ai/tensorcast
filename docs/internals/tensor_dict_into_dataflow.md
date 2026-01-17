@@ -52,7 +52,7 @@ sequenceDiagram
   participant GS as Global Store
 
   SDK->>SDK: Build TargetLayout + TargetTensorOffset
-  SDK->>Daemon: MaterializeIntoTarget (artifact_id, layout, device_uuid)
+  SDK->>Daemon: MaterializeIntoTarget (artifact_id, layout, device_uuid, pid)
   Daemon->>Daemon: Acquire IpcRegionRegistry ref + map IPC handle
   Daemon->>Engine: materialize_into_target(target_ptr, total_size, index_json)
   Engine->>GS: RequestReplicaTransport (if P2P)
@@ -66,6 +66,8 @@ Phase 1 constraints:
 - Canonical index only; no view/subset (no `tensor_names` or `view_subset_hash`).
 - Single coalesced storage; `storage_length` must match the logical total size.
 - `device_uuid` is required and must match `storage.device_id`.
+- The RPC is loopback/UDS only; `pid` is required and must match the registered
+  region owner PID.
 - Verification is skipped for external targets; metrics record the skip.
 
 Failure handling:

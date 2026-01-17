@@ -23,6 +23,9 @@ related_code:
 Implement Phase 2+ support for region-backed `tensor_dict_into` (`MaterializeIntoTarget`): view-indexed layouts
 (`INDEX_KIND_VIEW` + `view/view_id`), packed subset selection (`tensor_names` / `view_subset_hash`), multi-storage
 COALESCED (ordered concatenation) via a new TargetLayout-backed GPU sink, and (optionally) external-target verification.
+This work also requires cross-cutting identity hardening (deterministic `view_id` resolution for non-identity views and
+unambiguous subset-hash encoding) so Phase 2+ is safe and becomes a reliable lower-layer for
+`docs/designs/0052-deferred-slice-materialization.md`.
 These lower-layer primitives are also the dependency for daemon-owned placeholder/deferred fill sessions
 (`docs/designs/0052-deferred-slice-materialization.md`).
 
@@ -43,6 +46,9 @@ These lower-layer primitives are also the dependency for daemon-owned placeholde
   - `core/store/materialization/dataplane/sinks/gpu_memory_sink.{h,cc}`
 - Region mapping + ownership/TTL is tracked by the daemon:
   - `daemon/state/ipc_region_registry.{h,cc}`
+- Cross-cutting identity issues must be fixed before enabling view/subset into-target:
+  - a non-identity `view` must never execute without a resolved `view_id` (see `docs/designs/0016-artifact-view-v1.md`)
+  - `view_subset_hash` / `ViewSubset.subset_hash` must be standardized as raw digest bytes (never UTF-8/hex-string bytes)
 
 ## Constraints
 
@@ -53,19 +59,34 @@ These lower-layer primitives are also the dependency for daemon-owned placeholde
 
 # Phases & Milestones
 
+- [ ] Phase 0: Identity hardening (prerequisite for Phase 1 and for 0052 reuse)
+  - [ ] Milestone 1: Make `view_id` resolution authoritative and non-optional for non-identity views:
+    - when a request carries `view` but no `view_id`, compute a deterministic `view_id` (per `docs/designs/0016-artifact-view-v1.md`)
+    - propagate the resolved `view_id` into `VariantIdentity.view_id` so core `ReplicaKey` disambiguation and variant verification apply
+    - reject non-identity views that still lack a resolved `view_id` (fail fast to avoid canonical/variant collisions)
+    - add regression tests that a view-spec request does not reuse/collide with the canonical `ReplicaKey`
+  - [ ] Milestone 2: Standardize subset hash encoding end-to-end:
+    - define the canonical subset-hash algorithm (sorted+unique `tensor_names` → SHA-256 digest bytes)
+    - ensure SDK sends raw digest bytes in `view_subset_hash` and treats response `ViewSubset.subset_hash` as raw digest bytes
+    - add round-trip tests that cover request/response stability and caching labels
+
 - [ ] Phase 1: Enable view + subset selection for region-backed targets
   - [ ] Milestone 1: Relax daemon gating and make validation phase-aware:
     - accept `index_kind=VIEW` + `view/view_id` for `MaterializeIntoTarget`
+    - require a resolved `view_id` for non-identity `view` specs and validate it matches `target_layout.view_id`
     - accept `tensor_names` / `view_subset_hash` when the request defines a packed subset view ByteSpace
     - validate tensor table entries against the *selected* index bytes (canonical or view)
   - [ ] Milestone 2: Implement selected-index resolution in core `materialize_into_target`:
     - canonical only (Phase 1)
     - view-indexed (Phase 2+)
     - packed subset view index bytes (Phase 2+), including PAD=0 semantics
-  - [ ] Milestone 3: Populate response metadata for selection:
+  - [ ] Milestone 3: Choose a safe packed-subset contract (required before shipping subset-packed into-target):
+    - Option A (preferred): add a preflight planning RPC returning `view_index_bytes`, `view_subset`, and `logical_total_size` without writing
+    - Option B: centralize packing in one implementation (C++ core + Python binding) and add compatibility tests against the daemon
+  - [ ] Milestone 4: Populate response metadata for selection:
     - always return `canonical_index_bytes`
     - when selection is applied, return `view_index_bytes` + `view_subset`
-  - [ ] Milestone 4: Extend `//daemon:materialize_into_target_validation_test` with VIEW + subset scenarios (fake CUDA)
+  - [ ] Milestone 5: Extend `//daemon:materialize_into_target_validation_test` with VIEW + subset scenarios (fake CUDA)
 
 - [ ] Phase 2: Multi-storage COALESCED sink (ordered concatenation)
   - [ ] Milestone 1: Implement a TargetLayout-backed GPU sink that supports ordered concatenation across multiple region
@@ -95,6 +116,8 @@ These lower-layer primitives are also the dependency for daemon-owned placeholde
 
 - Phase 2+ view-indexed and subset-packed requests succeed with no daemon-owned replica allocation and bounded writes into
   the provided regions.
+- Non-identity view requests always execute with a resolved `view_id` (no canonical/variant `ReplicaKey` collisions).
+- Subset hashes round-trip consistently as raw digest bytes (SDK↔daemon), and are safe to use for cache keys/metrics.
 - Multi-storage COALESCED writes are correct at storage boundaries (no off-by-one; no cross-storage writes).
 - PAD=0 semantics hold for the selected ByteSpace (either via explicit zero writes or proven pre-zeroed destinations).
 - When external-target verification is enabled, corrupt/mismatched writes fail and the region is poisoned; when disabled,

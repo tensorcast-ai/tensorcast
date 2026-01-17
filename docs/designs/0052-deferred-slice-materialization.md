@@ -272,8 +272,13 @@ Because Global Store view routing is not yet implemented, we publish the output 
 Consumers can then `tc.artifact(artifact_id=<cgid>).tensor_dict(device=...)` and fetch via P2P without disk access, using existing replica routing.
 
 Optionally, for traceability, the daemon may also write a `variants` row linking:
-- canonical artifact id (mi2) → `view_id` = hash(view_spec_json) and `view_size`
-but this is not required for transport in Phase 1.
+- canonical artifact id (mi2) → deterministic `view_id` + `view_size`
+
+If this is done, `view_id` MUST follow the canonical variant-identity rules in
+`docs/designs/0016-artifact-view-v1.md` (do not use `hash(view_spec_json)`), and
+it MUST only be emitted when the produced ByteSpace is representable as a true
+view variant with stable packing. This is not required for transport in Phase 1
+and should be omitted when slice packing depends on allocation order.
 
 # Invariants & Error Model
 

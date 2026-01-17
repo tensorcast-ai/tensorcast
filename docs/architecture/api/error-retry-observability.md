@@ -94,6 +94,8 @@ Daemon metrics:
 
 - `tc_local_stable_tier_total{op,status,requirement}`
 - `tc_local_stable_tier_seconds{op,status}`
+- `tc_store_materialize_into_target_total{result,reason,source}`
+- `tc_store_materialize_into_target_verification_skipped_total`
 - `tc_persist_tasks_active{state}`
 - `tc_persist_errors_total{stage,reason}`
 - `tc_persist_progress_ratio`

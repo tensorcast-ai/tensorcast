@@ -106,6 +106,10 @@ path from LIP registration. The daemon writes directly into an existing CUDA
 region when the target layout is fully coalesced and matches the canonical
 index. No replica is allocated.
 
+This section describes the **current Phase 1 behavior**. Phase 2+ extends the
+same foundation to view-indexed and subset-packed layouts and multi-storage
+targets; see `docs/designs/0042-region-backed-tensor-dict-into.md`.
+
 ### SDK preconditions
 
 The SDK enforces strict eligibility rules before invoking
@@ -124,6 +128,8 @@ These checks are implemented in `tensorcast/api/store/materialization.py` and
 
 The daemon validates the request and the layout strictly:
 
+- The RPC is **loopback/UDS only**; non-loopback peers are rejected before any
+  write begins.
 - `TargetLayout` must be `LAYOUT_KIND_COALESCED_UNSPECIFIED` with
   `INDEX_KIND_CANONICAL_UNSPECIFIED`.
 - Exactly one storage entry, using `vram_region_id` and `mapping_base_offset`.
@@ -180,7 +186,7 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 ## Failure Modes
 
 - Owner mismatch returns `PERMISSION_DENIED`.
-- Expired regions return `FAILED_PRECONDITION`.
+- Expired regions behave as missing and return `NOT_FOUND`.
 - Drain timeouts return `DEADLINE_EXCEEDED` and leave the artifact quiesced.
 
 ## Code Map

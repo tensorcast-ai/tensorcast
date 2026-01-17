@@ -39,7 +39,7 @@ Implement a daemon-owned, deferred slice loading path that returns placeholder C
 - [ ] Phase 4: Global Store publication (optional but recommended)
   - [ ] Milestone 1: Define `cgid:` naming scheme for produced slice artifacts (include TTL)
   - [ ] Milestone 2: Register communicator keys for slice buffers and publish via `register_memory_replica`
-  - [ ] Milestone 3: (Optional) Upsert `variants` metadata for traceability (not required for routing)
+  - [ ] Milestone 3: (Optional) Upsert `variants` metadata for traceability (not required for routing; `view_id` must follow `docs/designs/0016-artifact-view-v1.md` and only when packing is stable)
 
 - [ ] Phase 5: Tests + docs
   - [ ] Milestone 1: C++ unit tests for TargetLayout sink mapping + selection-plan assembly (fake CUDA)

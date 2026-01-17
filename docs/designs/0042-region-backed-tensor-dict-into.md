@@ -40,6 +40,7 @@ Introduce a TargetLayout-backed `tensor_dict_into` RPC (`MaterializeIntoTarget`)
 3. Support multi-storage COALESCED layouts by defining a stable “ordered concatenation” rule for storages and implementing a multi-storage GPU sink (so the logical ByteSpace can be backed by multiple regions/allocations without scatter logic in the pump).
 4. Add optional external-target verification using plan-based hashing primitives so Phase 1’s “verification skipped” becomes an explicit, configurable trade-off.
 5. Keep `TargetLayout` and logical ByteSpace semantics reusable by daemon-owned placeholder sessions (the session/RPC surface remains out of scope for this design).
+6. Make view/subset identity semantics normative and unambiguous: resolve a deterministic `view_id` for any non-identity view and standardize `view_subset_hash` / `ViewSubset.subset_hash` encoding so SDK↔daemon cannot silently diverge (required for `docs/designs/0052-deferred-slice-materialization.md` reuse).
 
 ## Non-Goals
 - Replace `tensor_dict()` or `get()` flows (they continue to materialize a daemon-owned replica).
@@ -59,7 +60,7 @@ Introduce a TargetLayout-backed `tensor_dict_into` RPC (`MaterializeIntoTarget`)
 - `region_backed_mode` is consulted only by `tensor_dict_into` / `tensor_into` / `get_into`; `get` / `get_view` ignore it.
 
 ## Phase 2+ Scope (planned)
-- `index_kind=VIEW` is supported; requests may carry `view` or `view_id` (same semantics as other v2 materialization RPCs).
+- `index_kind=VIEW` is supported; requests may carry `view_id` or a `view` spec. If a `view` spec is provided, the daemon MUST resolve a deterministic `view_id` (per `docs/designs/0016-artifact-view-v1.md`) and treat it as authoritative (including for replica identity and caching). Identity views fold to the canonical path (`index_kind=CANONICAL`, no `view_id`).
 - Selective layouts are supported: request `tensor_names` and/or `view_subset_hash` and provide a target layout covering only the selected tensors in a packed view ByteSpace.
 - COALESCED supports multiple storages via ordered concatenation (to span multiple regions or multiple daemon allocations).
 - Optional external-target verification is supported (configurable; may remain off by default for performance).
@@ -70,6 +71,7 @@ Phase 1 is already wired as a dedicated v2 RPC (`MaterializeIntoTarget`) with re
 - Requires `artifact_id` and a COALESCED single-storage target; rejects `view/view_id`, `tensor_names/view_subset_hash`, and multi-storage layouts.
 - Streams bytes via the existing core dataplane (`SeekableSource → pump_ranges → GpuMemorySink`) into a mapped client region, then releases the region ref.
 - Skips external-target verification and treats failures as potentially partial writes (region is poisoned).
+- Enforces a local-only security model: `MaterializeIntoTarget` rejects non-loopback peers (loopback/UDS only).
 
 This leaves two gaps that block higher-level integrations such as daemon-owned placeholders and vLLM-style deferred slice loading:
 - No view-indexed / packed subset ByteSpace for into-target.
@@ -145,10 +147,15 @@ separate from “where to write them”. Cache keys and observability should use
 - `selection_hash`: identity of the selection applied on top (view + subset).
 
 `selection_hash` is computed from a stable serialization of:
-- view identity: `view_id` **or** canonicalized `view` spec (+ placement when relevant)
-- subset identity: `tensor_names` (sorted, unique, stable) **or** caller-provided `view_subset_hash`
+- view identity: a resolved `view_id` (required for any non-identity view). A raw `view` spec is input-only and MUST NOT be treated as an identity substitute because it can collide with the canonical `ReplicaKey` when `view_id` is absent.
+- placement: `TRANSFORM_PLACEMENT_SERVER|CLIENT` when relevant (transpose requires client placement by default).
+- subset identity: `tensor_names` (sorted, unique, stable) plus `view_subset_hash` if supplied.
 
 Phase 1 keeps selection empty and treats `selection_hash` as absent.
+
+**Normative representation (required)**
+- `view_id`: a deterministic, stable string identifier for the variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`). For any non-identity view, the daemon MUST populate `VariantIdentity.view_id` so core `ReplicaKey` disambiguation and verification apply.
+- `view_subset_hash` / `ViewSubset.subset_hash`: opaque **raw digest bytes** (recommended: 32-byte SHA-256 digest of a canonical serialization of sorted, unique `tensor_names`). These fields MUST NOT contain UTF-8 bytes of a hex string, and MUST NOT reuse `view_data_hash`.
 
 ### Index Anchoring
 - `index_kind=CANONICAL` means logical offsets are canonical offsets.
@@ -296,24 +303,25 @@ message MaterializeIntoTargetRequest {
   int32 pid = 5;
   string device_uuid = 6;
 
-  tensorcast.daemon.v2.SourcePreference preference = 7;
+  SourcePreference preference = 7;
+  SourcePolicy source_policy = 12;
 
   // Selective materialization (Phase 2+)
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    tensorcast.daemon.v2.ViewSpec view = 1001;
+    ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v2.TransformPlacement placement = 1003;
+  TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetResponse {
   string artifact_id = 1;
-  tensorcast.daemon.v2.MaterializeReplicaStatus status = 2;
-  tensorcast.daemon.v2.MaterializationSource source = 3;
+  MaterializeReplicaStatus status = 2;
+  MaterializationSource source = 3;
   bytes canonical_index_bytes = 4;
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
@@ -427,9 +435,14 @@ the target region does not need to span the full canonical artifact size.
 
 Request intent (illustrative):
 - `tensor_names = ["q"]`
-- `view_subset_hash = SHA256("q")` (stable, SDK-defined)
+- `view_subset_hash = SHA256(sorted_unique(tensor_names))` (raw digest bytes; stable and language-agnostic)
 - `index_kind = INDEX_KIND_VIEW`
-- `view_id = "subset:<view_subset_hash_hex>"` (or another stable derivation)
+- `view_id = "<resolved view_id>"` (deterministic variant identity; resolved from `view` or provided explicitly)
+
+The selected output ByteSpace identity is `(view_id, view_subset_hash, placement, packing_version)`. `view_id` MUST NOT
+be derived from `view_subset_hash`; it must remain the deterministic identity of the underlying view (see
+`docs/designs/0016-artifact-view-v1.md`). The daemon returns `view_index_bytes` describing the packed layout, and clients
+must validate that their `TargetLayout` matches these bytes before treating the target region contents as defined.
 
 The daemon returns `view_index_bytes` describing the packed layout (JSON simplified):
 
@@ -455,7 +468,7 @@ target_layout {
   ]
   layout_kind: COALESCED
   index_kind: INDEX_KIND_VIEW
-  view_id: "subset:<...>"
+  view_id: "<resolved view_id>"
   tensor_spec_kind: TENSOR_SPEC_KIND_OFFSETS
 }
 ```
@@ -579,6 +592,7 @@ flowchart LR
 # Invariants & Error Model
 
 ## Invariants
+- `MaterializeIntoTarget` is loopback/UDS only; non-loopback peers are rejected with `PERMISSION_DENIED` before any write begins.
 - Only region-backed storages are accepted (no inline IPC handles / `cuda_ipc_handle`).
 - Every tensor in the request maps to a canonical or view entry by name.
 - Writes are bounded to the declared storage length and region size.
@@ -618,17 +632,19 @@ flowchart LR
   (storages do not cover a linear `[0, logical_total_size)` space), missing `artifact_id` (Phase 1),
   `disk_fallback` without `artifact_id` (Phase 1), and Phase 1 gating violations (`tensor_names` / `view_subset_hash`,
   view identity, `index_kind != CANONICAL`, multi-storage, or non-full canonical coverage).
-- `FAILED_PRECONDITION`: region not found, region poisoned, TTL expired, owner_pid mismatch,
-  bounds violation, or device UUID mismatch.
+- `PERMISSION_DENIED`: non-loopback peer (local-only RPC) and owner PID mismatch when acquiring a region.
+- `NOT_FOUND`: region not found (including TTL expiry via registry sweep) and missing canonical index bytes for the requested `artifact_id`.
+- `FAILED_PRECONDITION`: region poisoned, region/device mismatch after acquisition, or region bounds violation.
 - `DATA_LOSS`: transfer started but failed (partial writes possible); retryable=false.
 - `CANCELLED`: client cancellation before transfer start (no bytes written).
 - `RESOURCE_EXHAUSTED`: pinned buffer pool exhausted.
 
 ## Observability
 - Daemon counter: `tc_store_materialize_into_target_total{result,reason,source}` where
-  `reason` is low-cardinality (layout_mismatch, region_missing, ttl_expired,
-  owner_pid_mismatch, bounds, capability_missing, selection_not_supported,
-  device_uuid_mismatch, region_poisoned, transfer_failed).
+  `reason` is a low-cardinality string emitted by `MaterializationController` (Phase 1 examples:
+  `non_loopback_peer`, `layout_mismatch`, `region_missing`, `region_poisoned`, `bounds`, `map_failed`, `transfer_failed`).
+- Daemon counter: `tc_store_materialize_into_target_verification_skipped_total` increments when external-target
+  verification is skipped (Phase 1 always).
 - SDK counters:
   - `tc_store_region_backed_fallback_total{reason}`
   - `tc_store_region_backed_verification_skipped_total`
@@ -650,9 +666,11 @@ updates are acceptable in this pre-launch phase.
 - **No external-target verification in Phase 1**: integrity checks are skipped for
   region-backed writes. Mitigate by adding plan-based verification in Phase 2 and
   instrumenting a metric that flags verification skips.
+- **Variant identity collision risk (cross-cutting)**: executing a non-identity view without a resolved `view_id` can cause canonical/variant `ReplicaKey` collisions and skip variant verification metadata. Mitigate by making the daemon authoritative for resolving `view_id` and rejecting missing `view_id` for non-identity views.
 - **Packed subset identity mismatch risk (Phase 2+)**: if the SDK and daemon disagree on subset identity/packing, the
   client can allocate an unsafe target. Mitigate by making the daemon authoritative for `view_index_bytes` and
   returning it (plus `view_subset`) so clients can validate what was actually written.
+- **Hash encoding drift risk (cross-cutting)**: if SDKs treat `view_subset_hash` as UTF-8 or hex-string bytes, cache keys and observability will silently diverge across languages. Mitigate by standardizing raw digest bytes and adding round-trip tests for request/response hashes.
 - **Multi-storage mapping bugs (Phase 2+)**: ordered concatenation is simple but still easy to get wrong at boundaries.
   Mitigate with targeted unit tests for the sink mapping and end-to-end daemon tests exercising multi-storage writes.
 - **Retry behavior**: region-backed failures poison the region and are non-retryable
