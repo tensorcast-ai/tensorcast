@@ -13,8 +13,8 @@ related_code:
   - core/store/replica/unified_memory_authority.cc
   - core/store/materialization/runtime/pipeline/handle_stage.cc
   - daemon/service/controllers/materialization_controller.cc
-  - daemon/session_lifecycle.h
-  - daemon/ref_tracker.h
+  - daemon/state/session_lifecycle.h
+  - daemon/state/ref_tracker.h
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - tensorcast/api/_materialize.py
   - tensorcast/api/store/materialization.py
@@ -226,7 +226,7 @@ To avoid adding a second lease/liveness system, handle leases should reuse the e
   lease creation (for CPU export cleanup):
   - **Subject identity must be the full `store::loading::ReplicaKey`** (includes `view_id` and `device.uuid`), not just
     `{artifact_id, device_id}`. This avoids collisions between canonical vs view variants and avoids mismatches when
-    GPUs are selected by UUID (see `core/store/materialization/contracts/loading_spec.h` and `daemon/ref_tracker.h`).
+    GPUs are selected by UUID (see `core/store/materialization/contracts/loading_spec.h` and `daemon/state/ref_tracker.h`).
   - Finalizers must act on the exact `ReplicaKey` used for `RefTracker::add_ref` (not a reconstructed key), otherwise
     PID-exit/TTL cleanup can leak references.
   - Keep GPU reclaim behavior GPU-only (`maybe_unload_daemon_replica_`); CPU handle leases use finalizers to drop export

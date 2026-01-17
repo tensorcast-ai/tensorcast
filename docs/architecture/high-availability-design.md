@@ -20,9 +20,9 @@ This document explains High Availability (HA) as implemented in code: startup re
   - Recovery/state sync service: `tensorcast/global_store/services/recovery_service.py`
   - gRPC surface (registration, heartbeat, sync, health): `tensorcast/global_store/grpc_service.py`
 - Store Daemon (C++)
-  - Lifecycle + heartbeat + sync + drift eviction: `daemon/worker_lifecycle_manager.cc`
+  - Lifecycle + heartbeat + sync + drift eviction: `daemon/ha/worker_lifecycle_manager.cc`
   - Global Store client + retries/backoff: `core/store/components/global_store_client.{h,cc}`
-  - HA wiring + endpoint selection: `daemon/server_main.cc`
+  - HA wiring + endpoint selection: `daemon/app/server_main.cc`
 - Protocol buffers
   - Enhanced heartbeat and sync: `proto/tensorcast/global_store/v1/global_store.proto`
 

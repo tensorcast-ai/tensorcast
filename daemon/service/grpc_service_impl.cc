@@ -1,0 +1,546 @@
+// Copyright (c) 2025-2026, TensorCast Team.
+
+#include "daemon/service/grpc_service_impl.h"
+
+#include <nlohmann/json.hpp>
+#include <unistd.h>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <optional>
+#include <string_view>
+#include "absl/container/flat_hash_set.h"
+#include "absl/log/log.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/time/time.h"
+#include "core/store/components/global_store_client.h"
+#include "daemon/state/store_policy_resolver.h"
+#include "daemon/util/path_utils.h"
+#include "daemon/util/status_utils.h"
+#include "opentelemetry/metrics/provider.h"
+
+namespace tensorcast::daemon {
+
+using ::grpc::Status;
+using ::grpc::StatusCode;
+using status_utils::to_grpc_status;
+
+StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
+    : engine_(&deps.engine),
+      materialization_controller_(&deps.materialization_controller),
+      registration_controller_(&deps.registration_controller),
+      transport_controller_(&deps.transport_controller),
+      status_controller_(&deps.status_controller),
+      region_registry_(&deps.region_registry),
+      lip_manager_(&deps.lip_manager),
+      persistence_manager_(deps.persistence_manager),
+      shutdown_signal_(&deps.shutdown_signal),
+      opts_(std::move(opts)) {}
+
+Status StoreDaemonServiceImpl::MaterializeReplica(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeReplicaRequest* req,
+    v2::MaterializeReplicaResponse* resp) {
+  RpcContext rctx{"MaterializeReplica", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->materialize_replica(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::MaterializeIntoTarget(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeIntoTargetRequest* req,
+    v2::MaterializeIntoTargetResponse* resp) {
+  RpcContext rctx{"MaterializeIntoTarget", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->materialize_into_target(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ConfirmReplica(
+    grpc::ServerContext* ctx,
+    const v2::ConfirmReplicaRequest* req,
+    v2::ConfirmReplicaResponse* resp) {
+  RpcContext rctx{"ConfirmReplica", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->confirm(rctx, *req, *resp);
+}
+
+// Key-based materialization via Global Store mapping.
+Status StoreDaemonServiceImpl::MaterializeByKey(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeByKeyRequest* req,
+    v2::MaterializeByKeyResponse* resp) {
+  RpcContext rctx{"MaterializeByKey", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->materialize_by_key(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ResolveArtifactFromDisk(
+    grpc::ServerContext* ctx,
+    const v2::ResolveArtifactFromDiskRequest* req,
+    v2::ResolveArtifactFromDiskResponse* resp) {
+  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->resolve_artifact_from_disk(rctx, *req, *resp);
+}
+
+// Publish key mapping via Global Store.
+Status StoreDaemonServiceImpl::PublishReplicaKey(
+    grpc::ServerContext* ctx,
+    const v2::PublishReplicaKeyRequest* req,
+    v2::PublishReplicaKeyResponse* resp) {
+  RpcContext rctx{"PublishReplicaKey", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.key", req->key());
+
+  if (req->key().empty() || !req->has_artifact_descriptor() || req->artifact_descriptor().artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key and artifact_descriptor.artifact_id are required"};
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  std::string normalized_disk_path;
+  if (!req->disk_path().empty()) {
+    auto normalized_or = normalize_disk_path(req->disk_path(), opts_.storage_path);
+    if (!normalized_or.ok()) {
+      return to_grpc_status(normalized_or.status());
+    }
+    normalized_disk_path = normalized_or->string();
+  }
+
+  // Use engine's configured Global Store client for upsert.
+  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), normalized_disk_path);
+  if (!up.ok()) {
+    // For conflicts, return OK with ok=false for idempotency.
+    if (absl::IsAlreadyExists(up)) {
+      resp->set_ok(false);
+      resp->set_conflict_reason(std::string(up.message()));
+      rctx.mark_success();
+      return grpc::Status::OK;
+    }
+    return to_grpc_status(up);
+  }
+  resp->set_ok(true);
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::ResolveKeyMapping(
+    grpc::ServerContext* ctx,
+    const v2::ResolveKeyMappingRequest* req,
+    v2::ResolveKeyMappingResponse* resp) {
+  RpcContext rctx{"ResolveKeyMapping", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.key", req->key());
+
+  if (req->key().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto mapping_or = engine_->resolve_key_mapping(req->key());
+  if (!mapping_or.ok()) {
+    return to_grpc_status(mapping_or.status());
+  }
+  const auto& m = *mapping_or;
+  resp->set_artifact_id(m.artifact_id);
+  resp->set_used_disk_path(m.disk_path);
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::GetArtifactIndexById(
+    grpc::ServerContext* ctx,
+    const v2::GetArtifactIndexByIdRequest* req,
+    v2::GetArtifactIndexByIdResponse* resp) {
+  RpcContext rctx{"GetArtifactIndexById", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::StartPersistence(
+    grpc::ServerContext* ctx,
+    const v2::StartPersistenceRequest* req,
+    v2::StartPersistenceResponse* resp) {
+  RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (!persistence_manager_) {
+    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
+  }
+  auto policy_or = resolve_store_policy(req->has_policy() ? &req->policy() : nullptr);
+  if (!policy_or.ok()) {
+    return to_grpc_status(policy_or.status());
+  }
+  auto task_or = persistence_manager_->start_task(req->artifact_id(), *policy_or);
+  if (!task_or.ok()) {
+    return to_grpc_status(task_or.status());
+  }
+  const auto& task = *task_or;
+
+  resp->set_task_id(task.task_id);
+  resp->set_plan_id(task.plan_id);
+  resp->set_state(task.state);
+  resp->set_progress(task.progress);
+  if (!task.degraded_reason.empty()) {
+    resp->set_degraded_reason(task.degraded_reason);
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::QueryPersistenceStatus(
+    grpc::ServerContext* ctx,
+    const v2::QueryPersistenceStatusRequest* req,
+    v2::QueryPersistenceStatusResponse* resp) {
+  RpcContext rctx{"QueryPersistenceStatus", *ctx, opts_.allow_high_card_attrs};
+  if (req->task_id().empty() && req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "task_id or artifact_id is required"};
+  }
+  std::optional<std::string> task_key;
+  if (!req->task_id().empty()) {
+    task_key = req->task_id();
+  }
+  if (!persistence_manager_) {
+    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
+  }
+  absl::optional<PersistenceTaskState> task;
+  if (task_key.has_value()) {
+    task = persistence_manager_->get_by_task_id(*task_key);
+  } else {
+    task = persistence_manager_->get_latest_for_artifact(req->artifact_id());
+  }
+
+  if (!task.has_value()) {
+    return {StatusCode::NOT_FOUND, "persistence task not found"};
+  }
+  resp->set_task_id(task_key.value_or(task->task_id));
+  resp->set_artifact_id(task->artifact_id);
+  resp->set_plan_id(task->plan_id);
+  resp->set_state(task->state);
+  resp->set_progress(task->progress);
+  if (!task->degraded_reason.empty()) {
+    resp->set_degraded_reason(task->degraded_reason);
+  }
+  if (!task->last_error.empty()) {
+    resp->set_last_error(task->last_error);
+  }
+  for (const auto& shard : task->shards) {
+    auto* out = resp->add_shards();
+    out->set_shard_id(shard.shard_id);
+    out->set_shard_idx(shard.shard_idx);
+    out->set_state(shard.state);
+    out->set_progress(shard.progress);
+    if (!shard.degraded_reason.empty()) {
+      out->set_degraded_reason(shard.degraded_reason);
+    }
+    if (!shard.last_error.empty()) {
+      out->set_last_error(shard.last_error);
+    }
+    out->mutable_target_nodes()->Reserve(static_cast<int>(shard.targets.size()));
+    out->mutable_lease_ids()->Reserve(static_cast<int>(shard.targets.size()));
+    for (const auto& target : shard.targets) {
+      out->add_target_nodes(target.node_id);
+      out->add_lease_ids(target.lease_id);
+    }
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::UnloadReplica(
+    grpc::ServerContext* ctx,
+    const v2::UnloadReplicaRequest* req,
+    v2::UnloadReplicaResponse* resp) {
+  RpcContext rctx{"UnloadReplica", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->unload(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ClearMem(
+    grpc::ServerContext* ctx,
+    const v2::ClearMemRequest* /*req*/,
+    v2::ClearMemResponse* /*resp*/) {
+  RpcContext rctx{"ClearMem", *ctx, opts_.allow_high_card_attrs};
+  const int rc = engine_->clear_mem();
+  if (rc == 0) {
+    rctx.mark_success();
+    return Status::OK;
+  }
+  return {StatusCode::INTERNAL, absl::StrFormat("clear_mem() returned %d", rc)};
+}
+
+Status StoreDaemonServiceImpl::GetServerConfig(
+    grpc::ServerContext* ctx,
+    const v2::GetServerConfigRequest* /*req*/,
+    v2::GetServerConfigResponse* resp) {
+  RpcContext rctx{"GetServerConfig", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_server_config(rctx, *resp);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────
+
+// Legacy device/key helpers have been removed in favor of DeviceResolver
+
+Status StoreDaemonServiceImpl::WaitReplicaVerification(
+    grpc::ServerContext* ctx,
+    const v2::WaitReplicaVerificationRequest* req,
+    v2::WaitReplicaVerificationResponse* resp) {
+  RpcContext rctx{"WaitReplicaVerification", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->wait_verification(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::LockTransportChunks(
+    grpc::ServerContext* ctx,
+    const v2::LockTransportChunksRequest* req,
+    v2::LockTransportChunksResponse* resp) {
+  RpcContext rctx{"LockTransportChunks", *ctx, opts_.allow_high_card_attrs};
+  return transport_controller_->lock(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::RegisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v2::RegisterVramRegionRequest* req,
+    v2::RegisterVramRegionResponse* resp) {
+  RpcContext rctx{"RegisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.device.id", static_cast<int64_t>(req->device_id()));
+  span->SetAttribute("tc.region.size_bytes", static_cast<int64_t>(req->size_bytes()));
+  span->SetAttribute("tc.region.ttl_ms", static_cast<int64_t>(req->ttl_ms()));
+
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->owner_pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
+  }
+  if (req->device_id() < 0) {
+    return {StatusCode::INVALID_ARGUMENT, "device_id must be >= 0"};
+  }
+  if (req->size_bytes() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "size_bytes must be > 0"};
+  }
+  if (req->ttl_ms() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "ttl_ms must be > 0"};
+  }
+  if (req->cuda_ipc_handle().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
+  }
+
+  IpcRegionRegistry::RegisterParams params;
+  params.device_id = req->device_id();
+  params.owner_pid = req->owner_pid();
+  params.size_bytes = req->size_bytes();
+  params.ttl_ms = req->ttl_ms();
+  if (req->has_session_id()) {
+    params.session_id = req->session_id();
+  }
+  if (req->has_region_name()) {
+    params.region_name = req->region_name();
+  }
+  params.handle_bytes = std::string(req->cuda_ipc_handle());
+
+  auto desc_or = region_registry_->register_region(params);
+  if (!desc_or.ok()) {
+    return to_grpc_status(desc_or.status());
+  }
+  const auto& desc = *desc_or;
+  resp->set_region_id(desc.region_id);
+  resp->set_ttl_ms(desc.ttl_ms);
+  if (desc.expires_at != absl::InfiniteFuture()) {
+    const int64_t micros = absl::ToUnixMicros(desc.expires_at);
+    auto* ts = resp->mutable_expires_at();
+    ts->set_seconds(micros / 1'000'000);
+    ts->set_nanos(static_cast<int32_t>((micros % 1'000'000) * 1'000));
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::UnregisterVramRegion(
+    grpc::ServerContext* ctx,
+    const v2::UnregisterVramRegionRequest* req,
+    v2::UnregisterVramRegionResponse* resp) {
+  RpcContext rctx{"UnregisterVramRegion", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.region.id", req->region_id());
+
+  if (req->region_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "region_id is required"};
+  }
+  if (req->owner_pid() <= 0) {
+    return {StatusCode::INVALID_ARGUMENT, "owner_pid must be > 0"};
+  }
+
+  const bool force = req->has_force() ? req->force() : false;
+  auto released_or = region_registry_->unregister_region(req->region_id(), req->owner_pid(), force);
+  if (!released_or.ok()) {
+    return to_grpc_status(released_or.status());
+  }
+  resp->set_released(*released_or);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::DeregisterArtifact(
+    grpc::ServerContext* ctx,
+    const v2::DeregisterArtifactRequest* req,
+    v2::DeregisterArtifactResponse* resp) {
+  RpcContext rctx{"DeregisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  if (!req->artifact_id().empty()) {
+    rctx.span()->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  const std::string artifact_id = req->artifact_id();
+  auto lip_opt = lip_manager_->find_active_by_artifact_id(artifact_id);
+  if (!lip_opt.has_value()) {
+    return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+  }
+  const auto& lip = *lip_opt;
+  if (req->has_owner_pid() && lip.owner_pid != req->owner_pid()) {
+    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for active lease"};
+  }
+  // Optional TTL extension before quiesce
+  if (req->has_extend_ttl_ms() && req->extend_ttl_ms() > 0) {
+    auto st = lip_manager_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms());
+    if (!st.ok())
+      return to_grpc_status(st);
+  }
+  // Quiesce new staged exports
+  lip_manager_->quiesce_artifact(artifact_id);
+  bool drained = true;
+  if (req->wait_for_drain()) {
+    const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
+    absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
+    drained = lip_manager_->wait_exports_drained(artifact_id, deadline);
+    if (!drained) {
+      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+    }
+  }
+  // Remove active lease if owner matches (or no owner provided)
+  bool removed = lip_manager_->revoke_commit_lease_if_owner_matches(artifact_id, lip.device_id, lip.owner_pid);
+  resp->set_drained(drained);
+  resp->set_removed(removed);
+  if (removed) {
+    // Best-effort: synchronize removal with Global Store
+    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, lip.device_id);
+    if (!gs_st.ok()) {
+      // Do not fail the RPC; attach message for observability
+      resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+    }
+  }
+  // Return referenced region ids for observability
+  absl::flat_hash_set<std::string> unique_regions;
+  for (const auto& s : lip.storages) {
+    if (s.has_region())
+      unique_regions.insert(s.region_id);
+  }
+  for (const auto& rid : unique_regions) {
+    resp->add_released_region_ids(rid);
+  }
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::UnlockTransportChunks(
+    grpc::ServerContext* ctx,
+    const v2::UnlockTransportChunksRequest* req,
+    v2::UnlockTransportChunksResponse* /*resp*/) {
+  RpcContext rctx{"UnlockTransportChunks", *ctx, opts_.allow_high_card_attrs};
+  v2::UnlockTransportChunksResponse dummy;
+  return transport_controller_->unlock(rctx, *req, dummy);
+}
+
+Status StoreDaemonServiceImpl::BeginRegisterArtifact(
+    grpc::ServerContext* ctx,
+    const v2::BeginRegisterArtifactRequest* req,
+    v2::BeginRegisterArtifactResponse* resp) {
+  RpcContext rctx{"BeginRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->begin(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::CommitRegisteredArtifact(
+    grpc::ServerContext* ctx,
+    const v2::CommitRegisteredArtifactRequest* req,
+    v2::CommitRegisteredArtifactResponse* resp) {
+  RpcContext rctx{"CommitRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->commit(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::AbortRegisteredArtifact(
+    grpc::ServerContext* ctx,
+    const v2::AbortRegisteredArtifactRequest* req,
+    v2::AbortRegisteredArtifactResponse* resp) {
+  RpcContext rctx{"AbortRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->abort(rctx, *req, *resp);
+}
+
+// Removed unary FeedRegisterArtifact; use streaming variant only
+
+Status StoreDaemonServiceImpl::FeedRegisterArtifactStream(
+    grpc::ServerContext* ctx,
+    ::grpc::ServerReader<v2::FeedRegisterArtifactStreamRequest>* reader,
+    v2::FeedRegisterArtifactStreamResponse* resp) {
+  RpcContext rctx{"FeedRegisterArtifactStream", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->feed_stream(rctx, *reader, *resp);
+}
+
+grpc::Status StoreDaemonServiceImpl::feed_register_artifact_stream_vector(
+    const std::vector<v2::FeedRegisterArtifactStreamRequest>& reqs) {
+  return registration_controller_->feed_vector(reqs);
+}
+
+Status StoreDaemonServiceImpl::KeepAliveRegisterArtifact(
+    grpc::ServerContext* ctx,
+    const v2::KeepAliveRegisterArtifactRequest* req,
+    v2::KeepAliveRegisterArtifactResponse* resp) {
+  RpcContext rctx{"KeepAliveRegisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->keep_alive(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::RevokeRegisteredArtifact(
+    grpc::ServerContext* ctx,
+    const v2::RevokeRegisteredArtifactRequest* req,
+    v2::RevokeRegisteredArtifactResponse* resp) {
+  RpcContext rctx{"RevokeRegisteredArtifact", *ctx, opts_.allow_high_card_attrs};
+  return registration_controller_->revoke(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::GetWorkerStatus(
+    grpc::ServerContext* ctx,
+    const v2::GetWorkerStatusRequest* /*req*/,
+    v2::GetWorkerStatusResponse* resp) {
+  RpcContext rctx{"GetWorkerStatus", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_worker_status(rctx, *resp);
+}
+
+Status StoreDaemonServiceImpl::GetDetailedStatus(
+    grpc::ServerContext* ctx,
+    const v2::GetDetailedStatusRequest* /*req*/,
+    v2::GetDetailedStatusResponse* resp) {
+  RpcContext rctx{"GetDetailedStatus", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_detailed_status(rctx, *resp);
+}
+
+// verification tracking moved to VerificationTracker
+
+// Legacy GetLoadedReplicas removed; use V2
+
+Status StoreDaemonServiceImpl::GetLoadedReplicasV2(
+    grpc::ServerContext* ctx,
+    const v2::GetLoadedReplicasV2Request* req,
+    v2::GetLoadedReplicasV2Response* resp) {
+  RpcContext rctx{"GetLoadedReplicasV2", *ctx, opts_.allow_high_card_attrs};
+  return status_controller_->get_loaded_replicas_v2(rctx, *req, *resp, opts_.use_cursor_pagination);
+}
+
+} // namespace tensorcast::daemon

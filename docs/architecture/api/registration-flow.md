@@ -222,5 +222,5 @@ sequenceDiagram
 - SDK registration: [tensorcast/api/store/registration.py](../../../tensorcast/api/store/registration.py)
 - Storage graph and LIP upload: [tensorcast/api/_register.py](../../../tensorcast/api/_register.py)
 - Daemon registration controller: [daemon/service/controllers/registration_controller.cc](../../../daemon/service/controllers/registration_controller.cc)
-- Policy resolution: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc)
+- Policy resolution: [daemon/state/store_policy_resolver.cc](../../../daemon/state/store_policy_resolver.cc)
 - Stable cache admission: [core/store/components/stable_dram_cache_manager.h](../../../core/store/components/stable_dram_cache_manager.h)

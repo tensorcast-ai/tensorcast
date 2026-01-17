@@ -1,0 +1,71 @@
+// Copyright (c) 2025-2026, TensorCast Team.
+
+#include "daemon/testing/daemon_service_harness.h"
+
+#include <catch2/catch_test_macros.hpp>
+#include "core/store/store_engine.h"
+#include "core/store/store_engine_options.h"
+#include "grpcpp/server_context.h"
+
+namespace {
+
+tensorcast::store::StoreEngineOptions make_opts() {
+  tensorcast::store::StoreEngineOptions opts;
+  opts.storage_path = std::filesystem::temp_directory_path() / "tensorcast_daemon_cpp_test";
+  std::filesystem::create_directories(opts.storage_path);
+  opts.p2p_port = 47004;
+  opts.memory_pool_size = 64ull << 20;
+  opts.tx_slice_bytes = 1ull << 20;
+  opts.num_thread = 2;
+  return opts;
+}
+
+std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
+    const std::shared_ptr<tensorcast::store::StoreEngine>& engine) {
+  tensorcast::daemon::DaemonOptions options;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  return harness;
+}
+
+} // namespace
+
+TEST_CASE("KeepAlive/Revoke lifecycle no-ops", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto harness = make_harness(engine);
+  auto& service = harness->service();
+
+  // Begin coalesced registration
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
+  breq.set_device_id(0);
+  breq.set_total_size(1024 * 1024);
+  breq.set_owner_pid(getpid());
+  auto* idx = breq.mutable_tensor_index_data();
+  idx->set_data("{}");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
+  auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
+  REQUIRE(st.ok());
+
+  // KeepAlive should return OK
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactRequest kreq;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactResponse kresp;
+  kreq.set_registration_id(bresp.registration_id());
+  kreq.set_ttl_ms(2000);
+  kreq.set_epoch(1);
+  kreq.set_owner_pid(getpid());
+  st = service.KeepAliveRegisterArtifact(&ctx, &kreq, &kresp);
+  REQUIRE(st.ok());
+
+  // Revoke should return OK
+  tensorcast::daemon::v2::RevokeRegisteredArtifactRequest rreq;
+  tensorcast::daemon::v2::RevokeRegisteredArtifactResponse rresp;
+  rreq.set_registration_id(bresp.registration_id());
+  rreq.set_reason("test");
+  st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);
+  REQUIRE(st.ok());
+}

@@ -183,6 +183,6 @@ Risks & mitigations
 - Key code locations for the implementation:
   - `tensorcast/common/identity.py` and `core/common/artifact_identity.cc` — shared validation helpers and identity kind enum.
   - `tensorcast/api/_register.py` & `tensorcast/api/store.py` — SDK path that accepts CGID, skips hashing, and surfaces `ArtifactIdKind`.
-  - `daemon/service/controllers/registration_controller.cc` & `daemon/lip_manager.cc` — daemon validation and CGID-aware commit path.
+  - `daemon/service/controllers/registration_controller.cc` & `daemon/state/lip_manager.cc` — daemon validation and CGID-aware commit path.
   - `core/store/store_engine.cc` — Store engine commit logic propagating identity kind to Global Store.
   - `tensorcast/global_store/repositories/*.py` & `tensorcast/global_store/grpc_service.py` — Global Store persistence and routing with `id_kind` and `expires_at` support.

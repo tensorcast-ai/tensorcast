@@ -11,7 +11,7 @@ related_code:
   - core/common/memory/pinned_buffer_pool.{h,cc}
   - core/communicator/engine/mr_cache.{h,cc}
   - core/communicator/misc/ibv_wrap.{h,cc}
-  - daemon/server_main.cc
+  - daemon/app/server_main.cc
   - proto/tensorcast/communicator/v1/communicator_config.proto
 links:
   plan: ../plans/0045-rdma-staging-vram-and-mr-prereg.md

@@ -9,12 +9,12 @@
 
 #include <gsl/pointers>
 #include "core/store/store_engine.h"
-#include "daemon/ipc_region_registry.h"
-#include "daemon/lip_manager.h"
-#include "daemon/ref_tracker.h"
-#include "daemon/registration_manager.h"
-#include "daemon/rpc_context.h"
-#include "daemon/session_lifecycle.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/registration_manager.h"
+#include "daemon/state/session_lifecycle.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 

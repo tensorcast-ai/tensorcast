@@ -9,14 +9,15 @@
 #include <vector>
 
 #include "core/store/store_engine.h"
-#include "daemon/device_resolver.h"
-#include "daemon/handle_lease_registry.h"
-#include "daemon/ipc_region_registry.h"
-#include "daemon/lip_bridge.h"
-#include "daemon/ref_tracker.h"
-#include "daemon/rpc_context.h"
-#include "daemon/session_lifecycle.h"
-#include "daemon/sessions_service.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/device_resolver.h"
+#include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lip_bridge.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/session_lifecycle.h"
+#include "daemon/state/sessions_service.h"
+#include "daemon/state/shutdown_signal.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
@@ -30,7 +31,7 @@ class MaterializationController {
     LipBridge& lip;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
-    std::atomic<bool>& is_shutting_down;
+    ShutdownSignal& shutdown_signal;
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{false};

@@ -185,8 +185,8 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 
 ## Code Map
 
-- Region registry: [daemon/ipc_region_registry.h](../../../daemon/ipc_region_registry.h)
-- LIP manager: [daemon/lip_manager.cc](../../../daemon/lip_manager.cc)
-- Daemon RPC wiring: [daemon/grpc_service_impl.cc](../../../daemon/grpc_service_impl.cc)
+- Region registry: [daemon/state/ipc_region_registry.h](../../../daemon/state/ipc_region_registry.h)
+- LIP manager: [daemon/state/lip_manager.cc](../../../daemon/state/lip_manager.cc)
+- Daemon RPC wiring: [daemon/service/grpc_service_impl.cc](../../../daemon/service/grpc_service_impl.cc)
 - SDK region cache: [tensorcast/api/_region_cache.py](../../../tensorcast/api/_region_cache.py)
 - SDK APIs: [tensorcast/api/store/__init__.py](../../../tensorcast/api/store/__init__.py)

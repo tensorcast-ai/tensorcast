@@ -42,23 +42,29 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 
 ```mermaid
 flowchart TB
-  SVC[StoreDaemonService (gRPC)] --> CTRLS[Controllers]
-  CTRLS --> MGRS[Managers/Registries]
-  CTRLS --> OBS[RpcContext (metrics/tracing)]
-  MGRS --> RUNTIME[BackgroundScheduler]
-  MGRS --> ENGINE[StoreEngine]
-  CTRLS --> ENGINE
+  Main["server_main.cc"] --> App["DaemonApp<br>(composition root)"]
+  App --> Kernel["DaemonKernel<br>(state + background tasks)"]
+  App --> Svc["StoreDaemonServiceImpl<br>(gRPC adapter)"]
+  App --> Uds["LocalHandleServer<br>(UDS adapter)"]
+  App --> Ha["WorkerLifecycleManager<br>(HA adapter)"]
+
+  Svc --> Ctrls[Controllers]
+  Ctrls --> Kernel
+  Ha --> Ports["WorkerLifecyclePorts<br>(narrow ports)"]
+  Ports --> Kernel
 ```
 
-- Service (gRPC): constructs dependencies, gates shutdown, validates inputs, maps `absl::Status` to gRPC.
+- App (composition root): constructs and wires subsystems; owns start/stop order for background tasks, UDS, gRPC, and HA.
+- Service (gRPC): thin adapter that routes RPCs to controllers and maps `absl::Status` to gRPC.
 - Controllers:
   - MaterializationController: `Materialize*`, `Confirm`, `WaitVerification`, `Unload`, `GetArtifactIndexById`.
   - RegistrationController: `Begin`/`Feed`/`KeepAlive`/`Commit`/`Abort`/`Revoke` (unified feed path).
   - TransportController: `LockTransportChunks`/`UnlockTransportChunks`.
   - StatusController: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`.
-- Managers/Registries:
-  - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
+- State/Kernel:
+  - DaemonKernel owns long-lived state (sessions, registries, lifecycle, persistence, identity) and wires background tasks.
   - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
+- HA: WorkerLifecycleManager uses `WorkerLifecyclePorts` (identity, retire gates, shutdown, async runtime) and does not depend on gRPC internals.
 - Engine: single source of truth for materialization orchestration, memory lifecycle, UMA ledger semantics, verification readiness.
 
 ## Interfaces (Public Surface)
@@ -106,18 +112,16 @@ Contract highlights:
 
 ## Directory Layout (What lives here)
 
-- `grpc_service_impl.{h,cc}`: thin gRPC service entry points and dependency wiring.
-- `service/controllers/*`: controllers for materialization, registration, transport, and status.
-- `registration_manager.h`, `replica_session_manager.h`, `sessions_service.h`: unified registration/session lifecycles with TTL.
-- `ref_tracker.h`: PID reference tracking; liveness integrated via `SessionLifecycleTask`.
-- `transport_lock_manager.h`: tokenized chunk locking with TTL and best-effort unlock.
-- `verification_tracker.h`: completion-driven verification tracking (ReadySignal subscriptions) with capacity/expiry pruning.
-- `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
-- `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
-- `ipc_region_registry.{h,cc}`: tracks client-registered CUDA IPC regions with TTL, refcounts, and poison state.
-- `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
-- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; heartbeat/state sync run independently with monotonic sync tokens (epoch + request id), inventory/checksums use publishable + resident replicas, state sync includes remote_memory_keys/buffer_sizes when comm registration is enabled, heartbeat obsolete hints only request sync, and full-state sync/REMOVE changes enqueue a retire queue that disables remote access (GPU/CPU) and unloads only after ref/use/pin/transport-lock gates clear; `start()` performs the handshake/registration, and shutdown signals interruptible waits so stop exits promptly.
-- `server_main.cc`: flags/bootstrap and service registration.
+- `app/`: composition root (`daemon_app.{h,cc}`), entrypoint (`server_main.cc`), shutdown drain test.
+- `service/`: gRPC adapter (`grpc_service_impl.{h,cc}`), controllers (`service/controllers/*`), and RPC helpers (`rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `replica_listing.h`).
+- `ha/`: HA adapter (`worker_lifecycle_manager.{h,cc}`) and `worker_lifecycle_ports.h` for decoupled state access.
+- `state/`: daemon kernel and state modules (`daemon_kernel.{h,cc}`, `shutdown_signal.h`, `worker_identity_store.{h,cc}`, `retire_gates.{h,cc}`),
+  registries/lifecycle (`session_lifecycle.{h,cc}`, `pid_monitor.{h,cc}`, `replica_session_manager.h`, `sessions_service.h`,
+  `ref_tracker.h`, `handle_lease_registry.{h,cc}`, `ipc_region_registry.{h,cc}`, `transport_lock_manager.h`,
+  `verification_tracker.h`, `background_scheduler.h`, `sweep_tasks.h`, `persistence_manager.{h,cc}`, `local_handle_server.{h,cc}`).
+- `util/`: shared helpers (`path_utils.{h,cc}`, `identity_utils.{h,cc}`, `deadline_utils.h`, `grpc_peer_utils.{h,cc}`, `status_utils.h`).
+- `testing/`: shared daemon service harness for gRPC tests.
+- `common/`: low-level safe syscall wrappers (`safe_sys.h`).
 
 ## Build, Run, Test
 
