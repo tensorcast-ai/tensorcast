@@ -312,8 +312,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     }
   }
 
-  const bool subset_full = !subset_filter.empty() && subset_filter.size() == canonical_entries.size();
-  const bool subset_enabled = !subset_filter.empty() && !subset_full;
+  const bool subset_enabled = !subset_filter.empty();
 
   bool has_transform = false;
   uint64_t view_cursor = 0;
@@ -322,7 +321,22 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
   bool any_requires_materialization = false;
   TransformPlan transform_plan;
   std::vector<std::string> ordered_names;
-  ordered_names.reserve(canonical_entries.size());
+  if (subset_enabled) {
+    ordered_names.reserve(subset_names.size());
+    absl::flat_hash_set<std::string> seen;
+    seen.reserve(subset_names.size());
+    for (const auto& name : subset_names) {
+      if (!seen.insert(name).second) {
+        continue;
+      }
+      ordered_names.push_back(name);
+    }
+  } else {
+    ordered_names.reserve(canonical_entries.size());
+    for (const auto& [name, entry] : canonical_entries) {
+      ordered_names.push_back(name);
+    }
+  }
   std::unordered_map<std::string, uint64_t> offsets;
   std::unordered_map<std::string, uint64_t> sizes;
   std::unordered_map<std::string, CanonicalTensorMeta> metas;
@@ -332,17 +346,18 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
   metas.reserve(canonical_entries.size());
   canonical_offsets.reserve(canonical_entries.size());
 
-  for (const auto& [name, entry] : canonical_entries) {
-    if (subset_enabled && !subset_filter.contains(name)) {
+  for (const auto& name : ordered_names) {
+    auto entry_it = canonical_entries.find(name);
+    if (entry_it == canonical_entries.end()) {
       continue;
     }
+    const auto& entry = entry_it->second;
     const uint64_t aligned_start = (view_cursor + (kAlignmentBytes - 1)) / kAlignmentBytes * kAlignmentBytes;
     if (aligned_start > view_cursor) {
       selection_plan.ranges.push_back(make_pad_range(view_cursor, aligned_start - view_cursor));
       view_cursor = aligned_start;
     }
 
-    ordered_names.push_back(name);
     canonical_offsets[name] = entry.offset;
     const auto spec_it = spec.tensors.find(name);
     const TensorViewOps* ops = (spec_it == spec.tensors.end() ? nullptr : &spec_it->second);

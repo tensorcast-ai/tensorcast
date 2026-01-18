@@ -94,6 +94,22 @@ without allocating VRAM.
 See [tensor_dict_into dataflow](tensor_dict_into_dataflow.md) for the detailed
 sequence and constraints.
 
+## Deferred Slice Materialization
+
+Deferred loaders expose vLLM-friendly placeholder binding while still using the
+region-backed data plane:
+
+- `Artifact.deferred_loader(...)` allocates a client-owned CUDA arena, registers
+  the arena as a VRAM region, and returns CUDA tensors immediately.
+- `DeferredLoader.tensor(...)` returns placeholder views into the arena; no I/O
+  occurs until `commit()`.
+- `commit()` issues a single `MaterializeIntoTarget` RPC with ordered
+  `tensor_names` so `ViewPlanner` packs the subset in that order (8B alignment),
+  and `TargetLayout` respects per-storage boundaries when streaming.
+- Optional `publish=True` registers the filled slice artifact via
+  `VRAM_LEASED` (LIP), enabling P2P reuse without creating a daemon-owned
+  replica.
+
 ### Lease-In-Place Fast Path & Use Leases
 
 `MaterializeByKey` still resolves the human key via `MetadataGateway::resolve_key_mapping`, but before it coordinates transport it now asks `LipManager::try_satisfy_from_lip` for a replica that already lives on the requested GPU. When this fast path hits, the daemon reuses the existing CUDA IPC handle, marks the status as `ALLOCATED`, and returns both `artifact_id` and `used_disk_path` to the client without invoking the bulk materialization pipeline. If the fast path misses, the controller immediately falls through to the engine-backed path described below.

@@ -215,6 +215,46 @@ TEST_CASE("MaterializeIntoTarget accepts subset selection", "[daemon][materializ
   REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
 }
 
+TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.add_tensor_names("b");
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(12);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(0);
+  offset_b->set_logical_length(4);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(8);
+  offset_a->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+}
+
 TEST_CASE("MaterializeIntoTarget accepts view spec subset", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;

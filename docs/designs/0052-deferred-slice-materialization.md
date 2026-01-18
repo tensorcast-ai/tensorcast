@@ -2,7 +2,7 @@
 slug: 0052-deferred-slice-materialization
 title: Deferred Slice Materialization for vLLM (On‑Demand Slice + Deferred Copy)
 areas: ["sdk", "daemon", "core", "global_store", "proto"]
-status: draft
+status: accepted
 created: 2026-01-17
 last_updated: 2026-01-18
 related_code:
@@ -106,6 +106,17 @@ Interoperability with existing handles:
 - `DeferredLoader` is created from an `Artifact` handle (canonical or derived view). If the handle already has a view spec (e.g., `artifact.slice(...)`), the loader inherits it; callers may omit `slice=` when slicing is already encoded in the handle.
 - `slice=` reuses the existing `SliceSpec` conventions (`Artifact.slice(...)` / `ViewBuilder.slice(...)`).
 
+# Naming Compliance
+
+Python API naming follows the repository conventions:
+
+- Classes (`PascalCase`): `DeferredLoader`, `DeferredCommitResult`.
+- Methods/functions (`snake_case`): `Artifact.deferred_loader`, `DeferredLoader.tensor`, `DeferredLoader.plan`,
+  `DeferredLoader.commit`, `DeferredLoader.close`.
+
+No new public C++ APIs are introduced in Phase 1; existing `ViewPlanner` and `MaterializeIntoTarget` behavior is
+extended without adding new symbols, so naming conventions remain unchanged.
+
 # Architecture & Interfaces
 
 ## High-Level Execution Model (Phase 1)
@@ -198,6 +209,9 @@ Invariants:
 - `commit()` is the only readiness barrier.
 - Placeholder bytes are undefined until `commit()` succeeds; on any failure, callers must treat bytes as undefined.
 - Slice requests are validated against canonical index metadata (dtype/shape bounds + narrow constraints).
+- Core restriction: `MaterializationFacade` rejects multi-storage targets when a server-side view transform is required.
+  Phase 1 stays safe by supporting only `narrow` (no transforms) and using a single arena; future transpose support must
+  either force single storage or switch to client-side transforms.
 
 Representative errors:
 
