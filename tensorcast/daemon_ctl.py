@@ -518,6 +518,11 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
+        tensor_names: Sequence[str] | None = None,
+        view: store_daemon_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        view_subset_hash: bytes | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
@@ -525,6 +530,8 @@ class DaemonCtl:
             raise ValueError("artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
+        if view is not None and view_id is not None:
+            raise ValueError("Specify at most one of view or view_id")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
             if preference is not None:
@@ -546,11 +553,21 @@ class DaemonCtl:
                 pid=pid_value,
                 preference=preference_value,
             )
+            if tensor_names is not None:
+                request.tensor_names.extend(list(tensor_names))
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = True
+            if view_subset_hash is not None:
+                request.view_subset_hash = bytes(view_subset_hash)
+            if view is not None:
+                request.view.CopyFrom(view)
+            elif view_id is not None:
+                request.view_id = str(view_id)
+            if placement is not None:
+                request.placement = placement
             try:
                 response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(

@@ -552,13 +552,12 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_into_target(
     const DeviceKey& target_device,
-    gsl::not_null<void*> target_ptr,
-    uint64_t total_size,
+    const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
     const loading::MaterializeHints& hints) {
   return ingestion_runtime_->materialize_into_target(
-      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+      target_device, target_layout, canonical_index_json, generation, hints);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -585,6 +584,12 @@ absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::str
 
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
   return metadata_gateway_->get_canonical_index(artifact_id);
+}
+
+absl::StatusOr<components::ViewMetadata> StoreEngine::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) {
+  return metadata_gateway_->get_view_metadata(artifact_id, view_id);
 }
 
 absl::Status StoreEngine::upsert_key_mapping(
@@ -668,6 +673,13 @@ absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
     std::string_view canonical_index_json,
     const loader::ViewSpec& spec) {
   return loader::ViewPlanner::compute_view_plan(canonical_index_json, spec);
+}
+
+absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
+    std::string_view canonical_index_json,
+    const loader::ViewSpec& spec,
+    absl::Span<const std::string> subset_names) {
+  return loader::ViewPlanner::compute_view_plan(canonical_index_json, spec, subset_names);
 }
 
 bool StoreEngine::view_plan_allows_alias(const loader::ViewPlan& plan) {

@@ -33,6 +33,7 @@ from tensorcast.api.store.view_composer import (
     ViewBuilder,
     ViewMetadataCache,
     ViewSpecComposer,
+    compute_view_id,
 )
 
 if TYPE_CHECKING:
@@ -1099,8 +1100,13 @@ class Artifact:
                 view_hash = ViewSpecComposer.hash_view_spec(
                     self._view_spec, subset=subset_names
                 )
+            resolved_view_id: str | None = None
+            if self._view_spec is not None and not self._view_spec.is_identity:
+                resolved_view_id = compute_view_id(
+                    self._view_spec.proto, canonical_index_bytes
+                )
             view_cache = ViewMetadataCache(
-                view_id=str(view_hash),
+                view_id=str(resolved_view_id or view_hash),
                 view_index_bytes=view_index_bytes,
                 view_data_hash=str(view_hash),
                 tensor_names=subset_names,

@@ -17,6 +17,7 @@ Key files:
 - StoreEngine: core/store/store_engine.h, core/store/store_engine.cc
 - Replica + ReplicaLoadController: core/store/replica/*
 - Loaders and pump: core/store/materialization/dataplane/*
+- Target layout sink: core/store/materialization/dataplane/sinks/target_layout_gpu_sink.{h,cc}
 - View planning + execution: core/store/materialization/dataplane/view/{view_planner,view_plan_source}.{h,cc}
 - Service helpers:
   - IndexService: core/store/materialization/dataplane/metadata/index_reader.{h,cc}
@@ -28,7 +29,7 @@ Key files:
     - RuntimeEnv: core/store/runtime/runtime_env.{h,cc} (bootstraps RuntimeContext, owns worker identity, and coordinates lifecycle/shutdown hooks for runtime services).
     - ReplicaRuntime: core/store/runtime/replica/replica_runtime.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, publishes replica lifecycle events, manages remote access toggles, and tracks per-replica publish state to build the HA inventory of publishable/resident replicas).
     - Ingestion events: core/store/runtime/ingestion_events.h (canonical definitions for runtime ingestion hooks shared by RuntimeContext’s dispatcher, ReplicaRuntime, and the ingestion/metadata runtimes).
-    - MetadataGateway: core/store/runtime/metadata/metadata_gateway.{h,cc} (merges the old GlobalMetadataGateway + RegistrationFacade responsibilities, acting as the sole publisher for Global Store metadata, registration CRUD, key-mapping operations, TTL refreshes, and publish-state updates after registration).
+    - MetadataGateway: core/store/runtime/metadata/metadata_gateway.{h,cc} (merges the old GlobalMetadataGateway + RegistrationFacade responsibilities, acting as the sole publisher for Global Store metadata, registration CRUD, key-mapping operations, TTL refreshes, view metadata fetches for view-id requests, and publish-state updates after registration).
     - IngestionRuntime: core/store/runtime/ingestion/ingestion_runtime.{h,cc} (delegates all ingestion/materialize flows to `MaterializationFacade` and exposes `IngestionRuntimeDependencies` so tests can inject facade hooks without touching production wiring; lifecycle events flow through `IngestionEventHub`).
     - RuntimeContextEvents: core/store/runtime/context/runtime_context_events.{h,cc} (Folly MPMC queue used by observers/tests; runtimes now publish ingestion/replica/registration updates after performing their own work so event consumers remain optional). Tests drain the dispatcher before teardown to ensure queued ingestion callbacks do not target destroyed runtimes.
 - Components: core/store/components/*
@@ -123,6 +124,11 @@ graph TB
     `cuda_ipc_handle` uses the shared `cuda::IpcHandleBytes` abstraction from `core/cuda`.
   - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
+
+- Region-backed materialization (external targets):
+  - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(const DeviceKey&, const loading::IntoTargetLayout&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&)`
+  - Streams canonical or view-selected ByteSpaces directly into client-provided GPU storages; no daemon-owned replica is allocated.
+  - `IntoTargetLayout` supports ordered-concatenation multi-storage layouts (mapped to `TargetLayoutGpuSink`), and view/subset selection uses `ViewPlanner` + `ViewPlanSource` with `MaterializeHints::variant` carrying `view_id`/`view_spec` and placement.
 
   Note: In the key-based client flow, the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
 

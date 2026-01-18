@@ -362,6 +362,36 @@ py::dict compute_view_registration_plan_wrapper(py::bytes canonical_index_bytes,
   return result;
 }
 
+py::dict compute_view_index_bytes_wrapper(
+    py::bytes canonical_index_bytes,
+    const py::dict& spec_dict,
+    const py::object& subset_names_obj) {
+  const std::string canonical_index_json = canonical_index_bytes.cast<std::string>();
+  ViewSpec spec = build_view_spec_from_py(spec_dict);
+
+  std::vector<std::string> subset_names;
+  if (!subset_names_obj.is_none()) {
+    py::list names_list = subset_names_obj.cast<py::list>();
+    subset_names.reserve(names_list.size());
+    for (py::handle handle : names_list) {
+      subset_names.push_back(handle.cast<std::string>());
+    }
+  }
+
+  absl::StatusOr<tensorcast::store::loader::ViewPlan> plan_or =
+      ViewPlanner::compute_view_plan(canonical_index_json, spec, subset_names);
+  if (!plan_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, plan_or.status().ToString());
+  }
+  const auto& plan = *plan_or;
+
+  py::dict result;
+  result["view_index_bytes"] = py::bytes(plan.view_index_json);
+  result["view_size_bytes"] = py::int_(plan.view_size_bytes);
+  result["is_identity"] = plan.is_identity;
+  return result;
+}
+
 } // namespace
 
 // Wrapper function for generate_verification_info_from_disk
@@ -949,6 +979,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("canonical_index_json"),
           py::arg("view_ops"),
           "Compute bidirectional view registration plan using the core ViewPlanner")
+      .def(
+          "compute_view_index_bytes",
+          &compute_view_index_bytes_wrapper,
+          py::arg("canonical_index_bytes"),
+          py::arg("normalized_ops"),
+          py::arg("subset_names") = py::none(),
+          "Compute packed view index bytes using the core ViewPlanner")
       .def(
           "restore_tensors",
           &tensorcast::checkpoint::restore_tensors,

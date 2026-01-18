@@ -89,6 +89,10 @@ We introduce the following protobuf changes under a new `tensorcast.proto.daemon
 
 Canonical index fields are standardized as `canonical_index_bytes` / `view_index_bytes` (never `*_json`) and always paired with `generation` so caches and disk resolution stay in sync across SDK layers.
 
+**Hash and identity semantics (required)**
+- `view_subset_hash` (request) and `ViewSubset.subset_hash` (response) are opaque **raw digest bytes** identifying the requested selection (e.g., SHA-256 digest of a canonical serialization of sorted, unique `tensor_names`). They MUST NOT contain UTF-8 bytes of a hex string and MUST NOT reuse `view_data_hash`.
+- `view_id` identifies a variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`) and is distinct from subset selection identity.
+
 `TensorPayloadDescriptor` is a thin schema containing `{ string name, string dtype, string device_uuid, uint64 buffer_offset, uint64 byte_length, uint64 storage_offset, repeated int64 shape, repeated int64 stride }`. The daemon uses UMA layout information to only emit descriptors for requested tensors and writes contiguous slices into the exported IPC buffer. Disk loaders use the same message to describe byte ranges in POSIX files.
 
 The daemon and SDK use the v2 RPCs end-to-end; legacy v1 RPCs are no longer part of the supported surface.

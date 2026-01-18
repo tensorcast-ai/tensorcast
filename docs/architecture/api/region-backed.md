@@ -102,9 +102,9 @@ Why “fully covered” matters:
 ## Region-Backed get_into (MaterializeIntoTarget)
 
 Region-backed `get_into` uses the same region registry but a different control
-path from LIP registration. The daemon writes directly into an existing CUDA
-region when the target layout is fully coalesced and matches the canonical
-index. No replica is allocated.
+path from LIP registration. The daemon writes directly into existing CUDA
+regions when the target layout is coalesced and matches the selected
+byte-space (canonical or view-indexed). No replica is allocated.
 
 ### SDK preconditions
 
@@ -112,10 +112,11 @@ The SDK enforces strict eligibility rules before invoking
 `MaterializeIntoTarget`:
 
 - `artifact_id` is required (key-based requests are rejected).
-- Full tensor set required (no subset).
-- All target tensors must be CUDA, contiguous, and match canonical dtype/shape/stride.
-- Canonical layout must be coalesced (segment offsets equal storage offsets).
-- The target tensors must map into a single registered region.
+- Canonical or view-indexed selection supported, including packed subsets
+  (`tensor_names`); non-identity views resolve a deterministic `view_id`.
+- All target tensors must be CUDA, contiguous, and match the selected index dtype/shape/stride.
+- Coalesced layouts may span multiple storages using ordered concatenation.
+- Each storage must map into a registered region and cover its logical range.
 
 These checks are implemented in `tensorcast/api/store/materialization.py` and
 `tensorcast/api/_region_cache.py`.
@@ -124,14 +125,21 @@ These checks are implemented in `tensorcast/api/store/materialization.py` and
 
 The daemon validates the request and the layout strictly:
 
+- The RPC is **loopback/UDS only**; non-loopback peers are rejected before any
+  write begins.
 - `TargetLayout` must be `LAYOUT_KIND_COALESCED_UNSPECIFIED` with
-  `INDEX_KIND_CANONICAL_UNSPECIFIED`.
-- Exactly one storage entry, using `vram_region_id` and `mapping_base_offset`.
+  `INDEX_KIND_CANONICAL_UNSPECIFIED` or `INDEX_KIND_VIEW`.
+- One or more storage entries, each using `vram_region_id` and
+  `mapping_base_offset`, ordered by concatenation.
 - `tensor_spec_kind` must be offsets or alias format.
-- All canonical tensors must be present; offsets/lengths must match canonical
-  index entries, and `storage_offset` must equal canonical logical offset.
-- `storage_length` must cover the full logical size.
+- Offsets/lengths must match the selected index entries (canonical or view),
+  and `storage_offset` must equal logical offset within the concatenated layout.
+- `storage_length` must cover the selected logical size.
 - `device_uuid` and `pid` are required and must match the region device.
+- When `INDEX_KIND_VIEW` is used, the daemon resolves a view plan and validates
+  `target_layout.view_id` against the resolved `view_id` (empty for subset-only
+  layouts). `view_subset_hash` is treated as raw digest bytes and must match
+  the selected `tensor_names` when provided.
 
 ### Execution
 
@@ -140,8 +148,10 @@ Once validated, the daemon:
 1. Acquires the region from `IpcRegionRegistry` and maps its CUDA IPC handle.
 2. Computes the canonical index plan and materializes directly into the region
    via `StoreEngine::materialize_into_target`.
-3. Skips verification (`MaterializeHints::Verify::NONE`) by design; metrics
-   record that verification was skipped.
+3. Skips external-target verification by default (`engine.enable_external_target_verification=false`);
+   when enabled, the daemon hashes the target ByteSpace and compares against the
+   expected mi2/view hash, poisoning the region on mismatch and emitting metrics
+   for enabled/skipped verification.
 
 On transfer `DataLoss`, the daemon marks the region as poisoned to prevent
 reuse. The client then unregisters the region from its cache.
@@ -180,7 +190,7 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 ## Failure Modes
 
 - Owner mismatch returns `PERMISSION_DENIED`.
-- Expired regions return `FAILED_PRECONDITION`.
+- Expired regions behave as missing and return `NOT_FOUND`.
 - Drain timeouts return `DEADLINE_EXCEEDED` and leave the artifact quiesced.
 
 ## Code Map

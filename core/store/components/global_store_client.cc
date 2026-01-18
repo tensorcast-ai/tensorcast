@@ -1427,6 +1427,55 @@ absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::str
   return response.tensor_index_data();
 }
 
+absl::StatusOr<ViewMetadata> GlobalStoreClient::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) {
+  if (artifact_id.empty() || view_id.empty()) {
+    return absl::InvalidArgumentError("get_view_metadata requires artifact_id and view_id");
+  }
+  global_store::GetArtifactInfoByIdRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_view_id(std::string(view_id));
+  request.set_include_view_meta(true);
+
+  global_store::GetArtifactInfoByIdResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactInfoById(ctx, req, resp); },
+      "GetArtifactInfoById");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(
+          absl::StrFormat("View metadata not found for artifact_id=%s view_id=%s", artifact_id, view_id));
+    }
+    return absl::InternalError(
+        absl::StrFormat(
+            "GetArtifactInfoById failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  if (!response.has_view_meta()) {
+    return absl::NotFoundError(
+        absl::StrFormat("View metadata missing for artifact_id=%s view_id=%s", artifact_id, view_id));
+  }
+  const auto& meta = response.view_meta();
+  if (meta.view_spec_json().empty()) {
+    return absl::NotFoundError(
+        absl::StrFormat("view_spec_json missing for artifact_id=%s view_id=%s", artifact_id, view_id));
+  }
+  ViewMetadata result;
+  result.view_spec_json = meta.view_spec_json();
+  result.view_size_bytes = meta.view_size();
+  if (!meta.view_data_hash().empty()) {
+    result.view_data_hash = meta.view_data_hash();
+  }
+  return result;
+}
+
 absl::StatusOr<PlacementPlanResult> GlobalStoreClient::plan_placement(
     std::string_view artifact_id,
     global_store::PlacementPolicy policy,

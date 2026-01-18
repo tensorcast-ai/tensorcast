@@ -116,6 +116,9 @@ message Engine {
   // Depth (in slices) for engine-owned StreamingPinnedBuffer instances used for
   // streaming CPU<->GPU transfers and disk/p2p pipelines.
   uint32 streaming_buffer_chunks = 8;
+  // When true, MaterializeIntoTarget verifies external target writes against
+  // expected data hashes (content-addressed or view metadata).
+  bool enable_external_target_verification = 12;
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;

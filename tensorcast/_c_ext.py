@@ -116,6 +116,17 @@ def compute_view_registration_plan(
     )
 
 
+def compute_view_index_bytes(
+    canonical_index_bytes: bytes,
+    normalized_ops: Mapping[str, Any],
+    subset_names: Sequence[str] | None = None,
+) -> Mapping[str, Any]:
+    payload = list(subset_names) if subset_names is not None else None
+    return _load_c_ext().compute_view_index_bytes(
+        canonical_index_bytes, normalized_ops, payload
+    )
+
+
 def get_cuda_memory_handle(device_id: int, memory_ptr: int) -> bytes:
     return _load_c_ext().get_cuda_memory_handle(device_id, memory_ptr)
 
@@ -152,6 +163,7 @@ def save_model_to_disk(
 __all__ = [
     "build_canonical_index_from_safetensors",
     "collect_tensor_storage_graph",
+    "compute_view_index_bytes",
     "compute_view_registration_plan",
     "get_c_ext",
     "get_cuda_memory_handle",

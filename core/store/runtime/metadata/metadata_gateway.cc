@@ -243,6 +243,16 @@ absl::StatusOr<std::string> MetadataGateway::get_canonical_index(std::string_vie
   return (*client_or)->get_artifact_index_by_id(artifact_id);
 }
 
+absl::StatusOr<components::ViewMetadata> MetadataGateway::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) const {
+  auto client_or = get_connected_client();
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->get_view_metadata(artifact_id, view_id);
+}
+
 absl::Status MetadataGateway::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,

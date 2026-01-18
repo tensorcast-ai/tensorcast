@@ -1,11 +1,13 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
@@ -17,6 +19,7 @@ struct CanonicalRange {
 };
 
 std::string build_view_spec_json(const loader::ViewSpec& spec);
+absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec_json);
 
 uint64_t align_up(uint64_t value, uint64_t align);
 uint64_t align_down(uint64_t value, uint64_t align);

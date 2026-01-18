@@ -251,12 +251,15 @@ struct VariantIdentity {
 
 The daemon fills `VariantIdentity` when requests carry a view, guaranteeing that both retrieval and registration flows query GS with consistent identities.
 
+**Normative invariant (required)**
+- Any non-identity view MUST have a deterministic `view_id`. If a request provides `view` but omits `view_id`, the daemon MUST resolve `view_id` deterministically (per the `view_id = MH(DETERMINISTIC_PROTO(ViewSpec) ⊕ indexᵐ)` rule in this design) and propagate it into `VariantIdentity.view_id` so `ReplicaKey` disambiguation and variant verification apply. Non-identity views that still lack a resolved `view_id` MUST be rejected to avoid canonical/variant `ReplicaKey` collisions.
+
 # 3. Lifecycle Flows
 
 ## 3.1 Retrieval (`MaterializeReplica`)
 
 1. SDK normalises `ViewSpec` (or accepts a `view_id`), selects placement, and sends `MaterializeReplicaRequest`.
-2. Daemon populates `MaterializeHints::variant`, fetches canonical index v3 (local or GS), and probes the registry with the extended `ReplicaKey`.
+2. Daemon resolves `view_id` (when only `view` is provided), populates `MaterializeHints::variant`, fetches canonical index v3 (local or GS), and probes the registry with the extended `ReplicaKey`. Identity views fold to the canonical path (no `view_id`).
 3. On cache miss, `ViewPlanner` produces the bidirectional plan; retrieval path uses `SelectionPlan` plus `view_plan_source`.
 4. P2P and disk transports propagate `(canonical_artifact_id, view_id)` so senders can stream minimal byte ranges or reject with `PARTIAL_COVERAGE`.
 5. Daemon persists `view_index_json`, computes/validates `view_data_hash`, and records per-view verification metadata on disk (`verification.view_<id>.json`).
@@ -494,4 +497,3 @@ Implementation status:
 * **Daemon & Proto** — gRPC surfaces carry `ViewSpec`/`view_id`, placement, and view metadata across both Materialize and Register RPCs; orchestrators propagate variant identity through P2P.
 * **Global Store** — `variants`/`leaves` tables, `GetArtifactInfoById` extensions, and `UpdateArtifactViewState` are live with Python service helpers.
 * **SDK** — `get_view`, `get_view_into`, and `register_view` share the same normalization pipeline and expose placement-aware ergonomics.
-

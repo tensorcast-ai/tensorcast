@@ -75,6 +75,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
+      .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);

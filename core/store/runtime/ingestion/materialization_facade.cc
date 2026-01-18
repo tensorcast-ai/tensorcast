@@ -7,6 +7,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <utility>
 
 #include "absl/log/check.h"
@@ -25,7 +26,10 @@
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
 #include "core/store/materialization/dataplane/runtime/pump.h"
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
-#include "core/store/materialization/dataplane/sinks/gpu_memory_sink.h"
+#include "core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h"
+#include "core/store/materialization/dataplane/view/view_plan_source.h"
+#include "core/store/materialization/dataplane/view/view_transform_executor.h"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::store::runtime::ingestion {
 
@@ -129,6 +133,35 @@ class PlanBackedSeekableSource final : public loader::SeekableSource {
   uint64_t current_offset_{0};
 };
 
+absl::StatusOr<uint64_t> compute_logical_total_size(std::string_view canonical_index_json) {
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("canonical index JSON must not be empty");
+  }
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(canonical_index_json, nullptr, true);
+  } catch (const std::exception& ex) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON: ", ex.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("canonical index JSON must be an object");
+  }
+  uint64_t total_size = 0;
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    const auto& arr = it.value();
+    if (!arr.is_array() || arr.size() < 2) {
+      continue;
+    }
+    const uint64_t offset = arr[0].get<uint64_t>();
+    const uint64_t size = arr[1].get<uint64_t>();
+    total_size = std::max<uint64_t>(total_size, offset + size);
+  }
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("canonical index total_size is zero");
+  }
+  return total_size;
+}
+
 MaterializationFacade::MaterializationFacade(Config config)
     : config_(std::move(config)),
       hooks_(config_.hooks),
@@ -209,22 +242,62 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_replic
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_into_target(
     const DeviceKey& target_device,
-    gsl::not_null<void*> target_ptr,
-    uint64_t total_size,
+    const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
     const loading::MaterializeHints& hints) {
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_into_target requires GPU target device");
   }
-  if (total_size == 0) {
-    return absl::InvalidArgumentError("materialize_into_target requires total_size > 0");
-  }
   if (canonical_index_json.empty()) {
     return absl::InvalidArgumentError("materialize_into_target requires canonical index bytes");
   }
   if (hints.artifact_id.empty()) {
     return absl::InvalidArgumentError("materialize_into_target requires hints.artifact_id");
+  }
+  if (target_layout.storages.empty()) {
+    return absl::InvalidArgumentError("materialize_into_target requires at least one target storage");
+  }
+
+  uint64_t total_size = target_layout.total_size;
+  uint64_t computed_total = 0;
+  for (const auto& storage : target_layout.storages) {
+    if (storage.length == 0) {
+      return absl::InvalidArgumentError("materialize_into_target requires non-empty storage length");
+    }
+    if (storage.length > std::numeric_limits<uint64_t>::max() - computed_total) {
+      return absl::OutOfRangeError("materialize_into_target storage length overflow");
+    }
+    computed_total += storage.length;
+  }
+  if (total_size == 0) {
+    total_size = computed_total;
+  } else if (total_size != computed_total) {
+    return absl::InvalidArgumentError("materialize_into_target total_size does not match storage lengths");
+  }
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("materialize_into_target requires total_size > 0");
+  }
+
+  auto canonical_total_or = compute_logical_total_size(canonical_index_json);
+  if (!canonical_total_or.ok()) {
+    return canonical_total_or.status();
+  }
+  const uint64_t canonical_total_size = *canonical_total_or;
+
+  std::optional<loader::ViewPlan> view_plan;
+  if (hints.variant && hints.variant->cached_plan.has_value()) {
+    view_plan = *hints.variant->cached_plan;
+  }
+  const loading::TransformPlacement placement =
+      hints.variant ? hints.variant->placement : loading::TransformPlacement::kServer;
+  if (view_plan.has_value() && view_plan->transform.requires_materialization &&
+      placement == loading::TransformPlacement::kServer && target_layout.storages.size() != 1) {
+    return absl::InvalidArgumentError(
+        "materialize_into_target requires single storage for server-side view transforms");
+  }
+  if (view_plan.has_value() && view_plan->view_size_bytes > 0 && view_plan->view_size_bytes != total_size) {
+    return absl::InvalidArgumentError("materialize_into_target view size does not match target layout size");
   }
 
   auto plan_key = [&]() -> std::string {
@@ -245,7 +318,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
   }
   if (!plan_ptr) {
-    auto plan_or = loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size);
+    auto plan_or = loader::build_segment_plan_from_canonical_index_json(canonical_index_json, canonical_total_size);
     if (!plan_or.ok()) {
       return plan_or.status();
     }
@@ -266,7 +339,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return source_or.status();
     }
 
-    auto plan_source = std::make_unique<PlanBackedSeekableSource>(std::move(*source_or), plan_ptr, total_size);
+    std::unique_ptr<loader::SeekableSource> plan_source =
+        std::make_unique<PlanBackedSeekableSource>(std::move(*source_or), plan_ptr, canonical_total_size);
+    if (view_plan.has_value() && !view_plan->is_identity) {
+      plan_source = loader::make_view_plan_source(std::move(plan_source), view_plan->selection);
+    }
+    if (!plan_source) {
+      return absl::InternalError("materialize_into_target failed to build view plan source");
+    }
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
     if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
@@ -283,17 +363,35 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
     loader::StreamingBufferAdapter adapter(session_spb);
 
-    loader::GpuMemorySink::Options sink_opts{
-        .gpu_base_ptr = target_ptr,
-        .total_size = total_size,
+    std::vector<loader::TargetStorage> storages;
+    storages.reserve(target_layout.storages.size());
+    std::vector<loader::Range> ranges;
+    ranges.reserve(target_layout.storages.size());
+    uint64_t range_cursor = 0;
+    for (const auto& storage : target_layout.storages) {
+      if (storage.length == 0) {
+        return absl::InvalidArgumentError("materialize_into_target requires non-empty storage length");
+      }
+      if (storage.length > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("materialize_into_target storage length exceeds host limits");
+      }
+      storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+      ranges.emplace_back(range_cursor, static_cast<size_t>(storage.length));
+      range_cursor += storage.length;
+    }
+    if (range_cursor != total_size) {
+      return absl::InvalidArgumentError("materialize_into_target storage ranges do not span total_size");
+    }
+
+    loader::TargetLayoutGpuSink::Options sink_opts{
+        .storages = std::move(storages),
         .chunk_size = config_.artifact_chunk_bytes,
         .device_id = target_device.ordinal,
     };
-    loader::GpuMemorySink sink(std::move(sink_opts));
+    loader::TargetLayoutGpuSink sink(std::move(sink_opts));
 
     const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
                                                            : std::max(1, config_.num_threads);
-    std::array<loader::Range, 1> ranges{loader::Range{0, static_cast<size_t>(total_size)}};
     auto pump_status = loader::pump_ranges(
         *plan_source,
         sink,
@@ -307,6 +405,18 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     auto close_status = sink.close();
     if (!close_status.ok()) {
       return absl::DataLossError(absl::StrCat("materialize_into_target sink close failed: ", close_status.message()));
+    }
+    if (view_plan.has_value() && view_plan->transform.requires_materialization &&
+        placement == loading::TransformPlacement::kServer) {
+      auto transform_status = loader::execute_transform(
+          view_plan->transform,
+          common::memory::MemoryLocation::GPU,
+          target_layout.storages.front().base_ptr.get(),
+          target_device.ordinal);
+      if (!transform_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_into_target view transform failed: ", transform_status.message()));
+      }
     }
     return loading::MaterializeIntoTargetResult{.source = source_kind};
   };

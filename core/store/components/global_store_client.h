@@ -127,6 +127,12 @@ struct VariantViewUpdate {
   std::vector<global_store::LeafWrite> leaf_writes;
 };
 
+struct ViewMetadata {
+  std::string view_spec_json;
+  uint64_t view_size_bytes{0};
+  std::optional<std::string> view_data_hash;
+};
+
 enum class MemoryTierLeaseKind { kStable, kPreemptible };
 enum class MemoryTierLeaseState { kPending, kActive, kRevoking, kExpired };
 enum class MemoryTierAckAction { kAcquired, kReleased };
@@ -342,6 +348,7 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) = 0;
 
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
+  virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
   virtual absl::Status upsert_key_mapping(
       std::string_view key,
@@ -528,6 +535,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override;
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
+  absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) override;
 
   void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
       override;

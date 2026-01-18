@@ -20,6 +20,13 @@ Related docs:
 - **Canonical index**: JSON mapping `tensor_name -> [logical_offset, logical_length, shape, stride, dtype, storage_offset]`.
   It defines the logical layout and is used to build payload descriptors. See
   `core/store/materialization/dataplane/metadata/canonical_index.h` for the stable format.
+- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`).
+  Non-identity views must have a resolved `view_id` so `ReplicaKey` disambiguation and variant verification apply.
+- **View data hash (`view_data_hash`)**: Integrity hash of the realized view byte stream (post-transform). It is distinct
+  from `view_id` and is not used as a subset identifier.
+- **View subset hash (`view_subset_hash` / `ViewSubset.subset_hash`)**: Opaque raw digest bytes identifying a selection
+  (e.g., sorted+unique `tensor_names`). These bytes must not be UTF-8/hex-string bytes; see
+  `docs/designs/0036-01-materialization-pipeline-v2.md` and `docs/designs/0042-region-backed-tensor-dict-into.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
   into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
 - **Materialization**: Resolving an artifact reference (artifact_id/key/disk path)
@@ -209,6 +216,8 @@ Views can be requested by spec (`ViewSpec`) or by ID (`view_id`):
 
 - **Planning**: The daemon computes view plans from canonical index and view
   ops (`ViewPlanner`). Plans include selection ranges and optional transforms.
+- **Identity**: If a request provides `view` but omits `view_id`, the daemon must resolve a deterministic `view_id`
+  (non-identity views must never execute without one). Identity views fold to the canonical path (no `view_id`).
 - **Placement**:
   - `TransformPlacement::kServer`: server applies transforms after load
     (`Replica::ensure_loaded_async` post-load hook).
@@ -225,15 +234,20 @@ Region-backed mode bypasses replica allocation and streams directly into a
 CUDA region registered by the client:
 
 - **SDK constraints** (`tensorcast/api/store/materialization.py`):
-  - Requires `artifact_id`, full canonical tensor set, CUDA contiguous tensors,
-    matching dtype/shape/stride, and coalesced canonical layout.
+  - Requires `artifact_id`, CUDA contiguous tensors, matching dtype/shape/stride, and a
+    coalesced layout over canonical or view-indexed ByteSpaces (including subsets).
+  - Non-identity views resolve a deterministic `view_id`; multi-storage layouts must
+    be ordered concatenations across registered regions.
 - **Daemon validation**:
-  - Requires `TargetLayout` with a single storage entry, coalesced layout,
-    canonical index kind, and a `vram_region_id`.
-  - Validates offsets and storage length against canonical index.
+  - The RPC is **loopback/UDS only**; non-loopback peers are rejected before any write begins.
+  - Requires `TargetLayout` with coalesced layout, canonical or view index kind,
+    `vram_region_id` storages (single or ordered multi-storage), and a matching `view_id`
+    when view transforms are requested.
+  - Validates offsets and storage length against the selected index, plus optional
+    `view_subset_hash` when provided.
 - **Execution**:
-  - The daemon maps the region via CUDA IPC, builds a segment plan from the
-    canonical index, and runs the same pump path into GPU memory.
+  - The daemon maps the region via CUDA IPC, builds a segment or view plan from
+    the selected index, and runs the same pump path into GPU memory.
   - Verification is explicitly skipped (`MaterializeHints::Verify::NONE`).
   - On DataLoss, the region is marked poisoned and the client unregisters it.
 

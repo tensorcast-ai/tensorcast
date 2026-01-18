@@ -56,12 +56,14 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
 
 `tensor_dict_into` / `tensor_into` / `get_into` can stream bytes directly into
 caller-owned CUDA regions via the v2 `MaterializeIntoTarget` RPC. The SDK
-computes a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`,
-`index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`)
-from the target tensors, validates
-dtype/shape/stride against the canonical index, and requests the daemon to
-materialize into the mapped region. The daemon does not allocate VRAM, and the
-SDK does not call `UnloadReplica` for this path.
+computes a coalesced `TargetLayout` over either the canonical index or a
+view-indexed ByteSpace (including packed subsets via `tensor_names`), validates
+dtype/shape/stride against the selected index, and requests the daemon to
+materialize into the mapped region. Multi-storage layouts are supported via
+ordered concatenation across registered regions. For non-identity views, the
+SDK resolves a deterministic `view_id` and attaches it to the layout. The
+daemon does not allocate VRAM, and the SDK does not call `UnloadReplica` for
+this path.
 
 The `region_backed_mode` default in the unified runtime config controls the
 behavior:

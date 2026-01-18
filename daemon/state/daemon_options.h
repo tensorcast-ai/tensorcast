@@ -50,6 +50,8 @@ struct DaemonOptions {
 
   // CPU shared-memory materialization (memfd-backed UMA CPU arena).
   bool cpu_shared_memory_enabled{false};
+  // Enable verification for MaterializeIntoTarget external target writes.
+  bool external_target_verification_enabled{false};
 
   // API behavior flags
   // If true, GetLoadedReplicasV2 uses opaque cursor tokens based on a stable

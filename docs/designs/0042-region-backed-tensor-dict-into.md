@@ -17,32 +17,38 @@ related_code:
   - daemon/state/ipc_region_registry.h
   - core/store/materialization/**
 created: 2025-12-21
-last_updated: 2025-12-21
+last_updated: 2026-01-17
 status: proposed
 ---
 
 # Summary
 
-Introduce a dedicated region-backed `tensor_dict_into` RPC (`MaterializeIntoTarget`) that streams artifact bytes directly into a client-registered CUDA region, bypassing daemon replica allocation and `mem_handle` export. Phase 1 requires `artifact_id`, COALESCED single-storage, and a full logical layout (no subset); `disk_fallback` is a source hint only. External-target verification is deferred. The daemon reuses the existing materialization dataplane (sources, sinks, pump) but writes into an external GPU region and releases region refs after completion. Region-backed mode applies only to `tensor_dict_into` / `tensor_into` / `get_into`; `get` / `get_view` always use the existing daemon-owned replica path.
+Introduce a TargetLayout-backed `tensor_dict_into` RPC (`MaterializeIntoTarget`) that streams artifact bytes directly into a client-registered CUDA region, bypassing daemon replica allocation and `mem_handle` export. Phase 1 is canonical + COALESCED and intentionally restrictive. Phase 2+ expands the same foundation to support view-indexed layouts (`INDEX_KIND_VIEW` + `view/view_id`), selective subsets (`tensor_names` / `view_subset_hash`) via a packed view ByteSpace, multi-storage COALESCED (ordered concatenation), and optional external-target verification. These Phase 2+ primitives are also the shared lower-layer dependency for daemon-owned placeholder/“deferred fill” sessions (see `docs/designs/0052-deferred-slice-materialization.md`).
 
 # Goals / Non-Goals
 
-## Goals
+## Goals (Phase 1)
 1. Provide a dedicated, long-lived RPC for region-backed get-into that does not rely on `mem_handle`.
 2. Zero extra VRAM on the daemon for region-backed targets.
 3. Keep IPC handle count minimal (typically one region handle plus a compact offset table).
 4. Reuse the existing daemon data-path abstractions (sources, sinks, buffer pools, pump).
 5. Reject any region-backed layout whose logical space does not match the target layout.
 
+## Goals (Phase 2+)
+1. Support view-indexed logical layouts (`INDEX_KIND_VIEW`) for region-backed targets using existing core view planning/execution (`ViewPlanner` + `ViewPlanSource`).
+2. Support selective materialization into a packed ByteSpace (subset-by-name), with explicit, deterministic padding semantics (PAD bytes are defined as zeros).
+3. Support multi-storage COALESCED layouts by defining a stable “ordered concatenation” rule for storages and implementing a multi-storage GPU sink (so the logical ByteSpace can be backed by multiple regions/allocations without scatter logic in the pump).
+4. Add optional external-target verification using plan-based hashing primitives so Phase 1’s “verification skipped” becomes an explicit, configurable trade-off.
+5. Keep `TargetLayout` and logical ByteSpace semantics reusable by daemon-owned placeholder sessions (the session/RPC surface remains out of scope for this design).
+6. Make view/subset identity semantics normative and unambiguous: resolve a deterministic `view_id` for any non-identity view and standardize `view_subset_hash` / `ViewSubset.subset_hash` encoding so SDK↔daemon cannot silently diverge (required for `docs/designs/0052-deferred-slice-materialization.md` reuse).
+
 ## Non-Goals
 - Replace `tensor_dict()` or `get()` flows (they continue to materialize a daemon-owned replica).
 - Apply `region_backed_mode` to `get` / `get_view` or change their semantics; those calls always use the daemon-owned replica path.
 - Enable cross-node GPU direct write (RDMA into client GPU) beyond current infrastructure.
 - Support arbitrary strided targets in the first release; non-contiguous tensors fall back.
-- Support subset materialization for region-backed targets (`tensor_names` / `view_subset_hash` are deferred).
 - Introduce Global Store schema changes or replica tracking for `tensor_dict_into` targets.
-- Support multi-storage COALESCED layouts or any TENSOR_TABLE layout in this phase.
-- Perform verification for external targets in Phase 1.
+- Modify vLLM itself or define vLLM-facing APIs (covered by `docs/designs/0052-deferred-slice-materialization.md`).
 
 ## Phase 1 Scope
 - Artifact identity must be `artifact_id` (key-based requests are reserved for a later phase).
@@ -53,9 +59,23 @@ Introduce a dedicated region-backed `tensor_dict_into` RPC (`MaterializeIntoTarg
 - `device_uuid` is required and authoritative; `device_id` is treated as a local ordinal only.
 - `region_backed_mode` is consulted only by `tensor_dict_into` / `tensor_into` / `get_into`; `get` / `get_view` ignore it.
 
+## Phase 2+ Scope (planned)
+- `index_kind=VIEW` is supported; requests may carry `view_id` or a `view` spec. If a `view` spec is provided, the daemon MUST resolve a deterministic `view_id` (per `docs/designs/0016-artifact-view-v1.md`) and treat it as authoritative (including for replica identity and caching). Identity views fold to the canonical path (`index_kind=CANONICAL`, no `view_id`).
+- Selective layouts are supported: request `tensor_names` and/or `view_subset_hash` and provide a target layout covering only the selected tensors in a packed view ByteSpace.
+- COALESCED supports multiple storages via ordered concatenation (to span multiple regions or multiple daemon allocations).
+- Optional external-target verification is supported (configurable; may remain off by default for performance).
+
 # Current State
 
-`tensor_dict_into` currently materializes a daemon-owned replica, exports a single IPC handle, and lets the client copy into target tensors before calling `UnloadReplica`. The v2 materialization path expects `mem_handle` on completion, so there is no RPC that writes directly into client regions. Region-backed registration exists for LIP and transport locks but is not used by `tensor_dict_into`.
+Phase 1 is already wired as a dedicated v2 RPC (`MaterializeIntoTarget`) with region registration (`RegisterVramRegion`) and a controller-level validation gate (`daemon/service/controllers/materialization_controller.cc`). The current implementation is intentionally strict:
+- Requires `artifact_id` and a COALESCED single-storage target; rejects `view/view_id`, `tensor_names/view_subset_hash`, and multi-storage layouts.
+- Streams bytes via the existing core dataplane (`SeekableSource → pump_ranges → GpuMemorySink`) into a mapped client region, then releases the region ref.
+- Skips external-target verification and treats failures as potentially partial writes (region is poisoned).
+- Enforces a local-only security model: `MaterializeIntoTarget` rejects non-loopback peers (loopback/UDS only).
+
+This leaves two gaps that block higher-level integrations such as daemon-owned placeholders and vLLM-style deferred slice loading:
+- No view-indexed / packed subset ByteSpace for into-target.
+- No multi-storage sink for mapping a single logical ByteSpace onto multiple region/allocations.
 
 # Architecture & Interfaces
 
@@ -71,6 +91,7 @@ Region-backed `tensor_dict_into` needs a compact description of where each tenso
   logical offsets to the underlying region and device pointer.
 - The logical total size is defined as `max(offset + logical_length)` across the canonical
   (or view) index entries, not the sum of lengths; COALESCED storages must span this size.
+- **Padding semantics are normative**: any logical ByteSpace may contain PAD gaps, and PAD bytes are defined as zero. Implementations may avoid copying PAD ranges only if they provably leave the corresponding destination bytes as zero.
 
 **TargetLayout** (new v2 wrapper message)
 - `repeated tensorcast.daemon.v2.StorageEntry storages`
@@ -118,18 +139,29 @@ The **offset table** maps each tensor's logical offset to a region offset:
 - If a physical-binding hash is ever needed, define it separately (e.g., `binding_hash`)
   so it does not affect plan caching.
 
-### Future: Selection Hash (Phase 2+)
-When view/subset support is added, plan identity becomes:
-`logical_layout_hash + selection_hash`. `selection_hash` encodes view identity and
-subset selection (`view_id` or canonicalized `view` spec, plus `tensor_names` /
-`view_subset_hash`) using a stable serialization. Phase 1 keeps selection empty and
-does not implement this logic.
+### Selection Identity (Phase 2+)
+Once view/subset support is enabled, “which bytes to produce” must be a first-class identity
+separate from “where to write them”. Cache keys and observability should use:
+
+- `logical_layout_hash`: identity of the base index ByteSpace (canonical index bytes + `index_kind`).
+- `selection_hash`: identity of the selection applied on top (view + subset).
+
+`selection_hash` is computed from a stable serialization of:
+- view identity: a resolved `view_id` (required for any non-identity view). A raw `view` spec is input-only and MUST NOT be treated as an identity substitute because it can collide with the canonical `ReplicaKey` when `view_id` is absent.
+- placement: `TRANSFORM_PLACEMENT_SERVER|CLIENT` when relevant (transpose requires client placement by default).
+- subset identity: `tensor_names` (sorted, unique, stable) plus `view_subset_hash` if supplied.
+
+Phase 1 keeps selection empty and treats `selection_hash` as absent.
+
+**Normative representation (required)**
+- `view_id`: a deterministic, stable string identifier for the variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`). For any non-identity view, the daemon MUST populate `VariantIdentity.view_id` so core `ReplicaKey` disambiguation and verification apply.
+- `view_subset_hash` / `ViewSubset.subset_hash`: opaque **raw digest bytes** (recommended: 32-byte SHA-256 digest of a canonical serialization of sorted, unique `tensor_names`). These fields MUST NOT contain UTF-8 bytes of a hex string, and MUST NOT reuse `view_data_hash`.
 
 ### Index Anchoring
 - `index_kind=CANONICAL` means logical offsets are canonical offsets.
 - `index_kind=VIEW` means logical offsets are view offsets; `view_id` or `view` must be
   present in the request to resolve the view plan.
-- Phase 1 only supports `INDEX_KIND_CANONICAL_UNSPECIFIED`; `INDEX_KIND_VIEW` is reserved for Phase 2.
+- Phase 1 only supports `INDEX_KIND_CANONICAL_UNSPECIFIED`; Phase 2+ enables `INDEX_KIND_VIEW`.
 
 ### Device Identity
 - `device_uuid` is the authoritative device identity across processes.
@@ -139,79 +171,102 @@ does not implement this logic.
   when `region_backed_mode=require`.
 
 ### Layout Modes
-1. **COALESCED**: the target region is arranged in logical order (canonical or view).
-   The daemon verifies `storage_offset == logical_offset` for each tensor, and a single
-   storage entry spans the logical space (`storage_length == logical_total_size`). The `mapping_base_offset` acts as the base of
+1. **COALESCED (single storage; Phase 1)**: the target region is arranged in logical order
+   (canonical or view). The daemon verifies `storage_offset == logical_offset` for each
+   tensor, and a single storage entry spans the logical space
+   (`storage_length == logical_total_size`). The `mapping_base_offset` acts as the base of
    the coalesced buffer slice in the region. This lets the pipeline stream ranges
    without extra scatter logic and reuse `pump_ranges`.
-   COALESCED implies the storage covers the full logical space and includes every tensor
-   in the canonical index; packed subset layouts are not supported in Phase 1.
 
-`TENSOR_TABLE` is reserved for a future extension. For now, any non-COALESCED layout
-or multi-storage layout is rejected with `INVALID_ARGUMENT`.
+2. **COALESCED (multi-storage; Phase 2+)**: the logical ByteSpace is still linear, but is
+   backed by multiple storages using **ordered concatenation**:
+   - Storages are interpreted in list order.
+   - Storage `i` covers logical offsets `[base_i, base_i + storage_length_i)`, where
+     `base_i = sum(storage_length_j for j < i)`.
+   - The sink maps `write_at(logical_offset, ...)` into the owning storage and performs
+     the copy at `mapped_base_ptr(storage) + mapping_base_offset + (logical_offset - base_i)`.
+
+   This enables spanning multiple registered regions (or multiple daemon allocations)
+   while keeping the pump interface purely linear.
+
+`TENSOR_TABLE` remains reserved for a future extension where the logical space is defined
+by a per-tensor table (no packed ByteSpace). Phase 1 rejects any non-COALESCED or
+multi-storage layout; Phase 2+ may still reject `TENSOR_TABLE` until the sink and
+validation rules are implemented.
 
 ## SDK: Client-Side Shape and Validation
 
 The SDK preserves `tensor_dict_into` semantics by validating targets before any
-daemon-side write. It builds a `TargetLayout` only when all of the following are true:
-- The request uses `artifact_id` (Phase 1 does not support key-based targets).
+daemon-side write. It builds a `TargetLayout` only when it can prove the write is safe,
+bounded, and deterministic.
+
+**Phase 1 constraints (canonical, full layout)**
+- Request uses `artifact_id` (Phase 1 does not support key-based targets).
 - Every target tensor is CUDA and on the selected device.
 - Every target storage is fully covered by a registered region in the client cache.
 - Every target tensor is contiguous (or matches a supported contiguous stride pattern).
-- The canonical index is available to compute offsets (view index support is deferred).
+- Canonical index is available to compute offsets.
 - Subset selection is disabled: `tensor_names` / `view_subset_hash` must be empty (or
   `tensor_names` must include all canonical names) and the layout must cover the full
-  logical byte space.
-- Phase 1 rejects view requests (`view` / `view_id`) for region-backed targets.
-- `device_uuid` is required and treated as authoritative for device identity; `device_id`
-  is carried only as a local ordinal and must match the daemon-resolved UUID.
-- The SDK assumes region-backed `MaterializeIntoTarget` support; fallback is still
-  controlled by `region_backed_mode`.
+  canonical logical ByteSpace.
+- View selection is disabled: `view` / `view_id` are rejected for region-backed targets.
+- `device_uuid` is required and authoritative; `device_id` is a local ordinal validated
+  against the daemon-resolved UUID.
+
+**Phase 2+ extensions (view-indexed + packed subset)**
+- `index_kind=VIEW` is allowed, and the request may include `view` or `view_id`.
+- Selective layouts are allowed: `tensor_names` may be a strict subset, and the target
+  layout may cover only the selected tensors in a packed view ByteSpace (with PAD=0
+  semantics).
+- The same safety validation applies; unsupported combinations still fall back under
+  `region_backed_mode=auto` and hard-error under `region_backed_mode=require`.
 
 **Construction steps**
 1. Resolve artifact identity and fetch canonical index bytes (already cached).
-2. Parse the canonical index and compute `logical_total_size = max(offset + logical_length)`;
-   `logical_length` reflects storage segments (max alias length), not a sum of tensor sizes.
-3. Validate target dtype/shape/stride against the canonical index without relying on
-   daemon-provided tensors, and ensure the target covers every canonical entry.
-4. Enforce subset rules: `tensor_names` must be empty (or include all canonical names)
-   and `view_subset_hash` must be empty for Phase 1.
+2. Determine the logical ByteSpace:
+   - Phase 1: canonical only (`index_kind=CANONICAL`).
+   - Phase 2+: canonical or view (`index_kind=VIEW` + `view/view_id`), including packed
+     subset layouts.
+3. Compute `logical_total_size = max(offset + logical_length)` from the *selected* index
+   bytes (canonical for Phase 1; view index bytes for Phase 2+ packed layouts).
+4. Validate target dtype/shape/stride against the relevant index (canonical or view)
+   without relying on daemon-provided tensors.
 5. Group target tensors by storage; assign deterministic `storage_id` (e.g., hash of base
    pointer + size).
 6. For each storage, find the covering region and compute `mapping_base_offset`.
-7. Emit `StorageEntry` records with `vram_region_id`, `mapping_base_offset`, and
-   `storage_length == logical_total_size`.
-8. Emit `TargetTensorOffset` records for each tensor with `storage_offset` and
-   `logical_length` (use `TensorAlias` only when `tensor_spec_kind=ALIAS`).
-9. Set `index_kind` to CANONICAL (VIEW is deferred to Phase 2).
-10. Enforce COALESCED constraints:
-   - `len(storages) == 1`
-   - `storage_offset == logical_offset` for all tensors
-   - `storage_length == logical_total_size`
-   If any check fails, either fall back (when `region_backed_mode=auto`) or raise
-   `INVALID_ARGUMENT` (when `region_backed_mode=require`).
-11. Set `layout_kind = COALESCED` and optionally compute `logical_layout_hash` from
-   canonical index bytes + `index_kind` (exclude any region binding). Selection hashing
-   is reserved for Phase 2+.
-12. Send `MaterializeIntoTarget` only if all constraints hold; otherwise fall back to
-   normal `materialize + client copy`.
+7. Emit `StorageEntry` records with `vram_region_id`, `mapping_base_offset`, and `storage_length`
+   (Phase 1: one storage spans `logical_total_size`; Phase 2+: multiple storages may be used and
+   must sum to `logical_total_size` under ordered concatenation).
+8. Emit tensor table records (`TargetTensorOffset` preferred) for the selected tensors.
+9. Validate COALESCED constraints:
+   - Phase 1: `len(storages) == 1` and `storage_length == logical_total_size`, and
+     `storage_offset == logical_offset` for all tensors.
+   - Phase 2+: COALESCED may span multiple storages via ordered concatenation; the
+     concatenation must span `logical_total_size` and each tensor must map within bounds.
+10. Optionally compute `logical_layout_hash` from index bytes + `index_kind` (exclude any
+    region binding). Phase 2+ may additionally compute `selection_hash` for cache keys.
+11. Send `MaterializeIntoTarget` only if all constraints hold; otherwise fall back to
+    normal `materialize + client copy` under `region_backed_mode=auto` (or raise under
+    `region_backed_mode=require`).
 
-Phase 1 COALESCED layouts require a full canonical layout: the storage spans the full
-logical byte space and every canonical tensor is present. Subset requests are rejected
-by the region-backed path and fall back (or error) based on `region_backed_mode`.
+**Phase 1 behavior**
+- COALESCED layouts require full canonical coverage: the single storage spans the full
+  canonical logical ByteSpace and every canonical tensor is present.
+- Subset and view requests fall back (or error) based on `region_backed_mode`.
 
-Phase 1 does not support view-indexed layouts. If a view is requested and the client
-cannot build a canonical layout, the SDK falls back or errors based on
-`region_backed_mode`.
+**Phase 2+ behavior**
+- COALESCED layouts may be canonical or view-indexed, and may cover a strict subset of
+  tensors when the layout is defined in the corresponding packed view ByteSpace.
+- The SDK remains responsible for building targets that match the selected ByteSpace
+  (canonical or view) and for validating bounds before issuing the RPC.
 
 ### Client API Surface
 - `tensor_dict_into(...)`, `tensor_into(...)`, and `get_into(...)` use `MaterializeIntoTarget`
-  when `region_backed_mode` allows and `artifact_id` is available (Phase 1). `get` /
+  when `region_backed_mode` allows and `artifact_id` is available. `get` /
   `get_view` always use the existing daemon-owned replica path and ignore
   `region_backed_mode`.
-- Region-backed paths require full materialization. If callers pass `tensor_names` that
-  do not include all canonical tensors, the SDK must not invoke `MaterializeIntoTarget`
-  (fallback in `auto`, error in `require`).
+- Phase 1 requires a full canonical COALESCED layout; Phase 2+ allows view-indexed and
+  packed subset layouts when the SDK can construct and validate them.
 - Region-backed results use a dedicated SDK return type (no `mem_handle`, no
   `UnloadReplica`) to avoid mixing into-target semantics with legacy payloads.
 - `get_into_async.cancel()` returns `False` once a region-backed transfer has started;
@@ -248,24 +303,25 @@ message MaterializeIntoTargetRequest {
   int32 pid = 5;
   string device_uuid = 6;
 
-  tensorcast.daemon.v2.SourcePreference preference = 7;
+  SourcePreference preference = 7;
+  SourcePolicy source_policy = 12;
 
-  // Selective materialization (reserved for Phase 2)
+  // Selective materialization (Phase 2+)
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    tensorcast.daemon.v2.ViewSpec view = 1001;
+    ViewSpec view = 1001;
     string view_id = 1002;
   }
 
-  tensorcast.daemon.v2.TransformPlacement placement = 1003;
+  TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetResponse {
   string artifact_id = 1;
-  tensorcast.daemon.v2.MaterializeReplicaStatus status = 2;
-  tensorcast.daemon.v2.MaterializationSource source = 3;
+  MaterializeReplicaStatus status = 2;
+  MaterializationSource source = 3;
   bytes canonical_index_bytes = 4;
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
@@ -277,14 +333,17 @@ message MaterializeIntoTargetResponse {
 When `MaterializeIntoTarget` is used:
 - The daemon writes directly into the provided regions.
 - `mem_handle` is not returned.
-- `canonical_index_bytes` (and `view_index_bytes` when available) are returned for validation.
-- Phase 1 requires `artifact_id` and treats `disk_fallback` as a source hint only.
-- Phase 1 rejects key-based requests, `tensor_names` / `view_subset_hash`, `index_kind != CANONICAL`,
-  `layout_kind != COALESCED`, `len(storages) != 1`, or `storage_length != logical_total_size`
-  with `INVALID_ARGUMENT`.
+- `canonical_index_bytes` is returned for validation; when view/subset is applied, the
+  daemon also returns `view_index_bytes` and `view_subset`.
+- `disk_fallback` is a source hint (not identity).
+- **Phase 1** rejects key-based requests, `tensor_names` / `view_subset_hash`, any view
+  identity, `index_kind != CANONICAL`, `layout_kind != COALESCED`, `len(storages) != 1`,
+  or non-full canonical layouts.
+- **Phase 2+** allows view identity + subset selection and may allow multi-storage
+  COALESCED layouts under ordered concatenation (see “Layout Modes”).
 - `device_uuid` must be present and resolves the target device; `device_id` is validated
   against the resolved UUID but is not authoritative across processes.
-- Phase 1 is synchronous; there is no transfer ticket or async completion.
+- Transfers are synchronous in this design; there is no transfer ticket or async completion.
 
 ## Examples
 
@@ -323,9 +382,9 @@ target_layout {
 `storage_offset == logical_offset` and a single storage spans the logical space, so
 the daemon uses `pump_ranges` with a SegmentPlan derived from the canonical index.
 
-### Example B: COALESCED view, single region (planned, Phase 2)
+### Example B: COALESCED view, single region (Phase 2+)
 
-Phase 1 rejects `INDEX_KIND_VIEW`.
+Phase 1 rejects `INDEX_KIND_VIEW`; Phase 2+ enables it.
 
 Canonical index (JSON, simplified):
 
@@ -369,7 +428,52 @@ target_layout {
 
 Logical offsets follow the view index, so `storage_offset == logical_offset` still holds.
 
-### Example C: Unsupported layouts (error)
+### Example C: Packed subset view ByteSpace (Phase 2+)
+
+Phase 2+ supports writing a strict subset of tensors into a *packed* view ByteSpace, so
+the target region does not need to span the full canonical artifact size.
+
+Request intent (illustrative):
+- `tensor_names = ["q"]`
+- `view_subset_hash = SHA256(sorted_unique(tensor_names))` (raw digest bytes; stable and language-agnostic)
+- `index_kind = INDEX_KIND_VIEW`
+- `view_id = "<resolved view_id>"` (deterministic variant identity; resolved from `view` or provided explicitly)
+
+The selected output ByteSpace identity is `(view_id, view_subset_hash, placement, packing_version)`. `view_id` MUST NOT
+be derived from `view_subset_hash`; it must remain the deterministic identity of the underlying view (see
+`docs/designs/0016-artifact-view-v1.md`). The daemon returns `view_index_bytes` describing the packed layout, and clients
+must validate that their `TargetLayout` matches these bytes before treating the target region contents as defined.
+
+The daemon returns `view_index_bytes` describing the packed layout (JSON simplified):
+
+```json
+{
+  "q": [0, 4096, [1024], [1], "float16", 0]
+}
+```
+
+Target layout then spans only the packed ByteSpace:
+
+```text
+target_layout {
+  storages: {
+    storage_id: "s0"
+    device_id: 0
+    vram_region_id: "region:0003"
+    mapping_base_offset: 0
+    storage_length: 4096
+  }
+  offsets: [
+    { name: "q", storage_id: "s0", storage_offset: 0, logical_length: 4096 }
+  ]
+  layout_kind: COALESCED
+  index_kind: INDEX_KIND_VIEW
+  view_id: "<resolved view_id>"
+  tensor_spec_kind: TENSOR_SPEC_KIND_OFFSETS
+}
+```
+
+### Example D: Unsupported layouts (error)
 
 Case 1: offsets do not match logical space:
 
@@ -385,8 +489,10 @@ Case 2: multiple storages:
 storages: [ { storage_id: "s0", ... }, { storage_id: "s1", ... } ]
 ```
 
-Both cases are rejected with `INVALID_ARGUMENT` because only COALESCED single-storage
-layouts are supported.
+- Case 1 is rejected with `INVALID_ARGUMENT` (layout mismatch).
+- Case 2 is rejected in Phase 1. In Phase 2+, multiple storages are only accepted when
+  they satisfy the ordered-concatenation COALESCED rules; otherwise it remains
+  `INVALID_ARGUMENT`.
 
 ## Daemon Pipeline Integration
 
@@ -396,41 +502,54 @@ so the data-path stays in core and shares scheduling, buffer pools, and loaders.
 
 ### Validation
 `MaterializationController` validates:
-- `artifact_id` is present (Phase 1 rejects key-based requests and disk-only requests).
+- `artifact_id` is present (key-based requests remain deferred for this RPC).
 - `target_layout` is present and non-empty.
-- `target_layout.storages` are region-backed (no inline handles).
+- `target_layout.storages` are region-backed (`vram_region_id`); inline IPC handles are rejected.
 - `device_uuid` is present and resolves to a device; each storage entry `device_id`
   matches the resolved UUID (device_id is not authoritative across processes).
-- `layout_kind == COALESCED` and `len(storages) == 1`.
-- `mapping_base_offset + storage_length <= region.size_bytes`.
+- `layout_kind == COALESCED` (until `TENSOR_TABLE` rules are implemented).
+- For each storage: `mapping_base_offset + storage_length <= region.size_bytes`.
 - `owner_pid` matches the session (via `IpcRegionRegistry::acquire`).
 - Region is not poisoned (fail fast if the registry marks the region as invalid).
-- `TensorAlias` or `TargetTensorOffset` matches canonical entry (length, name).
-- `tensor_names` and `view_subset_hash` are empty in Phase 1.
-- `view` / `view_id` are not set (Phase 1 rejects view materialization).
-- `index_kind == INDEX_KIND_CANONICAL_UNSPECIFIED` (Phase 1 rejects view layouts).
-- For COALESCED, `storage_offset == logical_offset` for all entries.
-- For COALESCED, the storage table spans the logical space (`storage_length == logical_total_size`).
+- Tensor table entries are consistent with the selected index (canonical for Phase 1; view
+  index for Phase 2+), including bounds and `logical_length`.
+- Phase 1 gating: `len(storages) == 1`, `index_kind == CANONICAL`, no view identity, and
+  no subset selection.
+- Phase 2+ gating: `index_kind` may be `VIEW`, view identity may be present, subset
+  selection may be present, and storages may be multiple under ordered concatenation.
 
 ### Coalesced Data Path
-For COALESCED layouts, the logical offsets match the destination offsets. The daemon:
+For COALESCED layouts, the daemon treats the destination as a linear logical ByteSpace
+and streams it end-to-end using the existing dataplane.
 
-- Builds a SegmentPlan from the canonical (Phase 1) or view (Phase 2) index that spans
-  the full logical byte space.
-- Uses `pump_ranges` to stream the logical ranges directly into the region-backed sink.
-- Avoids any scatter plan or additional copy-plan machinery.
+Proposed source composition (Phase 2+):
+- Open the underlying loader source (disk / P2P).
+- Normalize canonical PAD semantics via a canonical SegmentPlan wrapper (PAD=0).
+- If `index_kind=VIEW`, compute a view plan (optionally subset-packed) and wrap the
+  canonical source with `ViewPlanSource` to produce the view ByteSpace (PAD=0).
+
+Destination:
+- Phase 1: single-storage `GpuMemorySink` into a single mapped region window.
+- Phase 2+: a multi-storage “TargetLayoutGpuSink” (conceptual) that maps `write_at` into
+  ordered-concatenation storages, and implements `AsyncPositionedSink` so `pump_ranges`
+  overlaps I/O + H2D.
+
+Execution:
+- Use `pump_ranges` over `[0, logical_total_size)` (or a per-range optimization that
+  skips PAD/tensor-excluded ranges when safe).
 
 ### External GPU Target
 Introduce an external GPU target in the materialization pipeline:
 - Bypass `AllocationStage` and `HandleStage`; no daemon-owned replica or IPC export.
-- Open the single region IPC handle and pass `gpu_base_ptr = region_base + mapping_base_offset`
-  into `GpuMemorySink`, with `total_size = logical_total_size` to enforce a full copy.
+- Open each region IPC handle and map to one or more storage windows.
+- For Phase 1, pass `gpu_base_ptr = region_base + mapping_base_offset` into `GpuMemorySink`.
+- For Phase 2+ multi-storage, pass per-storage base pointers into the multi-storage sink.
 - Acquire the region via `IpcRegionRegistry::acquire` to extend TTL and enforce ownership,
   then release on completion to decrement the refcount.
-- Phase 1 skips verification for external targets (TODO: add plan-based verification
-  via `compute_data_multihash_from_gpu_plan`).
-- Region-backed ignores `enable_verification`; do not start `_monitor_verification`, and
-  emit `verification_skipped` metrics.
+- Phase 1 skips verification for external targets (TODO: add plan-based verification via
+  `compute_data_multihash_from_gpu_plan` and view/subset equivalents).
+- Phase 1 ignores `enable_verification`; Phase 2+ may optionally enable external-target
+  verification with explicit metrics for on/off.
 - If transfer starts and later fails, mark the region as poisoned so further writes are
   rejected until the client unregisters and re-registers the region.
 
@@ -467,19 +586,29 @@ sequenceDiagram
 flowchart LR
   A["Source<br>disk or p2p"] --> B["SegmentPlan<br>logical ranges"]
   B --> C["pump_ranges"]
-  C --> D["GpuMemorySink<br>mapped region"]
+  C --> D["GpuByteSpaceSink<br>TargetLayout-backed<br>(single region or multi-storage)"]
 ```
 
 # Invariants & Error Model
 
 ## Invariants
-- Only region-backed storages are accepted (no inline IPC handles).
+- `MaterializeIntoTarget` is loopback/UDS only; non-loopback peers are rejected with `PERMISSION_DENIED` before any write begins.
+- Only region-backed storages are accepted (no inline IPC handles / `cuda_ipc_handle`).
 - Every tensor in the request maps to a canonical or view entry by name.
 - Writes are bounded to the declared storage length and region size.
-- When `layout_kind=COALESCED`, `storage_offset == logical_offset` and the storage spans the logical space.
-- Phase 1 requires full canonical coverage; subset requests are rejected.
-- Phase 1 requires `index_kind=CANONICAL` and skips verification for external targets.
-- Phase 1 requires `artifact_id`; `disk_fallback` is a source hint only.
+- PAD bytes in the selected ByteSpace are defined as zeros; the implementation must either write zeros or prove the
+  destination bytes are already zero before skipping a write.
+- When `layout_kind=COALESCED`, the destination logical space is linear `[0, logical_total_size)` and the `storages`
+  list defines how that logical space is backed:
+  - Single-storage (Phase 1): one storage spans `logical_total_size` and each tensor offset obeys
+    `storage_offset == logical_offset`.
+  - Ordered-concatenation multi-storage (Phase 2+): storage `i` owns
+    `[base_i, base_i + storage_length_i)`, with `base_i = sum(storage_length_j for j < i)`. Each tensor offset obeys
+    `storage_offset == logical_offset - base(storage_id)`, and `sum(storage_length_i) == logical_total_size`.
+- Phase 1 gating requires full canonical coverage and rejects view/subset selection and multi-storage layouts.
+- Phase 2+ allows view identity + subset selection and may allow multi-storage COALESCED layouts under ordered
+  concatenation.
+- `artifact_id` is required in Phase 1; `disk_fallback` is a source hint only (never identity).
 - `device_uuid` is authoritative for device identity; `device_id` is validated but not trusted across processes.
 - Region references are held for the duration of the transfer only.
 - Region-backed transfers are non-cancelable once the pump starts; daemon-side cancellation
@@ -497,23 +626,25 @@ flowchart LR
   optional fatal-exit behavior, if desired, must be wired through the unified config.
 
 ## Error Mapping
-- `INVALID_ARGUMENT`: missing layout entries, dtype/shape mismatch, both region and
-  handle fields set, tensor_spec_kind mismatch, non-COALESCED layout, multiple storages,
-  key-based requests, missing `artifact_id`, `disk_fallback` without `artifact_id`,
-  missing/invalid `device_uuid` or device mismatch, `tensor_names` / `view_subset_hash` set,
-  `index_kind != CANONICAL`, view identity set, non-full layouts, or `tensor_names`
-  mismatch (Phase 1).
-- `FAILED_PRECONDITION`: region not found, region poisoned, TTL expired, owner_pid mismatch,
-  bounds violation, or non-contiguous targets when required.
+- `INVALID_ARGUMENT`: malformed `target_layout` (missing storage source / missing tensor table),
+  unknown tensor names, duplicate tensor entries, out-of-bounds `storage_offset + logical_length`,
+  `layout_kind != COALESCED` (until `TENSOR_TABLE` is implemented), invalid ordered-concatenation storages
+  (storages do not cover a linear `[0, logical_total_size)` space), missing `artifact_id` (Phase 1),
+  `disk_fallback` without `artifact_id` (Phase 1), and Phase 1 gating violations (`tensor_names` / `view_subset_hash`,
+  view identity, `index_kind != CANONICAL`, multi-storage, or non-full canonical coverage).
+- `PERMISSION_DENIED`: non-loopback peer (local-only RPC) and owner PID mismatch when acquiring a region.
+- `NOT_FOUND`: region not found (including TTL expiry via registry sweep) and missing canonical index bytes for the requested `artifact_id`.
+- `FAILED_PRECONDITION`: region poisoned, region/device mismatch after acquisition, or region bounds violation.
 - `DATA_LOSS`: transfer started but failed (partial writes possible); retryable=false.
 - `CANCELLED`: client cancellation before transfer start (no bytes written).
 - `RESOURCE_EXHAUSTED`: pinned buffer pool exhausted.
 
 ## Observability
 - Daemon counter: `tc_store_materialize_into_target_total{result,reason,source}` where
-  `reason` is low-cardinality (layout_mismatch, region_missing, ttl_expired,
-  owner_pid_mismatch, bounds, non_contiguous, capability_missing, subset_not_supported,
-  device_uuid_mismatch, region_poisoned, transfer_failed).
+  `reason` is a low-cardinality string emitted by `MaterializationController` (Phase 1 examples:
+  `non_loopback_peer`, `layout_mismatch`, `region_missing`, `region_poisoned`, `bounds`, `map_failed`, `transfer_failed`).
+- Daemon counter: `tc_store_materialize_into_target_verification_skipped_total` increments when external-target
+  verification is skipped (Phase 1 always).
 - SDK counters:
   - `tc_store_region_backed_fallback_total{reason}`
   - `tc_store_region_backed_verification_skipped_total`
@@ -527,14 +658,21 @@ updates are acceptable in this pre-launch phase.
 
 # Trade-offs & Risks
 
-- **COALESCED single-storage only**: simplifies implementation but rejects multi-storage
-  or packed layouts. Mitigate by retaining fallback and reserving TENSOR_TABLE for a
-  later design.
+- **Phase 1 is intentionally restrictive**: single-storage + full canonical COALESCED keeps the first release safe but
+  increases fallback frequency. Mitigate by implementing the Phase 2+ primitives in this design (view/subset and
+  multi-storage COALESCED).
 - **Non-contiguous tensors**: strided layouts are deferred. SDK must detect and fall
   back to the current path to preserve semantics.
 - **No external-target verification in Phase 1**: integrity checks are skipped for
   region-backed writes. Mitigate by adding plan-based verification in Phase 2 and
   instrumenting a metric that flags verification skips.
+- **Variant identity collision risk (cross-cutting)**: executing a non-identity view without a resolved `view_id` can cause canonical/variant `ReplicaKey` collisions and skip variant verification metadata. Mitigate by making the daemon authoritative for resolving `view_id` and rejecting missing `view_id` for non-identity views.
+- **Packed subset identity mismatch risk (Phase 2+)**: if the SDK and daemon disagree on subset identity/packing, the
+  client can allocate an unsafe target. Mitigate by making the daemon authoritative for `view_index_bytes` and
+  returning it (plus `view_subset`) so clients can validate what was actually written.
+- **Hash encoding drift risk (cross-cutting)**: if SDKs treat `view_subset_hash` as UTF-8 or hex-string bytes, cache keys and observability will silently diverge across languages. Mitigate by standardizing raw digest bytes and adding round-trip tests for request/response hashes.
+- **Multi-storage mapping bugs (Phase 2+)**: ordered concatenation is simple but still easy to get wrong at boundaries.
+  Mitigate with targeted unit tests for the sink mapping and end-to-end daemon tests exercising multi-storage writes.
 - **Retry behavior**: region-backed failures poison the region and are non-retryable
   until the region is re-registered.
 - **Plan caching**: stale cache entries must be invalidated on generation changes.
@@ -550,16 +688,23 @@ updates are acceptable in this pre-launch phase.
 - `region_backed_mode` affects only into paths; `get` / `get_view` remain unchanged.
 
 ## Acceptance Criteria
-- Daemon VRAM usage does not exceed target region size during `tensor_dict_into`.
+**Phase 1 (current)**
+- Daemon VRAM usage does not exceed the target region size during `tensor_dict_into`.
 - IPC handle count per `tensor_dict_into` is limited to region handles only.
 - Phase 1 skips external-target verification and reports the skip via metrics.
-- Observability: new counters for region-backed get-into success/failure and fallback
-  reasons (no region, non-contiguous, layout mismatch).
-- Region-backed transfers are non-cancelable once started; failures mark the region
-  poisoned and return `DATA_LOSS`/`FAILED_PRECONDITION` (non-retryable).
-- Key-based requests or `INDEX_KIND_VIEW` return `INVALID_ARGUMENT` in Phase 1.
-- Subset layouts or non-full `tensor_names` return `INVALID_ARGUMENT` in Phase 1.
-- Non-COALESCED or multi-storage layouts return `INVALID_ARGUMENT`.
+- Observability: counters for region-backed success/failure and fallback reasons (no region, layout mismatch, etc).
+- Region-backed transfers are non-cancelable once started; failures mark the region poisoned and return
+  `DATA_LOSS`/`FAILED_PRECONDITION` (non-retryable).
+- Key-based requests, `INDEX_KIND_VIEW`, view identity, subset selection, non-full canonical layouts, and multi-storage
+  layouts return `INVALID_ARGUMENT`.
+
+**Phase 2+ (planned)**
+- View-indexed writes succeed when `index_kind=VIEW` and `view/view_id` is provided; the daemon returns `view_index_bytes`
+  and `view_subset` when selection is applied.
+- Packed subset writes succeed when `tensor_names` is a strict subset and the target layout matches the packed
+  `view_index_bytes` ByteSpace, including PAD=0 semantics.
+- Multi-storage COALESCED writes succeed when storages satisfy ordered concatenation and span the selected ByteSpace.
+- External-target verification can be enabled explicitly (configurable) and reports verification on/off via metrics.
 
 # Naming Compliance
 

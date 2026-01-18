@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -49,8 +49,7 @@ class IngestionRuntime {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
-      gsl::not_null<void*> target_ptr,
-      uint64_t total_size,
+      const loading::IntoTargetLayout& target_layout,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints);
