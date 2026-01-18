@@ -41,6 +41,7 @@ sc_header_only_library(
         "@abseil-cpp//absl/hash",
         "@folly//folly/futures:core",
         "@glog",
+        "@gsl",
     ],
 )
 

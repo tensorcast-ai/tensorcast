@@ -15,8 +15,12 @@ managing clients manually.
   tensor directly into the provided buffer. Only the requested tensor must be
   present in the target mapping, so multi-tensor artifacts no longer require
   pre-allocating placeholders for every entry when using the helper.
-- `tensor_dict_into` / `tensor_into` region-backed paths assume daemon support;
-  `region_backed_mode` (`auto`/`require`/`disable`) controls fallback behavior.
+- `tensor_dict_into` / `tensor_into` region-backed paths stream into registered
+  CUDA regions via `MaterializeIntoTarget`, supporting view specs, packed
+  subset selection (`tensor_names`), and ordered multi-storage layouts. For
+  non-identity views the SDK resolves and sends a deterministic `view_id` in
+  the `TargetLayout`. `region_backed_mode` (`auto`/`require`/`disable`) controls
+  fallback behavior.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`,
   `disk_path`). At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and

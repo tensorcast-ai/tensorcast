@@ -7,47 +7,60 @@ links:
 
 # Objective
 
-Implement a daemon-owned, deferred slice loading path that returns placeholder CUDA tensors immediately and fills them after an explicit `DeferredLoader.commit()` barrier. Use a session-owned arena so CUDA IPC handle count is bounded (not per-parameter), and optionally publish the resulting slice-artifact as an in-memory (`is_memory_replica`) artifact.
+Enable vLLM’s “meta-init + per‑param weight_loader” integration by providing a TensorCast `DeferredLoader` that:
+
+- returns placeholder CUDA tensors immediately (views into a client-owned arena),
+- fills them with a single daemon data-plane call at `DeferredLoader.commit()` (via `MaterializeIntoTarget`),
+- optionally publishes the produced slice-artifact for P2P reuse using existing registration primitives.
 
 # Current State & Grounding
 
-- Existing async materialization is “alloc then confirm” but SDK forbids returning tensors when `wait_for_completion=False`: `tensorcast/api/_materialize.py`.
-- View planning exists and can produce packed outputs for `narrow`: `core/store/materialization/dataplane/view/view_planner.cc`.
-- Copy pipeline exists (`SeekableSource → pump_ranges → PositionedSink`) with async H2D support: `core/store/materialization/dataplane/runtime/pump.cc`, `core/common/async_copy_manager.*`.
-- Global Store supports memory replica registration (`tensor_index_key`, `remote_memory_keys`): `schema.sql`, `core/store/components/global_store_client.cc`, `proto/tensorcast/common/v1/common.proto`.
+- Region-backed ingestion is implemented (`MaterializeIntoTarget` + `TargetLayout`) and already supports multi-storage ordered concatenation.
+- View planning/execution primitives exist (`ViewPlanner`, `ViewPlanSource`, `pump_ranges`).
+- Unified lifecycle/leases exist for daemon-exported handles and registration TTLs; avoid inventing new placeholder lease systems.
+- Global Store view routing is not implemented (view transport falls back to canonical), so Phase 1 publishing must not depend on view-aware routing.
 
 # Phases & Milestones
 
-- [ ] Phase 1: Proto + daemon session skeleton
-  - [ ] Milestone 1: Add new RPCs/messages to `proto/tensorcast/daemon/v2/store_daemon.proto`
-  - [ ] Milestone 2: Implement daemon-side `DeferredSliceLoadSession` registry (PID-bound, TTL cleanup)
-  - [ ] Milestone 3: Implement `AllocateDeferredSlice` allocating from a session arena and returning `(storage_id, optional MemCopyHandle, storage_offset_bytes)` + slice metadata
+## Phase A — SDK-first deferred loader (no new daemon RPCs)
 
-- [ ] Phase 2: Core dataplane (deferred copy execution)
-  - [ ] Milestone 1: Implement (or reuse from 0042) a TargetLayout-backed GPU sink supporting ordered concatenation across multiple storage windows
-  - [ ] Milestone 2: Implement daemon execution path `CommitDeferredSliceLoad`:
-    - build a session SelectionPlan from registered slices (src_offset → dst_offset, with PAD=0 alignment)
-    - open source (disk first; P2P/local replica follow-on)
-    - run `pump_ranges` to fill the session arena (linear ByteSpace over the arena storages)
-  - [ ] Milestone 3: Wire observability (spans/metrics) for copy planning + execution
+- [ ] Milestone A1: Add `Artifact.deferred_loader(device=...)` API and `DeferredLoader` implementation skeleton.
+- [ ] Milestone A2: Implement client-owned arena allocation strategy (single allocation first; multi-storage follow-on).
+- [ ] Milestone A3: Implement `DeferredLoader.tensor(name, slice=...)`:
+  - validate against canonical index bytes
+  - allocate an arena view tensor and record the slice request
+- [ ] Milestone A4: Implement `DeferredLoader.commit()` using a single `MaterializeIntoTarget` call:
+  - build `TargetLayout` over arena storages
+  - encode selection as view/subset (narrow-only; packed + PAD=0)
+  - ensure commit respects target storage boundary constraints (per-storage ranges, consistent with existing pipeline)
 
-- [ ] Phase 3: Python SDK API surface
-  - [ ] Milestone 1: Add `Artifact.deferred_loader(device=...)` returning `DeferredLoader`
-  - [ ] Milestone 2: Add `DeferredLoader.tensor(name, slice=...)` that calls `AllocateDeferredSlice` and rehydrates `torch.Tensor` via `_C.get_cuda_memory_ptr` + `_C.restore_tensors`
-  - [ ] Milestone 3: Add `DeferredLoader.commit()` that calls `CommitDeferredSliceLoad` and raises on failure
+## Phase B — Determinism and publish-friendly mode
 
-- [ ] Phase 4: Global Store publication (optional but recommended)
-  - [ ] Milestone 1: Define `cgid:` naming scheme for produced slice artifacts (include TTL)
-  - [ ] Milestone 2: Register communicator keys for slice buffers and publish via `register_memory_replica`
-  - [ ] Milestone 3: (Optional) Upsert `variants` metadata for traceability (not required for routing; `view_id` must follow `docs/designs/0016-artifact-view-v1.md` and only when packing is stable)
+- [ ] Milestone B1: Add explicit packing modes:
+  - append mode (default; matches vLLM immediate binding)
+  - plan-first mode (deterministic packed layout; required for stable publishing)
+- [ ] Milestone B2: Implement optional publication after commit via existing registration:
+  - register arena storages as VRAM regions (`RegisterVramRegion`)
+  - publish as `VRAM_LEASED` (LIP) with TTL via `Begin/Feed/CommitRegisteredArtifact`
+  - return a publish result (`artifact_id`, TTL, and any debug metadata)
 
-- [ ] Phase 5: Tests + docs
-  - [ ] Milestone 1: C++ unit tests for TargetLayout sink mapping + selection-plan assembly (fake CUDA)
-  - [ ] Milestone 2: Daemon gRPC tests for allocate/commit lifecycle and cleanup
-  - [ ] Milestone 3: Python tests for placeholder semantics and `DeferredLoader.commit()` (use `TENSORCAST_CUDA_BACKEND=fake`)
-  - [ ] Milestone 4: Update `docs/internals/model-loading.md` to document the new deferred slice mode
+## Phase C — Unified readiness semantics (system-level follow-on)
+
+- [ ] Milestone C1: Implement daemon-side `QueryReplicaStatus` + `ReleaseReplica` (or an equivalent unified ticket API) so async readiness is not special-cased via `ConfirmReplica`.
+- [ ] Milestone C2: Update SDK so any future async/deferred surfaces share the same wait/cancel/status mechanism.
+
+## Phase D — First-class variant reuse (system-level follow-on)
+
+- [ ] Milestone D1: Implement Global Store view-aware routing (replace canonical fallback for `request_view_transport`).
+- [ ] Milestone D2: Promote `TargetLayout.TENSOR_TABLE` to a first-class mode to reduce reliance on packed linear ByteSpaces for future complex layouts.
+
+## Tests + Docs
+
+- [ ] Python tests (fake CUDA): `DeferredLoader` placeholder semantics + commit barrier correctness.
+- [ ] (Optional) integration tests: publish via `VRAM_LEASED` and P2P materialize on a second daemon.
+- [ ] Update `docs/internals/model-loading.md` to document deferred loader semantics and how it relates to `tensor_dict_into` and publishing.
 
 # Rollout / Backout
 
-- Rollout behind an `Artifact` method (`Artifact.deferred_loader`) without changing existing `Artifact.tensor*` semantics.
-- Backout by removing the new entrypoint and RPCs; no persistent schema changes are required for Phase 1–3.
+- Roll out behind a new `Artifact` method (`Artifact.deferred_loader`) without changing existing `Artifact.tensor*` semantics.
+- Back out by removing the SDK entry point and keeping `MaterializeIntoTarget` unchanged; no schema changes required for Phase A/B.

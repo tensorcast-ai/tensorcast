@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
@@ -9,10 +9,12 @@
 #include <unordered_map>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/types/span.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "nlohmann/json.hpp"
 
@@ -280,7 +282,8 @@ absl::StatusOr<TransformPlan> build_inverse_transform(
 
 absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     std::string_view canonical_index_json,
-    const ViewSpec& spec) {
+    const ViewSpec& spec,
+    absl::Span<const std::string> subset_names) {
   std::map<std::string, CanonicalEntry> canonical_entries;
   if (auto st = parse_canonical_index(canonical_index_json, &canonical_entries); !st.ok()) {
     return st;
@@ -295,6 +298,22 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
       return st;
     }
   }
+
+  absl::flat_hash_set<std::string> subset_filter;
+  subset_filter.reserve(subset_names.size());
+  for (const auto& name : subset_names) {
+    subset_filter.insert(name);
+  }
+  if (!subset_filter.empty()) {
+    for (const auto& name : subset_filter) {
+      if (!canonical_entries.contains(name)) {
+        return absl::InvalidArgumentError(absl::StrCat("View subset references unknown tensor: ", name));
+      }
+    }
+  }
+
+  const bool subset_full = !subset_filter.empty() && subset_filter.size() == canonical_entries.size();
+  const bool subset_enabled = !subset_filter.empty() && !subset_full;
 
   bool has_transform = false;
   uint64_t view_cursor = 0;
@@ -314,6 +333,9 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
   canonical_offsets.reserve(canonical_entries.size());
 
   for (const auto& [name, entry] : canonical_entries) {
+    if (subset_enabled && !subset_filter.contains(name)) {
+      continue;
+    }
     const uint64_t aligned_start = (view_cursor + (kAlignmentBytes - 1)) / kAlignmentBytes * kAlignmentBytes;
     if (aligned_start > view_cursor) {
       selection_plan.ranges.push_back(make_pad_range(view_cursor, aligned_start - view_cursor));
@@ -499,7 +521,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
   transform_plan.requires_materialization = any_requires_materialization;
 
   ViewPlan forward_plan;
-  forward_plan.is_identity = !has_transform;
+  forward_plan.is_identity = !has_transform && !subset_enabled;
   forward_plan.view_size_bytes = view_cursor;
   forward_plan.selection = std::move(selection_plan);
   forward_plan.transform = std::move(transform_plan);
@@ -534,7 +556,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
 } // namespace
 
 absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonical_index_json, const ViewSpec& spec) {
-  auto bidirectional_or = compute_bidirectional_internal(canonical_index_json, spec);
+  auto bidirectional_or = compute_bidirectional_internal(canonical_index_json, spec, {});
   if (!bidirectional_or.ok()) {
     return bidirectional_or.status();
   }
@@ -545,7 +567,26 @@ absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(std::string_view canonic
 absl::StatusOr<BidirectionalViewPlan> ViewPlanner::compute_bidirectional_view_plan(
     std::string_view canonical_index_json,
     const ViewSpec& spec) {
-  return compute_bidirectional_internal(canonical_index_json, spec);
+  return compute_bidirectional_internal(canonical_index_json, spec, {});
+}
+
+absl::StatusOr<ViewPlan> ViewPlanner::compute_view_plan(
+    std::string_view canonical_index_json,
+    const ViewSpec& spec,
+    absl::Span<const std::string> subset_names) {
+  auto bidirectional_or = compute_bidirectional_internal(canonical_index_json, spec, subset_names);
+  if (!bidirectional_or.ok()) {
+    return bidirectional_or.status();
+  }
+  BidirectionalViewPlan bidirectional = std::move(*bidirectional_or);
+  return std::move(bidirectional.forward);
+}
+
+absl::StatusOr<BidirectionalViewPlan> ViewPlanner::compute_bidirectional_view_plan(
+    std::string_view canonical_index_json,
+    const ViewSpec& spec,
+    absl::Span<const std::string> subset_names) {
+  return compute_bidirectional_internal(canonical_index_json, spec, subset_names);
 }
 
 } // namespace tensorcast::store::loader

@@ -4,76 +4,82 @@ title: Deferred Slice Materialization for vLLM (On‑Demand Slice + Deferred Cop
 areas: ["sdk", "daemon", "core", "global_store", "proto"]
 status: draft
 created: 2026-01-17
-last_updated: 2026-01-17
+last_updated: 2026-01-18
 related_code:
+  - docs/designs/0042-region-backed-tensor-dict-into.md
+  - docs/designs/0049-cpu-shared-memory-materialization.md
+  - docs/designs/0011-unified-session-lifecycle-leases.md
+  - docs/designs/0016-artifact-view-v1.md
+  - tensorcast/api/store/artifact.py
+  - tensorcast/api/store/materialization.py
+  - tensorcast/api/store/__init__.py
+  - tensorcast/api/_region_cache.py
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - daemon/service/controllers/materialization_controller.cc
-  - daemon/state/session_lifecycle.*
-  - core/store/materialization/dataplane/runtime/pump.{h,cc}
+  - daemon/service/controllers/registration_controller.cc
+  - core/store/runtime/ingestion/materialization_facade.cc
+  - core/store/materialization/dataplane/sinks/target_layout_gpu_sink.{h,cc}
   - core/store/materialization/dataplane/view/view_planner.{h,cc}
-  - core/store/materialization/dataplane/sinks/gpu_memory_sink.{h,cc}
-  - tensorcast/api/_materialize.py
-  - tensorcast/_c_ext.py
-  - tensorcast/csrc/checkpoint_py.cc
+  - core/store/materialization/dataplane/view/view_plan_source.{h,cc}
+  - core/store/materialization/dataplane/runtime/pump.{h,cc}
 links:
   predecessors:
-    - ./0005-async-copy-manager.md
-    - ./0009-safetensors-loader-integration.md
-    - ./0016-artifact-view-v1.md
-    - ./0038-daemon-only-disk-materialization.md
     - ./0042-region-backed-tensor-dict-into.md
+    - ./0049-cpu-shared-memory-materialization.md
+    - ./0011-unified-session-lifecycle-leases.md
+    - ./0016-artifact-view-v1.md
     - ../internals/model-loading.md
   plan: ../plans/0052-deferred-slice-materialization.md
 ---
 
 # Summary
 
-Add a new TensorCast loading mode to support vLLM’s “meta-init + per‑param weight_loader” chain without eager `torch.Tensor` materialization and per‑param `copy_`. The SDK returns per‑param **placeholder tensors** immediately (daemon-owned GPU memory exported to the client) while deferring the actual I/O + GPU copies until `DeferredLoader.commit()`. The daemon batches all registered slices and executes an optimized copy plan (disk/P2P/local‑replica) in one shot.
+Support vLLM’s “meta-init + per‑param weight_loader” chain by adding a **deferred loader** API that returns per‑parameter CUDA tensors immediately (placeholders) and performs the actual I/O + GPU copies only at an explicit `DeferredLoader.commit()` barrier.
 
-This design is intentionally **daemon-centric**: allocation, planning, and copy execution happen in the Store daemon; the client only holds handles/tensors and triggers `DeferredLoader.commit()`.
+**North star (global direction):** implement deferred slice loading as orchestration over the existing **TargetLayout + `MaterializeIntoTarget`** primitive (see `docs/designs/0042-region-backed-tensor-dict-into.md`), not as a new daemon-owned placeholder session. Concretely:
 
-To keep CUDA IPC handle counts and mapping overhead bounded, the daemon allocates placeholder memory from a
-session-owned GPU arena (one/few exported handles) and returns per-parameter tensors as views into those storages.
+- Placeholders are **client-owned CUDA tensors** (views into a client-owned arena).
+- `commit()` performs **one** daemon data-plane call (`MaterializeIntoTarget`) to fill the arena.
+- Optional publishing reuses existing registration primitives (recommended: client-owned `VRAM_LEASED` / LIP).
 
 # Goals / Non‑Goals
 
 ## Goals
-- **On-demand slice**: allow callers to request the same logical slice as existing `narrow` rules, per tensor and per rank.
-- **Deferred copy**: register many slices first, then execute all transfers via one `DeferredLoader.commit()` barrier.
-- **Meta-friendly**: enable `torch.device("meta")` model construction, followed by binding placeholder tensors as real parameter storages.
-- **Daemon-owned memory**: GPU allocation and all copying happens in the daemon; client receives standard `torch.Tensor` objects backed by shared CUDA memory.
-- **Copy optimization**: reuse `pump_ranges` + `AsyncCopyManager` to overlap I/O and GPU DMA and coalesce work.
-- **Artifact consistency**: make the produced weights compatible with TensorCast concepts (artifact/replica/index), and optionally publish to Global Store so other nodes can P2P-fetch the produced artifact.
+
+- **On-demand slice**: allow callers to request v1 `narrow` semantics (single-dimension slice) per tensor.
+- **Deferred copy barrier**: register slices first, execute transfers once at `commit()`.
+- **Meta-friendly**: allow `torch.device("meta")` construction and immediate binding of real CUDA storages.
+- **Low control-plane overhead**: Phase 1 requires **no per-tensor daemon RPCs**; only `commit()` hits the daemon.
+- **Reuse existing dataplane**: use `ViewPlanner`/`ViewPlanSource` + `pump_ranges` + `TargetLayoutGpuSink` for overlapped I/O and DMA.
+- **Artifact consistency**: optionally publish the produced slice artifact so other nodes can P2P fetch.
 
 ## Non‑Goals
-- Modifying vLLM itself (this design only provides a TensorCast API surface that vLLM can integrate with).
-- Supporting arbitrary view ops beyond `narrow` in the first iteration (transpose/materialization is a follow-on).
-- View-aware routing in Global Store (currently `request_view_transport` is a placeholder and falls back to canonical routing). This design avoids depending on view routing for P2P.
+
+- Modifying vLLM itself.
+- Supporting arbitrary view ops beyond `narrow` in the first iteration (transpose/materialization remains follow-on).
+- Solving Global Store view-aware routing in Phase 1 (today `request_view_transport` falls back to canonical).
 - Eliminating GPU allocation (this is “delayed copy”, not “zero allocation”).
 
 # Current State (Grounding)
 
-- The daemon already supports daemon-owned GPU materialization with exported handles (`MaterializeReplica` → `MemCopyHandle.cuda_ipc_handle`) and a two-phase flow (`Materialize*` then `ConfirmReplica`) (see `docs/internals/model-loading.md`).
-- The Python SDK currently refuses to create torch tensor views unless `wait_for_completion=true` (`tensorcast/api/_materialize.py` raises when `wait_for_completion=False`). That blocks “placeholder tensors that become ready later”.
-- The view planner (`core/store/materialization/dataplane/view/view_planner.cc`) can build packed outputs for `narrow` (contiguous `view_stride`) but, today, it always iterates all canonical entries. Subset-only planning is not first-class.
-- Global Store can persist view metadata (`variants`, `leaves`) but does not route view transports yet (core client `request_view_transport` falls back to canonical).
-- Global Store already supports registering in-memory replicas (`is_memory_replica`, `tensor_index_key`, `remote_memory_keys`, `buffer_sizes`) via `RegisterReplica` / `register_memory_replica` (see `schema.sql`, `core/store/components/global_store_client.cc`).
+- **Region-backed ingestion exists and is implemented**: the SDK builds a `TargetLayout` over client-registered VRAM regions and calls `MaterializeIntoTarget` to stream bytes into those targets (`tensorcast/api/store/materialization.py`).
+- **Core has the right primitives**:
+  - `ViewPlanner` supports subset filtering and `narrow` planning (`core/store/materialization/dataplane/view/view_planner.cc`).
+  - `ViewPlanSource` executes `SelectionPlan` with PAD=0 (`core/store/materialization/dataplane/view/view_plan_source.*`).
+  - `pump_ranges` overlaps staged IO and GPU copies (`core/store/materialization/dataplane/runtime/pump.*`).
+  - `TargetLayoutGpuSink` supports ordered-concatenation multi-storage targets but rejects writes that span storage boundaries (commit must pass per-storage ranges, as `materialize_into_target` already does).
+- **Lifecycle and leases are already unified** for daemon-exported handles and local-only handle plane (`docs/designs/0049-cpu-shared-memory-materialization.md`, `docs/designs/0011-unified-session-lifecycle-leases.md`). A new “placeholder lease system” should be avoided.
+- **Global Store view routing is still a placeholder** (`GlobalStoreClient::request_view_transport` falls back to canonical routing). Phase 1 should not depend on it.
 
 # User-Facing SDK API
 
-TensorCast’s Python SDK is **handle-first**: users identify a model as an `Artifact`
-(`tensorcast.from_disk(...)` / `tensorcast.artifact(...)`), optionally derive a
-view handle (`.slice/.subset/.view_builder()`), and then materialize tensors.
+Add a new surface on `Artifact`:
 
-This feature should follow the same shape instead of introducing a parallel
-“model handle” hierarchy. The SDK adds a new **deferred loader** surface on top
-of `Artifact`:
-
-- `Artifact.deferred_loader(...) -> DeferredLoader`
+- `Artifact.deferred_loader(device=...) -> DeferredLoader`
 - `DeferredLoader.tensor(name, slice=...) -> torch.Tensor` (placeholder)
-- `DeferredLoader.commit()` (barrier: plan + execute all copies)
+- `DeferredLoader.commit(*, publish=...) -> DeferredCommitResult`
 
-Example (vLLM meta-init + per-parameter binding)
+Example (vLLM meta-init + per-parameter binding):
 
 ```python
 import tensorcast as tc
@@ -83,41 +89,33 @@ artifact = tc.from_disk("/models/llama-7b")
 
 with artifact.deferred_loader(device="cuda:0") as loader:
     for name, param in model.named_parameters():
-        # narrow semantics: SliceSpec = slice | (dim, slice)
         shard = loader.tensor(name, slice=(0, slice(rank_start, rank_start + rank_size)))
         param.data = shard
 
-    loader.commit()  # barrier: fills all placeholders
+    loader.commit()
 ```
 
-Behavioral contract
-- `DeferredLoader.tensor(...)` returns a standard CUDA `torch.Tensor` backed by daemon-owned memory.
+Behavioral contract:
+
+- `DeferredLoader.tensor(...)` returns a standard CUDA `torch.Tensor` backed by **client-owned** memory.
 - Tensor contents are **undefined** until `DeferredLoader.commit()` returns successfully.
+- `commit()` is the explicit readiness barrier; Phase 1 does not rely on `wait_for_completion` / `ConfirmReplica` semantics.
 
-Interoperability with existing handles
-- `DeferredLoader` is created from an `Artifact` handle (canonical or derived view). If the handle already has a view spec (e.g., `artifact.slice(...)`), the loader inherits it; callers may omit `slice=` for tensors whose slicing is already encoded in the handle.
-- `slice=` uses the same `SliceSpec` conventions as the view APIs (`Artifact.slice(...)` / `ViewBuilder.slice(...)`) so users do not need to learn a new sharding DSL.
+Interoperability with existing handles:
 
-## Naming Compliance (required)
-
-Python
-- Functions: `Artifact.deferred_loader`, `DeferredLoader.tensor`, `DeferredLoader.commit` (snake_case).
-- Classes: `DeferredLoader`, `DeferredCommitResult` (PascalCase).
-
-C++
-- Proposed classes: `DeferredSliceLoadSession`, `DeferredSliceArena`, `TargetLayoutGpuSink` (PascalCase).
-- Proposed methods: `begin_deferred_slice_load`, `allocate_deferred_slice`, `commit_deferred_slice_load` (snake_case).
+- `DeferredLoader` is created from an `Artifact` handle (canonical or derived view). If the handle already has a view spec (e.g., `artifact.slice(...)`), the loader inherits it; callers may omit `slice=` when slicing is already encoded in the handle.
+- `slice=` reuses the existing `SliceSpec` conventions (`Artifact.slice(...)` / `ViewBuilder.slice(...)`).
 
 # Architecture & Interfaces
 
-## High-Level Execution Model
+## High-Level Execution Model (Phase 1)
 
-We introduce a daemon-managed **deferred slice load session**:
+Phase 1 is a **client-owned deferred session**:
 
-1) `Artifact.deferred_loader(...)` creates a session and returns metadata needed to validate slice requests (canonical index).
-2) Each `DeferredLoader.tensor(...)` call allocates daemon-owned device memory for the requested (possibly sliced) tensor and returns a placeholder `torch.Tensor`; the daemon records the request.
-3) `DeferredLoader.commit()` triggers the daemon to plan and execute all copies (disk/P2P/local), filling the allocated buffers.
-4) Optionally, `commit(publish=...)` publishes the resulting “sliced model artifact” as a Global Store **memory replica** (recommended as a `cgid:` artifact for runtime use).
+1) `Artifact.deferred_loader(...)` ensures canonical index bytes are available (cache → daemon fetch if needed).
+2) Each `DeferredLoader.tensor(...)` allocates from a client-owned CUDA arena and returns a view tensor immediately.
+3) `DeferredLoader.commit()` builds a logical view/subset request plus a `TargetLayout` describing the arena storages, then calls **one** daemon RPC: `MaterializeIntoTarget`.
+4) Optional: `commit(publish=...)` publishes the produced slice-artifact via existing registration primitives.
 
 ```mermaid
 sequenceDiagram
@@ -125,216 +123,116 @@ sequenceDiagram
   participant SDK as TensorCast SDK
   participant A as Artifact handle
   participant D as StoreDaemon
-  participant SE as StoreEngine
   participant IO as Disk/P2P Source
 
   A->>SDK: deferred_loader(device="cuda:0")
-  SDK->>D: BeginDeferredSliceLoad(artifact_id|disk_path, device_uuid, pid)
-  D-->>SDK: session_id + canonical_index_bytes (+ canonical_artifact_id)
+  SDK->>D: GetArtifactIndexById / ResolveArtifactFromDisk (if needed)
+  D-->>SDK: canonical_index_bytes (+ generation)
 
   loop per parameter
     V->>SDK: loader.tensor(tensor_name, slice=...)
-    SDK->>D: AllocateDeferredSlice(session_id, tensor_name, view_op)
-    D-->>SDK: slice_id + (optional) arena handle + tensor offset + slice metadata
-    SDK-->>V: torch.Tensor placeholder (CUDA, view into daemon-owned arena)
+    SDK->>SDK: allocate view into client arena
+    SDK-->>V: torch.Tensor placeholder
   end
 
   V->>SDK: loader.commit()
-  SDK->>D: CommitDeferredSliceLoad(session_id)
-  D->>SE: plan + execute copies
-  SE->>IO: read_at / communicator.read_tensor
-  SE-->>D: completion (or error)
-  D-->>SDK: OK (+ optional published artifact_id)
+  SDK->>D: MaterializeIntoTarget(artifact_id|disk_fallback, TargetLayout, view/subset)
+  D->>IO: read_at / communicator.read_tensor
+  D-->>SDK: OK (target buffers filled)
 ```
 
-## RPC Surface (daemon v2)
+## RPC Surface
 
-Add new RPCs to `proto/tensorcast/daemon/v2/store_daemon.proto`:
+Phase 1 introduces **no new daemon RPCs**. It reuses:
 
-```protobuf
-rpc BeginDeferredSliceLoad(BeginDeferredSliceLoadRequest)
-    returns (BeginDeferredSliceLoadResponse) {}
+- `GetArtifactIndexById` / `ResolveArtifactFromDisk` (index acquisition when needed)
+- `MaterializeIntoTarget` (the commit barrier that fills placeholders)
+- Optional publishing:
+  - `RegisterVramRegion` + `Begin/Feed/CommitRegisteredArtifact` (registration)
 
-rpc AllocateDeferredSlice(AllocateDeferredSliceRequest)
-    returns (AllocateDeferredSliceResponse) {}
+If a daemon-owned placeholder session is ever introduced as a follow-on, it must reuse the existing handle lease contract (`MemCopyHandle.lease_token`) and unified lifecycle manager; do not create a parallel liveness system.
 
-rpc CommitDeferredSliceLoad(CommitDeferredSliceLoadRequest)
-    returns (CommitDeferredSliceLoadResponse) {}
+## Planning and Layout
 
-rpc ReleaseDeferredSliceLoad(ReleaseDeferredSliceLoadRequest)
-    returns (ReleaseDeferredSliceLoadResponse) {}
-```
+### Packing modes
 
-Key message intents (illustrative, not final proto):
+Phase 1 supports two SDK-side packing modes:
 
-- `BeginDeferredSliceLoadRequest`
-  - `DiskFallbackHint disk_fallback` (reuses 0038 daemon-only disk materialization semantics)
-  - `string device_uuid` (GPU only; local-only)
-  - `int32 pid` (required for handle leases / lifecycle)
-  - `SourcePreference preference` + `SourcePolicy source_policy` (optional; same intent as `MaterializeReplicaRequest`)
-  - `optional uint32 ttl_ms` (optional session TTL)
-  - `optional bool publish_memory_replica` (whether to publish the result as an in-memory artifact)
+- **Append mode (default)**: each `tensor()` allocation appends to a packed view ByteSpace (8B aligned, PAD=0). This matches vLLM’s immediate binding needs but layout can depend on call order.
+- **Plan-first mode (recommended for publishing/determinism)**: callers declare the slice set first; the SDK computes a deterministic packed layout (stable ordering + canonical normalization) and then returns tensors whose offsets are stable.
 
-- `BeginDeferredSliceLoadResponse`
-  - `string session_id`
-  - `bytes canonical_index_bytes`
-  - `uint64 generation`
-  - `optional string canonical_artifact_id` (when determinable from `artifact_descriptor.json`)
+### TargetLayout constraints (important)
 
-- `AllocateDeferredSliceRequest`
-  - `string session_id`
-  - `string tensor_name`
-  - `NarrowOp narrow` (dim/start/length)
+`TargetLayoutGpuSink` rejects writes that span multiple storages. Therefore:
 
-- `AllocateDeferredSliceResponse`
-  - `string slice_id`
-  - `string storage_id` (session arena storage backing this slice)
-  - `optional MemCopyHandle storage_handle` (CUDA IPC + `lease_token`; returned when the storage is first introduced)
-  - `uint64 storage_offset_bytes`
-  - `uint64 byte_length`
-  - `repeated int64 shape`, `repeated int64 stride`, `string dtype` (slice metadata for SDK tensor creation)
+- The arena can be one allocation (simplest), or multiple allocations (preferred for allocator flexibility).
+- `commit()` must route `pump_ranges` over **per-storage ranges** (exactly as the existing `materialize_into_target` path already does).
 
-- `CommitDeferredSliceLoadResponse`
-  - `bool ok`
-  - `optional string published_artifact_id` (e.g., `cgid:` id for the produced slice-artifact)
+## Optional Publishing (Global Store)
 
-All of these RPCs are **loopback/UDS only** (same security model as other handle-returning RPCs).
+Publishing is orthogonal to deferred loading; it should reuse existing primitives.
 
-## Core Copy Planning and Execution
+### Recommended: client-owned `VRAM_LEASED` / LIP publish
 
-### Planning primitive
+After `commit()` fills the client arena:
 
-Treat the session output as a **packed ByteSpace** (PAD=0) owned by the session, not as a “view ByteSpace that must
-remain stable as selection grows”.
+1) The client registers the arena storages as VRAM regions (`RegisterVramRegion`).
+2) The client commits a `VRAM_LEASED` (LIP) registration describing the packed slice-artifact (storages + tensor aliases + index bytes).
 
-Each `AllocateDeferredSlice`:
-- validates the slice against `canonical_index_bytes` (dtype/shape bounds + narrow constraints)
-- computes the canonical read ranges for that slice (reusing `ViewPlanner` on a single-tensor spec, or equivalent)
-- appends a new interval to the session ByteSpace (8B aligned; PAD bytes are zeros) and allocates backing bytes from the
-  session arena
-- records `(src_offset, dst_offset, length)` ranges for the eventual copy, shifting `dst_offset` into the session
-  ByteSpace
+This gives:
 
-At `CommitDeferredSliceLoad`, the daemon merges the per-slice ranges into a single `SelectionPlan` (including PAD ranges
-where required) and uses `ViewPlanSource(base_source, selection_plan)` so `pump_ranges` can stream the session ByteSpace
-linearly into the arena.
+- Normal Global Store registration semantics.
+- PID ownership + TTL via the unified lifecycle manager (no daemon-owned replica required).
+- A first-class artifact identity suitable for P2P reuse.
 
-### Destination mapping (reused sink)
+### Follow-on: daemon-side `register_memory_replica`
 
-Reuse the TargetLayout-backed GPU sink introduced for region-backed targets (`docs/designs/0042-region-backed-tensor-dict-into.md`):
-- The session arena is modeled as an ordered list of storage windows (CUDA allocations), using the same ordered
-  concatenation rule for a linear destination ByteSpace.
-- The sink maps `write_at(dst_offset, ...)` into the owning storage window and implements `AsyncPositionedSink` so
-  `pump_ranges` overlaps IO + H2D.
-
-### Execution
-
-The daemon runs:
-- `pump_ranges(selection_source, target_layout_sink, streaming_pinned_buffer, [0, session_total_bytes), concurrency, blocking_executor)`
-
-This reuses:
-- `AsyncCopyManager` for H2D scheduling (via `AsyncPositionedSink`)
-- the existing staged path (page cache for disk, or communicator for P2P)
-- existing observability hooks (tracing stage labels)
-
-## Memory and Handle Export
-
-Phase 1 uses the existing CUDA IPC handle path end-to-end:
-- daemon allocates arena storage windows with the existing CUDA memory allocator (one/few allocations per session)
-- daemon returns `MemCopyHandle.cuda_ipc_handle` per arena storage (plus `lease_token`) and per-slice `storage_offset_bytes`
-- SDK maps each storage once via `_C.get_cuda_memory_ptr()` and builds tensors as views into the mapped storages (offset + metadata)
-
-### VMM note (follow-on)
-
-The long-term goal is to back slice buffers with CUDA VMM allocations (for RDMA-friendly dma-buf export and more flexible mapping). This requires:
-- extending the CUDA driver API binding with import/export primitives (beyond `cuMemGetHandleForAddressRange`)
-- a new proto handle kind (e.g., dma-buf fd passing + size + offset)
-- an SDK-side mapping helper parallel to `get_cuda_memory_ptr`
-
-Important constraint (grounded in `core/communicator/engine/rdma_vmm_test.cc`):
-- exporting a dma-buf handle for an address range fails if the requested range spans unmapped pages. Therefore, VMM usage must either fully back exported ranges or export per-slice ranges.
-
-## Global Store Integration (P2P Sharing)
-
-Because Global Store view routing is not yet implemented, we publish the output as a **first-class artifact** (recommended `cgid:` for runtime):
-
-- The daemon computes a **slice-artifact tensor index** (canonical index bytes for the packed slice tensors) whose offsets
-  describe the session ByteSpace (including PAD=0 gaps introduced by alignment rules, if any).
-- The daemon registers the produced memory replica via `GlobalStoreClient::register_memory_replica`, providing:
-  - `artifact_id`: `cgid:<...>` (or optionally mi2 if a digest is computed)
-  - `tensor_index_key`: sha256 hex of the index bytes
-  - `tensor_index_data`: the index bytes (for upsert)
-  - `remote_memory_keys` / `buffer_sizes`: communicator registrations of the arena storage windows in ordered-concatenation
-    order (gapless linear mapping over the slice-artifact ByteSpace; required by `RemoteKeySource` offset mapping in
-    `core/store/materialization/dataplane/sources/remote_key_source.cc`)
-  - `verification_json`: optional KEY_POINTS (fast) verification metadata
-
-Consumers can then `tc.artifact(artifact_id=<cgid>).tensor_dict(device=...)` and fetch via P2P without disk access, using existing replica routing.
-
-Optionally, for traceability, the daemon may also write a `variants` row linking:
-- canonical artifact id (mi2) → deterministic `view_id` + `view_size`
-
-If this is done, `view_id` MUST follow the canonical variant-identity rules in
-`docs/designs/0016-artifact-view-v1.md` (do not use `hash(view_spec_json)`), and
-it MUST only be emitted when the produced ByteSpace is representable as a true
-view variant with stable packing. This is not required for transport in Phase 1
-and should be omitted when slice packing depends on allocation order.
+If/when the runtime has communicator keys for client-owned regions (or when outputs become daemon-owned), the daemon can directly call `GlobalStoreClient::register_memory_replica`. This is not required for Phase 1 correctness.
 
 # Invariants & Error Model
 
-Invariants
-- Slice allocations are daemon-owned; client tensors are views over exported handles (lease-based lifetime).
-- `DeferredLoader.tensor(...)` does not read checkpoint bytes and does not block on I/O; it only allocates and returns a placeholder.
-- `DeferredLoader.commit()` is the only barrier that guarantees data readiness.
-- Slice requests are validated against the canonical index (dtype/shape bounds, narrow constraints).
-- Placeholder tensor contents are undefined until commit succeeds; on any error, callers must treat bytes as undefined.
+Invariants:
 
-Errors (representative)
-- `INVALID_ARGUMENT`: unknown tensor name; narrow dim out of range; narrow start/length invalid; unknown `session_id`;
-  duplicate allocation for the same `(tensor_name, slice)` without an explicit reuse policy.
-- `FAILED_PRECONDITION`: daemon not initialized; device_uuid missing; wrong pid; non-loopback peer requested handle-bearing RPC.
-- `DATA_LOSS`: checksum/verification failure during disk/P2P read.
-- `RESOURCE_EXHAUSTED`: GPU allocation failure for session arena storage.
+- Placeholders are client-owned CUDA buffers; no daemon handle export is required to create them.
+- `tensor()` does not perform I/O and must not block on disk/P2P.
+- `commit()` is the only readiness barrier.
+- Placeholder bytes are undefined until `commit()` succeeds; on any failure, callers must treat bytes as undefined.
+- Slice requests are validated against canonical index metadata (dtype/shape bounds + narrow constraints).
+
+Representative errors:
+
+- `INVALID_ARGUMENT`: unknown tensor name; invalid slice bounds; invalid device; layout mismatch.
+- `FAILED_PRECONDITION`: daemon not initialized; Global Store required but unavailable (depending on policy); region-backed prerequisites missing.
+- `RESOURCE_EXHAUSTED`: GPU allocation failure; pinned buffer pool exhaustion; FD pressure (if any local-handle interactions are involved elsewhere).
+- `DATA_LOSS`: verification failure during disk/P2P read.
 
 # Compatibility & Acceptance Criteria
 
-Compatibility
+Compatibility:
+
 - Does not change existing `Artifact.tensor_dict()` / `MaterializeReplica` semantics.
-- Default SDK materialization continues to require `wait_for_completion=true` for returned tensors; this new API is the only surface that intentionally returns “not-yet-filled” tensors.
-- Works with safetensors artifacts via existing DiskLoader + SafetensorsSource integration.
+- Deferred loader is the only surface that intentionally returns “not-yet-filled” tensors.
 
-Acceptance criteria
+Acceptance criteria:
+
 - vLLM-style per-parameter workflow can bind placeholder tensors and complete loading via a single `DeferredLoader.commit()` call.
-- No eager `torch.Tensor` materialization from checkpoint is required in the client.
-- Daemon copy execution uses `pump_ranges` and overlaps I/O + H2D copies (verified by tracing/metrics).
-- CUDA IPC handle count is bounded (session arena storages), not proportional to parameter count.
-- (Optional) After `DeferredLoader.commit()`, the daemon can publish the produced slice-artifact as a GS memory replica and another node can materialize it via P2P.
+- Phase 1 performs **no per-parameter daemon RPCs** (only the single `MaterializeIntoTarget` at commit).
+- Commit uses `pump_ranges` and overlaps I/O + DMA (verified via tracing/metrics).
+- Optional: after `commit()`, client publishes the produced slice-artifact and another node can P2P-materialize it.
 
-# Schema Changes
+# Long-Term Roadmap (Global)
 
-No `schema.sql` changes are required. This design reuses existing Global Store concepts:
-- `is_memory_replica` registration for in-memory artifacts
-- optional `variants` metadata for traceability (no new tables required)
+Deferred slice loading exposes two foundational gaps that should be solved globally:
 
-# Trade-offs & Risks
+1) **Unified async readiness**: converge on a single, explicit wait/cancel/status mechanism (tickets/tasks) instead of ad-hoc `wait_for_completion` semantics. (`ConfirmReplica` exists today; the longer-term API should be consistent across materialize/into/publish.)
+2) **First-class view routing**: implement Global Store view-aware routing so `view_id` becomes a routable identity rather than an implementation detail.
 
-- **More RPCs during registration**: `AllocateDeferredSlice` is per tensor/param; mitigate via batching in a follow-on (`AllocateDeferredSlices`).
-- **View planner limitations**: current planner supports at most one `narrow` per tensor; fits vLLM sharding but may need extension later.
-- **Handle lifecycle complexity**: requires careful lease/session cleanup to avoid orphaned allocations; reuse existing PID + handle-lease infrastructure.
-- **Arena layout vs determinism**: session packing is append-only, so the produced slice-artifact layout may depend on allocation order. Mitigate by using a runtime `cgid:` id (ephemeral by design) and, if determinism becomes required, introducing an explicit “declare slices then allocate” mode.
-- **VMM export complexity**: true VMM-backed cross-process handles require new import plumbing; Phase 1 uses CUDA IPC and treats VMM as follow-on.
-
-# Alternatives (and why not)
-
-- **Client-owned placeholders via region-backed targets (0042)**: would require vLLM (or integration) to allocate/register regions and manage layouts; this design keeps placeholder ownership daemon-side for consistent lifecycle and batching.
-- **Reuse `MaterializeReplica(wait_for_completion=false)` only**: returns an allocated handle early, but does not match vLLM’s incremental per-parameter registration shape and does not support “allocate many slices, then commit once” without additional session semantics.
-- **Per-slice CUDA IPC handle per parameter**: simplest to implement but scales poorly (handle count + mapping overhead) for large models; the arena approach keeps this bounded.
+Additionally, `TargetLayout` has a reserved `TENSOR_TABLE` mode. Long-term, making `TENSOR_TABLE` first-class avoids forcing everything into a single packed linear ByteSpace, which reduces determinism and packing complexity for future sparse/quantized/multi-buffer layouts.
 
 # References
 
-- `docs/internals/model-loading.md` (Materialize + Confirm pattern)
-- `docs/designs/0016-artifact-view-v1.md` (ViewSpec/ViewPlan concepts)
-- `docs/designs/0038-daemon-only-disk-materialization.md` (daemon-only disk reads)
-- `docs/designs/0005-async-copy-manager.md` (async H2D copy submission)
-- `docs/designs/0009-safetensors-loader-integration.md` (safetensors source)
-- `docs/designs/0017-client-generated-artifact-id.md` (cgid runtime artifact identity)
+- `docs/designs/0042-region-backed-tensor-dict-into.md`
+- `docs/designs/0049-cpu-shared-memory-materialization.md`
+- `docs/designs/0011-unified-session-lifecycle-leases.md`
+- `docs/designs/0016-artifact-view-v1.md`
+- `docs/internals/model-loading.md`

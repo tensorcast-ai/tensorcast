@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -54,6 +54,8 @@ class MetadataGateway {
 
   absl::StatusOr<components::KeyMapping> resolve_key_mapping(std::string_view key) const;
   absl::StatusOr<std::string> get_canonical_index(std::string_view artifact_id) const;
+  absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id)
+      const;
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,

@@ -64,6 +64,8 @@ engine:
   artifact_chunk_bytes: 256MB
   # Default depth for StreamingPinnedBuffer instances created by StoreEngine.
   streaming_buffer_chunks: 16
+  # Enable external target verification for MaterializeIntoTarget (off by default).
+  enable_external_target_verification: false
   # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
   cpu_shared_memory:
     enabled: true

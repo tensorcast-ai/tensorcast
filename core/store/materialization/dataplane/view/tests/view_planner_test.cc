@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
@@ -78,6 +78,75 @@ TEST_CASE("ViewPlanner returns identity plan when spec is empty", "[view_planner
   auto rebuilt_or = tensorcast::store::loader::rebuild_stable_canonical_index(canonical, /*default_device_id=*/0);
   REQUIRE(rebuilt_or.ok());
   CHECK(plan.view_index_json == *rebuilt_or);
+}
+
+TEST_CASE("ViewPlanner packs subset names into view index", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["alpha"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  index["beta"] = tensor_entry(
+      /*offset=*/16,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/4);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  const std::vector<std::string> subset{"beta"};
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  CHECK_FALSE(plan.is_identity);
+  REQUIRE(plan.selection.ranges.size() == 1);
+  const auto& range = plan.selection.ranges.front();
+  CHECK(range.kind == SelectionPlan::Range::Kind::kData);
+  CHECK(range.src_offset == 16);
+  CHECK(range.dst_offset == 0);
+  CHECK(range.length == 16);
+  CHECK(plan.view_size_bytes == 16);
+
+  const auto view_json = nlohmann::json::parse(plan.view_index_json);
+  REQUIRE(view_json.size() == 1);
+  const auto& entry = view_json.at("beta");
+  CHECK(entry[0].get<uint64_t>() == 0);
+  CHECK(entry[1].get<uint64_t>() == 16);
+}
+
+TEST_CASE("ViewPlanner keeps identity for full-name subset", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["alpha"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  index["beta"] = tensor_entry(
+      /*offset=*/16,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/4);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  const std::vector<std::string> subset{"alpha", "beta"};
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+  CHECK(plan.is_identity);
+  CHECK(plan.view_index_json == tensorcast::store::loader::rebuild_stable_canonical_index(canonical, 0).value());
 }
 
 TEST_CASE("ViewPlanner emits contiguous aligned range for 1D narrow", "[view_planner]") {

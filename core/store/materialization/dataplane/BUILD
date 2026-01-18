@@ -229,8 +229,10 @@ sc_cc_library(
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/strings:str_format",
+        "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
     ],
 )
@@ -294,6 +296,18 @@ sc_cc_library(
         "@abseil-cpp//absl/time",
         "@gsl",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "target_layout_gpu_sink",
+    srcs = ["sinks/target_layout_gpu_sink.cc"],
+    hdrs = ["sinks/target_layout_gpu_sink.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":gpu_memory_sink",
+        ":sink",
+        "@gsl",
     ],
 )
 
@@ -608,6 +622,20 @@ cc_test(
         ":pump",
         "//core/testing:catch_main",
         "//core/testing:common",
+        "@catch2//:catch2_main",
+        "@gsl",
+    ],
+)
+
+cc_test(
+    name = "target_layout_gpu_sink_test",
+    srcs = ["sinks/tests/target_layout_gpu_sink_test.cc"],
+    tags = ["requires_cuda"],
+    deps = [
+        ":target_layout_gpu_sink",
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@gsl",
     ],

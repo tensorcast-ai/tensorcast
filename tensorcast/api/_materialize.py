@@ -412,19 +412,7 @@ def materialize_artifact_v2(
                     "Daemon returned empty cpu_memfd handle for CPU materialization v2"
                 )
 
-    view_data_hash: str | None = None
-    try:
-        subset_hash_bytes = (
-            bytes(response.view_subset.subset_hash)
-            if hasattr(response, "view_subset")
-            else b""
-        )
-        if subset_hash_bytes:
-            view_data_hash = subset_hash_bytes.hex()
-    except Exception:  # noqa: BLE001
-        view_data_hash = None
-    if view_data_hash is None and view_subset_hash:
-        view_data_hash = view_subset_hash.hex()
+    view_data_hash = getattr(response, "view_data_hash", "") or None
 
     canonical_index_bytes = bytes(response.canonical_index_bytes)
     raw_generation = int(getattr(response, "generation", 0))

@@ -81,8 +81,7 @@ class StoreEngine {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
-      gsl::not_null<void*> target_ptr,
-      uint64_t total_size,
+      const loading::IntoTargetLayout& target_layout,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints = {});
@@ -103,6 +102,11 @@ class StoreEngine {
   static absl::StatusOr<loader::ViewPlan> compute_view_plan(
       std::string_view canonical_index_json,
       const loader::ViewSpec& spec);
+
+  static absl::StatusOr<loader::ViewPlan> compute_view_plan(
+      std::string_view canonical_index_json,
+      const loader::ViewSpec& spec,
+      absl::Span<const std::string> subset_names);
 
   static bool view_plan_allows_alias(const loader::ViewPlan& plan);
 
@@ -276,6 +280,7 @@ class StoreEngine {
       std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration());
   absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
+  absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id);
   absl::Status revoke_key_mapping(std::string_view key);
 
   // --------------------------------------------------------------------

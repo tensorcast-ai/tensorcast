@@ -85,13 +85,14 @@ sequenceDiagram
 
 Region-backed into calls bypass daemon-owned replicas by streaming bytes into a
 client-registered CUDA region using `MaterializeIntoTarget`. The SDK computes a
-full coalesced `TargetLayout` from the target tensors, validates against the
-canonical index, and invokes the v2 RPC directly. The daemon maps the IPC handle,
+coalesced `TargetLayout` over canonical or view-indexed ByteSpaces (including
+packed subsets), validates against the selected index, and invokes the v2 RPC
+directly. The daemon maps the IPC handles (single or ordered multi-storage),
 streams bytes from P2P or disk, and releases the region reference on completion
 without allocating VRAM.
 
 See [tensor_dict_into dataflow](tensor_dict_into_dataflow.md) for the detailed
-sequence and Phase 1 constraints.
+sequence and constraints.
 
 ### Lease-In-Place Fast Path & Use Leases
 

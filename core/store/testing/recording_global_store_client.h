@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -38,6 +39,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool fail_acknowledge_lease{false};
   std::string remote_node_id{"stub-remote"};
   std::string plan_degraded_reason{"insufficient_remote_capacity"};
+  std::optional<std::string> canonical_index_json;
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -205,7 +207,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   }
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
+    if (canonical_index_json.has_value()) {
+      return *canonical_index_json;
+    }
     return absl::UnimplementedError("get_artifact_index_by_id not supported in test stub");
+  }
+
+  absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("get_view_metadata not supported in test stub");
   }
 
   absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {

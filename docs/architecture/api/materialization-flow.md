@@ -234,16 +234,20 @@ Region-backed mode bypasses replica allocation and streams directly into a
 CUDA region registered by the client:
 
 - **SDK constraints** (`tensorcast/api/store/materialization.py`):
-  - Requires `artifact_id`, full canonical tensor set, CUDA contiguous tensors,
-    matching dtype/shape/stride, and coalesced canonical layout.
+  - Requires `artifact_id`, CUDA contiguous tensors, matching dtype/shape/stride, and a
+    coalesced layout over canonical or view-indexed ByteSpaces (including subsets).
+  - Non-identity views resolve a deterministic `view_id`; multi-storage layouts must
+    be ordered concatenations across registered regions.
 - **Daemon validation**:
   - The RPC is **loopback/UDS only**; non-loopback peers are rejected before any write begins.
-  - Requires `TargetLayout` with a single storage entry, coalesced layout,
-    canonical index kind, and a `vram_region_id`.
-  - Validates offsets and storage length against canonical index.
+  - Requires `TargetLayout` with coalesced layout, canonical or view index kind,
+    `vram_region_id` storages (single or ordered multi-storage), and a matching `view_id`
+    when view transforms are requested.
+  - Validates offsets and storage length against the selected index, plus optional
+    `view_subset_hash` when provided.
 - **Execution**:
-  - The daemon maps the region via CUDA IPC, builds a segment plan from the
-    canonical index, and runs the same pump path into GPU memory.
+  - The daemon maps the region via CUDA IPC, builds a segment or view plan from
+    the selected index, and runs the same pump path into GPU memory.
   - Verification is explicitly skipped (`MaterializeHints::Verify::NONE`).
   - On DataLoss, the region is marked poisoned and the client unregisters it.
 

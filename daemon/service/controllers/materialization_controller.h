@@ -35,6 +35,7 @@ class MaterializationController {
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{false};
+    bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
   };
 

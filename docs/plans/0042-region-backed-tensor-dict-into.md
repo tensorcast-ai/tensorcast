@@ -59,50 +59,50 @@ These lower-layer primitives are also the dependency for daemon-owned placeholde
 
 # Phases & Milestones
 
-- [ ] Phase 0: Identity hardening (prerequisite for Phase 1 and for 0052 reuse)
-  - [ ] Milestone 1: Make `view_id` resolution authoritative and non-optional for non-identity views:
+- [x] Phase 0: Identity hardening (prerequisite for Phase 1 and for 0052 reuse)
+  - [x] Milestone 1: Make `view_id` resolution authoritative and non-optional for non-identity views:
     - when a request carries `view` but no `view_id`, compute a deterministic `view_id` (per `docs/designs/0016-artifact-view-v1.md`)
     - propagate the resolved `view_id` into `VariantIdentity.view_id` so core `ReplicaKey` disambiguation and variant verification apply
     - reject non-identity views that still lack a resolved `view_id` (fail fast to avoid canonical/variant collisions)
     - add regression tests that a view-spec request does not reuse/collide with the canonical `ReplicaKey`
-  - [ ] Milestone 2: Standardize subset hash encoding end-to-end:
+  - [x] Milestone 2: Standardize subset hash encoding end-to-end:
     - define the canonical subset-hash algorithm (sorted+unique `tensor_names` → SHA-256 digest bytes)
     - ensure SDK sends raw digest bytes in `view_subset_hash` and treats response `ViewSubset.subset_hash` as raw digest bytes
     - add round-trip tests that cover request/response stability and caching labels
 
-- [ ] Phase 1: Enable view + subset selection for region-backed targets
-  - [ ] Milestone 1: Relax daemon gating and make validation phase-aware:
+- [x] Phase 1: Enable view + subset selection for region-backed targets
+  - [x] Milestone 1: Relax daemon gating and make validation phase-aware:
     - accept `index_kind=VIEW` + `view/view_id` for `MaterializeIntoTarget`
     - require a resolved `view_id` for non-identity `view` specs and validate it matches `target_layout.view_id`
     - accept `tensor_names` / `view_subset_hash` when the request defines a packed subset view ByteSpace
     - validate tensor table entries against the *selected* index bytes (canonical or view)
-  - [ ] Milestone 2: Implement selected-index resolution in core `materialize_into_target`:
+  - [x] Milestone 2: Implement selected-index resolution in core `materialize_into_target`:
     - canonical only (Phase 1)
     - view-indexed (Phase 2+)
     - packed subset view index bytes (Phase 2+), including PAD=0 semantics
-  - [ ] Milestone 3: Choose a safe packed-subset contract (required before shipping subset-packed into-target):
+  - [x] Milestone 3: Choose a safe packed-subset contract (required before shipping subset-packed into-target):
     - Option A (preferred): add a preflight planning RPC returning `view_index_bytes`, `view_subset`, and `logical_total_size` without writing
     - Option B: centralize packing in one implementation (C++ core + Python binding) and add compatibility tests against the daemon
-  - [ ] Milestone 4: Populate response metadata for selection:
+  - [x] Milestone 4: Populate response metadata for selection:
     - always return `canonical_index_bytes`
     - when selection is applied, return `view_index_bytes` + `view_subset`
-  - [ ] Milestone 5: Extend `//daemon:materialize_into_target_validation_test` with VIEW + subset scenarios (fake CUDA)
+  - [x] Milestone 5: Extend `//daemon:materialize_into_target_validation_test` with VIEW + subset scenarios (fake CUDA)
 
-- [ ] Phase 2: Multi-storage COALESCED sink (ordered concatenation)
-  - [ ] Milestone 1: Implement a TargetLayout-backed GPU sink that supports ordered concatenation across multiple region
+- [x] Phase 2: Multi-storage COALESCED sink (ordered concatenation)
+  - [x] Milestone 1: Implement a TargetLayout-backed GPU sink that supports ordered concatenation across multiple region
     windows (implements `AsyncPositionedSink` so `pump_ranges` overlaps IO + H2D).
-  - [ ] Milestone 2: Extend daemon validation to accept multi-storage only when storages satisfy ordered concatenation and
+  - [x] Milestone 2: Extend daemon validation to accept multi-storage only when storages satisfy ordered concatenation and
     span `logical_total_size` for the selected ByteSpace.
-  - [ ] Milestone 3: Add targeted sink mapping tests (boundary + cross-storage) and an end-to-end daemon test that writes
+  - [x] Milestone 3: Add targeted sink mapping tests (boundary + cross-storage) and an end-to-end daemon test that writes
     into multiple registered regions.
 
-- [ ] Phase 3: Optional external-target verification
-  - [ ] Milestone 1: Add a unified-config toggle for external-target verification (off by default) and expose metrics for
+- [x] Phase 3: Optional external-target verification
+  - [x] Milestone 1: Add a unified-config toggle for external-target verification (off by default) and expose metrics for
     verification enabled/disabled.
-  - [ ] Milestone 2: Implement external-target verification using plan-based hashing utilities:
+  - [x] Milestone 2: Implement external-target verification using plan-based hashing utilities:
     - canonical: `compute_data_multihash_from_gpu_plan` (`core/store/materialization/dataplane/sources/segment_plan_source.{h,cc}`)
     - view/subset: define and implement the equivalent “selected ByteSpace hash” contract (reusing view/subset identity)
-  - [ ] Milestone 3: Add tests for verification failures and ensure failures poison the target region (no silent partial
+  - [x] Milestone 3: Add tests for verification failures and ensure failures poison the target region (no silent partial
     success).
 
 - [ ] Phase 4: Hardening + performance (optional follow-ons)
@@ -111,6 +111,12 @@ These lower-layer primitives are also the dependency for daemon-owned placeholde
   - [ ] Milestone 2: Add per-request IPC mapping reuse to avoid repeated `cudaIpcOpenMemHandle` for the same region.
   - [ ] Milestone 3: Add a fast path that copies from an existing local replica into the external target once a range-based
     GPU→GPU helper exists (avoid disk/P2P re-stream).
+
+# Status (2026-01-18)
+
+- Completed Phase 0/1 and Phase 2 milestones for view/subset support, selection identity, multi-storage sink, and daemon validation updates.
+- Added sink mapping tests for ordered concatenation plus an end-to-end daemon multi-region materialization test.
+- External-target verification is wired with a unified config toggle and target-layout multihash checks (mi2 data hash or view_data_hash when available), plus verification failure tests; perf hardening remains unimplemented.
 
 # Acceptance Checks
 

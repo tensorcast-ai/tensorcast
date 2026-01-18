@@ -566,6 +566,7 @@ int main(int argc, char** argv) {
   }
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
+  daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
   // Observability high-cardinality attributes: default off (config hook TBD)
   daemon_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)

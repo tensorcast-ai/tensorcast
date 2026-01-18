@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,15 +23,20 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/types/span.h"
+#include "google/protobuf/io/coded_stream.h"
+#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "google/protobuf/util/time_util.h"
 #include "gsl/pointers"
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
+#include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/view_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/path_utils.h"
@@ -98,6 +104,120 @@ void record_lease_create_failed() {
     ctr->Add(1.0);
   } catch (...) {
   }
+}
+
+void record_materialize_into_target_verification_enabled() {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateUInt64Counter("tc_store_materialize_into_target_verification_enabled_total");
+    if (counter) {
+      counter->Add(1);
+    }
+  } catch (...) {
+  }
+}
+
+std::optional<std::string> parse_mi2_data_multihash(std::string_view artifact_id) {
+  constexpr std::string_view kPrefix = "mi2:";
+  if (!artifact_id.starts_with(kPrefix)) {
+    return std::nullopt;
+  }
+  const std::string_view tail = artifact_id.substr(kPrefix.size());
+  const size_t sep = tail.find(':');
+  if (sep == std::string_view::npos) {
+    return std::nullopt;
+  }
+  const std::string_view data_mh = tail.substr(sep + 1);
+  if (data_mh.empty()) {
+    return std::nullopt;
+  }
+  return std::string(data_mh);
+}
+
+struct TargetLayoutSpan {
+  gsl::not_null<void*> base_ptr;
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
+class TargetLayoutGpuSource final : public store::loader::SeekableSource {
+ public:
+  TargetLayoutGpuSource(std::vector<TargetLayoutSpan> spans, uint64_t total_size, int device_id)
+      : spans_(std::move(spans)), total_size_(total_size), device_id_(device_id) {}
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto st = read_at(current_offset_, dst, max_bytes);
+    if (!st.ok()) {
+      return st;
+    }
+    current_offset_ += *st;
+    return st;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_size_) {
+      return static_cast<size_t>(0);
+    }
+    if (auto st = cuda::set_device(device_id_); !st.ok()) {
+      return st;
+    }
+
+    size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
+    auto* out = static_cast<uint8_t*>(dst);
+
+    size_t idx = 0;
+    for (; idx < spans_.size(); ++idx) {
+      const auto& span = spans_[idx];
+      if (offset < span.offset + span.length) {
+        break;
+      }
+    }
+    if (idx == spans_.size()) {
+      return static_cast<size_t>(0);
+    }
+
+    while (remaining > 0 && idx < spans_.size()) {
+      const auto& span = spans_[idx];
+      const uint64_t local = offset - span.offset;
+      const size_t avail = static_cast<size_t>(span.length - local);
+      const size_t take = std::min(remaining, avail);
+      const auto* src = static_cast<uint8_t*>(span.base_ptr.get()) + local;
+      auto st = cuda::memcpy(out, src, take, cudaMemcpyDeviceToHost);
+      if (!st.ok()) {
+        return st;
+      }
+      if (auto sync = cuda::device_synchronize(); !sync.ok()) {
+        return sync;
+      }
+      out += take;
+      offset += take;
+      remaining -= take;
+      if (take == avail) {
+        ++idx;
+      }
+    }
+    return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
+  }
+
+ private:
+  std::vector<TargetLayoutSpan> spans_;
+  uint64_t total_size_{0};
+  int device_id_{0};
+  uint64_t current_offset_{0};
+};
+
+absl::StatusOr<std::string> compute_target_layout_multihash(
+    std::vector<TargetLayoutSpan> spans,
+    uint64_t total_size,
+    int device_id) {
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("target layout total_size is zero");
+  }
+  if (spans.empty()) {
+    return absl::InvalidArgumentError("target layout spans are empty");
+  }
+  TargetLayoutGpuSource src(std::move(spans), total_size, device_id);
+  return store::loader::compute_data_multihash_from_seekable_source(src, total_size);
 }
 
 void register_session_and_refs(
@@ -459,6 +579,64 @@ absl::StatusOr<ViewSpec> convert_view_spec(const v2::ViewSpec& proto) {
   return spec;
 }
 
+absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf::Message& message) {
+  const size_t size = message.ByteSizeLong();
+  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return absl::OutOfRangeError("proto message too large for deterministic serialization");
+  }
+  std::string buffer;
+  buffer.resize(size);
+  google::protobuf::io::ArrayOutputStream stream(buffer.data(), static_cast<int>(size));
+  google::protobuf::io::CodedOutputStream coded(&stream);
+  coded.SetSerializationDeterministic(true);
+  if (!message.SerializeToCodedStream(&coded) || coded.HadError()) {
+    return absl::InternalError("deterministic proto serialization failed");
+  }
+  return buffer;
+}
+
+absl::StatusOr<std::string> compute_view_id_from_spec(
+    const v2::ViewSpec& view_spec,
+    std::string_view canonical_index_json) {
+  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+  auto proto_bytes_or = serialize_deterministic_proto(view_spec);
+  if (!proto_bytes_or.ok()) {
+    return proto_bytes_or.status();
+  }
+  std::vector<uint8_t> buffer;
+  buffer.reserve(proto_bytes_or->size() + index_mh_or->size());
+  buffer.insert(buffer.end(), proto_bytes_or->begin(), proto_bytes_or->end());
+  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer));
+  return common::multibase_multihash_sha256(digest);
+}
+
+v2::ViewSpec build_view_spec_proto(const ViewSpec& spec) {
+  v2::ViewSpec proto;
+  auto* tensors = proto.mutable_tensors();
+  for (const auto& [tensor_name, ops] : spec.tensors) {
+    auto& container = (*tensors)[tensor_name];
+    for (const auto& op : ops.ops) {
+      auto* op_proto = container.add_ops();
+      switch (op.kind) {
+        case ViewOp::Kind::kNarrow:
+          op_proto->mutable_narrow()->set_dim(static_cast<uint32_t>(op.narrow.dim));
+          op_proto->mutable_narrow()->set_start(op.narrow.start);
+          op_proto->mutable_narrow()->set_length(op.narrow.length);
+          break;
+        case ViewOp::Kind::kTranspose:
+          op_proto->mutable_transpose()->set_dim0(static_cast<uint32_t>(op.transpose.dim0));
+          op_proto->mutable_transpose()->set_dim1(static_cast<uint32_t>(op.transpose.dim1));
+          break;
+      }
+    }
+  }
+  return proto;
+}
+
 bool spec_includes_transpose(const ViewSpec& spec) {
   for (const auto& [_, ops] : spec.tensors) {
     for (const auto& op : ops.ops) {
@@ -470,8 +648,49 @@ bool spec_includes_transpose(const ViewSpec& spec) {
   return false;
 }
 
+absl::StatusOr<std::string> compute_view_subset_hash_bytes(absl::Span<const std::string> names) {
+  if (names.empty()) {
+    return std::string();
+  }
+  absl::flat_hash_set<std::string> seen;
+  std::vector<std::string> unique;
+  unique.reserve(names.size());
+  for (const auto& name : names) {
+    if (seen.insert(name).second) {
+      unique.push_back(name);
+    }
+  }
+  std::sort(unique.begin(), unique.end());
+  nlohmann::json arr = nlohmann::json::array();
+  for (const auto& name : unique) {
+    arr.push_back(name);
+  }
+  const std::string payload = arr.dump(-1, ' ', true);
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
+
 store::loading::TransformPlacement resolve_placement(
     const v2::MaterializeReplicaRequest& req,
+    const std::optional<ViewSpec>& spec) {
+  switch (req.placement()) {
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
+      return store::loading::TransformPlacement::kServer;
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
+      return store::loading::TransformPlacement::kClient;
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    default:
+      break;
+  }
+  if (spec.has_value() && spec_includes_transpose(*spec)) {
+    return store::loading::TransformPlacement::kClient;
+  }
+  return store::loading::TransformPlacement::kServer;
+}
+
+store::loading::TransformPlacement resolve_placement(
+    const v2::MaterializeIntoTargetRequest& req,
     const std::optional<ViewSpec>& spec) {
   switch (req.placement()) {
     case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
@@ -978,6 +1197,11 @@ grpc::Status MaterializationController::materialize_replica(
       }
       if (!plan_or->is_identity) {
         view_plan = *plan_or;
+        auto view_id_or = compute_view_id_from_spec(req.view(), *canonical_index_json);
+        if (!view_id_or.ok()) {
+          return to_grpc_status(view_id_or.status());
+        }
+        request_view_id = std::move(*view_id_or);
       } else {
         // Identity view collapses to canonical path
         view_spec.reset();
@@ -1533,16 +1757,6 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
   }
-  if (req.tensor_names_size() > 0 || !req.view_subset_hash().empty()) {
-    record_materialize_into_target(
-        "error", "subset_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "tensor_names/view_subset_hash not supported for MaterializeIntoTarget"};
-  }
-  if (req.view_identity_case() != v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET) {
-    record_materialize_into_target(
-        "error", "view_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view/view_id not supported for MaterializeIntoTarget"};
-  }
   if (req.device_uuid().empty()) {
     record_materialize_into_target(
         "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -1560,15 +1774,11 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "layout_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Only LAYOUT_KIND_COALESCED_UNSPECIFIED is supported"};
   }
-  if (layout.index_kind() != v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
+  if (layout.index_kind() != v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED &&
+      layout.index_kind() != v2::TargetLayout::INDEX_KIND_VIEW) {
     record_materialize_into_target(
         "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "Only INDEX_KIND_CANONICAL_UNSPECIFIED is supported"};
-  }
-  if (layout.storages_size() != 1) {
-    record_materialize_into_target(
-        "error", "multi_storage", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "COALESCED layouts must include exactly one storage entry"};
+    return {StatusCode::INVALID_ARGUMENT, "Unsupported index_kind for MaterializeIntoTarget"};
   }
   if (layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS &&
       layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
@@ -1576,35 +1786,25 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "tensor_spec_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "Unsupported tensor_spec_kind for MaterializeIntoTarget"};
   }
-
-  const auto& storage = layout.storages(0);
-  if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
+  if (layout.storages_size() == 0) {
     record_materialize_into_target(
-        "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
+        "error", "storage_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
   }
 
   const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
-  if (storage.device_id() != device.ordinal) {
-    record_materialize_into_target(
-        "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
+      record_materialize_into_target(
+          "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
+    }
+    if (storage.device_id() != device.ordinal) {
+      record_materialize_into_target(
+          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
+    }
   }
-
-  auto canonical_json_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
-  if (!canonical_json_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(canonical_json_or.status());
-  }
-  auto index_table_or = parse_canonical_index(*canonical_json_or);
-  if (!index_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(index_table_or.status());
-  }
-  const CanonicalIndexTable& index_table = *index_table_or;
-  const uint64_t logical_total_size = index_table.logical_total_size;
 
   auto offsets_or = resolve_target_offsets(layout);
   if (!offsets_or.ok()) {
@@ -1618,38 +1818,404 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
-  if (offsets.size() != index_table.entries.size()) {
+
+  absl::flat_hash_set<std::string> layout_name_set;
+  layout_name_set.reserve(offsets.size());
+  std::vector<std::string> layout_names;
+  layout_names.reserve(offsets.size());
+  for (const auto& entry : offsets) {
+    if (entry.name.empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
+    }
+    if (!layout_name_set.insert(entry.name).second) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
+    }
+    layout_names.push_back(entry.name);
+  }
+  std::sort(layout_names.begin(), layout_names.end());
+
+  if (req.tensor_names_size() > 0) {
+    absl::flat_hash_set<std::string> request_names;
+    request_names.reserve(req.tensor_names_size());
+    for (const auto& name : req.tensor_names()) {
+      request_names.insert(name);
+    }
+    if (request_names.size() != layout_name_set.size()) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+    }
+    for (const auto& name : layout_name_set) {
+      if (!request_names.contains(name)) {
+        record_materialize_into_target(
+            "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+      }
+    }
+  }
+
+  auto canonical_json_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
+  if (!canonical_json_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_json_or.status());
+  }
+  auto canonical_table_or = parse_canonical_index(*canonical_json_or);
+  if (!canonical_table_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_table_or.status());
+  }
+  const CanonicalIndexTable& canonical_table = *canonical_table_or;
+  for (const auto& name : layout_name_set) {
+    if (!canonical_table.entries.contains(name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
+    }
+  }
+
+  bool has_subset = canonical_table.entries.size() != layout_name_set.size();
+  if (!has_subset) {
+    for (const auto& [name, _] : canonical_table.entries) {
+      if (!layout_name_set.contains(name)) {
+        has_subset = true;
+        break;
+      }
+    }
+  }
+
+  std::optional<ViewSpec> view_spec;
+  std::optional<v2::ViewSpec> view_spec_proto;
+  std::optional<std::string> request_view_id;
+  std::optional<std::string> view_data_hash;
+  bool view_id_requested = false;
+
+  switch (req.view_identity_case()) {
+    case v2::MaterializeIntoTargetRequest::kView: {
+      auto spec_or = convert_view_spec(req.view());
+      if (!spec_or.ok()) {
+        return to_grpc_status(spec_or.status());
+      }
+      view_spec = std::move(*spec_or);
+      view_spec_proto = req.view();
+      break;
+    }
+    case v2::MaterializeIntoTargetRequest::kViewId: {
+      if (!req.view_id().empty()) {
+        view_id_requested = true;
+        request_view_id = req.view_id();
+      }
+      break;
+    }
+    case v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET:
+      break;
+  }
+
+  if (view_id_requested && request_view_id.has_value()) {
+    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *request_view_id);
+    if (!view_meta_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(view_meta_or.status());
+    }
+    auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
+    if (!spec_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(spec_or.status());
+    }
+    view_spec = std::move(*spec_or);
+    view_spec_proto = build_view_spec_proto(*view_spec);
+    view_data_hash = view_meta_or->view_data_hash;
+  }
+
+  std::optional<store::loader::ViewPlan> view_plan;
+  if (view_spec.has_value() || has_subset || layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    ViewSpec plan_spec = view_spec.value_or(ViewSpec{});
+    std::vector<std::string> subset_names;
+    if (has_subset) {
+      subset_names = layout_names;
+    }
+    auto plan_or = store::StoreEngine::compute_view_plan(*canonical_json_or, plan_spec, subset_names);
+    if (!plan_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(plan_or.status());
+    }
+    view_plan = std::move(*plan_or);
+  }
+
+  const bool has_view_transform =
+      view_id_requested || (view_spec.has_value() && view_plan.has_value() && !view_plan->is_identity);
+  if (view_id_requested && view_plan.has_value() && view_plan->is_identity && !has_subset) {
+    record_materialize_into_target(
+        "error", "view_identity_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view_id requires a non-identity view spec"};
+  }
+
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
+    if (has_view_transform || has_subset) {
+      record_materialize_into_target(
+          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset"};
+    }
+  } else {
+    if (!has_view_transform && !has_subset) {
+      record_materialize_into_target(
+          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or subset selection"};
+    }
+  }
+
+  std::optional<std::string> resolved_view_id;
+  if (has_view_transform) {
+    if (!view_spec_proto.has_value()) {
+      record_materialize_into_target(
+          "error", "view_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "view spec required for view transforms"};
+    }
+    auto view_id_or = compute_view_id_from_spec(*view_spec_proto, *canonical_json_or);
+    if (!view_id_or.ok()) {
+      return to_grpc_status(view_id_or.status());
+    }
+    if (request_view_id.has_value() && *request_view_id != *view_id_or) {
+      record_materialize_into_target(
+          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
+    }
+    resolved_view_id = *view_id_or;
+  }
+
+  if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
+    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *resolved_view_id);
+    if (view_meta_or.ok()) {
+      view_data_hash = view_meta_or->view_data_hash;
+    } else {
+      VLOG(1) << "MaterializeIntoTarget: view metadata unavailable for verification: " << view_meta_or.status();
+    }
+  }
+
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    if (has_view_transform) {
+      if (layout.view_id().empty() || (resolved_view_id.has_value() && layout.view_id() != *resolved_view_id)) {
+        record_materialize_into_target(
+            "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must match resolved view_id"};
+      }
+    } else if (!layout.view_id().empty()) {
+      record_materialize_into_target(
+          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must be empty for subset-only layouts"};
+    }
+  } else if (!layout.view_id().empty()) {
+    record_materialize_into_target(
+        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id not allowed for canonical layout"};
+  }
+
+  std::string selected_index_json;
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    if (!view_plan.has_value()) {
+      record_materialize_into_target(
+          "error", "view_plan_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "view plan missing for VIEW layout"};
+    }
+    selected_index_json = view_plan->view_index_json;
+  } else {
+    selected_index_json = *canonical_json_or;
+  }
+
+  auto index_table_or = parse_canonical_index(selected_index_json);
+  if (!index_table_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(index_table_or.status());
+  }
+  const CanonicalIndexTable& index_table = *index_table_or;
+  const uint64_t logical_total_size = index_table.logical_total_size;
+  if (index_table.entries.size() != layout_name_set.size()) {
     record_materialize_into_target(
         "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout must include every canonical tensor"};
+    return {StatusCode::INVALID_ARGUMENT, "target_layout must include every selected tensor"};
   }
+  for (const auto& name : layout_name_set) {
+    if (!index_table.entries.contains(name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
+    }
+  }
+  if (view_plan.has_value() && view_plan->view_size_bytes > 0 && view_plan->view_size_bytes != logical_total_size) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view plan size does not match selected index"};
+  }
+
+  if (layout.tensor_spec_kind() == v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
+    for (const auto& alias : layout.aliases()) {
+      auto it = index_table.entries.find(alias.name());
+      if (it == index_table.entries.end()) {
+        record_materialize_into_target(
+            "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout alias includes unknown tensor name"};
+      }
+      const auto& entry = it->second;
+      if (alias.logical_length() != entry.logical_length) {
+        record_materialize_into_target(
+            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout alias logical_length mismatch"};
+      }
+      if (alias.dtype() != entry.dtype) {
+        record_materialize_into_target(
+            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout alias dtype mismatch"};
+      }
+      if (alias.shape_size() != static_cast<int>(entry.shape.size()) ||
+          alias.stride_size() != static_cast<int>(entry.stride.size())) {
+        record_materialize_into_target(
+            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape/stride mismatch"};
+      }
+      for (int i = 0; i < alias.shape_size(); ++i) {
+        if (alias.shape(i) != entry.shape[static_cast<size_t>(i)]) {
+          record_materialize_into_target(
+              "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape mismatch"};
+        }
+      }
+      for (int i = 0; i < alias.stride_size(); ++i) {
+        if (alias.stride(i) != entry.stride[static_cast<size_t>(i)]) {
+          record_materialize_into_target(
+              "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          return {StatusCode::INVALID_ARGUMENT, "target_layout alias stride mismatch"};
+        }
+      }
+    }
+  }
+
+  struct StorageRange {
+    std::string storage_id;
+    uint64_t base_offset{0};
+    uint64_t length{0};
+  };
+
+  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
+  storage_ranges.reserve(layout.storages_size());
+  uint64_t range_cursor = 0;
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_id().empty()) {
+      record_materialize_into_target(
+          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
+    }
+    if (storage.storage_length() == 0) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
+    }
+    if (storage_ranges.contains(storage.storage_id())) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
+    }
+    StorageRange range;
+    range.storage_id = storage.storage_id();
+    range.base_offset = range_cursor;
+    range.length = storage.storage_length();
+    storage_ranges.emplace(range.storage_id, range);
+    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
+    }
+    range_cursor += storage.storage_length();
+  }
+  if (range_cursor != logical_total_size) {
+    record_materialize_into_target(
+        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "storage_length must span logical byte space"};
+  }
+
+  absl::flat_hash_set<std::string> seen_offsets;
+  seen_offsets.reserve(offsets.size());
   for (const auto& entry : offsets) {
+    if (!seen_offsets.insert(entry.name).second) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
+    }
     auto it = index_table.entries.find(entry.name);
     if (it == index_table.entries.end()) {
       record_materialize_into_target(
           "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
     }
-    if (entry.logical_length != it->second.logical_length) {
+    const auto range_it = storage_ranges.find(entry.storage_id);
+    if (range_it == storage_ranges.end()) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
+    }
+    const auto& range = range_it->second;
+    const auto& index_entry = it->second;
+    if (entry.logical_length != index_entry.logical_length) {
       record_materialize_into_target(
           "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
     }
-    if (entry.storage_offset != it->second.logical_offset) {
+    if (index_entry.logical_offset < range.base_offset) {
       record_materialize_into_target(
           "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset must match logical offset"};
+      return {StatusCode::INVALID_ARGUMENT, "target_layout offset out of storage bounds"};
     }
-    if (entry.storage_id != storage.storage_id()) {
+    const uint64_t expected_storage_offset = index_entry.logical_offset - range.base_offset;
+    if (entry.storage_offset != expected_storage_offset) {
       record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_id mismatch"};
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
+    }
+    if (expected_storage_offset + entry.logical_length > range.length) {
+      record_materialize_into_target(
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
     }
   }
-  if (storage.storage_length() != logical_total_size) {
+
+  auto subset_hash_or = compute_view_subset_hash_bytes(absl::MakeSpan(layout_names));
+  if (!subset_hash_or.ok()) {
     record_materialize_into_target(
-        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "storage_length must cover full logical space"};
+        "error", "subset_hash_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(subset_hash_or.status());
+  }
+  const std::string view_subset_hash = *subset_hash_or;
+  if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
+    record_materialize_into_target(
+        "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
+  }
+
+  std::optional<std::string> expected_data_hash;
+  bool verify_external_target = false;
+  if (d_.external_target_verification_enabled) {
+    if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED && !has_view_transform &&
+        !has_subset) {
+      expected_data_hash = parse_mi2_data_multihash(req.artifact_id());
+    } else if (resolved_view_id.has_value()) {
+      expected_data_hash = view_data_hash;
+    }
+    if (expected_data_hash.has_value()) {
+      record_materialize_into_target_verification_enabled();
+      verify_external_target = true;
+    } else {
+      record_materialize_into_target_verification_skipped();
+    }
+  } else {
+    record_materialize_into_target_verification_skipped();
   }
 
   if (rctx.server_context().IsCancelled()) {
@@ -1657,53 +2223,96 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::CANCELLED, "request cancelled before transfer"};
   }
 
-  auto region_desc_or = d_.regions.acquire(storage.vram_region_id(), req.pid());
-  if (!region_desc_or.ok()) {
-    const absl::Status& st = region_desc_or.status();
-    const bool poisoned = absl::IsFailedPrecondition(st) && st.message() == "region is poisoned";
-    record_materialize_into_target(
-        "error",
-        poisoned ? "region_poisoned" : "region_missing",
-        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(st);
-  }
-  auto region_desc = *region_desc_or;
-  if (region_desc.device_id != storage.device_id()) {
-    record_materialize_into_target(
-        "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    d_.regions.release(storage.vram_region_id()).IgnoreError();
-    return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
-  }
-  const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
-  if (region_end > region_desc.size_bytes) {
-    record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    d_.regions.release(storage.vram_region_id()).IgnoreError();
-    return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
-  }
-
   struct RegionReleaseGuard {
     IpcRegionRegistry& registry;
-    std::string region_id;
+    std::vector<std::string>& region_ids;
     bool active{true};
 
     ~RegionReleaseGuard() {
       if (active) {
-        (void)registry.release(region_id);
+        for (const auto& region_id : region_ids) {
+          (void)registry.release(region_id);
+        }
       }
     }
-  } guard{d_.regions, storage.vram_region_id(), true};
+  };
 
-  auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
-  if (!handle_or.ok()) {
-    record_materialize_into_target(
-        "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(handle_or.status());
+  struct RegionMapping {
+    IpcRegionRegistry::RegionDescriptor desc;
+    std::unique_ptr<cuda::IpcMapping> mapping;
+  };
+
+  absl::flat_hash_map<std::string, RegionMapping> region_map;
+  region_map.reserve(layout.storages_size());
+  std::vector<std::string> acquired_regions;
+  acquired_regions.reserve(layout.storages_size());
+  RegionReleaseGuard guard{d_.regions, acquired_regions, true};
+
+  std::vector<store::loading::IntoTargetStorage> target_storages;
+  target_storages.reserve(layout.storages_size());
+  for (const auto& storage : layout.storages()) {
+    auto it = region_map.find(storage.vram_region_id());
+    if (it == region_map.end()) {
+      auto region_desc_or = d_.regions.acquire(storage.vram_region_id(), req.pid());
+      if (!region_desc_or.ok()) {
+        const absl::Status& st = region_desc_or.status();
+        const bool poisoned = absl::IsFailedPrecondition(st) && st.message() == "region is poisoned";
+        record_materialize_into_target(
+            "error",
+            poisoned ? "region_poisoned" : "region_missing",
+            v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(st);
+      }
+      auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
+      if (!handle_or.ok()) {
+        record_materialize_into_target(
+            "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(handle_or.status());
+      }
+      auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
+      if (!map_or.ok()) {
+        record_materialize_into_target(
+            "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(map_or.status());
+      }
+      RegionMapping mapping{.desc = *region_desc_or, .mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or))};
+      auto [inserted_it, _] = region_map.emplace(storage.vram_region_id(), std::move(mapping));
+      it = inserted_it;
+      acquired_regions.push_back(storage.vram_region_id());
+    }
+    const auto& region_desc = it->second.desc;
+    if (region_desc.device_id != storage.device_id()) {
+      record_materialize_into_target(
+          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
+    }
+    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
+    if (region_end > region_desc.size_bytes) {
+      record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+    }
+    void* region_base_ptr =
+        static_cast<uint8_t*>(it->second.mapping->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
+    target_storages.push_back(
+        store::loading::IntoTargetStorage{
+            .base_ptr = gsl::not_null<void*>{region_base_ptr},
+            .length = storage.storage_length(),
+        });
   }
-  auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
-  if (!map_or.ok()) {
-    record_materialize_into_target(
-        "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(map_or.status());
+
+  std::vector<TargetLayoutSpan> verification_spans;
+  if (verify_external_target) {
+    verification_spans.reserve(target_storages.size());
+    uint64_t cursor = 0;
+    for (const auto& storage : target_storages) {
+      verification_spans.push_back(
+          TargetLayoutSpan{
+              .base_ptr = storage.base_ptr,
+              .offset = cursor,
+              .length = storage.length,
+          });
+      cursor += storage.length;
+    }
   }
 
   store::loading::MaterializeHints hints;
@@ -1728,15 +2337,31 @@ grpc::Status MaterializationController::materialize_into_target(
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
 
-  record_materialize_into_target_verification_skipped();
+  if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    store::loading::VariantIdentity variant;
+    variant.canonical_artifact_id = req.artifact_id();
+    if (resolved_view_id.has_value()) {
+      variant.view_id = *resolved_view_id;
+    }
+    if (view_spec.has_value()) {
+      variant.view_spec = view_spec;
+    }
+    variant.cached_plan = view_plan;
+    variant.canonical_index_json = *canonical_json_or;
+    variant.placement = resolve_placement(req, view_spec);
+    hints.variant = std::move(variant);
+  }
 
-  void* region_base_ptr = static_cast<uint8_t*>(map_or->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
-  auto result_or = d_.engine.materialize_into_target(
-      device, gsl::not_null<void*>{region_base_ptr}, logical_total_size, *canonical_json_or, generation, hints);
+  store::loading::IntoTargetLayout target_layout;
+  target_layout.storages = std::move(target_storages);
+  target_layout.total_size = logical_total_size;
+  auto result_or = d_.engine.materialize_into_target(device, target_layout, *canonical_json_or, generation, hints);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
-      d_.regions.mark_poisoned(storage.vram_region_id()).IgnoreError();
+      for (const auto& region_id : acquired_regions) {
+        d_.regions.mark_poisoned(region_id).IgnoreError();
+      }
       record_materialize_into_target(
           "error", "transfer_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     } else {
@@ -1746,10 +2371,45 @@ grpc::Status MaterializationController::materialize_into_target(
     return to_grpc_status(result_or.status());
   }
 
+  if (verify_external_target) {
+    auto actual_hash_or =
+        compute_target_layout_multihash(std::move(verification_spans), logical_total_size, device.ordinal);
+    if (!actual_hash_or.ok()) {
+      for (const auto& region_id : acquired_regions) {
+        d_.regions.mark_poisoned(region_id).IgnoreError();
+      }
+      record_materialize_into_target(
+          "error", "verification_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(
+          absl::DataLossError(
+              absl::StrCat("external target verification failed: ", actual_hash_or.status().message())));
+    }
+    if (expected_data_hash.has_value() && *expected_data_hash != *actual_hash_or) {
+      for (const auto& region_id : acquired_regions) {
+        d_.regions.mark_poisoned(region_id).IgnoreError();
+      }
+      record_materialize_into_target(
+          "error", "verification_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::DATA_LOSS, "external target verification failed: data hash mismatch"};
+    }
+  }
+
   resp.set_artifact_id(req.artifact_id());
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
   resp.set_canonical_index_bytes(*canonical_json_or);
+  if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    resp.set_view_index_bytes(view_plan->view_index_json);
+  }
+  if (!layout_names.empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!view_subset_hash.empty()) {
+      subset->set_subset_hash(view_subset_hash);
+    }
+    for (const auto& name : layout_names) {
+      subset->add_tensor_names(name);
+    }
+  }
   resp.set_generation(generation);
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();

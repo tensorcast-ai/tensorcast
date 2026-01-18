@@ -282,6 +282,7 @@ sc_cc_library(
     deps = [
         "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
     ],
