@@ -167,6 +167,7 @@ graph TB
 ### Variant-Aware Views (v1)
 
 - `StoreEngine::compute_view_plan(canonical_index_json, ViewSpec)` constructs a deterministic `ViewPlan` by delegating to the loader `ViewPlanner`. v1 supports single-dimension `narrow` (slice) operations.
+- When `tensor_names`/subset selection is provided, `ViewPlanner` packs tensors in the provided order (including full-name subsets) so `view_index_json` offsets match client-declared ordering for `MaterializeIntoTarget`.
 - `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when (and only when) the selection is contiguous, segment-aligned, and no transforms are required.
 - `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the variant `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
 

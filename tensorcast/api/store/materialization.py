@@ -865,6 +865,7 @@ class MaterializationPipeline:
         view_spec: store_daemon_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
+        selection_order: Sequence[str] | None = None,
     ) -> _RegionBackedLayout:
         entries_by_name = {entry.name: entry for entry in canonical_index.entries}
         if not entries_by_name:
@@ -895,7 +896,28 @@ class MaterializationPipeline:
                 retryable=False,
             )
 
-        selection_names = tuple(sorted(target_names))
+        if selection_order is not None:
+            selection_names = tuple(str(name) for name in selection_order)
+            if not selection_names:
+                raise ArtifactError(
+                    "selection_order must not be empty when provided",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if len(set(selection_names)) != len(selection_names):
+                raise ArtifactError(
+                    "selection_order must not contain duplicates",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if set(selection_names) != target_names:
+                raise ArtifactError(
+                    "selection_order must match target tensor names",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+        else:
+            selection_names = tuple(sorted(target_names))
         full_selection = target_names == canonical_names
 
         normalized_ops: dict[str, list[dict[str, int | str]]] = {}
@@ -934,13 +956,17 @@ class MaterializationPipeline:
                 )
             resolved_view_id = view_id
 
-        needs_view_index = bool(normalized_ops) or not full_selection
+        needs_view_index = (
+            bool(normalized_ops) or not full_selection or selection_order is not None
+        )
         view_index_bytes: bytes | None = None
         if needs_view_index:
             if view_spec is None and view_index_hint is not None:
                 view_index_bytes = view_index_hint
             else:
-                subset_payload = None if full_selection else list(selection_names)
+                subset_payload = None
+                if selection_order is not None or not full_selection:
+                    subset_payload = list(selection_names)
                 view_payload = compute_view_index_bytes(
                     canonical_index_bytes, normalized_ops, subset_payload
                 )

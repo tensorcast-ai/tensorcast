@@ -31,6 +31,7 @@ from tensorcast.api.store.batch_context import (
     MaterializationBatcher,
     PrefetchTicket,
 )
+from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
@@ -683,6 +684,8 @@ __all__ = [
     "ArtifactStatusCode",
     "CanonicalIndex",
     "CanonicalIndexEntry",
+    "DeferredCommitResult",
+    "DeferredLoader",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",

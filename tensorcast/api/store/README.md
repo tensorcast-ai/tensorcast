@@ -53,6 +53,20 @@ managing clients manually.
   are computed exactly once in the derived view (no double-application of the
   parent slice).
 
+## Deferred Slice Materialization (vLLM)
+
+- `artifact.deferred_loader(device=..., packing="append", capacity_bytes=...)` returns
+  a `DeferredLoader` that issues no I/O until `commit()`.
+- `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
+  client-owned arena; contents are undefined until `commit()` completes.
+- `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
+  first to precompute a deterministic layout before calling `tensor(...)`.
+- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena;
+  `publish=True` optionally registers the packed slice artifact via
+  `VRAM_LEASED` (LIP).
+- `capacity_bytes` bounds the arena size (defaults to the base canonical/view
+  total size); exceeding it raises `RESOURCE_EXHAUSTED`.
+
 ## Batching, Async, and Prefetch
 
 - Use `with artifact.batch(device="cuda:0")` to coalesce multiple tensor fetches

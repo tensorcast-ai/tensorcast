@@ -20,6 +20,7 @@ from tensorcast.api._view_ops import (
 )
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.deferred_loader import DeferredLoader
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import (
@@ -384,6 +385,22 @@ class Artifact:
 
     def view_builder(self) -> ViewBuilder:
         return ViewBuilder(artifact_ref=weakref.ref(self), composer=ViewSpecComposer())
+
+    def deferred_loader(
+        self,
+        *,
+        device: torch.device | str,
+        packing: str = "append",
+        capacity_bytes: int | None = None,
+    ) -> DeferredLoader:
+        """Return a deferred loader for vLLM-style placeholder binding."""
+        self._require_components()
+        return DeferredLoader(
+            artifact=self,
+            device=device,
+            packing=packing,
+            capacity_bytes=capacity_bytes,
+        )
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext
@@ -1102,9 +1119,14 @@ class Artifact:
                 )
             resolved_view_id: str | None = None
             if self._view_spec is not None and not self._view_spec.is_identity:
-                resolved_view_id = compute_view_id(
-                    self._view_spec.proto, canonical_index_bytes
-                )
+                view_proto = self._view_spec.proto
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while resolving view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                resolved_view_id = compute_view_id(view_proto, canonical_index_bytes)
             view_cache = ViewMetadataCache(
                 view_id=str(resolved_view_id or view_hash),
                 view_index_bytes=view_index_bytes,

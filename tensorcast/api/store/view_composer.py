@@ -300,7 +300,14 @@ class ViewSpecComposer:
             view_id: str | None = None
             if composed_spec is not None and not composed_spec.is_identity:
                 canonical_bytes = _serialize_index(canonical_index)
-                view_id = compute_view_id(composed_spec.proto, canonical_bytes)
+                view_proto = composed_spec.proto
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while computing view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                view_id = compute_view_id(view_proto, canonical_bytes)
             view_cache = ViewMetadataCache(
                 view_id=view_id or view_hash,
                 view_index_bytes=view_index_bytes,

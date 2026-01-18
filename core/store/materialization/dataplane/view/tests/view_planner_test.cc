@@ -145,8 +145,40 @@ TEST_CASE("ViewPlanner keeps identity for full-name subset", "[view_planner]") {
   auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
   REQUIRE(plan_or.ok());
   const auto& plan = *plan_or;
-  CHECK(plan.is_identity);
+  CHECK_FALSE(plan.is_identity);
   CHECK(plan.view_index_json == tensorcast::store::loader::rebuild_stable_canonical_index(canonical, 0).value());
+}
+
+TEST_CASE("ViewPlanner preserves subset ordering", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["alpha"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  index["beta"] = tensor_entry(
+      /*offset=*/16,
+      /*size=*/16,
+      /*shape=*/{4},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float32",
+      /*storage_offset=*/0);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  const std::vector<std::string> subset{"beta", "alpha"};
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec, subset);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  CHECK_FALSE(plan.is_identity);
+  const auto view_json = nlohmann::json::parse(plan.view_index_json);
+  REQUIRE(view_json.size() == 2);
+  CHECK(view_json.at("beta")[0].get<uint64_t>() == 0);
+  CHECK(view_json.at("alpha")[0].get<uint64_t>() == 16);
 }
 
 TEST_CASE("ViewPlanner emits contiguous aligned range for 1D narrow", "[view_planner]") {
