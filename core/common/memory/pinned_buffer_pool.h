@@ -27,6 +27,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "gsl/pointers"
@@ -44,8 +45,19 @@ class PinnedBufferPool {
     size_t bytes;
   };
 
+  struct Options {
+    std::string name;
+    // If >=0, best-effort bind the backing slab to this NUMA node before pinning.
+    // Default (-1) leaves placement to the OS (first-touch / default policy).
+    int numa_node = -1;
+    // If true and numa_node is set, pre-fault the slab (touch each page) before
+    // cudaHostRegister to make the NUMA placement deterministic.
+    bool prefault = false;
+  };
+
   explicit PinnedBufferPool(size_t total_size, size_t chunk_size);
   PinnedBufferPool(size_t total_size, size_t chunk_size, std::string name);
+  PinnedBufferPool(size_t total_size, size_t chunk_size, Options options);
   ~PinnedBufferPool();
 
   int allocate(
