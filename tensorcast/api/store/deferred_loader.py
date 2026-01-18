@@ -333,6 +333,8 @@ class DeferredLoader:
                 tensor_name, self._slice_specs.get(tensor_name)
             )
 
+        offset = 0
+        end = 0
         if self._packing == "append":
             offset = _align_bytes(self._cursor_bytes, _ALIGNMENT_BYTES)
             if offset % self._element_size(spec.dtype) != 0:
@@ -348,9 +350,6 @@ class DeferredLoader:
                     status_code="RESOURCE_EXHAUSTED",
                     retryable=False,
                 )
-            self._cursor_bytes = end
-            self._order.append(tensor_name)
-            self._offsets[tensor_name] = offset
             spec = _TensorSpec(
                 shape=spec.shape,
                 stride=spec.stride,
@@ -358,7 +357,6 @@ class DeferredLoader:
                 size_bytes=spec.size_bytes,
                 offset_bytes=offset,
             )
-            self._specs[tensor_name] = spec
         else:
             if tensor_name not in self._offsets:
                 raise ArtifactError(
@@ -370,6 +368,11 @@ class DeferredLoader:
 
         self._ensure_arena()
         tensor = self._materialize_tensor(spec)
+        if self._packing == "append":
+            self._cursor_bytes = end
+            self._order.append(tensor_name)
+            self._offsets[tensor_name] = offset
+            self._specs[tensor_name] = spec
         self._tensors[tensor_name] = tensor
         return tensor
 
@@ -617,6 +620,8 @@ class DeferredLoader:
                     for idx, dim in enumerate(entry.shape)
                 )
                 stride = _compact_stride(shape)
+        if not stride:
+            stride = _compact_stride(shape)
         if tuple(stride) != _compact_stride(shape):
             raise ArtifactError(
                 f"Tensor '{name}' is not contiguous; deferred loader requires contiguous layouts",

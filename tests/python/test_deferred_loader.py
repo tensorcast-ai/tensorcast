@@ -24,10 +24,18 @@ def _skip_if_no_cuda() -> None:
         pytest.skip("CUDA not available - deferred loader requires CUDA tensors")
 
 
-def _make_index_bytes() -> bytes:
+def _make_index_bytes(
+    *, shape: list[int] | None = None, stride: list[int] | None = None
+) -> bytes:
+    shape_value = shape if shape is not None else [4]
+    stride_value = stride if stride is not None else [1]
+    numel = 1
+    for dim in shape_value:
+        numel *= int(dim)
+    size_bytes = int(numel) * 4
     index = {
-        "alpha": [0, 16, [4], [1], "torch.float32", 0],
-        "beta": [16, 16, [4], [1], "torch.float32", 0],
+        "alpha": [0, size_bytes, shape_value, stride_value, "torch.float32", 0],
+        "beta": [size_bytes, size_bytes, shape_value, stride_value, "torch.float32", 0],
     }
     return json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -123,6 +131,24 @@ def store_and_client(
         runtime.executor.shutdown(wait=False)
 
 
+@pytest.fixture
+def store_and_client_empty_stride(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[Store, FakeDeferredClient]]:
+    _skip_if_no_cuda()
+    client = FakeDeferredClient(_make_index_bytes(stride=[]))
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    try:
+        yield store, client
+    finally:
+        runtime.executor.shutdown(wait=False)
+
+
 def test_deferred_loader_invalid_slice_raises(
     store_and_client: tuple[Store, FakeDeferredClient],
 ) -> None:
@@ -160,3 +186,46 @@ def test_deferred_loader_commit_preserves_order(
     assert result.tensor_names == ("beta", "alpha")
     assert result.view_id is None
     assert result.view_subset_hash is not None
+
+
+def test_deferred_loader_empty_stride_is_contiguous(
+    store_and_client_empty_stride: tuple[Store, FakeDeferredClient],
+) -> None:
+    store, _ = store_and_client_empty_stride
+    artifact = store.artifact(artifact_id="artifact-1")
+    with artifact.deferred_loader(device="cuda:0") as loader:
+        tensor = loader.tensor("alpha")
+        assert tensor.is_contiguous()
+        assert tuple(tensor.stride()) == (1,)
+
+
+def test_deferred_loader_append_retry_does_not_duplicate_order(
+    store_and_client: tuple[Store, FakeDeferredClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, client = store_and_client
+    artifact = store.artifact(artifact_id="artifact-1")
+
+    with artifact.deferred_loader(device="cuda:0") as loader:
+        original_ensure = loader._ensure_arena
+
+        def _boom() -> None:
+            raise ArtifactError(
+                "arena unavailable",
+                status_code="RESOURCE_EXHAUSTED",
+                retryable=True,
+            )
+
+        monkeypatch.setattr(loader, "_ensure_arena", _boom)
+        with pytest.raises(ArtifactError):
+            loader.tensor("alpha")
+        assert loader._order == []
+        assert loader._cursor_bytes == 0
+        assert "alpha" not in loader._offsets
+
+        monkeypatch.setattr(loader, "_ensure_arena", original_ensure)
+        loader.tensor("alpha")
+        result = loader.commit()
+
+    assert result.tensor_names == ("alpha",)
+    assert len(client.materialize_calls) == 1
