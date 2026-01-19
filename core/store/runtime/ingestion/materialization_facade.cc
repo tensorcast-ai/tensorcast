@@ -9,6 +9,7 @@
 #include <functional>
 #include <limits>
 #include <utility>
+#include <vector>
 
 #include "absl/log/check.h"
 #include "absl/log/log.h"
@@ -71,7 +72,12 @@ class PlanBackedSeekableSource final : public loader::SeekableSource {
       std::unique_ptr<loader::SeekableSource> source,
       std::shared_ptr<const std::vector<loader::SegmentPiece>> plan,
       uint64_t total_size)
-      : source_(std::move(source)), plan_(std::move(plan)), total_size_(total_size) {}
+      : source_(std::move(source)), plan_(std::move(plan)), total_size_(total_size) {
+    piece_starts_.reserve(plan_->size());
+    for (const auto& piece : *plan_) {
+      piece_starts_.push_back(piece.dst_offset);
+    }
+  }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     auto st = read_at(current_offset_, dst, max_bytes);
@@ -89,14 +95,17 @@ class PlanBackedSeekableSource final : public loader::SeekableSource {
     size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
     auto* out = static_cast<uint8_t*>(dst);
 
-    size_t idx = 0;
-    for (; idx < plan_->size(); ++idx) {
-      const auto& p = (*plan_)[idx];
-      if (offset < p.dst_offset + p.length) {
-        break;
-      }
+    if (piece_starts_.empty()) {
+      return static_cast<size_t>(0);
     }
-    if (idx == plan_->size()) {
+    auto it = std::upper_bound(piece_starts_.begin(), piece_starts_.end(), offset);
+    size_t idx = 0;
+    if (it == piece_starts_.begin()) {
+      idx = 0;
+    } else {
+      idx = static_cast<size_t>(it - piece_starts_.begin() - 1);
+    }
+    if (idx >= plan_->size()) {
       return static_cast<size_t>(0);
     }
 
@@ -129,6 +138,7 @@ class PlanBackedSeekableSource final : public loader::SeekableSource {
  private:
   std::unique_ptr<loader::SeekableSource> source_;
   std::shared_ptr<const std::vector<loader::SegmentPiece>> plan_;
+  std::vector<uint64_t> piece_starts_;
   uint64_t total_size_{0};
   uint64_t current_offset_{0};
 };
