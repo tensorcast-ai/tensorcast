@@ -25,7 +25,7 @@
 #include <string>
 #include <utility>
 
-#include <numaif.h>
+#include <linux/mempolicy.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 

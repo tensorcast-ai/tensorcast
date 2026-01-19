@@ -51,23 +51,23 @@ struct MetricsHandles {
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> amplification_ratio;
 };
 
+MetricsHandles init_metrics_handles() {
+  MetricsHandles handles;
+  handles.meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  handles.base_read_calls = handles.meter->CreateDoubleCounter("tc_view_plan_source_base_read_calls_total");
+  handles.base_read_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_base_read_bytes_total");
+  handles.output_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_output_bytes_total");
+  handles.pack_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_pack_bytes_total");
+  handles.strided_runs = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_runs_total");
+  handles.strided_fallback_runs = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_fallback_runs_total");
+  handles.cache_hits = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_cache_hits_total");
+  handles.cache_misses = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_cache_misses_total");
+  handles.amplification_ratio = handles.meter->CreateDoubleHistogram("tc_view_plan_source_amplification_ratio");
+  return handles;
+}
+
 MetricsHandles& metrics_handles() {
-  static MetricsHandles handles;
-  if (!handles.meter) {
-    handles.meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-  }
-  if (!handles.base_read_calls) {
-    handles.base_read_calls = handles.meter->CreateDoubleCounter("tc_view_plan_source_base_read_calls_total");
-    handles.base_read_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_base_read_bytes_total");
-    handles.output_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_output_bytes_total");
-    handles.pack_bytes = handles.meter->CreateDoubleCounter("tc_view_plan_source_pack_bytes_total");
-    handles.strided_runs = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_runs_total");
-    handles.strided_fallback_runs =
-        handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_fallback_runs_total");
-    handles.cache_hits = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_cache_hits_total");
-    handles.cache_misses = handles.meter->CreateDoubleCounter("tc_view_plan_source_strided_cache_misses_total");
-    handles.amplification_ratio = handles.meter->CreateDoubleHistogram("tc_view_plan_source_amplification_ratio");
-  }
+  static MetricsHandles handles = init_metrics_handles();
   return handles;
 }
 
@@ -549,7 +549,12 @@ absl::StatusOr<size_t> ViewPlanSource::fill_strided_run(
             stats_.strided_runtime_fallbacks.fetch_add(1, std::memory_order_relaxed);
           }
         }
-        return copy_from_strided_ranges(run, local_offset, out, remaining);
+        const size_t already_copied = bytes - remaining;
+        auto fallback_or = copy_from_strided_ranges(run, local_offset, out, remaining);
+        if (!fallback_or.ok()) {
+          return fallback_or.status();
+        }
+        return already_copied + *fallback_or;
       }
       return block_or.status();
     }
