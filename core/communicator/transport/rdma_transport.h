@@ -96,7 +96,7 @@ class RdmaTransport {
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
   misc::Queue<read_request_t> read_queue_;
-  misc::Queue<read_request_t> inflight_queue_;
+  std::vector<misc::Queue<read_request_t>> per_qp_inflight_queues_;
 
   std::function<void(const read_request_t&)> ack_cb_;
 
