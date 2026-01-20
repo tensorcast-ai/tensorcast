@@ -3,6 +3,7 @@
 #ifndef CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -96,7 +97,8 @@ class RdmaTransport {
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
   misc::Queue<read_request_t> read_queue_;
-  std::vector<misc::Queue<read_request_t>> per_qp_inflight_queues_;
+  // std::vector<misc::Queue<read_request_t>> per_qp_inflight_queues_;
+  std::array<misc::Queue<read_request_t>, 16> per_qp_inflight_queues_;//硬编码，设计可能需要再考虑一下
 
   std::function<void(const read_request_t&)> ack_cb_;
 

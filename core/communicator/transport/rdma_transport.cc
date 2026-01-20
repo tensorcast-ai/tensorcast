@@ -21,7 +21,12 @@ RdmaTransport::RdmaTransport(RdmaContext* context, net_dev_t dev, rdma_thread_t 
       gid_idx_(-1),
       ready_(false),
       inflight_send_(0) {
-  per_qp_inflight_queues_.resize(qp_count_);// Initialize per-QP inflight queues
+        /**
+        per_qp_inflight_queues_.reserve(qp_count_);
+        for (int i = 0; i < qp_count_; ++i) {
+          per_qp_inflight_queues_.emplace_back();
+        }
+        */
   io_thread_->register_transport(this);
   CHECK_WARN(do_init_qp(), "failed to init qp");
 }
