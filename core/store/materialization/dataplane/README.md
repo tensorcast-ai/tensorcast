@@ -15,3 +15,9 @@ removed, making these targets the single source of truth for dataplane code.
   - `auto` selects `O_DIRECT` for large payloads (currently `> 5GiB`) and will fall back to buffered I/O if `open(O_DIRECT)` fails with a common “unsupported” errno (see `direct_io_fallback_errno()` / `direct_io_fallback_reason()`).
 - `GpuMemorySink::Options::{gpu_sched_enabled,gpu_sched_limit_bytes,gpu_sched_limit_copies}`
   - Limits per-GPU in-flight H2D bytes/copies for `write_at_async()` to reduce transient oversubscription; stats are readable via `get_gpu_scheduler_stats(device_id)`.
+
+## View Execution (SelectionPlan)
+
+- `ViewPlanSource` compiles `SelectionPlan` ranges into indexed execution runs to avoid per-call linear scans.
+- Strided `narrow(axis=1)`-style runs use row-block coalesced reads plus host packing, with PAD=0 semantics preserved.
+- Strided execution is auto-gated by run length, row width, and amplification bounds; `VLOG(1)` summarizes read/pack/caching totals per instance.

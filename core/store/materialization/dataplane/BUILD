@@ -247,7 +247,9 @@ sc_cc_library(
         ":view_planner",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
+        "@abseil-cpp//absl/synchronization",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
