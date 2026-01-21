@@ -42,7 +42,7 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 
 - `CallContext`: QoS + deadline + idempotency + tracing tags (per request/task).
 - `Operation[T]`: unified async wait/cancel/status (prefetch/persistence/pin).
-- `Plan`: a composable orchestration IR that can dispatch actions to node-local agents (without “shipping arbitrary Python” like Ray).
+- `Plan`: a composable orchestration IR that dispatches actions across daemons (Phase-0: direct daemon RPCs; future: node-local agents for instance/engine steps) without “shipping arbitrary Python” like Ray.
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
 
@@ -53,6 +53,7 @@ This document prioritizes **What/Why** (semantics and rationale) and defines con
 This design extends the existing artifact-first SDK and daemon APIs:
 
 - Prefetch exists today as `Artifact.prefetch(device=...) -> (prefetched_handle, PrefetchTicket)` (see `tensorcast/api/store/artifact.py`). `PrefetchTicket.wait()` polls `QueryReplicaStatus` and `PrefetchTicket.cancel()` calls `ReleaseReplica` via `tensorcast/daemon_ctl.py`; however, `StoreDaemonServiceImpl` does not currently override these RPCs (`daemon/service/grpc_service_impl.h`), so wait/cancel are best-effort today (may return `False` / no-op).
+- The daemon’s current sessions map can silently overwrite `replica_uuid -> ReplicaKey` associations (see `daemon/state/sessions_service.h`). Deterministic join requires PutIfAbsent/JoinIfMatch semantics to prevent “session overwrite” cross-talk.
 - The daemon already tracks `replica_uuid` sessions via `ReplicaSessionManager` (`daemon/state/replica_session_manager.h`) and consults lifecycle counters (`use_count`, `placement_pins`) for eviction (see `daemon/README.md`).
 - The Global Store tracks workers and replicas (by `worker_id`), but there is no first-class “engine instance” registry surface today (`proto/tensorcast/global_store/v1/global_store.proto`).
 
@@ -104,8 +105,9 @@ This design extends the existing artifact-first SDK and daemon APIs:
 4. **At-least-once orchestration with safe idempotency**
    - When a `CallContext.idempotency_key` (or `request_id`) is provided, repeated submissions must not cause duplicate daemon-owned replicas or leaked waiters.
 
-5. **Deterministic `replica_uuid` (no EnsureReplica RPC)**
-   - Avoid duplicate daemon-owned VRAM replicas by joining on a deterministic `replica_uuid` derived from `(worker_id, artifact_id, view_id, tier, device)` (where `worker_id` is the daemon identity tracked by the Global Store).
+5. **Deterministic session UUID (`replica_uuid`) for joinable tickets**
+   - Avoid duplicate sessions/tickets and enable joinable async readiness for the same `ReplicaKey` on the same worker.
+   - `replica_uuid` remains a daemon session/ticket namespace label (existing proto field name), and does **not** redefine StoreEngine replica identity.
 
 6. **Durability vs residency are orthogonal**
    - `StorePolicy` describes durable tiers (stable_dram/shared_disk), not “GPU never evict”.
@@ -139,6 +141,25 @@ A view is a derived artifact shape/layout (subset, slice, transpose, etc.) whose
 ### Replica (existing)
 
 A concrete materialization of an artifact (or view) on a tier/device.
+
+### ReplicaKey (existing; StoreEngine identity)
+
+In the C++ StoreEngine, the identity of a daemon-owned replica is the `ReplicaKey`:
+
+- `artifact_id`
+- `view_id` (optional; absent means canonical view)
+- `device` (`DeviceType`, `ordinal`, `uuid`)
+- `replica` (uint32; Phase-0 uses `replica=0`)
+
+This is the key that determines which underlying daemon-owned VRAM/DRAM replica is being loaded/kept around.
+
+### Replica session / ticket (`replica_uuid`) (existing; daemon namespace)
+
+In the daemon, `replica_uuid` is a **session/ticket label** that maps to a `ReplicaKey` and a readiness signal.
+
+- This is the handle used by ticket-based RPCs (`QueryReplicaStatus`, `ReleaseReplica`, future `WaitReplicaStatus`).
+- Multiple callers may “join” the same `replica_uuid` session as additional waiters, all waiting on the same underlying readiness.
+- The deterministic design in this doc targets **this** namespace: “avoid duplicate sessions/tickets and make readiness joinable and cancelable per waiter”, not re-defining StoreEngine identity.
 
 ### Two ownership modes (must be explicit)
 
@@ -198,6 +219,8 @@ For remote `into(...)` operations, targets cannot be raw `torch.Tensor` across m
 
 - `tensorcast.context(...) -> CallContext`
 - `tensorcast.plan(ctx: CallContext) -> Plan`
+- `tensorcast.signals(ctx: CallContext | None = None) -> TensorCastSignals`
+- `tensorcast.execution_signals(adapters: Sequence[ExecutionSignalsAdapter]) -> ExecutionSignals`
 
 Example:
 
@@ -371,7 +394,7 @@ class Artifact:
         options: "GetArtifactOptions | None" = None,
     ) -> PrefetchResult:
         """
-        Ensure a daemon-owned replica exists (and optionally begins loading immediately).
+        Ensure a daemon-owned replica session exists (and begins loading in the background).
 
         Returns:
         - `PrefetchResult(artifact=<prefetched_handle>, ticket=<PrefetchTicket>)`
@@ -382,9 +405,14 @@ class Artifact:
 
         Semantics:
         - Daemon-owned residency (VRAM/DRAM is owned by the daemon).
-        - Uses deterministic `replica_uuid` + join when `ctx` has an `idempotency_key`/`request_id`.
-        - Prefetch does not require creating per-process UseLeases (no mapping).
-        - Cache identity includes `(artifact_id, view_id, tier, device)`.
+        - Uses deterministic **session** UUID (`replica_uuid`) + join when `ctx` has an `idempotency_key`/`request_id`.
+        - **Remote-safe**: prefetch MUST NOT export a mem handle, MUST NOT create a PID UseLease, and MUST NOT write
+          per-process reference tracking (`RefTracker(pid)`). Prefetch is “warm the daemon cache”, not “map into my
+          process”.
+        - Cache identity follows StoreEngine `ReplicaKey`: `(artifact_id, view_id_token, device_type, device_ordinal, replica=0)`.
+          (The daemon resolves `device_uuid` internally; clients are not required to provide it for determinism.)
+        - Prefetch does not imply pinning. To keep a replica resident, callers must use `pin_residency(...)`; otherwise
+          the daemon may evict under pressure after the replica becomes ready.
 
         Await semantics (recommended in async code):
         - `await art.prefetch(...)` waits for the ticket to become ready and then returns the same tuple-like
@@ -394,11 +422,37 @@ class Artifact:
         """
 ```
 
-**Deterministic `replica_uuid` (default when `ctx` provided)**
+**Deterministic session UUID (`replica_uuid`)**
 
-- Derived from a canonical tuple: `(worker_id, artifact_id, view_id, tier, device_id, algo_version)`.
-- Uses UUIDv5 (or explicit algo enum).
-- Ensures “same replica key on same worker” joins instead of creating multiple daemon-owned replicas.
+We keep the existing proto field name `replica_uuid`, but in Phase-0 it is best understood as a **deterministic session UUID**:
+
+- It identifies a *daemon session/ticket* for a specific `ReplicaKey` on a specific worker.
+- It is used to make prefetch idempotent under retries and to support joinable readiness + waiter-scoped cancel.
+
+Derivation (Phase-0 default when `ctx` provided):
+
+- Canonical tuple (inputs are strings unless noted):
+  - `worker_id` (Global Store identity for the daemon)
+  - `artifact_id`
+  - `view_id_token`:
+    - `"canonical"` for canonical view (no transforms)
+    - otherwise the stable `view_id`
+  - `device_type` (e.g., `"gpu"` / `"cpu"`)
+  - `device_ordinal` (int; e.g., `cuda:0 -> 0`)
+  - `replica` (int; Phase-0 fixed to `0`, but still part of the tuple for forward-compatibility)
+  - `algo_version` (int/enum; allows evolution without ambiguity)
+- Uses UUIDv5 (or an explicit `replica_uuid_algo` enum) over a canonical string encoding of the tuple.
+
+Join semantics:
+
+- Prefetch sets `join_if_exists=true`. If the session already exists, the daemon **joins the session** (adds the caller as a waiter) rather than overwriting it.
+- If `join_if_exists=false` and the session exists, the daemon MUST return `ALREADY_EXISTS` (preferred) so callers can detect duplicate submission.
+
+Safety requirement (must fix in daemon):
+
+- The daemon MUST treat the mapping `replica_uuid -> (replica_key_hash, replica_uuid_algo, ReadySignal)` as **PutIfAbsent/JoinIfMatch**, never “silent overwrite”.
+  - If a request attempts to reuse an existing `replica_uuid` but resolves to a different `ReplicaKey`, the daemon MUST fail fast with `FAILED_PRECONDITION`.
+  - The daemon MUST compute and return an authoritative `replica_key_hash` (stable digest) for debugging and join validation.
 
 #### Into (caller-owned buffers; engine arena / KV buffers)
 
@@ -420,7 +474,9 @@ class Artifact:
         Notes:
         - When region-backed is enabled, uses MaterializeIntoTarget (loopback/UDS only).
         - Does not create daemon-owned VRAM replica.
-        - For remote execution, `target` must be a TargetSpec (serializable reference).
+        - `TargetSpec` is a serializable reference to engine-owned buffers. Phase-0 assumes the caller is running in
+          the engine process (or on the same node) that can resolve the target; cross-process/remote `into(...)`
+          orchestration via `Plan` is future work.
         """
 ```
 
@@ -479,14 +535,14 @@ Naming note: `Plan` here is orchestration IR, distinct from the existing `PlanTy
 
 - Avoids “distributed Python execution” complexity.
 - Supports at-least-once semantics with idempotent action submission (Phase-0 retries are user-driven).
-- Central/controller can build a plan; node-local agent executes actions safely.
+- Central/controller can build a plan; Phase-0 executes by issuing remote-safe RPCs to Store Daemons (no separate agent service required).
 
 #### Node identity: Worker vs Instance
 
 For correctness, Plan distinguishes:
 
 - **Worker** (daemon identity; cache/prefetch/pin run here)
-- **Instance** (engine process identity; into/targets resolved here). Phase-0 note: TensorCast does not currently expose an instance registry in the control plane; `Instance` steps are future work.
+- **Instance** (engine process identity; into/targets resolved here). Phase-0 note: TensorCast does not currently expose an instance registry in the control plane; instance steps are future work and are **not** exposed in the Phase-0 `Plan` API.
 
 #### Minimal types
 
@@ -513,27 +569,39 @@ class Instance:
 #### Plan API
 
 ```python
+from dataclasses import dataclass
+from typing import Any, Generic, Mapping, Sequence, TypeVar
+
+T = TypeVar("T")
+
+@dataclass(frozen=True, slots=True)
+class PlanStepRef(Generic[T]):
+    """A typed reference to a planned step (IR), not an executing operation."""
+
+    step_id: str
+
 class Plan:
     def __init__(self, ctx: CallContext): ...
 
     def on_worker(self, worker: Worker) -> "WorkerStepBuilder": ...
-    def on_instance(self, inst: Instance) -> "InstanceStepBuilder": ...
 
-    async def run(self, *, concurrency: int = 16) -> "PlanResult": ...
-```
+    async def run(
+        self,
+        *,
+        concurrency: int = 16,
+        raise_on_error: bool = True,
+    ) -> "PlanResult": ...
 
-#### PlanResult (Phase-0)
 
-`Plan.run()` returns a `PlanResult` summarizing per-step outcomes. Phase-0 treats the plan as failed if any step fails; the result still includes all completed step statuses for debugging.
+class PlanFailedError(ArtifactError):
+    """Raised when `Plan.run()` observes any step failure."""
 
-```python
-from dataclasses import dataclass
-from typing import Any, Sequence
+    result: "PlanResult"
 
 @dataclass(frozen=True, slots=True)
 class PlanStepResult:
     step_id: str
-    target_id: str  # worker_id or instance_id
+    target_id: str  # worker_id
     action: str
     status: OperationStatus
     value: Any | None = None
@@ -542,23 +610,40 @@ class PlanStepResult:
 class PlanResult:
     ok: bool
     request_id: str
-    steps: Sequence[PlanStepResult]
+    steps: Mapping[str, PlanStepResult]
+
+    def step(self, ref: PlanStepRef[Any]) -> PlanStepResult: ...
 ```
+
+`Plan.run(raise_on_error=True)` raises `PlanFailedError` by default to prevent silently ignoring failures; callers can opt into “always return a result” via `raise_on_error=False`.
 
 #### Worker steps (daemon-owned)
 
 ```python
 class WorkerStepBuilder:
-    def prefetch(self, art: "Artifact", *, device: str | int) -> Operation["PrefetchResult"]: ...
-    def pin_residency(self, art: "Artifact", *, device: str | int, ttl_ms: int | None) -> Operation["PlacementLease"]: ...
-    def unpin_residency(self, lease: "PlacementLease") -> Operation[None]: ...
-```
+    def prefetch(
+        self,
+        art: "Artifact",
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["PrefetchResult"]: ...
 
-#### Instance steps (engine-owned)
+    def pin_residency(
+        self,
+        art: "Artifact",
+        *,
+        device: str | int,
+        ttl_ms: int | None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["PlacementLease"]: ...
 
-```python
-class InstanceStepBuilder:
-    def into(self, art: "Artifact", *, target: "TargetSpec", device: str | None = None) -> Operation[None]: ...
+    def unpin_residency(
+        self,
+        lease: "PlacementLease",
+        *,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[None]: ...
 ```
 
 #### Execution
@@ -575,6 +660,7 @@ class InstanceStepBuilder:
 Phase-0 adopts a deliberately simple contract:
 
 - **Atomic reporting (not rollback)**: any single-step failure causes the overall plan result to be marked failed (`PlanResult.ok=False`).
+- **Plan atomicity is reporting atomicity only**: side effects may remain even when `ok=False` (e.g., a replica may have been prefetched successfully before a later step failed).
 - **No rollback**: Phase-0 does not attempt to “undo” side effects that already happened (e.g., a replica that was prefetched before a later step failed may still exist).
 - **Best-effort cancellation**: once a failure is observed, remaining not-yet-started steps are skipped and in-flight steps receive a best-effort cancel; some steps may still succeed concurrently.
 - **No plan-level reschedule retries**: Phase-0 does not automatically reschedule failed steps; callers can retry by re-running the whole plan with the same `CallContext.idempotency_key`/`request_id` and by using `OperationStatus.error.retryable` + `OperationStatus.error.status_code` to decide what to retry vs discard.
@@ -833,23 +919,27 @@ class KvLookupHit:
    - Weights/KVCache/checkpoints are artifacts (tensor dicts).
    - All data-plane actions are performed via `Store`/`Artifact` primitives.
 
-2. **Deterministic `replica_uuid` + join (no EnsureReplica)**
-   - When `ctx.request_id` (or `ctx.idempotency_key`) is present, prefetch MUST use deterministic `replica_uuid` derived from `(worker_id, artifact_id, view_id, tier, device)` and algo version.
-   - Daemon MUST join on identical `replica_uuid` instead of allocating multiple daemon-owned replicas.
+2. **Deterministic session UUID (`replica_uuid`) + join (no EnsureReplica)**
+   - When `ctx.request_id` (or `ctx.idempotency_key`) is present, prefetch MUST use a deterministic session UUID (`replica_uuid`) derived from canonical `ReplicaKey` inputs (see Prefetch section) and an algorithm version.
+   - The daemon MUST implement PutIfAbsent/JoinIfMatch for `replica_uuid` sessions (never silent overwrite), so retries join the same readiness rather than creating/overwriting sessions.
 
 3. **Waiter idempotency: `request_id` is mandatory in proto for joinable ops**
    - Materialize/prefetch requests must include `request_id` (waiter id).
    - `ReleaseReplica` must release by `(artifact_id, replica_uuid, request_id)` to avoid cancel cross-talk.
+   - Compatibility rule: requests without `request_id` MUST NOT perform global release; the safest behavior is `FAILED_PRECONDITION` with an “upgrade required” error detail.
 
-4. **Durability vs residency orthogonal**
+4. **Prefetch is remote-safe**
+   - Prefetch MUST NOT mint handles or create UseLeases, and MUST NOT write PID reference tracking. This must be an explicit mode/intent in proto, not inferred from `wait_for_completion=false`.
+
+5. **Durability vs residency orthogonal**
    - `StorePolicy` does not express “GPU never evict”.
    - Residency is expressed by `pin_residency` (placement lease) or engine-owned memory.
 
-5. **Key mapping immutable; alias is CAS**
+6. **Key mapping immutable; alias is CAS**
    - Key mapping remains conflict-by-default (`FAILED_PRECONDITION` on overwrite).
    - Movable alias must be a separate service/table with CAS and linearizable read.
 
-6. **Namespace as first-class concept (Phase-0: encoded)**
+7. **Namespace as first-class concept (Phase-0: encoded)**
    - Phase-0: key prefixes encode namespace (e.g. `/<ns>/weights/...`).
    - All programmable loops (plans, caches, catalog) must treat namespace as a first-class scope.
 
@@ -874,6 +964,10 @@ class KvLookupHit:
 
 - Cancel is best-effort.
 - For joinable operations (prefetch), cancel MUST be scoped to the caller’s waiter (`request_id`), not global to the `replica_uuid`, unless explicitly owned.
+- Phase-0 waiter-scoped cancel is “stop waiting”, not “rollback”:
+  - `ReleaseReplica(replica_uuid, request_id)` removes the waiter (idempotent) and must not unload an already-ready replica.
+  - For in-flight loads, Phase-0 does not require canceling underlying IO; it only ensures the caller is no longer blocked.
+  - To avoid waiter leaks, waiter entries should be bounded by TTL (e.g., derived from `CallContext.deadline_ms` or a server default).
 
 ### Idempotency
 
@@ -896,25 +990,79 @@ This design assumes proto can evolve. The following are required to make the use
 
 **MaterializeReplica / MaterializeByKey**
 
-- add `request_id` (waiter id) so joins/cancels are scoped per caller
-- add `join_if_exists` (idempotent join on existing deterministic `replica_uuid`)
+- add `request_id` (`string`; waiter id) so joins/cancels are scoped per caller
+- add `join_if_exists` (`bool`) to allow explicit join semantics on existing deterministic `replica_uuid`
+- add an explicit **intent/mode** so prefetch behavior is not inferred from `wait_for_completion`:
+  - recommended: `MaterializeIntent intent = GET | PREFETCH | INTO`
+  - `PREFETCH` MUST forbid handle export + UseLease minting + PID ref tracking
 - extend `MaterializeReplicaStatus` (or introduce a dedicated ticket enum) to represent a terminal success state (e.g., `READY`) so tickets can be waited/polled safely
-- include `replica_key` and `replica_uuid_algo` for validation/debug (optional but recommended)
+- include (and persist in session state) an authoritative `replica_key_hash` (stable digest) + `replica_uuid_algo` for join validation and debugging
+
+Concrete proto sketch (field numbers illustrative; keep additive):
+
+```proto
+enum MaterializeIntent {
+  MATERIALIZE_INTENT_UNSPECIFIED = 0; // treat as legacy GET
+  MATERIALIZE_INTENT_GET = 1;
+  MATERIALIZE_INTENT_PREFETCH = 2;
+  MATERIALIZE_INTENT_INTO = 3;
+}
+
+message MaterializeReplicaRequest {
+  // ...
+  string replica_uuid = 3;
+  // New (Phase-0):
+  string request_id = 2001;
+  bool join_if_exists = 2002;
+  MaterializeIntent intent = 2003;
+  uint32 replica_uuid_algo = 2004;
+  bytes expected_replica_key_hash = 2005; // optional
+}
+
+message ReplicaTicket {
+  string replica_uuid = 1;
+  MaterializeReplicaStatus status = 2;
+  // New:
+  bytes replica_key_hash = 10;
+  uint32 replica_uuid_algo = 11;
+  // Prefer a structured status payload for failures (google.rpc.Status or an equivalent internal message):
+  // google.rpc.Status last_error = 12;
+}
+```
 
 **QueryReplicaStatus / ReleaseReplica (existing RPCs; must be wired)**
 
 - implement handlers in `StoreDaemonServiceImpl` (currently not overridden) and define semantics:
   - `QueryReplicaStatus` returns ticket state (`ALLOCATED`/`READY`/`FAILED`) for a given `ReplicaTicket`
+    - if `request_id` is provided, the daemon MAY include waiter-specific details (e.g., “this waiter canceled”)
   - `ReleaseReplica` is waiter-scoped by `(replica_uuid, request_id)`; releasing one waiter must not cancel the underlying replica globally unless explicitly owned
+    - compatibility: if `request_id` is empty/missing, the daemon MUST NOT perform a global release; return `FAILED_PRECONDITION` (recommended) or `released=false` with an error detail
+
+Minimal request shape (sketch):
+
+```proto
+message QueryReplicaStatusRequest {
+  ReplicaTicket ticket = 1;
+  string request_id = 2; // optional
+}
+
+message ReleaseReplicaRequest {
+  ReplicaTicket ticket = 1;
+  string request_id = 2; // required for waiter-scoped semantics
+}
+```
 
 **WaitReplicaStatus (recommended)**
 
 - add a long-polling wait RPC to avoid client-side polling loops (especially for low-latency QoS)
+  - request includes `ReplicaTicket` + `request_id` + optional `deadline_ms`/server-side timeout
+  - response includes terminal state + structured error details
 
 **Placement lease RPCs**
 
 - `CreatePlacementLease`, `RenewPlacementLease`, `ReleasePlacementLease`
 - map to daemon’s existing placement_pins semantics
+  - idempotency MUST be enforced server-side (e.g., map `(owner_id, replica_key_hash) -> lease_id` so repeated Create does not double-pin)
 
 ### GlobalStoreService (recommended)
 
@@ -974,14 +1122,22 @@ import tensorcast
 
 ctx = tensorcast.context(request_id="warm-pool:v7", qos="background", deadline_ms=120_000)
 plan = tensorcast.plan(ctx)
+signals = tensorcast.signals(ctx=ctx)
+workers = (await signals.list_workers()).value
 
 art = ctx.artifact(key="/prod/weights/llama-70b/v7", fallback="p2p")
 
 for w in workers:
-    plan.on_worker(w).prefetch(art, device=0)
-    plan.on_worker(w).pin_residency(art, device=0, ttl_ms=300_000)
+    steps = plan.on_worker(w)
+    prefetch_step = steps.prefetch(art, device=0)
+    steps.pin_residency(art, device=0, ttl_ms=300_000, depends_on=[prefetch_step])
 
-await plan.run(concurrency=16)
+try:
+    await plan.run(concurrency=16)
+except tensorcast.PlanFailedError as exc:
+    # Result still contains completed step statuses for debugging.
+    result = exc.result
+    raise
 ```
 
 ---
@@ -992,7 +1148,7 @@ await plan.run(concurrency=16)
 - Existing calls to `tensorcast.artifact(...).tensor_dict(...)` / `tensor_dict_into(...)` continue to work.
 - `prefetch()` behavior becomes safer when `CallContext` is used:
   - without context: existing behavior (random `replica_uuid`) remains for compatibility
-  - with context: deterministic `replica_uuid` + join semantics prevent duplicate daemon-owned replicas
+  - with context: deterministic session UUID (`replica_uuid`) + join semantics prevent duplicate sessions/tickets and enable joinable readiness
 - `pin_residency()` is new; existing deployments without placement lease RPC will raise a clear `FAILED_PRECONDITION` with guidance.
 
 ---
@@ -1031,8 +1187,9 @@ Suggested code locations:
 
 This design’s proposed public interfaces follow repository naming conventions:
 
-- Python classes use `PascalCase`: `CallContext`, `Operation`, `OperationStatus`, `OperationError`, `TimeoutErrorDetails`, `PlacementLease`, `TargetSpec`, `Plan`, `PlanResult`, `PlanStepResult`, `PrefetchResult`, `SignalSnapshot`, `TensorCastSignals`, `ExecutionSignals`, `ExecutionSignalsAdapter`, `InstanceProfile`.
+- Python classes use `PascalCase`: `CallContext`, `Operation`, `OperationStatus`, `OperationError`, `TimeoutErrorDetails`, `PlacementLease`, `TargetSpec`, `Plan`, `PlanResult`, `PlanStepResult`, `PlanStepRef`, `PlanFailedError`, `PrefetchResult`, `SignalSnapshot`, `TensorCastSignals`, `ExecutionSignals`, `ExecutionSignalsAdapter`, `InstanceProfile`.
 - Python functions/methods use `snake_case`: `tensorcast.context`, `CallContext.artifact`, `Artifact.prefetch`, `Artifact.tensor_dict_into`, `Artifact.pin_residency`, `Operation.status`, `Operation.wait`, `Operation.cancel`.
+- Python functions/methods use `snake_case`: `tensorcast.signals`, `tensorcast.execution_signals` (Signals entry points).
 - Domain helper functions use `snake_case`: `weights.key`, `weights.layers`, `kvcache.key_to_str`, `kvcache.delta`.
 - Protobuf RPC names remain `PascalCase` (`MaterializeReplica`, `QueryReplicaStatus`, `ReleaseReplica`); new fields use `snake_case` (`request_id`, `join_if_exists`).
 
@@ -1043,5 +1200,5 @@ This design’s proposed public interfaces follow repository naming conventions:
 - Handles over ad-hoc getters: matches the existing SDK principle and keeps room for evolving internal strategies.
 - No parallel “programmability object model”: avoids fracturing users into two APIs.
 - Plan as IR: delivers programmability without building a distributed Python runtime.
-- Deterministic `replica_uuid`: fixes real-world VRAM duplication issues under retries, multi-agent deployments, and at-least-once orchestration.
+- Deterministic session UUID (`replica_uuid`): fixes real-world duplicate sessions/tickets under retries and enables joinable readiness + waiter-scoped cancel.
 - Pinning as first-class: makes warm pools and serverless viable without abusing PID leases.
