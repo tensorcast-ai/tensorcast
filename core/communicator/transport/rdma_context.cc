@@ -431,6 +431,7 @@ void RdmaThread::poll_loop() {
 
       // Extract transport_index from upper 16 bits of wr_id
       // wr_id encoding: (transport_index << 16) | qp_index
+      // poll_transports_ has 1024 slots and transport_index is assigned 0-1023, so a 10-bit mask (0x3FF) is sufficient.
       int transport_index = static_cast<int>((wc->wr_id >> 16) & 0x3FF);
       if (transport_index < 1024 && poll_transports_[transport_index] != nullptr) {
         poll_transports_[transport_index]->do_process_wc(wc);
