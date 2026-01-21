@@ -365,7 +365,7 @@ misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
   if (wc->opcode == IBV_WC_RDMA_READ) {
     // Extract qp_index from lower 16 bits of wr_id
     int qp_index = static_cast<int>(wc->wr_id & 0xFFFF);
-    if (qp_index < 0 || qp_index >= qp_count_) {
+    if (qp_index < 0 || qp_index >= kMaxQpCount || qp_index >= qp_count_) {
       LOG(FATAL) << "invalid qp_index=" << qp_index << " from wr_id=" << wc->wr_id;
     }
     auto req = per_qp_inflight_queues_[qp_index].pop(true);
