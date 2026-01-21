@@ -284,12 +284,13 @@ misc::result_t RdmaTransport::do_post_send() {
   read_sge.length = local_tensor->get_bytes();
   read_sge.lkey = mr->lkey;
 
-  // Push to per-QP queue for lock-free completion matching
   auto res = misc::wrap_ibv_post_send(selected_qp, &read_wr, &read_bad_wr);
   if (res) {
     req->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send failed: return=", res)));
     return misc::FAILED;
   }
+
+  // Push to per-QP queue for lock-free completion matching
   per_qp_inflight_queues_[qp_index].push(req);
   return misc::SUCCESS;
 }
@@ -341,8 +342,6 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     sge.lkey = mr->lkey;
     wr.next = (i + 1 < segs.size()) ? &wrs[i + 1] : nullptr;
   }
-
-  
 
   auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
   if (res) {
