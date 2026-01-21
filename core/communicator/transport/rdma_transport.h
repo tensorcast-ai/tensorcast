@@ -85,6 +85,9 @@ class RdmaTransport {
   }
 
  private:
+  static constexpr int kMaxQpCount = 16;
+  static_assert(kMaxQpCount > 0, "kMaxQpCount must be positive");
+
   RdmaContext* context_;
   net_dev_t dev_;
   rdma_thread_t io_thread_;
@@ -97,11 +100,8 @@ class RdmaTransport {
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
   misc::Queue<read_request_t> read_queue_;
-  // Debug strategy options:
-  // Option 1: Dynamic sizing - use std::vector for flexible QP count
-  // std::vector<misc::Queue<read_request_t>> per_qp_inflight_queues_;
-  // Option 2: Fixed sizing - use std::array with hardcoded size for simpler debugging
-  std::array<misc::Queue<read_request_t>, 16> per_qp_inflight_queues_;
+  
+  std::array<misc::Queue<read_request_t>, kMaxQpCount> per_qp_inflight_queues_;
 
   std::function<void(const read_request_t&)> ack_cb_;
 
