@@ -345,6 +345,16 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
   auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
   if (res) {
+    size_t posted_count = (bad_wr != nullptr) 
+      ? static_cast<size_t>(bad_wr - wrs.data()) 
+      : 0;
+    if (posted_count > 0) {
+      for (size_t i = 0; i < posted_count; ++i) {
+        per_qp_inflight_queues_[qp_index].push(request);
+      }
+      LOG(WARNING) << "[rdma_transport] partial post: " << posted_count << "/" << segs.size() 
+                    << " WRs posted before failure";
+    }
     request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
     LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
                  << " errno=" << errno;
