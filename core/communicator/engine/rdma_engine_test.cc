@@ -66,6 +66,7 @@ struct RdmaTestFixture {
 
   RdmaTestFixture() {
     auto srv_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+    // srv_cfg.mutable_rdma()->set_qp_count(4); // Enable multi-QP for server, default is 1
     auto srv_pools = tensorcast::testing::make_test_pinned_staging_pools(
         srv_cfg.stager().buffers_per_flow(),
         srv_cfg.transport().tcp_conn_count(),
@@ -75,6 +76,7 @@ struct RdmaTestFixture {
     server_ = new communicator::engine::Communicator(srv_cfg, std::move(srv_pools), 30);
     server_init_status_ = server_->init("127.0.0.1", 60000, 8);
     auto cli_cfg = tensorcast::testing::make_tcp_communicator_config(/*enable_rdma=*/true);
+    // cli_cfg.mutable_rdma()->set_qp_count(4); // Enable multi-QP for client, default is 1
     auto cli_pools = tensorcast::testing::make_test_pinned_staging_pools(
         cli_cfg.stager().buffers_per_flow(),
         cli_cfg.transport().tcp_conn_count(),
