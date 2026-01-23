@@ -4,7 +4,7 @@ set -exuo pipefail
 
 arg1="${1-}"
 
-BAZELISK_VERSION="v1.16.0"
+BAZELISK_VERSION="v1.28.1"
 
 platform="unknown"
 
