@@ -261,7 +261,12 @@ misc::result_t RdmaTransport::do_post_send() {
   auto local_tensor = req->get_local_tensor();
   auto remote_tensor = req->get_remote_tensor();
 
-  read_wr.wr_id = transport_index_;
+  // Select QP using round robin first to encode in wr_id
+  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
+  struct ibv_qp* selected_qp = qps_[qp_index];
+
+  // Encode both transport_index and qp_index in wr_id for completion routing
+  read_wr.wr_id = (static_cast<uint64_t>(transport_index_) << 16) | static_cast<uint64_t>(qp_index);
   read_wr.opcode = IBV_WR_RDMA_READ;
   read_wr.send_flags = IBV_SEND_SIGNALED;
 
@@ -279,16 +284,14 @@ misc::result_t RdmaTransport::do_post_send() {
   read_sge.length = local_tensor->get_bytes();
   read_sge.lkey = mr->lkey;
 
-  // Select QP using round robin
-  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
-  struct ibv_qp* selected_qp = qps_[qp_index];
-
-  inflight_queue_.push(req);
   auto res = misc::wrap_ibv_post_send(selected_qp, &read_wr, &read_bad_wr);
   if (res) {
     req->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send failed: return=", res)));
     return misc::FAILED;
   }
+
+  // Push to per-QP queue for lock-free completion matching
+  per_qp_inflight_queues_[qp_index].push(req);
   return misc::SUCCESS;
 }
 
@@ -315,12 +318,19 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
   auto* mr = request->get_local_tensor()->get_mr_by_rail(request->get_rail_id());
   request->record_rdma_queue_done();
 
+  // Select QP using round robin first to encode in wr_id
+  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
+  struct ibv_qp* selected_qp = qps_[qp_index];
+
+  // Encode both transport_index and qp_index in wr_id
+  uint64_t encoded_wr_id = (static_cast<uint64_t>(transport_index_) << 16) | static_cast<uint64_t>(qp_index);
+
   for (size_t i = 0; i < segs.size(); ++i) {
     auto& wr = wrs[i];
     auto& sge = sges[i];
     misc::CLEAR(wr);
     misc::CLEAR(sge);
-    wr.wr_id = transport_index_;
+    wr.wr_id = encoded_wr_id;
     wr.opcode = IBV_WR_RDMA_READ;
     wr.send_flags = IBV_SEND_SIGNALED;
     wr.num_sge = 1;
@@ -333,22 +343,29 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
     wr.next = (i + 1 < segs.size()) ? &wrs[i + 1] : nullptr;
   }
 
-  // Track N inflight completions for this request
-  for (size_t i = 0; i < segs.size(); ++i) {
-    inflight_queue_.push(request);
-  }
-
-  // Select QP using round robin for multi-segment operations
-  int qp_index = next_qp_index_.fetch_add(1) % qp_count_;
-  struct ibv_qp* selected_qp = qps_[qp_index];
-
   auto res = misc::wrap_ibv_post_send(selected_qp, wrs.data(), &bad_wr);
   if (res) {
+    size_t posted_count = (bad_wr != nullptr) 
+      ? static_cast<size_t>(bad_wr - wrs.data()) 
+      : 0;
+    if (posted_count > 0) {
+      for (size_t i = 0; i < posted_count; ++i) {
+        per_qp_inflight_queues_[qp_index].push(request);
+      }
+      LOG(WARNING) << "[rdma_transport] partial post: " << posted_count << "/" << segs.size() 
+                    << " WRs posted before failure";
+    }
     request->set_result(absl::ErrnoToStatus(errno, absl::StrCat("rdma post_send (multi) failed: return=", res)));
     LOG(WARNING) << "[rdma_transport] ibv_post_send failed for request=" << request->get_key() << " res=" << res
                  << " errno=" << errno;
     return misc::FAILED;
   }
+
+  // Track N inflight completions for this request in per-QP queue
+  for (size_t i = 0; i < segs.size(); ++i) {
+    per_qp_inflight_queues_[qp_index].push(request);
+  }
+
   LOG(INFO) << "[rdma_transport] Posted " << segs.size() << " RDMA READ WRs on QP " << qp_index
             << " for request=" << request->get_key();
   return misc::SUCCESS;
@@ -356,9 +373,14 @@ misc::result_t RdmaTransport::read_multi(read_request_t request, const std::vect
 
 misc::result_t RdmaTransport::do_process_wc(struct ibv_wc* wc) {
   if (wc->opcode == IBV_WC_RDMA_READ) {
-    auto req = inflight_queue_.pop(true);
+    // Extract qp_index from lower 16 bits of wr_id
+    int qp_index = static_cast<int>(wc->wr_id & 0xFFFF);
+    if (qp_index < 0 || qp_index >= kMaxQpCount || qp_index >= qp_count_) {
+      LOG(FATAL) << "invalid qp_index=" << qp_index << " from wr_id=" << wc->wr_id;
+    }
+    auto req = per_qp_inflight_queues_[qp_index].pop(true);
     if (req == nullptr) {
-      LOG(FATAL) << "abnormal queue state";
+      LOG(FATAL) << "abnormal queue state for qp_index=" << qp_index;
     }
     req->record_read_done();
     if (wc->status == IBV_WC_SUCCESS) {
