@@ -247,6 +247,13 @@ def ensure_external_symlink() -> None:
             return Path(*parts[:execroot_idx])
 
         output_base_path = infer_output_base_from_bazel_symlinks()
+        if output_base_path is not None:
+            inferred_external = output_base_path / "external"
+            # Bazel's convenience symlinks (bazel-bin/bazel-out/...) can become stale
+            # when the output_base is relocated. If the inferred output_base doesn't
+            # exist anymore, fall back to `bazel info output_base`.
+            if not output_base_path.exists() or not inferred_external.exists():
+                output_base_path = None
         if output_base_path is None and BAZEL_EXE is not None:
             output_base_path = Path(
                 subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
