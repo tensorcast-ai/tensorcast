@@ -10,7 +10,7 @@ runs:
         bazelisk-cache: true
         disk-cache: ${{ github.workflow }}
         repository-cache: true
-        bazelisk-version: 1.16.0
+        bazelisk-version: 1.28.1
 
     - name: Install uv
       uses: astral-sh/setup-uv@v6
