@@ -63,6 +63,8 @@ BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
   rm -f external && ln -s $(bazel info output_base)/external external
   ```
 
+- If importing `tensorcast._C` fails with `cannot allocate memory in static TLS block`, rebuild on the latest `main` (TensorCast disables jemalloc initial-exec TLS to make `dlopen()` safe). As a temporary workaround for older builds, run with `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=32768`.
+
 ### Run services (local)
 
 ```bash
