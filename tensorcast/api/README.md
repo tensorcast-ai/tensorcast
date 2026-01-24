@@ -44,6 +44,18 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
   `TENSORCAST_STORE_CACHE_MAX_ENTRIES` (1000). Metrics are emitted for cache
   hits, misses, evictions (`reason=ttl|lru`), and invalidations (`reason=*`).
 
+## Programmable Control-Plane Primitives
+
+- `tensorcast.context(...) -> CallContext` is a pure per-call container for deadline/idempotency/tags. Handle factories
+  remain context-free (`tensorcast.artifact(...)` / `Store.artifact(...)`).
+- Action APIs accept `*, ctx: CallContext | None = None` as a keyword-only parameter; `ctx` does not participate in
+  artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
+- Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
+  implement wait/cancel without ad-hoc polling loops.
+- `tensorcast.plan(ctx)` builds a programmable orchestration plan. Plan steps target stable worker identities
+  (`daemon_id`) and return `PlanStepRef` handles; `Plan.run()` executes with bounded concurrency and returns a
+  `PlanResult` that aggregates per-step `OperationStatus`.
+
 ## Materialization v2 (descriptor streaming)
 
 - `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.

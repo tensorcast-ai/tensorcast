@@ -170,7 +170,9 @@ class _PipelineStub:
         view_data_hash=None,
         view_index_hint=None,
         replica_uuid=None,
+        ctx=None,
     ) -> None:
+        del ctx
         self.get_into_calls.append(
             {
                 "artifact_id": artifact_id,
@@ -246,7 +248,7 @@ def test_tensor_into_materializes_subset_only():
     assert pipeline.get_into_calls[0]["tensor_names"] == ("bar",)
 
 
-def test_prefetch_returns_clone_and_ticket():
+def test_prefetch_returns_operation():
     tensors = {"foo": torch.ones(1, dtype=torch.float32)}
     canonical_bytes, payload = _build_payload(tensors)
     payload = replace(
@@ -264,16 +266,16 @@ def test_prefetch_returns_clone_and_ticket():
         canonical_index_bytes=canonical_bytes,
     )
 
-    prefetched, ticket = artifact.prefetch(device="cpu")
+    op = artifact.prefetch(device="cpu")
 
-    assert prefetched is not artifact
-    assert prefetched.artifact_id == "aid"
-    assert ticket.replica_uuid == "prefetch-replica"
-    prefetched_snapshot = prefetched.to_dict()
-    fallback_snapshot = prefetched_snapshot["fallback"]
-    assert fallback_snapshot is not None
-    assert fallback_snapshot["replica_uuid"] == ticket.replica_uuid
-    assert artifact.to_dict()["fallback"] is None
+    from tensorcast.proto.daemon.v2 import store_daemon_pb2
+
+    assert op.operation_id == "prefetch-replica"
+    assert pipeline.calls
+    assert (
+        pipeline.calls[0]["lease_mode"]
+        == store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE
+    )
 
 
 def test_release_blocks_materialization():

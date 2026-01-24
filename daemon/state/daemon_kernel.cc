@@ -60,6 +60,8 @@ DaemonKernel::DaemonKernel(
     handle_leases_ = std::make_unique<HandleLeaseRegistry>(hl_opts, *engine_, *lifecycle_mgr_);
   }
 
+  placement_lease_tokens_ = std::make_unique<PlacementLeaseTokens>(PlacementLeaseTokens::Options{});
+
   persistence_mgr_ = std::make_unique<PersistenceManager>(
       scheduler_.get(),
       lip_mgr_.get(),
@@ -76,6 +78,7 @@ DaemonKernel::DaemonKernel(
   });
 
   identity_store_ = std::make_unique<WorkerIdentityStore>(persistence_mgr_.get());
+  identity_store_->set_daemon_id(options_.daemon_id);
   retire_gates_ = std::make_unique<RetireGates>(refs_, *lifecycle_mgr_, locks_);
 }
 

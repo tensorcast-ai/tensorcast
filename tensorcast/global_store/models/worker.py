@@ -28,6 +28,7 @@ class Worker:
 
     # Identity
     worker_id: str = ""
+    daemon_id: str = ""
     node_id: str = ""
 
     # Network

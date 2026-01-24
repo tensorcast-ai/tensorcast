@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 
@@ -24,12 +25,24 @@ from tensorcast.api._region_cache import (
 )
 from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
-from tensorcast.api.store.artifact import Artifact, ArtifactDescriptor, TensorMeta
+from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    Operation,
+    OperationError,
+    OperationStatus,
+    PollingOperation,
+)
+from tensorcast.api.store.artifact import (
+    Artifact,
+    ArtifactDescriptor,
+    PlacementPin,
+    PrefetchedReplica,
+    TensorMeta,
+)
 from tensorcast.api.store.async_ops import ArtifactFuture
 from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
-    PrefetchTicket,
 )
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
@@ -270,6 +283,66 @@ class Store:
             degraded_reason=resp.degraded_reason or None,
             last_error=resp.last_error or None,
             shards=tuple(shards),
+        )
+
+    def persistence_operation(
+        self,
+        *,
+        task_id: str | None = None,
+        artifact_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[PersistenceStatusResult]:
+        del ctx
+        op_id = task_id or f"persist:{artifact_id or ''}"
+
+        def _status() -> OperationStatus:
+            result = self.query_persistence_status(
+                task_id=task_id, artifact_id=artifact_id
+            )
+            state: str
+            if result.state in {"pending", "running", "unknown"}:
+                state = "running"
+            elif result.state == "success":
+                state = "success"
+            elif result.state == "failed":
+                state = "failed"
+            elif result.state == "degraded":
+                state = "degraded"
+            else:
+                state = "running"
+            error: OperationError | None = None
+            if state in {"failed", "degraded"}:
+                message = (
+                    result.last_error
+                    or result.degraded_reason
+                    or "persistence degraded"
+                )
+                error = OperationError(
+                    status_code="INTERNAL"
+                    if state == "failed"
+                    else "DEADLINE_EXCEEDED",
+                    message=message,
+                    retryable=True,
+                    context={
+                        "task_id": result.task_id,
+                        "artifact_id": result.artifact_id,
+                    },
+                )
+            return OperationStatus(
+                state=state,  # type: ignore[arg-type]
+                message=result.degraded_reason or None,
+                progress=float(result.progress),
+                as_of_ms=int(time.time() * 1000),
+                error=error,
+            )
+
+        def _result() -> PersistenceStatusResult:
+            return self.query_persistence_status(
+                task_id=task_id, artifact_id=artifact_id
+            )
+
+        return PollingOperation(
+            operation_id=op_id, status_fn=_status, result_fn=_result
         )
 
     # ------------------------------------------------------------------
@@ -690,7 +763,8 @@ __all__ = [
     "LeaseHandle",
     "MaterializationPayload",
     "MaterializationBatcher",
-    "PrefetchTicket",
+    "PlacementPin",
+    "PrefetchedReplica",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",

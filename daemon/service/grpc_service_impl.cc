@@ -4,11 +4,15 @@
 
 #include <nlohmann/json.hpp>
 #include <unistd.h>
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <optional>
 #include <string_view>
+
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -17,9 +21,12 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
+#include "core/store/device_registry.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/path_utils.h"
 #include "daemon/util/status_utils.h"
+#include "folly/futures/Future.h"
+#include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
 
 namespace tensorcast::daemon {
@@ -27,6 +34,101 @@ namespace tensorcast::daemon {
 using ::grpc::Status;
 using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
+
+namespace {
+
+std::string status_code_name(grpc::StatusCode code) {
+  switch (code) {
+    case grpc::StatusCode::OK:
+      return "OK";
+    case grpc::StatusCode::CANCELLED:
+      return "CANCELLED";
+    case grpc::StatusCode::UNKNOWN:
+      return "UNKNOWN";
+    case grpc::StatusCode::INVALID_ARGUMENT:
+      return "INVALID_ARGUMENT";
+    case grpc::StatusCode::DEADLINE_EXCEEDED:
+      return "DEADLINE_EXCEEDED";
+    case grpc::StatusCode::NOT_FOUND:
+      return "NOT_FOUND";
+    case grpc::StatusCode::ALREADY_EXISTS:
+      return "ALREADY_EXISTS";
+    case grpc::StatusCode::PERMISSION_DENIED:
+      return "PERMISSION_DENIED";
+    case grpc::StatusCode::RESOURCE_EXHAUSTED:
+      return "RESOURCE_EXHAUSTED";
+    case grpc::StatusCode::FAILED_PRECONDITION:
+      return "FAILED_PRECONDITION";
+    case grpc::StatusCode::ABORTED:
+      return "ABORTED";
+    case grpc::StatusCode::OUT_OF_RANGE:
+      return "OUT_OF_RANGE";
+    case grpc::StatusCode::UNIMPLEMENTED:
+      return "UNIMPLEMENTED";
+    case grpc::StatusCode::INTERNAL:
+      return "INTERNAL";
+    case grpc::StatusCode::UNAVAILABLE:
+      return "UNAVAILABLE";
+    case grpc::StatusCode::DATA_LOSS:
+      return "DATA_LOSS";
+    case grpc::StatusCode::UNAUTHENTICATED:
+      return "UNAUTHENTICATED";
+    default:
+      return "UNKNOWN";
+  }
+}
+
+bool is_retryable(grpc::StatusCode code) {
+  switch (code) {
+    case grpc::StatusCode::UNAVAILABLE:
+    case grpc::StatusCode::DEADLINE_EXCEEDED:
+    case grpc::StatusCode::RESOURCE_EXHAUSTED:
+    case grpc::StatusCode::ABORTED:
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::string replica_key_hash_bytes(const store::loading::ReplicaKey& key) {
+  const uint64_t h = static_cast<uint64_t>(store::loading::ReplicaKeyHash{}(key));
+  std::string out(sizeof(h), '\0');
+  std::memcpy(out.data(), &h, sizeof(h));
+  return out;
+}
+
+void fill_success_status(v2::ReplicaOperationStatus& out) {
+  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_SUCCESS);
+  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+}
+
+void fill_running_status(v2::ReplicaOperationStatus& out) {
+  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_RUNNING);
+  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+}
+
+void fill_failed_status(v2::ReplicaOperationStatus& out, const absl::Status& st) {
+  grpc::Status grpc_st = status_utils::to_grpc_status(st);
+  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_FAILED);
+  out.set_message(std::string(st.message()));
+  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  auto* err = out.mutable_error();
+  err->set_status_code(status_code_name(grpc_st.error_code()));
+  err->set_message(std::string(st.message()));
+  err->set_retryable(is_retryable(grpc_st.error_code()));
+}
+
+void fill_degraded_timeout_status(v2::ReplicaOperationStatus& out, std::string_view message) {
+  out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_DEGRADED);
+  out.set_message(std::string(message));
+  *out.mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
+  auto* err = out.mutable_error();
+  err->set_status_code("DEADLINE_EXCEEDED");
+  err->set_message(std::string(message));
+  err->set_retryable(true);
+}
+
+} // namespace
 
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
     : engine_(&deps.engine),
@@ -37,6 +139,9 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       region_registry_(&deps.region_registry),
       lip_manager_(&deps.lip_manager),
       persistence_manager_(deps.persistence_manager),
+      sessions_service_(&deps.sessions_service),
+      lifecycle_manager_(&deps.lifecycle_manager),
+      placement_lease_tokens_(&deps.placement_lease_tokens),
       shutdown_signal_(&deps.shutdown_signal),
       opts_(std::move(opts)) {}
 
@@ -79,6 +184,256 @@ Status StoreDaemonServiceImpl::ResolveArtifactFromDisk(
     v2::ResolveArtifactFromDiskResponse* resp) {
   RpcContext rctx{"ResolveArtifactFromDisk", *ctx, opts_.allow_high_card_attrs};
   return materialization_controller_->resolve_artifact_from_disk(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::QueryReplicaStatus(
+    grpc::ServerContext* ctx,
+    const v2::QueryReplicaStatusRequest* req,
+    v2::QueryReplicaStatusResponse* resp) {
+  RpcContext rctx{"QueryReplicaStatus", *ctx, opts_.allow_high_card_attrs};
+  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
+  }
+  const std::string& replica_uuid = req->ticket().replica_uuid();
+  auto entry = sessions_service_->get(replica_uuid);
+  if (!entry.has_value()) {
+    return {StatusCode::NOT_FOUND, "replica_uuid not found"};
+  }
+
+  resp->mutable_ticket()->set_replica_uuid(replica_uuid);
+  resp->set_replica_key_hash(replica_key_hash_bytes(entry->key));
+
+  auto* status = resp->mutable_status();
+  if (!entry->ready_signal) {
+    fill_success_status(*status);
+  } else if (!entry->ready_signal->is_ready()) {
+    fill_running_status(*status);
+  } else {
+    const absl::Status st = entry->wait_ready(std::chrono::milliseconds(0));
+    if (st.ok()) {
+      fill_success_status(*status);
+    } else {
+      fill_failed_status(*status, st);
+    }
+  }
+
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::WaitReplicaStatus(
+    grpc::ServerContext* ctx,
+    const v2::WaitReplicaStatusRequest* req,
+    v2::WaitReplicaStatusResponse* resp) {
+  RpcContext rctx{"WaitReplicaStatus", *ctx, opts_.allow_high_card_attrs};
+  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
+  }
+  const std::string& replica_uuid = req->ticket().replica_uuid();
+  auto entry = sessions_service_->get(replica_uuid);
+  if (!entry.has_value()) {
+    return {StatusCode::NOT_FOUND, "replica_uuid not found"};
+  }
+
+  resp->mutable_ticket()->set_replica_uuid(replica_uuid);
+  resp->set_replica_key_hash(replica_key_hash_bytes(entry->key));
+
+  auto* status = resp->mutable_status();
+  if (!entry->ready_signal) {
+    fill_success_status(*status);
+    rctx.mark_success();
+    return Status::OK;
+  }
+  if (entry->ready_signal->is_ready()) {
+    const absl::Status st = entry->wait_ready(std::chrono::milliseconds(0));
+    if (st.ok()) {
+      fill_success_status(*status);
+    } else {
+      fill_failed_status(*status, st);
+    }
+    rctx.mark_success();
+    return Status::OK;
+  }
+
+  // timeout_ms is a server-side wait budget. When unset/0, the server waits until the replica reaches a terminal
+  // state or until the RPC deadline expires.
+  const std::chrono::milliseconds user_timeout(static_cast<int64_t>(req->timeout_ms()));
+  const auto start = std::chrono::steady_clock::now();
+  const std::optional<std::chrono::steady_clock::time_point> user_deadline = user_timeout.count() > 0
+      ? std::optional<std::chrono::steady_clock::time_point>(start + user_timeout)
+      : std::nullopt;
+
+  constexpr std::chrono::milliseconds k_wait_slice(250);
+
+  while (true) {
+    std::optional<std::chrono::milliseconds> remaining;
+    if (user_deadline.has_value()) {
+      remaining =
+          std::chrono::duration_cast<std::chrono::milliseconds>(*user_deadline - std::chrono::steady_clock::now());
+    }
+
+    using clock = std::chrono::system_clock;
+    const auto grpc_deadline = ctx->deadline();
+    if (grpc_deadline != clock::time_point::max()) {
+      const auto now = clock::now();
+      const auto d = grpc_deadline <= now ? std::chrono::milliseconds(0)
+                                          : std::chrono::duration_cast<std::chrono::milliseconds>(grpc_deadline - now);
+      remaining = remaining.has_value() ? std::min(*remaining, d) : d;
+    }
+
+    if (remaining.has_value() && remaining->count() <= 0) {
+      fill_degraded_timeout_status(*status, "replica wait budget exhausted");
+      rctx.mark_success();
+      return Status::OK;
+    }
+
+    if (ctx->IsCancelled()) {
+      return {StatusCode::CANCELLED, "request cancelled"};
+    }
+
+    const std::chrono::milliseconds slice = remaining.has_value() ? std::min(*remaining, k_wait_slice) : k_wait_slice;
+    if (slice.count() <= 0) {
+      fill_degraded_timeout_status(*status, "replica wait budget exhausted");
+      rctx.mark_success();
+      return Status::OK;
+    }
+
+    absl::Status wait_st;
+    try {
+      wait_st = std::move(entry->subscribe_ready()).get(slice);
+    } catch (const folly::FutureTimeout&) {
+      continue;
+    } catch (const std::exception& ex) {
+      wait_st = absl::InternalError(ex.what());
+    } catch (...) {
+      wait_st = absl::InternalError("replica wait_ready failed with unknown exception");
+    }
+
+    if (wait_st.ok()) {
+      fill_success_status(*status);
+    } else if (absl::IsDeadlineExceeded(wait_st)) {
+      fill_degraded_timeout_status(*status, wait_st.message());
+    } else {
+      fill_failed_status(*status, wait_st);
+    }
+    rctx.mark_success();
+    return Status::OK;
+  }
+}
+
+Status StoreDaemonServiceImpl::ReleaseReplica(
+    grpc::ServerContext* ctx,
+    const v2::ReleaseReplicaRequest* req,
+    v2::ReleaseReplicaResponse* resp) {
+  RpcContext rctx{"ReleaseReplica", *ctx, opts_.allow_high_card_attrs};
+  if (!req->has_ticket() || req->ticket().replica_uuid().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "ticket.replica_uuid is required"};
+  }
+  const std::string& replica_uuid = req->ticket().replica_uuid();
+  const bool erased = sessions_service_->erase(replica_uuid);
+  lifecycle_manager_->release_session(replica_uuid);
+  resp->set_released(erased);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::CreatePlacementLease(
+    grpc::ServerContext* ctx,
+    const v2::CreatePlacementLeaseRequest* req,
+    v2::CreatePlacementLeaseResponse* resp) {
+  RpcContext rctx{"CreatePlacementLease", *ctx, opts_.allow_high_card_attrs};
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+  const int device_id = req->device_id();
+  if (device_id < 0 || device_id >= engine_->get_num_gpus()) {
+    return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+  }
+
+  store::loading::ReplicaKey key;
+  key.artifact_id = req->artifact_id();
+  if (!req->view_id().empty()) {
+    key.view_id = req->view_id();
+  }
+  key.device = store::DeviceRegistry::instance().gpu_key(device_id);
+  key.replica = 0;
+
+  const absl::Duration ttl =
+      req->has_ttl_ms() ? absl::Milliseconds(static_cast<int64_t>(req->ttl_ms())) : absl::ZeroDuration();
+  auto lease_or = lifecycle_manager_->create_placement_lease(key, ttl);
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  const auto token_or = placement_lease_tokens_->mint(*lease_or, ttl);
+  if (!token_or.ok()) {
+    lifecycle_manager_->release_lease(*lease_or);
+    return to_grpc_status(token_or.status());
+  }
+
+  resp->set_lease_id(*lease_or);
+  resp->set_lease_token(*token_or);
+  if (ttl > absl::ZeroDuration()) {
+    const absl::Time expires_at = absl::Now() + ttl;
+    google::protobuf::Timestamp ts;
+    ts.set_seconds(absl::ToUnixSeconds(expires_at));
+    ts.set_nanos(static_cast<int32_t>(absl::ToInt64Nanoseconds(expires_at - absl::FromUnixSeconds(ts.seconds()))));
+    *resp->mutable_expires_at() = ts;
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::RenewPlacementLease(
+    grpc::ServerContext* ctx,
+    const v2::RenewPlacementLeaseRequest* req,
+    v2::RenewPlacementLeaseResponse* resp) {
+  RpcContext rctx{"RenewPlacementLease", *ctx, opts_.allow_high_card_attrs};
+  if (req->lease_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
+  }
+  if (req->ttl_ms() == 0) {
+    return {StatusCode::INVALID_ARGUMENT, "ttl_ms is required"};
+  }
+  const absl::Duration ttl = absl::Milliseconds(static_cast<int64_t>(req->ttl_ms()));
+  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  auto st = lifecycle_manager_->renew_placement(*lease_or, ttl);
+  if (!st.ok()) {
+    return to_grpc_status(st);
+  }
+  st = placement_lease_tokens_->refresh(req->lease_token(), ttl);
+  if (!st.ok()) {
+    return to_grpc_status(st);
+  }
+  resp->set_lease_id(*lease_or);
+  const absl::Time expires_at = absl::Now() + ttl;
+  google::protobuf::Timestamp ts;
+  ts.set_seconds(absl::ToUnixSeconds(expires_at));
+  ts.set_nanos(static_cast<int32_t>(absl::ToInt64Nanoseconds(expires_at - absl::FromUnixSeconds(ts.seconds()))));
+  *resp->mutable_expires_at() = ts;
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::ReleasePlacementLease(
+    grpc::ServerContext* ctx,
+    const v2::ReleasePlacementLeaseRequest* req,
+    v2::ReleasePlacementLeaseResponse* resp) {
+  RpcContext rctx{"ReleasePlacementLease", *ctx, opts_.allow_high_card_attrs};
+  if (req->lease_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
+  }
+  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
+  if (!lease_or.ok()) {
+    return to_grpc_status(lease_or.status());
+  }
+  lifecycle_manager_->release_lease(*lease_or);
+  const bool erased = placement_lease_tokens_->erase(req->lease_token());
+  resp->set_released(erased);
+  rctx.mark_success();
+  return Status::OK;
 }
 
 // Publish key mapping via Global Store.

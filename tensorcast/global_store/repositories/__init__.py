@@ -1,8 +1,9 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Data access repositories for Global Store."""
 
 from .chunk_directory_repository import ChunkDirectoryRepository
+from .instance_repository import InstanceRepository
 from .leaf_repository import LeafRepository
 from .memory_tier_lease_repository import MemoryTierLeaseRepository
 from .memory_tier_snapshot_repository import MemoryTierSnapshotRepository
@@ -22,6 +23,7 @@ __all__ = [
     "TransportRepository",
     "VariantRepository",
     "WorkerRepository",
+    "InstanceRepository",
     "MemoryTierSnapshotRepository",
     "MemoryTierLeaseRepository",
     "ArtifactPlacementRepository",

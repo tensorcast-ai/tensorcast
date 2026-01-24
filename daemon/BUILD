@@ -48,6 +48,7 @@ sc_cc_library(
     copts = [],
     deps = [
         ":background_scheduler_hdr",
+        ":deadline_utils_hdr",
         ":device_resolver_hdr",
         ":grpc_metrics_hdr",
         ":grpc_span_hdr",
@@ -59,6 +60,7 @@ sc_cc_library(
         ":materialization_controller_lib",
         ":path_utils_lib",
         ":persistence_manager_lib",
+        ":placement_lease_tokens_lib",
         ":ref_tracker_hdr",
         ":registration_controller_lib",
         ":registration_manager_lib",
@@ -78,6 +80,7 @@ sc_cc_library(
         ":verification_tracker_hdr",
         "//core/common:artifact_hash_lib",
         "//core/common:otel_grpc_propagation_lib",
+        "//core/store:device_registry",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:segment_plan_source",
@@ -145,6 +148,19 @@ sc_cc_library(
         "@abseil-cpp//absl/time:time",
         "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "placement_lease_tokens_lib",
+    srcs = ["state/placement_lease_tokens.cc"],
+    hdrs = ["state/placement_lease_tokens.h"],
+    deps = [
+        ":session_lifecycle_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/random:random",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
     ],
 )
 
@@ -537,6 +553,7 @@ sc_cc_library(
         ":lip_manager_lib",
         ":persistence_manager_lib",
         ":pid_monitor_lib",
+        ":placement_lease_tokens_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
         ":retire_gates_lib",
@@ -595,6 +612,7 @@ sc_header_only_library(
         ":verification_tracker_hdr",
         "//core/common:ready_signal_lib",
         "@abseil-cpp//absl/log",
+        "@abseil-cpp//absl/status",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time:time",
         "@opentelemetry-cpp//api:api",
@@ -965,6 +983,7 @@ cc_test(
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],
@@ -1049,6 +1068,59 @@ cc_test(
         "//core/store:store_engine",
         "//core/store:store_engine_options",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_replica_status_test",
+    srcs = ["service/grpc_service_impl_replica_status_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/common:ready_signal_lib",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_placement_lease_test",
+    srcs = ["service/grpc_service_impl_placement_lease_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_no_lease_materialize_test",
+    srcs = ["service/grpc_service_impl_no_lease_materialize_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/testing:common",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "replica_session_manager_join_semantics_test",
+    srcs = ["state/replica_session_manager_join_semantics_test.cc"],
+    deps = [
+        ":session_manager_hdr",
+        "//core/store:device_types",
         "@catch2//:catch2_main",
     ],
 )

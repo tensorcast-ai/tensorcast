@@ -54,6 +54,7 @@ class StatusController {
     resp.set_mem_pool_available_size(d_.engine.get_available_memory());
     resp.set_uptime_seconds(uptime().count());
     resp.set_worker_id(d_.identity.is_registered() ? d_.identity.worker_id() : "");
+    resp.set_daemon_id(d_.identity.daemon_id());
     // Optional metrics for status snapshots
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");

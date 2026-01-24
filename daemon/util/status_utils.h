@@ -11,10 +11,16 @@ namespace tensorcast::daemon::status_utils {
 inline grpc::Status to_grpc_status(const absl::Status& s) {
   using grpc::StatusCode;
   switch (s.code()) {
+    case absl::StatusCode::kCancelled:
+      return {StatusCode::CANCELLED, std::string(s.message())};
     case absl::StatusCode::kInvalidArgument:
       return {StatusCode::INVALID_ARGUMENT, std::string(s.message())};
     case absl::StatusCode::kNotFound:
       return {StatusCode::NOT_FOUND, std::string(s.message())};
+    case absl::StatusCode::kPermissionDenied:
+      return {StatusCode::PERMISSION_DENIED, std::string(s.message())};
+    case absl::StatusCode::kUnauthenticated:
+      return {StatusCode::UNAUTHENTICATED, std::string(s.message())};
     case absl::StatusCode::kResourceExhausted:
       return {StatusCode::RESOURCE_EXHAUSTED, std::string(s.message())};
     case absl::StatusCode::kDeadlineExceeded:
@@ -23,6 +29,8 @@ inline grpc::Status to_grpc_status(const absl::Status& s) {
       return {StatusCode::FAILED_PRECONDITION, std::string(s.message())};
     case absl::StatusCode::kAlreadyExists:
       return {StatusCode::ALREADY_EXISTS, std::string(s.message())};
+    case absl::StatusCode::kAborted:
+      return {StatusCode::ABORTED, std::string(s.message())};
     case absl::StatusCode::kUnimplemented:
       return {StatusCode::UNIMPLEMENTED, std::string(s.message())};
     case absl::StatusCode::kUnavailable:

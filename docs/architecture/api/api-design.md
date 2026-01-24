@@ -63,6 +63,8 @@ These terms show up across docs and APIs:
   is backed by client-owned VRAM; the daemon exports it via CUDA IPC handles.
 - **Fallback**: a caller-provided hint for preferred source selection (`local`,
   `p2p`, `disk`) and optional disk path hints.
+- **Plan**: a programmable orchestration IR for control-plane actions targeting
+  workers (`daemon_id`) and instances (`instance_id`), executed via node agents.
 
 ## Entry Points
 
@@ -71,6 +73,8 @@ TensorCast exposes a process-wide store session and module-level helpers.
 - `tensorcast.init(...)`: establishes a runtime (connect to an existing daemon
   or launch services). Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
 - `tensorcast.store(...)`: returns the process-wide `Store` (lazy initialization).
+- `tensorcast.plan(ctx)`: builds a programmable plan that binds a single
+  `CallContext` to all step executions.
 - Module-level helpers (`tensorcast.register`, `tensorcast.put`,
   `tensorcast.register_view`, `tensorcast.artifact`, `tensorcast.from_disk`) are
   thin wrappers around the process `Store`.

@@ -127,6 +127,7 @@ class WorkerLifecycleManager {
   const gsl::not_null<std::shared_ptr<store::StoreEngine>> engine_;
   const WorkerLifecyclePorts ports_;
   const Options opts_;
+  const std::string daemon_id_;
 
   static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
       const Options& opts);

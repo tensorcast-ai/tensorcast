@@ -26,6 +26,7 @@ from tensorcast.api._device import CPU_DEVICE_ID, device_uuid_for, resolve_devic
 from tensorcast.api._errors import DaemonUnavailable, IndexParseError
 from tensorcast.api._runtime import apply_client_load_defaults_if_present
 from tensorcast.api._utils import new_uuid
+from tensorcast.api.context import CallContext
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
@@ -181,6 +182,9 @@ def materialize_artifact_v2(
     replica_uuid: str | None = None,
     view_index_hint: bytes | None = None,
     generation_hint: int | None = None,
+    ctx: CallContext | None = None,
+    timeout_s: float | None = None,
+    lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
@@ -228,7 +232,26 @@ def materialize_artifact_v2(
 
     with tracer.start_as_current_span(
         "Client/MaterializeArtifactV2", kind=SpanKind.INTERNAL
-    ):
+    ) as span:
+        if ctx is not None:
+            if ctx.request_id:
+                span.set_attribute("tc.request_id", str(ctx.request_id))
+            if ctx.qos:
+                span.set_attribute("tc.qos", str(ctx.qos))
+            if ctx.idempotency_key:
+                span.set_attribute("tc.idempotency_key", str(ctx.idempotency_key))
+            if ctx.tags:
+                for k, v in ctx.tags.items():
+                    span.set_attribute(f"tc.tags.{k}", v)
+
+        effective_timeout_s = timeout_s
+        if (
+            effective_timeout_s is None
+            and ctx is not None
+            and ctx.deadline_ms is not None
+        ):
+            effective_timeout_s = max(0.001, float(ctx.deadline_ms) / 1000.0)
+
         if preference is not None:
             preference_value = preference
         elif source_policy is not None:
@@ -267,6 +290,8 @@ def materialize_artifact_v2(
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
+                lease_mode=lease_mode,
+                timeout_s=effective_timeout_s,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(
@@ -289,6 +314,8 @@ def materialize_artifact_v2(
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
+                lease_mode=lease_mode,
+                timeout_s=effective_timeout_s,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeByKeyResponse):
                 raise DaemonUnavailable(
@@ -320,6 +347,8 @@ def materialize_artifact_v2(
                 verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
+                lease_mode=lease_mode,
+                timeout_s=effective_timeout_s,
             )
             if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
                 raise DaemonUnavailable(

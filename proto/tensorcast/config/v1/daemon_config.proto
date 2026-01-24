@@ -149,6 +149,9 @@ message DaemonConfig {
   tensorcast.communicator.v1.CommunicatorConfig communicator = 4;
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
+  // Stable identity for this daemon instance used by the control plane.
+  // Must not be derived from network address and should remain stable across restarts.
+  string daemon_id = 10;
 
   message Compatibility {
     bool confirm_requires_disk_path = 1;

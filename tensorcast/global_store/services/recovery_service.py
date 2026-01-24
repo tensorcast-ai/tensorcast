@@ -9,13 +9,11 @@ Handles state recovery after failures, worker rediscovery, and state synchroniza
 import time
 from uuid import UUID, uuid4
 
-from tensorcast.global_store.exceptions import NotFoundError
+from tensorcast.global_store.exceptions import NotFoundError, ValidationError
 from tensorcast.global_store.metrics import observe_state_sync
 from tensorcast.global_store.models import Replica, Worker
-from tensorcast.global_store.repositories import (
-    ReplicaRepository,
-    WorkerRepository,
-)
+from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
+from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.logger import init_logger
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
@@ -32,9 +30,11 @@ class RecoveryService:
         self,
         worker_repository: WorkerRepository,
         replica_repository: ReplicaRepository,
+        worker_service: WorkerService,
     ):
         self.worker_repository = worker_repository
         self.replica_repository = replica_repository
+        self.worker_service = worker_service
 
         # Recovery state tracking
         self.recovery_in_progress = False
@@ -115,15 +115,22 @@ class RecoveryService:
             Tuple of (registration_success, state_sync_required)
         """
         try:
-            # If previous worker ID provided, set worker_id and clean up old state
-            if previous_worker_id:
-                worker.worker_id = previous_worker_id
-                self._cleanup_previous_worker_state(
-                    previous_worker_id, worker.worker_id
-                )
+            daemon_id = (worker.daemon_id or "").strip()
+            if not daemon_id:
+                raise ValidationError("daemon_id is required")
 
-            # Register new worker
-            registered_worker = self.worker_repository.create_or_update(worker)
+            if previous_worker_id:
+                previous = self.worker_repository.find_by_id(
+                    previous_worker_id, include_inactive=True
+                )
+                if previous and (previous.daemon_id or "").strip() != daemon_id:
+                    raise ValidationError("previous_worker_id does not match daemon_id")
+
+            registered_worker = self.worker_service.register_worker(worker)
+            if previous_worker_id and previous_worker_id != registered_worker.worker_id:
+                self._cleanup_previous_worker_state(
+                    previous_worker_id, registered_worker.worker_id
+                )
 
             # Ensure persisted state version is initialized
             self.worker_repository.ensure_state_version(registered_worker.worker_id)

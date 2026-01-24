@@ -60,7 +60,11 @@ service StoreDaemonService {
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
+  rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
+  rpc CreatePlacementLease(CreatePlacementLeaseRequest) returns (CreatePlacementLeaseResponse) {}
+  rpc RenewPlacementLease(RenewPlacementLeaseRequest) returns (RenewPlacementLeaseResponse) {}
+  rpc ReleasePlacementLease(ReleasePlacementLeaseRequest) returns (ReleasePlacementLeaseResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
@@ -71,6 +75,7 @@ service StoreDaemonService {
   // See docs/architecture/api/policy-persistence.md for policy and task flow.
   rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
   rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
+  rpc WaitPersistenceStatus(WaitPersistenceStatusRequest) returns (WaitPersistenceStatusResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -136,6 +141,16 @@ enum MaterializationSource {
   MATERIALIZATION_SOURCE_DISK = 1;
   MATERIALIZATION_SOURCE_P2P = 2;
   MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
+}
+
+enum LeaseMode {
+  LEASE_MODE_UNSPECIFIED = 0;
+  // Legacy behavior: daemon may create PID-bound use leases and handle leases
+  // for loopback/UDS callers.
+  LEASE_MODE_PID = 1;
+  // Programmable control-plane mode: do not mint handle leases and do not
+  // create PID-bound use leases (even for loopback/UDS callers).
+  LEASE_MODE_NO_LEASE = 2;
 }
 
 enum PlacementPolicy {
@@ -331,6 +346,31 @@ message ReplicaTicket {
   google.protobuf.Timestamp expires_at = 5;
 }
 
+enum ReplicaOperationState {
+  REPLICA_OPERATION_STATE_UNSPECIFIED = 0;
+  REPLICA_OPERATION_STATE_PENDING = 1;
+  REPLICA_OPERATION_STATE_RUNNING = 2;
+  REPLICA_OPERATION_STATE_SUCCESS = 3;
+  REPLICA_OPERATION_STATE_FAILED = 4;
+  REPLICA_OPERATION_STATE_CANCELLED = 5;
+  REPLICA_OPERATION_STATE_DEGRADED = 6;
+}
+
+message ReplicaOperationError {
+  // gRPC canonical code name (e.g. DEADLINE_EXCEEDED).
+  string status_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message ReplicaOperationStatus {
+  ReplicaOperationState state = 1;
+  string message = 2;
+  double progress = 3;
+  google.protobuf.Timestamp as_of = 4;
+  optional ReplicaOperationError error = 5;
+}
+
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   optional string artifact_id = 1;
@@ -345,6 +385,7 @@ message MaterializeReplicaRequest {
 
   SourcePreference preference = 9;
   SourcePolicy source_policy = 14;
+  LeaseMode lease_mode = 15;
 
   // Selective materialization
   repeated string tensor_names = 10;
@@ -463,6 +504,7 @@ message GetWorkerStatusResponse {
   uint64 mem_pool_available_size = 5; // 内存池可用大小（字节）
   int64 uptime_seconds = 6; // 运行时间（秒）
   string worker_id = 7; // Worker ID（如已注册）
+  string daemon_id = 8; // Stable daemon identity (from daemon config)
 }
 
 // ----------------------------------------------------------------------
@@ -889,6 +931,7 @@ message MaterializeByKeyRequest {
   string replica_uuid = 4;
   int32 pid = 5;
   DeviceType target_device_type = 6;
+  LeaseMode lease_mode = 7;
 
   // Selective materialization
   repeated string tensor_names = 10;
@@ -926,10 +969,25 @@ message ResolveArtifactFromDiskResponse {
 
 message QueryReplicaStatusResponse {
   ReplicaTicket ticket = 1;
+  ReplicaOperationStatus status = 2;
+  bytes replica_key_hash = 3;
 }
 
 message QueryReplicaStatusRequest {
   ReplicaTicket ticket = 1;
+}
+
+message WaitReplicaStatusRequest {
+  ReplicaTicket ticket = 1;
+  // Server-side wait budget. When unset/0, the server waits until the replica
+  // reaches a terminal state or until the RPC deadline expires.
+  uint32 timeout_ms = 2;
+}
+
+message WaitReplicaStatusResponse {
+  ReplicaTicket ticket = 1;
+  ReplicaOperationStatus status = 2;
+  bytes replica_key_hash = 3;
 }
 
 message ReleaseReplicaRequest {
@@ -937,6 +995,40 @@ message ReleaseReplicaRequest {
 }
 
 message ReleaseReplicaResponse {
+  bool released = 1;
+}
+
+// ========== Placement leases (device residency pins) ==========
+message CreatePlacementLeaseRequest {
+  string artifact_id = 1;
+  string view_id = 2;
+  int32 device_id = 3;
+  // When unset, the lease is best-effort and remains until explicitly released
+  // or daemon restart. When set, the lease is guarded by a deadline.
+  optional uint32 ttl_ms = 4;
+}
+
+message CreatePlacementLeaseResponse {
+  uint64 lease_id = 1;
+  bytes lease_token = 2;
+  optional google.protobuf.Timestamp expires_at = 3;
+}
+
+message RenewPlacementLeaseRequest {
+  bytes lease_token = 1;
+  uint32 ttl_ms = 2;
+}
+
+message RenewPlacementLeaseResponse {
+  uint64 lease_id = 1;
+  optional google.protobuf.Timestamp expires_at = 2;
+}
+
+message ReleasePlacementLeaseRequest {
+  bytes lease_token = 1;
+}
+
+message ReleasePlacementLeaseResponse {
   bool released = 1;
 }
 
@@ -1010,4 +1102,15 @@ message QueryPersistenceStatusResponse {
   string degraded_reason = 6;
   string last_error = 7;
   repeated PersistenceShardStatus shards = 8;
+}
+
+message WaitPersistenceStatusRequest {
+  string task_id = 1;
+  // Server-side wait budget. When unset/0, the server waits until the task
+  // reaches a terminal state or until the RPC deadline expires.
+  uint32 timeout_ms = 2;
+}
+
+message WaitPersistenceStatusResponse {
+  QueryPersistenceStatusResponse status = 1;
 }

@@ -8,6 +8,7 @@
 #include <string>
 
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "core/common/ready_signal.h"
@@ -29,14 +30,20 @@ class SessionsService {
       absl::Duration session_ttl = absl::Seconds(60))
       : sessions_(s), verif_(v), sched_(sched), lifecycle_(lifecycle), session_ttl_(session_ttl) {}
 
-  void put_with_verification(
+  [[nodiscard]] absl::Status put_with_verification(
       const std::string& replica_uuid,
       const store::loading::ReplicaKey& key,
       std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
-    sessions_.put(replica_uuid, key, ready_signal);
-    verif_.initiate(replica_uuid, ready_signal);
-    if (sched_)
-      sched_->notify(TaskKind::kVerification);
+    const auto put_or = sessions_.put_if_absent_or_join(replica_uuid, key, ready_signal);
+    if (!put_or.ok()) {
+      return put_or.status();
+    }
+    if (*put_or == ReplicaSessionManager::PutResult::kInserted) {
+      verif_.initiate(replica_uuid, ready_signal);
+      if (sched_) {
+        sched_->notify(TaskKind::kVerification);
+      }
+    }
     if (lifecycle_) {
       // Create or renew session principal keepalive under the unified lifecycle
       auto st = lifecycle_->keepalive_session(replica_uuid, session_ttl_);
@@ -51,6 +58,7 @@ class SessionsService {
         }
       }
     }
+    return absl::OkStatus();
   }
 
   [[nodiscard]] std::optional<SessionEntry> get(const std::string& replica_uuid) const {

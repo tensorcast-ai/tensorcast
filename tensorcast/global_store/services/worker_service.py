@@ -65,83 +65,64 @@ class WorkerService:
 
         ensure_routable_address(worker.node_address, "node_address")
 
-        # Check for existing worker registered at the same advertised address:port
-        existing = self.worker_repository.find_by_address_port(
-            worker.node_address, worker.grpc_port
+        daemon_id = (worker.daemon_id or "").strip()
+        if not daemon_id:
+            raise ValidationError("daemon_id is required")
+
+        # Prefer stable daemon_id identity; address/port are routing attributes.
+        existing = self.worker_repository.find_by_daemon_id(
+            daemon_id, include_inactive=True
+        )
+        by_addr = self.worker_repository.find_by_address_port(
+            worker.node_address, worker.grpc_port, include_inactive=True
         )
 
         if existing:
-            reset_state_tracking = False
-            # Reject cross-host duplicate on same address:port
-            if existing.node_id != worker.node_id:
-                if existing.inactive_at is not None:
-                    reset_state_tracking = True
-                    logger.warning(
-                        "Reassigning inactive worker_id=%s from node=%s to node=%s at %s:%d.",
-                        existing.worker_id,
-                        existing.node_id,
-                        worker.node_id,
-                        existing.node_address,
-                        existing.grpc_port,
-                    )
-                else:
-                    logger.error(
-                        "Address/port already registered by a different worker: %s:%d (existing_id=%s existing_node=%s, new_node=%s).",
-                        worker.node_address,
-                        worker.grpc_port,
-                        existing.worker_id,
-                        existing.node_id,
-                        worker.node_id,
-                    )
-                    # Surface as validation error so gRPC layer returns STATUS_ERROR
-                    raise ValidationError(
-                        "Address/port already registered by another worker"
-                    )
-
-            # Warn if this looks like a duplicate registration while the existing worker is still active
-            if existing.last_heartbeat and existing.inactive_at is None:
-                try:
-                    age_sec = max(
-                        0.0, time.time() - existing.last_heartbeat.timestamp()
-                    )
-                    if age_sec <= (self.config.heartbeat_timeout_ms / 1000.0):
-                        logger.warning(
-                            "Duplicate registration attempt for active worker_id=%s at %s:%d (node=%s). Treating as update.",
-                            existing.worker_id,
-                            existing.node_address,
-                            existing.grpc_port,
-                            existing.node_id,
-                        )
-                except Exception:
-                    # Best-effort diagnostic; continue
-                    logger.debug(
-                        "Failed to compute last_heartbeat age for duplicate registration check"
-                    )
-
-            # Update existing worker (same identity / restart/config-change path)
-            existing.node_id = worker.node_id
-            if existing.p2p_port != worker.p2p_port:
-                logger.debug(
-                    "Updating p2p_port for worker_id=%s: %d -> %d",
-                    existing.worker_id,
-                    existing.p2p_port,
-                    worker.p2p_port,
+            # Reject address/port conflicts, regardless of node_id match.
+            if by_addr and by_addr.worker_id != existing.worker_id:
+                raise ValidationError(
+                    "Address/port already registered by another worker"
                 )
+
+            reset_state_tracking = bool(existing.inactive_at is not None)
+            existing.daemon_id = daemon_id
+            existing.node_id = worker.node_id
+            existing.node_address = worker.node_address
+            existing.grpc_port = worker.grpc_port
             existing.p2p_port = worker.p2p_port
             existing.mem_pool_total_size = worker.mem_pool_total_size
             existing.mem_pool_available_size = worker.mem_pool_available_size
             existing.accepting_new_requests = True
-
-            logger.debug(f"Updating existing worker {existing.worker_id}")
             return self.worker_repository.update(
                 existing, reset_state_tracking=reset_state_tracking
             )
-        else:
-            # Create new worker
-            # Use UUID-based suffix to avoid collisions across nodes registering in the same second
-            worker.worker_id = self._generate_worker_id(worker.node_id)
-            logger.debug(f"Registering new worker {worker.worker_id}")
-            return self.worker_repository.create(worker)
+
+        if by_addr:
+            # Address/port cannot be shared by different daemon_id values unless the
+            # existing row is inactive.
+            if by_addr.inactive_at is None:
+                raise ValidationError(
+                    "Address/port already registered by another worker"
+                )
+
+            reset_state_tracking = True
+            by_addr.daemon_id = daemon_id
+            by_addr.node_id = worker.node_id
+            by_addr.node_address = worker.node_address
+            by_addr.grpc_port = worker.grpc_port
+            by_addr.p2p_port = worker.p2p_port
+            by_addr.mem_pool_total_size = worker.mem_pool_total_size
+            by_addr.mem_pool_available_size = worker.mem_pool_available_size
+            by_addr.accepting_new_requests = True
+            return self.worker_repository.update(
+                by_addr, reset_state_tracking=reset_state_tracking
+            )
+
+        # Create new worker
+        worker.worker_id = self._generate_worker_id(worker.node_id)
+        worker.daemon_id = daemon_id
+        logger.debug(f"Registering new worker {worker.worker_id}")
+        return self.worker_repository.create(worker)
 
     def find_worker_by_address(
         self, node_address: str, grpc_port: int, *, include_inactive: bool = True

@@ -142,9 +142,35 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
   [replicas marked unavailable]
 ```
 
+Workers must provide a stable `daemon_id` (from daemon config). Registration treats `daemon_id` as the
+primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
+identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
+
 Inactive workers remain in the registry with `inactive_at` set so routing can filter them while avoiding delete/update conflicts.
 
 **Design decision: batched heartbeats.** Workers send heartbeats every ~5 seconds. Writing each immediately would create unnecessary database load. Instead, `WorkerService` buffers heartbeats in memory and a background thread flushes batches every ~100ms. This trades sub-second staleness for dramatically reduced write amplification.
+
+### Instance Lifecycle
+
+Engine instances (user processes) register with the Global Store and send periodic heartbeats:
+
+```
+                 RegisterInstance
+                        │
+                        ▼
+┌─────────────────────────────────────────┐
+│         instance_id assigned            │
+└────────────────────┬────────────────────┘
+                     │
+              InstanceHeartbeat
+               (resets timeout)
+                     │
+                     ▼
+             [marked inactive]
+```
+
+Instances are keyed by a stable `instance_id` and associated with a `daemon_id` (and
+optionally a `worker_id`) to bridge engine processes with the node’s store daemon.
 
 ## Service Responsibilities
 
@@ -154,7 +180,8 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 
 **Key behaviors:**
 - Generates unique worker IDs incorporating node identity and UUID suffix (avoids collisions across restarts)
-- Validates address uniqueness—two workers cannot register the same `(address, port)` from different nodes
+- Requires stable `daemon_id` identity (allows address changes without changing `worker_id`)
+- Validates address uniqueness—two workers cannot register the same `(address, port)` from different daemon IDs
 - Detects stale workers via heartbeat timeout, marks them inactive, and cleans up their replicas
 
 ### ArtifactService
@@ -191,8 +218,17 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
 - Persists `state_version` and `state_checksum` per worker (non-null defaults); heartbeats use cached checksum to avoid full-table scans
-- Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
-- Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+  - Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
+  - Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+
+### InstanceService
+
+**Purpose:** Manage engine instance registrations.
+
+**Key behaviors:**
+- Validates instance identity (instance_id, daemon_id, engine).
+- Updates worker association on heartbeat when daemon_id resolves to a new worker_id.
+- Marks inactive instances when heartbeats expire.
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
 - Applies endpoint/metadata drift updates (node address/port, memory size, transport keys when reported) during sync
 - HA checksum format is `artifact_id:node_id:node_address:node_port:device_id:memory_type:available;` (FNV-1a 64-bit).

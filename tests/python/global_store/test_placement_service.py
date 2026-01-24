@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -58,6 +58,7 @@ def _shard(size_bytes: int) -> PlacementShard:
 def test_plan_placement_marks_degraded_without_remote_capacity() -> None:
     shard = _shard(64 * 1024 * 1024)
     remote = Worker(
+        daemon_id="daemon-remote",
         node_id="node-remote",
         memory_tier_state=WorkerMemoryTierState(
             stable_total_bytes=32 * 1024 * 1024,
@@ -87,6 +88,7 @@ def test_plan_placement_marks_degraded_without_remote_capacity() -> None:
 def test_plan_placement_prefers_remote_with_stable_headroom() -> None:
     shard = _shard(32 * 1024 * 1024)
     remote_low = Worker(
+        daemon_id="daemon-low",
         node_id="node-low",
         memory_tier_state=WorkerMemoryTierState(
             stable_total_bytes=16 * 1024 * 1024,
@@ -94,6 +96,7 @@ def test_plan_placement_prefers_remote_with_stable_headroom() -> None:
         ),
     )
     remote_ok = Worker(
+        daemon_id="daemon-ok",
         node_id="node-ok",
         memory_tier_state=WorkerMemoryTierState(
             stable_total_bytes=256 * 1024 * 1024,
@@ -122,6 +125,7 @@ def test_plan_placement_prefers_remote_with_stable_headroom() -> None:
 def test_record_status_updates_targets_and_task_state() -> None:
     shard = _shard(16 * 1024 * 1024)
     remote_ok = Worker(
+        daemon_id="daemon-ok",
         node_id="node-ok",
         memory_tier_state=WorkerMemoryTierState(
             stable_total_bytes=128 * 1024 * 1024,

@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import yaml
 from google.protobuf import json_format as _pb_json
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from tensorcast.common.config.normalize import normalize_enum_aliases_inplace
 from tensorcast.proto.config.v1 import (
@@ -20,6 +20,8 @@ from tensorcast.proto.config.v1 import (
 
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
+
+    model_config = ConfigDict(frozen=True)
 
     # Database settings
     # Optional path to a persistent on-disk DuckDB database. When ``None`` a
@@ -54,10 +56,6 @@ class GlobalStoreConfig(BaseModel):
     metrics_port: int = 8000
     # Cluster identity (opaque token used to prevent split-brain)
     cluster_token: Optional[str] = None
-
-    class Config:
-        # Match previous @dataclass(frozen=True) behaviour (immutability)
-        frozen = True
 
     @property
     def port(self) -> int:

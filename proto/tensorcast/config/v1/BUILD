@@ -9,6 +9,7 @@ proto_library(
         "common.proto",
         "daemon_config.proto",
         "global_store_config.proto",
+        "node_agent_config.proto",
     ],
     strip_import_prefix = "/proto",
     visibility = ["//visibility:public"],

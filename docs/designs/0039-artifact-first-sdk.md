@@ -60,7 +60,7 @@ Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_i
 - Symmetry convenience: `.tensor_into(name, target_tensor, device=None)` streams a single tensor directly into the provided buffer without requiring placeholders for every tensor in the artifact.
 - Materialization (async): `.tensor_async(name, device)`, `.tensor_dict_async(device, names=None)`.
 - Views/composition: `.view(slices=None, transpose=None, names=None)`, `.subset(names)`, `.slice({...})`, `.view_builder()`.
-- Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=...) -> tuple[Artifact, PrefetchTicket]` so callers can opt into ticket-based fallbacks via a cloned handle.
+- Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=..., ctx=None) -> Operation[PrefetchedReplica]` for daemon-owned cache warm with unified `status/wait/cancel` semantics.
 - Policy override: `.with_fallback(FallbackOptions(...))`.
 - Serialization (process-local): `.to_dict()`, `.from_dict(data, store)`.
 
@@ -86,7 +86,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - Lazy views: chaining `.view().slice().transpose()` builds view specs only; no RPCs or data transfer occur until `.tensor*`/`.tensor_dict*`/`.exists()`.
 - Single-process Store: all functional helpers delegate to the process Store (singleton); initialization flows through `StoreRuntimeContext` with `get_daemon_client`.
 - View composition: uses `ViewSpecComposer` and `ViewMetadataCache`; derived handles keep parent hints and share caches.
-- Prefetch: returns `(handle_clone, PrefetchTicket)`; the clone carries `replica_uuid` via `FallbackOptions` while the original handle stays untouched. Tickets expose `wait()`/`cancel()` for staged replicas.
+- Prefetch: returns an `Operation[PrefetchedReplica]` with daemon-side operation tracking and operation-scoped wait/cancel. The on-wire `replica_uuid` is treated as an operation id (not replica identity).
 - Region-backed registration: unchanged semantics per [region-backed](../architecture/api/region-backed.md); clearly scoped as an advanced lifecycle path.
 - Error surfaces: constructing an `Artifact` handle never raises `NOT_FOUND`; `ArtifactError` is raised on materialization (`tensor*`, `tensor_dict*`, `tensor_dict_into`, `tensor_into`) or explicit checks (`exists()`) when identity/metadata resolution fails.
 

@@ -44,6 +44,12 @@ service GlobalStoreService {
   rpc UnregisterWorker(UnregisterWorkerRequest) returns (UnregisterWorkerResponse) {}
   rpc ListActiveWorkers(ListActiveWorkersRequest) returns (ListActiveWorkersResponse) {}
 
+  // Instance management (engine process registry)
+  rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse) {}
+  rpc InstanceHeartbeat(InstanceHeartbeatRequest) returns (InstanceHeartbeatResponse) {}
+  rpc UnregisterInstance(UnregisterInstanceRequest) returns (UnregisterInstanceResponse) {}
+  rpc ListActiveInstances(ListActiveInstancesRequest) returns (ListActiveInstancesResponse) {}
+
   // High Availability and State Synchronization
   rpc SynchronizeWorkerState(SynchronizeWorkerStateRequest) returns (SynchronizeWorkerStateResponse) {}
   rpc RequestFullStateSync(RequestFullStateSyncRequest) returns (RequestFullStateSyncResponse) {}
@@ -104,6 +110,7 @@ message RegisterWorkerRequest {
   // HA fields
   bool is_recovery_registration = 7; // 是否为恢复注册
   string previous_worker_id = 8; // 上一个 Worker ID (用于恢复)
+  string daemon_id = 9; // Required stable daemon identity (from daemon config)
 }
 
 message RegisterWorkerResponse {
@@ -128,6 +135,7 @@ message WorkerHeartbeatRequest {
   repeated string registered_artifact_ids = 6; // 本地注册的 Artifact 列表（内容寻址ID）
   int64 last_successful_sync = 7; // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
+  optional string daemon_id = 9; // Optional for sanity-check logging
 }
 
 message WorkerHeartbeatResponse {
@@ -170,8 +178,62 @@ message ListActiveWorkersResponse {
     // HA fields
     uint64 state_version = 10; // 当前状态版本
     ConnectionStatus status = 11; // 连接状态
+    string daemon_id = 12; // Stable daemon identity
   }
   repeated WorkerInfo workers = 1;
+}
+
+// ========== Instance registry ==========
+
+message RegisterInstanceRequest {
+  string instance_id = 1;
+  string daemon_id = 2;
+  string engine = 3;
+  optional string worker_id = 4;
+  string signals_endpoint = 5;
+  map<string, string> labels = 6;
+}
+
+message RegisterInstanceResponse {
+  Status status = 1;
+  string instance_id = 2;
+  uint32 heartbeat_interval_ms = 3;
+}
+
+message InstanceHeartbeatRequest {
+  string instance_id = 1;
+  optional string worker_id = 2;
+}
+
+message InstanceHeartbeatResponse {
+  Status status = 1;
+}
+
+message UnregisterInstanceRequest {
+  string instance_id = 1;
+  bool is_graceful_shutdown = 2;
+}
+
+message UnregisterInstanceResponse {
+  Status status = 1;
+}
+
+message ListActiveInstancesRequest {
+  bool include_unavailable = 1;
+}
+
+message ListActiveInstancesResponse {
+  message InstanceInfo {
+    string instance_id = 1;
+    string daemon_id = 2;
+    string worker_id = 3;
+    string engine = 4;
+    string signals_endpoint = 5;
+    google.protobuf.Timestamp last_heartbeat_ts = 6;
+    map<string, string> labels = 7;
+    ConnectionStatus status = 8;
+  }
+  repeated InstanceInfo instances = 1;
 }
 
 // ========== State Synchronization Messages ==========

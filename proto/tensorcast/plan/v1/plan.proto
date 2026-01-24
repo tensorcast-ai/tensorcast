@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package tensorcast.plan.v1;
+
+import "tensorcast/daemon/v2/store_daemon.proto";
+
+message CallContext {
+  string request_id = 1;
+  QosClass qos = 2;
+  optional uint64 deadline_ms = 3;
+  string idempotency_key = 4;
+  map<string, string> tags = 5;
+}
+
+enum QosClass {
+  QOS_CLASS_UNSPECIFIED = 0;
+  QOS_CLASS_REALTIME = 1;
+  QOS_CLASS_INTERACTIVE = 2;
+  QOS_CLASS_BACKGROUND = 3;
+}
+
+enum TargetType {
+  TARGET_TYPE_UNSPECIFIED = 0;
+  TARGET_TYPE_WORKER = 1;
+  TARGET_TYPE_INSTANCE = 2;
+}
+
+message TargetRef {
+  TargetType target_type = 1;
+  string target_id = 2;
+}
+
+message ArtifactSelection {
+  string artifact_id = 1;
+  string view_id = 2;
+  bytes logical_layout_hash = 3;
+  bytes selection_hash = 4;
+  bytes view_subset_hash = 5;
+  tensorcast.daemon.v2.ViewSpec view_spec = 6;
+  repeated string tensor_names = 7;
+}
+
+message PrefetchAction {
+  ArtifactSelection selection = 1;
+  int32 device_id = 2;
+}
+
+message PinDeviceResidencyAction {
+  ArtifactSelection selection = 1;
+  int32 device_id = 2;
+  optional uint64 ttl_ms = 3;
+}
+
+message UnpinDeviceResidencyAction {
+  string pin_id = 1;
+  bytes capability_token = 2;
+}
+
+message TransformArg {
+  string key = 1;
+  oneof value {
+    string string_value = 2;
+    int64 int_value = 3;
+  }
+}
+
+message TransformSpec {
+  string name = 1;
+  repeated TransformArg args = 2;
+  string layout_hash = 3;
+}
+
+message TargetSpec {
+  string instance_id = 1;
+  string name = 2;
+  map<string, string> tensors = 3;
+  string layout_hash = 4;
+  uint64 expires_at_ms = 5;
+  bytes capability_token = 6;
+}
+
+message TransformIntoAction {
+  ArtifactSelection selection = 1;
+  TransformSpec spec = 2;
+  TargetSpec target = 3;
+}
+
+message TransformRegisterAction {
+  ArtifactSelection selection = 1;
+  TransformSpec spec = 2;
+  string out_key = 3;
+  tensorcast.daemon.v2.StorePolicy policy = 4;
+}
+
+message PlanAction {
+  oneof kind {
+    PrefetchAction prefetch = 1;
+    PinDeviceResidencyAction pin_device_residency = 2;
+    UnpinDeviceResidencyAction unpin_device_residency = 3;
+    TransformIntoAction transform_into = 4;
+    TransformRegisterAction transform_register = 5;
+  }
+}
+
+message PlanStep {
+  string step_id = 1;
+  TargetRef target = 2;
+  PlanAction action = 3;
+  repeated string depends_on = 4;
+}
+
+message PlanSpec {
+  string plan_id = 1;
+  CallContext context = 2;
+  repeated PlanStep steps = 3;
+}

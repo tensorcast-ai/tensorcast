@@ -23,6 +23,7 @@ from tensorcast.api._materialize import (
     MaterializationPayload,
     materialize_artifact_v2,
 )
+from tensorcast.api.context import CallContext
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
@@ -193,6 +194,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
+        ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
         payload, _ = self._perform_get_with_retry(
             artifact_id=artifact_id,
@@ -204,6 +206,7 @@ class MaterializationPipeline:
             options_override=options,
             tensor_names=tensor_names,
             allow_cpu=True,
+            ctx=ctx,
         )
         state = self._payload_state_dict(payload)
         if tensor_names:
@@ -232,6 +235,8 @@ class MaterializationPipeline:
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
         options: GetArtifactOptions | None = None,
+        ctx: CallContext | None = None,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
     ) -> tuple[MaterializationPayload, int]:
         return self._perform_get_with_retry(
             method="get",
@@ -249,6 +254,8 @@ class MaterializationPipeline:
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
             allow_cpu=True,
+            ctx=ctx,
+            lease_mode=lease_mode,
         )
 
     def get_view(
@@ -263,6 +270,7 @@ class MaterializationPipeline:
         device: torch.device | str | None = None,
         options: GetArtifactOptions | None = None,
         resolver: Callable[..., ResolvedViewInputs] | None = None,
+        ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
         view_resolver = resolver or self._views.resolve_view_inputs
         resolved = self._call_view_resolver(
@@ -293,6 +301,7 @@ class MaterializationPipeline:
             canonical_index_hint=resolved.canonical_index_bytes,
             disk_path_hint=resolved.disk_path_hint,
             allow_cpu=True,
+            ctx=ctx,
         )
         return self._payload_state_dict(payload)
 
@@ -383,6 +392,7 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        ctx: CallContext | None = None,
     ) -> None:
         options = self._apply_client_defaults(
             self._build_get_options(fallback, options)
@@ -437,6 +447,7 @@ class MaterializationPipeline:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            ctx=ctx,
         )
         try:
             layout_bytes = payload.view_index_bytes or payload.canonical_index_bytes
@@ -468,6 +479,7 @@ class MaterializationPipeline:
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
+        ctx: CallContext | None = None,
     ) -> ArtifactFuture[None]:
         options = self._apply_client_defaults(
             self._build_get_options(fallback, options)
@@ -537,6 +549,7 @@ class MaterializationPipeline:
                     view_data_hash=view_data_hash,
                     view_index_hint=view_index_hint,
                     replica_uuid=replica_uuid,
+                    ctx=ctx,
                 )
                 with mat_lock:
                     mat_ref["value"] = materialized
@@ -1407,6 +1420,9 @@ class MaterializationPipeline:
         options: GetArtifactOptions,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None = None,
+        ctx: CallContext | None,
+        timeout_s: float | None,
+        lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
         view: store_daemon_pb2.ViewSpec | None = None,
         view_id: str | None = None,
@@ -1425,6 +1441,9 @@ class MaterializationPipeline:
             options=options,
             fallback=fallback,
             cancel_event=cancel_event,
+            ctx=ctx,
+            timeout_s=timeout_s,
+            lease_mode=lease_mode,
             span=span,
             view=view,
             view_id=view_id,
@@ -1446,6 +1465,9 @@ class MaterializationPipeline:
         options: GetArtifactOptions,
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None = None,
+        ctx: CallContext | None,
+        timeout_s: float | None,
+        lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
         view: store_daemon_pb2.ViewSpec | None = None,
         view_id: str | None = None,
@@ -1630,6 +1652,9 @@ class MaterializationPipeline:
             replica_uuid=replica_uuid,
             view_index_hint=view_index_hint,
             generation_hint=generation_hint,
+            ctx=ctx,
+            timeout_s=timeout_s,
+            lease_mode=lease_mode,
         )
         if fallback_opts:
             disallowed_sources: set[store_daemon_pb2.MaterializationSource] = set()
@@ -1784,6 +1809,8 @@ class MaterializationPipeline:
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
         allow_cpu: bool = False,
+        ctx: CallContext | None = None,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
     ) -> tuple[MaterializationPayload, int]:
         policy = self._runtime.retry_policies.get(
             method, self._runtime.retry_policies.get("get")
@@ -1802,6 +1829,15 @@ class MaterializationPipeline:
         }
         source_label: str | None = None
         selection_label: str | None = None
+
+        if ctx is not None:
+            if ctx.request_id:
+                attributes["tc.request_id"] = str(ctx.request_id)
+            if ctx.qos:
+                attributes["tc.qos"] = str(ctx.qos)
+            if ctx.tags:
+                for k, v in ctx.tags.items():
+                    attributes[f"tc.tags.{k}"] = v
 
         with self._runtime.operation_span(span_name, attributes) as span:
 
@@ -1836,6 +1872,18 @@ class MaterializationPipeline:
                         retryable=False,
                     )
                 try:
+                    rpc_timeout_s: float | None = None
+                    if ctx is not None and ctx.deadline_ms is not None:
+                        ctx_remaining_s = (float(ctx.deadline_ms) / 1000.0) - (
+                            time.monotonic() - start_time
+                        )
+                        if ctx_remaining_s <= 0:
+                            raise ArtifactError(
+                                "CallContext deadline exceeded",
+                                status_code="DEADLINE_EXCEEDED",
+                                retryable=False,
+                            )
+                        rpc_timeout_s = ctx_remaining_s
                     materialized, device_id = self._attempt_get(
                         artifact_id=artifact_id,
                         key=key,
@@ -1854,6 +1902,9 @@ class MaterializationPipeline:
                         view_index_hint=view_index_hint,
                         replica_uuid=replica_uuid,
                         allow_cpu=allow_cpu,
+                        lease_mode=lease_mode,
+                        ctx=ctx,
+                        timeout_s=rpc_timeout_s,
                     )
                     summary = self._summarize_materialized(materialized, tensor_names)
                     selection_label = summary["selection"]
@@ -1993,6 +2044,9 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
+        ctx: CallContext | None,
+        timeout_s: float | None,
+        lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
         view: store_daemon_pb2.ViewSpec | None = None,
         view_id: str | None = None,
@@ -2032,6 +2086,9 @@ class MaterializationPipeline:
                 view_data_hash=view_data_hash,
                 view_index_hint=view_index_hint,
                 replica_uuid=replica_uuid,
+                ctx=ctx,
+                timeout_s=timeout_s,
+                lease_mode=lease_mode,
             )
         except Exception as exc:  # noqa: BLE001
             raise map_materialization_error(exc) from exc

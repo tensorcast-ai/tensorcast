@@ -1,0 +1,29 @@
+server:
+  listen:
+    host: "127.0.0.1"
+    port: 51051
+daemon_target:
+  host: "127.0.0.1"
+  port: 50051
+identity:
+  daemon_id: "daemon-1"
+  instance_id: "engine-1"
+  engine: "torch"
+  signals_endpoint: ""
+  labels: {}
+global_store:
+  endpoints:
+    - host: "127.0.0.1"
+      port: 50051
+  heartbeat_interval: "5s"
+  register_retry_delay: "5s"
+  register_instance: true
+engine_adapter:
+  target_ttl: "30s"
+  capability_secret: ""
+  transform_plugins: []
+observability:
+  logging:
+    level: LOG_LEVEL_INFO
+  otel:
+    enabled: false

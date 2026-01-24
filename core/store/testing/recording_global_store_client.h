@@ -53,6 +53,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       uint64_t,
       uint64_t,
       bool,
+      std::string_view,
       std::string_view) override {
     return absl::UnimplementedError("register_worker not supported in test stub");
   }
@@ -66,7 +67,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const std::vector<std::string>&,
       int64_t,
       tensorcast::global_store::v1::ConnectionStatus,
-      const components::RpcOptions&) override {
+      const components::RpcOptions&,
+      std::string_view) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not supported in test stub");
   }
 

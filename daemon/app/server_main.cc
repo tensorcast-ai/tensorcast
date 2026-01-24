@@ -567,6 +567,11 @@ int main(int argc, char** argv) {
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
+  if (cfg.daemon_id().empty()) {
+    LOG(ERROR) << "DaemonConfig.daemon_id is required for Global Store registration.";
+    return 1;
+  }
+  daemon_opts.daemon_id = cfg.daemon_id();
   // Observability high-cardinality attributes: default off (config hook TBD)
   daemon_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)

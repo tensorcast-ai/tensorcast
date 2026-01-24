@@ -188,6 +188,7 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       uint64_t,
       uint64_t,
       bool,
+      std::string_view,
       std::string_view) override {
     return absl::UnimplementedError("register_worker not used in tests");
   }
@@ -201,7 +202,8 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       const std::vector<std::string>&,
       int64_t,
       tensorcast::global_store::v1::ConnectionStatus,
-      const tensorcast::store::components::RpcOptions&) override {
+      const tensorcast::store::components::RpcOptions&,
+      std::string_view) override {
     return absl::UnimplementedError("send_heartbeat_enhanced not used in tests");
   }
 

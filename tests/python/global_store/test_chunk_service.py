@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for ChunkService (chunk directory operations)."""
 
@@ -42,6 +42,7 @@ def _insert_worker(
 ) -> Worker:
     worker = Worker(
         worker_id="worker_node1_1",
+        daemon_id=f"daemon_{node_id}",
         node_id=node_id,
         node_address=node_address,
         grpc_port=50051,
@@ -283,6 +284,7 @@ def test_get_chunk_distribution_across_multiple_nodes(
     worker_repo.create(
         Worker(
             worker_id="worker_node1_1",
+            daemon_id="daemon_node1",
             node_id="node1",
             node_address="192.168.50.10",
             grpc_port=50051,
@@ -295,6 +297,7 @@ def test_get_chunk_distribution_across_multiple_nodes(
     worker_repo.create(
         Worker(
             worker_id="worker_node2_1",
+            daemon_id="daemon_node2",
             node_id="node2",
             node_address="192.168.50.11",
             grpc_port=50061,
@@ -346,6 +349,7 @@ def test_query_specific_indices_returns_multiple_nodes(
     worker_repo.create(
         Worker(
             worker_id="worker_node1_2",
+            daemon_id="daemon_node1",
             node_id="node1",
             node_address="192.168.50.10",
             grpc_port=50071,
@@ -358,6 +362,7 @@ def test_query_specific_indices_returns_multiple_nodes(
     worker_repo.create(
         Worker(
             worker_id="worker_node2_2",
+            daemon_id="daemon_node2",
             node_id="node2",
             node_address="192.168.50.11",
             grpc_port=50081,
@@ -409,6 +414,7 @@ def test_query_ordering_by_node_load_ratio(chunk_service: ChunkService, repos, d
     worker_repo.create(
         Worker(
             worker_id="worker_node1_3",
+            daemon_id="daemon_node1",
             node_id="node1",
             node_address="192.168.50.10",
             grpc_port=50091,
@@ -421,6 +427,7 @@ def test_query_ordering_by_node_load_ratio(chunk_service: ChunkService, repos, d
     worker_repo.create(
         Worker(
             worker_id="worker_node2_3",
+            daemon_id="daemon_node2",
             node_id="node2",
             node_address="192.168.50.11",
             grpc_port=50101,

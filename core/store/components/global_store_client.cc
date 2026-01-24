@@ -376,7 +376,12 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
     uint64_t mem_pool_total_size,
     uint64_t mem_pool_available_size,
     bool is_recovery_registration,
-    std::string_view previous_worker_id) {
+    std::string_view previous_worker_id,
+    std::string_view daemon_id) {
+  if (daemon_id.empty()) {
+    return absl::InvalidArgumentError(
+        "register_worker requires a non-empty daemon_id; configure DaemonConfig.daemon_id.");
+  }
   if (is_loopback_or_unspecified(node_address)) {
     return absl::InvalidArgumentError(
         absl::StrFormat(
@@ -408,6 +413,7 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
       request.set_previous_worker_id(std::string(previous_worker_id));
     }
   }
+  request.set_daemon_id(std::string(daemon_id));
 
   global_store::RegisterWorkerResponse response;
 
@@ -467,7 +473,8 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
     const std::vector<std::string>& registered_artifact_ids,
     int64_t last_successful_sync,
     global_store::ConnectionStatus connection_status,
-    const RpcOptions& rpc_options) {
+    const RpcOptions& rpc_options,
+    std::string_view daemon_id) {
   global_store::WorkerHeartbeatRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_mem_pool_available_size(mem_pool_available_size);
@@ -479,6 +486,9 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
   }
   request.set_last_successful_sync(last_successful_sync);
   request.set_global_store_status(connection_status);
+  if (!daemon_id.empty()) {
+    request.set_daemon_id(std::string(daemon_id));
+  }
 
   global_store::WorkerHeartbeatResponse response;
   auto status = execute_rpc_with_retry(

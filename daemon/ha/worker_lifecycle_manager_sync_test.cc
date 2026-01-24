@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <string>
 #include <string_view>
 #include <thread>
 
@@ -58,6 +59,7 @@ static std::unique_ptr<DaemonKernel> make_kernel(
   tensorcast::daemon::DaemonOptions opts;
   opts.storage_path = storage_root;
   opts.persistence_log_path = storage_root / "persistence.log";
+  opts.daemon_id = "daemon-test";
   return std::make_unique<DaemonKernel>(engine, nullptr, opts);
 }
 
@@ -203,6 +205,11 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
     return outstanding_leases_;
   }
 
+  std::string last_registered_daemon_id() const {
+    absl::MutexLock l(&mu_);
+    return last_registered_daemon_id_;
+  }
+
   ::grpc::Status HealthCheck(
       ::grpc::ServerContext* /*context*/,
       const global_store::HealthCheckRequest* /*request*/,
@@ -215,7 +222,10 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
       ::grpc::ServerContext* /*context*/,
       const global_store::RegisterWorkerRequest* req,
       global_store::RegisterWorkerResponse* resp) override {
-    (void)req;
+    {
+      absl::MutexLock l(&mu_);
+      last_registered_daemon_id_ = req->daemon_id();
+    }
     resp->set_status(global_store::STATUS_OK);
     resp->set_worker_id("worker-1");
     resp->set_heartbeat_interval_ms(1000);
@@ -400,6 +410,7 @@ class FakeGlobalStoreService final : public global_store::GlobalStoreService::Se
   std::vector<commonpb::ReplicaInfo> expected_replicas_;
   mutable absl::Mutex mu_;
   uint32_t total_chunk_updates_{0};
+  std::string last_registered_daemon_id_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::MemoryTierLease> outstanding_leases_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::MemoryTierStatus> published_statuses_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::AcknowledgeMemoryTierLeaseRequest> ack_requests_ ABSL_GUARDED_BY(mu_);
@@ -532,6 +543,7 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Initial full-state sync happens in start(); poll until removal applied
   bool keep_gpu_present = false;
@@ -604,6 +616,7 @@ TEST_CASE("WorkerLifecycleManager heartbeat applies obsolete removals", "[daemon
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Poll to ensure heartbeat obsolete hints do not trigger unloads.
   bool kept = false;
@@ -719,6 +732,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Poll until REMOVE applied
   bool keep_present = false;
@@ -790,6 +804,7 @@ TEST_CASE("WorkerLifecycleManager retire waits for refs", "[daemon][ha][retire]"
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   bool still_present = false;
   for (int i = 0; i < 200; ++i) {
@@ -855,6 +870,7 @@ TEST_CASE("WorkerLifecycleManager retire waits for transport locks", "[daemon][h
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   bool still_present = false;
   for (int i = 0; i < 200; ++i) {
@@ -919,6 +935,7 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Poll until fallback full-sync applied (remove_id removed, keep_id present)
   bool removed = false;
@@ -983,6 +1000,7 @@ TEST_CASE("WorkerLifecycleManager sends batch chunk state updates", "[daemon][ha
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Poll for updates
   bool got_updates = false;
@@ -1112,6 +1130,7 @@ TEST_CASE("WorkerLifecycleManager publishes memory tier status and reconciles le
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   bool saw_acquired = false;
   bool saw_released = false;
@@ -1213,6 +1232,7 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
   auto st = wlm.start();
   REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
   // Poll until version-only hint triggers synchronize and removal applied
   bool removed = false;
