@@ -125,7 +125,7 @@ Contract highlights:
   `ref_tracker.h`, `handle_lease_registry.{h,cc}`, `ipc_region_registry.{h,cc}`, `transport_lock_manager.h`,
   `verification_tracker.h`, `background_scheduler.h`, `sweep_tasks.h`, `persistence_manager.{h,cc}`, `local_handle_server.{h,cc}`).
 - `util/`: shared helpers (`path_utils.{h,cc}`, `identity_utils.{h,cc}`, `deadline_utils.h`, `grpc_peer_utils.{h,cc}`, `status_utils.h`).
-- `testing/`: shared daemon service harness for gRPC tests.
+- `testing/`: shared daemon service harness for gRPC tests, plus the spawn-based `cuda_ipc_helper` used by CUDA IPC tests.
 - `common/`: low-level safe syscall wrappers (`safe_sys.h`).
 
 ## Build, Run, Test
@@ -133,6 +133,7 @@ Contract highlights:
 - Build binary: `bazel build //daemon:tensorcast_daemon`
 - Launch with unified config: see `../docs/deployment/store-daemon.md`
 - C++ tests: `bazel test //daemon:grpc_service_impl_registration_test` (and related `*_test.cc` in this directory)
+- CUDA IPC tests spawn `//daemon:cuda_ipc_helper` via runfiles; when running outside Bazel, build it in `bazel-bin/daemon/`.
 
 ## Error Handling Conventions
 

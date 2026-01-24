@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <thread>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 #include "core/cuda/cuda_api.h"
@@ -53,6 +54,7 @@ TEST_CASE("LIP TTL expiry gates P2P source selection", "[daemon][lip][ttl][fakec
       {.size_bytes = 1 * 1024 * 1024, .fill_byte = -1},
   };
   auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, 0, buffers);
+  INFO("cuda_ipc_helper spawn status: " << child_or.status());
   REQUIRE(child_or.ok());
   auto child = std::move(*child_or);
   REQUIRE(child.handle_bytes().size() == 1);

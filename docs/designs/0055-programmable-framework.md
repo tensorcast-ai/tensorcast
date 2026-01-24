@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-01-23
+last_updated: 2026-01-24
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py

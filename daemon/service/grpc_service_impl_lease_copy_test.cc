@@ -3,12 +3,14 @@
 #include "daemon/testing/daemon_service_harness.h"
 
 #include <string>
+#include <utility>
 
 #include <catch2/catch_test_macros.hpp>
 #include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "daemon/testing/cuda_ipc_spawn_helper.h"
 #include "grpcpp/server_context.h"
 #include "gsl/pointers"
 #include "nlohmann/json.hpp"
@@ -45,16 +47,30 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
 
   // Build canonical index with two DATA regions and a PAD gap of 16 bytes
   // Regions: [0,16] and [32,16]; total_size = 48 (no trailing PAD)
-  nlohmann::json j;
-  j["a"] = {0, 16, std::vector<int>{16}, std::vector<int>{1}, "torch.uint8", 0};
-  j["b"] = {32, 16, std::vector<int>{16}, std::vector<int>{1}, "torch.uint8", 0};
-  const std::string index_bytes = j.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+  nlohmann::json index_json;
+  index_json["a"] = {0, 16, std::vector<int>{16}, std::vector<int>{1}, "torch.uint8", 0};
+  index_json["b"] = {32, 16, std::vector<int>{16}, std::vector<int>{1}, "torch.uint8", 0};
+  const std::string index_bytes = index_json.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+  const auto helper_path_or = tensorcast::daemon::testing::resolve_cuda_ipc_helper_path();
+  REQUIRE(helper_path_or.ok());
+  std::vector<tensorcast::daemon::testing::CudaIpcBufferSpec> buffers = {
+      {.size_bytes = 16, .fill_byte = 0x11},
+      {.size_bytes = 16, .fill_byte = 0x22},
+  };
+  auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, 0, buffers);
+  INFO("cuda_ipc_helper spawn status: " << child_or.status());
+  REQUIRE(child_or.ok());
+  auto child = std::move(*child_or);
+  REQUIRE(child.handle_bytes().size() == 2);
+  const std::string& handle_bytes_first = child.handle_bytes()[0];
+  const std::string& handle_bytes_second = child.handle_bytes()[1];
 
   // Begin lease registration
   tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
   breq.set_device_id(0);
   breq.set_total_size(48);
-  breq.set_owner_pid(getpid());
+  breq.set_owner_pid(child.pid());
   breq.mutable_tensor_index_data()->set_data(index_bytes);
   breq.mutable_tensor_index_data()->set_schema_version("v3");
   breq.mutable_tensor_index_data()->set_encoding("json");
@@ -66,18 +82,8 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   REQUIRE(st.ok());
   REQUIRE(bresp.has_lease());
 
-  // Allocate two device buffers, fill distinct patterns, export IPC handles
+  // Ensure CUDA is available in the environment.
   REQUIRE(tensorcast::cuda::is_available());
-  void* p1 = nullptr;
-  void* p2 = nullptr;
-  REQUIRE(tensorcast::cuda::malloc(&p1, 16).ok());
-  REQUIRE(tensorcast::cuda::malloc(&p2, 16).ok());
-  REQUIRE(tensorcast::cuda::memset(p1, 0x11, 16).ok());
-  REQUIRE(tensorcast::cuda::memset(p2, 0x22, 16).ok());
-  cudaIpcMemHandle_t h1{};
-  cudaIpcMemHandle_t h2{};
-  REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h1, p1).ok());
-  REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&h2, p2).ok());
 
   // Feed in reverse order to validate order independence; include explicit dst_offset
   tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest freq;
@@ -87,43 +93,43 @@ TEST_CASE("Lease commit places segments by dst_offset and zeros PAD", "[daemon][
   storage2->set_storage_id("s2");
   storage2->set_device_id(0);
   storage2->set_storage_length(16);
-  storage2->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h2), sizeof(cudaIpcMemHandle_t)));
+  storage2->set_cuda_ipc_handle(handle_bytes_second);
   storage2->set_mapping_base_offset(0);
   auto* storage1 = freq.add_storage_entries();
   storage1->set_storage_id("s1");
   storage1->set_device_id(0);
   storage1->set_storage_length(16);
-  storage1->set_cuda_ipc_handle(std::string(reinterpret_cast<const char*>(&h1), sizeof(cudaIpcMemHandle_t)));
+  storage1->set_cuda_ipc_handle(handle_bytes_first);
   storage1->set_mapping_base_offset(0);
   // Tensor alias metadata (required for LIP commits).
-  auto* a = freq.add_tensor_aliases();
-  a->set_name("a");
-  a->set_storage_id("s1");
-  a->set_storage_offset(0);
-  a->set_logical_length(16);
-  a->add_shape(16);
-  a->add_stride(1);
-  a->set_dtype("torch.uint8");
-  auto* b = freq.add_tensor_aliases();
-  b->set_name("b");
-  b->set_storage_id("s2");
-  b->set_storage_offset(0);
-  b->set_logical_length(16);
-  b->add_shape(16);
-  b->add_stride(1);
-  b->set_dtype("torch.uint8");
+  auto* alias_a = freq.add_tensor_aliases();
+  alias_a->set_name("a");
+  alias_a->set_storage_id("s1");
+  alias_a->set_storage_offset(0);
+  alias_a->set_logical_length(16);
+  alias_a->add_shape(16);
+  alias_a->add_stride(1);
+  alias_a->set_dtype("torch.uint8");
+  auto* alias_b = freq.add_tensor_aliases();
+  alias_b->set_name("b");
+  alias_b->set_storage_id("s2");
+  alias_b->set_storage_offset(0);
+  alias_b->set_logical_length(16);
+  alias_b->add_shape(16);
+  alias_b->add_stride(1);
+  alias_b->set_dtype("torch.uint8");
 
   auto* ls = freq.mutable_lease_segments();
-  auto* s2 = ls->add_segments();
-  s2->set_storage_id("s2");
-  s2->set_storage_offset(0);
-  s2->set_length(16);
-  s2->set_artifact_offset(32);
-  auto* s1 = ls->add_segments();
-  s1->set_storage_id("s1");
-  s1->set_storage_offset(0);
-  s1->set_length(16);
-  s1->set_artifact_offset(0);
+  auto* segment_second = ls->add_segments();
+  segment_second->set_storage_id("s2");
+  segment_second->set_storage_offset(0);
+  segment_second->set_length(16);
+  segment_second->set_artifact_offset(32);
+  auto* segment_first = ls->add_segments();
+  segment_first->set_storage_id("s1");
+  segment_first->set_storage_offset(0);
+  segment_first->set_length(16);
+  segment_first->set_artifact_offset(0);
 
   // Use helper to feed streaming vector without spinning up gRPC server
   std::vector<tensorcast::daemon::v2::FeedRegisterArtifactStreamRequest> reqs;

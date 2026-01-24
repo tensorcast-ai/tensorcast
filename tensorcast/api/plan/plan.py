@@ -413,10 +413,8 @@ class WorkerStepBuilder:
         device: str | int,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[PrefetchedReplica]:
-        device_id = _resolve_device_id(device=device, allow_cpu=True)
+        device_id = _resolve_device_id(device=device, allow_cpu=False)
         device_input: str | int = device
-        if device_id == CPU_DEVICE_ID:
-            device_input = "cpu"
         return self._plan._add_step(
             target=self._worker,
             action=_PrefetchAction(

@@ -336,7 +336,24 @@ class Store:
                         },
                     ),
                 )
-            result = _query()
+            try:
+                result = _query()
+            except OperationTimeoutError as exc:
+                return OperationStatus(
+                    state="degraded",
+                    message=str(exc),
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message=str(exc),
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
             state: str
             if result.state in {"pending", "running", "unknown"}:
                 state = "running"

@@ -26,6 +26,7 @@ best-effort cancellation.
   the `PlanSpec` to a node agent with an engine adapter.
 - Instance targets must be expressed as `TargetSpec` capabilities minted by the
   engine adapter on the target process.
+- Worker prefetch is GPU-only; CPU devices are rejected for `prefetch` steps.
 
 ## Execution semantics
 

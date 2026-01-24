@@ -136,9 +136,6 @@ sc_cc_library(
     name = "cuda_ipc_spawn_helper_lib",
     srcs = ["testing/cuda_ipc_spawn_helper.cc"],
     hdrs = ["testing/cuda_ipc_spawn_helper.h"],
-    deps = [
-        "@abseil-cpp//absl/status",
-    ],
 )
 
 cc_binary(

@@ -11,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -34,6 +35,7 @@
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/verification_tracker.h"
+#include "daemon/testing/cuda_ipc_spawn_helper.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
@@ -226,26 +228,26 @@ TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][mate
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
-  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
   layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
 
   auto* storage = layout->add_storages();
   storage->set_storage_id("storage-0");
   storage->set_device_id(0);
-  storage->set_storage_length(12);
+  storage->set_storage_length(8);
   storage->set_vram_region_id("region-0");
   storage->set_mapping_base_offset(0);
 
   auto* offset_b = layout->add_offsets();
   offset_b->set_name("b");
   offset_b->set_storage_id("storage-0");
-  offset_b->set_storage_offset(0);
+  offset_b->set_storage_offset(4);
   offset_b->set_logical_length(4);
 
   auto* offset_a = layout->add_offsets();
   offset_a->set_name("a");
   offset_a->set_storage_id("storage-0");
-  offset_a->set_storage_offset(8);
+  offset_a->set_storage_offset(0);
   offset_a->set_logical_length(4);
 
   MaterializeIntoTargetResponse resp;
@@ -332,28 +334,30 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   tensorcast::cuda::DeviceGuard guard(0);
   REQUIRE(guard.status().ok());
 
-  void* ptr0 = nullptr;
-  void* ptr1 = nullptr;
-  REQUIRE(tensorcast::cuda::malloc(&ptr0, 8).ok());
-  REQUIRE(tensorcast::cuda::malloc(&ptr1, 8).ok());
+  const auto helper_path_or = tensorcast::daemon::testing::resolve_cuda_ipc_helper_path();
+  REQUIRE(helper_path_or.ok());
+  std::vector<tensorcast::daemon::testing::CudaIpcBufferSpec> buffers = {
+      {.size_bytes = 8, .fill_byte = -1},
+      {.size_bytes = 8, .fill_byte = -1},
+  };
+  auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, 0, buffers);
+  INFO("cuda_ipc_helper spawn status: " << child_or.status());
+  REQUIRE(child_or.ok());
+  auto child = std::move(*child_or);
+  REQUIRE(child.handle_bytes().size() == 2);
+  const std::string& handle_bytes_first = child.handle_bytes()[0];
+  const std::string& handle_bytes_second = child.handle_bytes()[1];
 
-  cudaIpcMemHandle_t handle0_native{};
-  cudaIpcMemHandle_t handle1_native{};
-  REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&handle0_native, ptr0).ok());
-  REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&handle1_native, ptr1).ok());
-  const auto handle0_bytes = tensorcast::cuda::IpcHandleBytes::from_native(handle0_native);
-  const auto handle1_bytes = tensorcast::cuda::IpcHandleBytes::from_native(handle1_native);
-
-  const int owner_pid = getpid();
+  const int owner_pid = child.pid();
   tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
   params.device_id = 0;
   params.owner_pid = owner_pid;
   params.size_bytes = 8;
   params.ttl_ms = 10'000;
-  params.handle_bytes = std::string(handle0_bytes.as_string_view());
+  params.handle_bytes = handle_bytes_first;
   auto region0_or = fix.regions.register_region(params);
   REQUIRE(region0_or.ok());
-  params.handle_bytes = std::string(handle1_bytes.as_string_view());
+  params.handle_bytes = handle_bytes_second;
   auto region1_or = fix.regions.register_region(params);
   REQUIRE(region1_or.ok());
 
@@ -409,16 +413,23 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
 
   std::array<char, 8> out0{};
   std::array<char, 8> out1{};
-  REQUIRE(tensorcast::cuda::memcpy(out0.data(), ptr0, out0.size(), cudaMemcpyDeviceToHost).ok());
-  REQUIRE(tensorcast::cuda::memcpy(out1.data(), ptr1, out1.size(), cudaMemcpyDeviceToHost).ok());
+  auto mapping0_or = tensorcast::cuda::IpcMapping::open(
+      handle_bytes_first, tensorcast::cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
+  REQUIRE(mapping0_or.ok());
+  auto mapping1_or = tensorcast::cuda::IpcMapping::open(
+      handle_bytes_second, tensorcast::cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
+  REQUIRE(mapping1_or.ok());
+  auto mapping0 = std::move(*mapping0_or);
+  auto mapping1 = std::move(*mapping1_or);
+  REQUIRE(tensorcast::cuda::memcpy(out0.data(), mapping0.get(), out0.size(), cudaMemcpyDeviceToHost).ok());
+  REQUIRE(tensorcast::cuda::memcpy(out1.data(), mapping1.get(), out1.size(), cudaMemcpyDeviceToHost).ok());
 
   REQUIRE(std::string(out0.begin(), out0.end()) == std::string(8, 'A'));
   REQUIRE(std::string(out1.begin(), out1.end()) == std::string(8, 'B'));
 
   REQUIRE(fix.regions.unregister_region(region0_or->region_id, owner_pid, /*force=*/true).ok());
   REQUIRE(fix.regions.unregister_region(region1_or->region_id, owner_pid, /*force=*/true).ok());
-  REQUIRE(tensorcast::cuda::free(ptr0).ok());
-  REQUIRE(tensorcast::cuda::free(ptr1).ok());
+  REQUIRE(child.Shutdown().ok());
 }
 
 TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daemon][materialize][into_target]") {
@@ -449,20 +460,25 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   tensorcast::cuda::DeviceGuard guard(0);
   REQUIRE(guard.status().ok());
 
-  void* ptr = nullptr;
-  REQUIRE(tensorcast::cuda::malloc(&ptr, 8).ok());
+  const auto helper_path_or = tensorcast::daemon::testing::resolve_cuda_ipc_helper_path();
+  REQUIRE(helper_path_or.ok());
+  std::vector<tensorcast::daemon::testing::CudaIpcBufferSpec> buffers = {
+      {.size_bytes = 8, .fill_byte = -1},
+  };
+  auto child_or = tensorcast::daemon::testing::CudaIpcChild::Spawn(*helper_path_or, 0, buffers);
+  INFO("cuda_ipc_helper spawn status: " << child_or.status());
+  REQUIRE(child_or.ok());
+  auto child = std::move(*child_or);
+  REQUIRE(child.handle_bytes().size() == 1);
+  const std::string& handle_bytes = child.handle_bytes().front();
 
-  cudaIpcMemHandle_t handle_native{};
-  REQUIRE(tensorcast::cuda::get_ipc_mem_handle(&handle_native, ptr).ok());
-  const auto handle_bytes = tensorcast::cuda::IpcHandleBytes::from_native(handle_native);
-
-  const int owner_pid = getpid();
+  const int owner_pid = child.pid();
   tensorcast::daemon::IpcRegionRegistry::RegisterParams params;
   params.device_id = 0;
   params.owner_pid = owner_pid;
   params.size_bytes = 8;
   params.ttl_ms = 10'000;
-  params.handle_bytes = std::string(handle_bytes.as_string_view());
+  params.handle_bytes = handle_bytes;
   auto region_or = fix.regions.register_region(params);
   REQUIRE(region_or.ok());
 
@@ -504,5 +520,5 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   REQUIRE(fix.regions.is_poisoned(region_or->region_id));
 
   REQUIRE(fix.regions.unregister_region(region_or->region_id, owner_pid, /*force=*/true).ok());
-  REQUIRE(tensorcast::cuda::free(ptr).ok());
+  REQUIRE(child.Shutdown().ok());
 }

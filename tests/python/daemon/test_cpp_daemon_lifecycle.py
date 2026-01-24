@@ -92,6 +92,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
     # Allocate ports and temp storage dir
     listen_port = _get_free_port()
     storage_dir = Path(tempfile.mkdtemp(prefix="tc_daemon_it_"))
+    daemon_id = f"daemon_it_{listen_port}"
 
     # Build minimal unified DaemonConfig (YAML)
     log_path = storage_dir / "daemon.log"
@@ -103,6 +104,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
             "num_threads": 2,
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
         },
+        "daemon_id": daemon_id,
         "engine": {
             "artifact_chunk_bytes": 1 * 1024 * 1024,
             "streaming_buffer_chunks": 4,

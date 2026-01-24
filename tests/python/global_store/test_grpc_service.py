@@ -10,6 +10,11 @@ import grpc
 from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.config.settings import (
+    GlobalStoreConfig,
+    get_config,
+    set_config,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -308,6 +313,10 @@ class TestGRPCService:
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""
         try:
+            try:
+                get_config()
+            except RuntimeError:
+                set_config(GlobalStoreConfig())
             # Create a servicer with the file path - DuckDB will create the file
             servicer1 = GlobalStoreServicer(db_file=temp_db_file)
 

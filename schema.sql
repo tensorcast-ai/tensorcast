@@ -39,11 +39,6 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE(node_address, grpc_port)
 );
 
--- Ensure new worker lifecycle columns exist on upgrades.
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS inactive_at TIMESTAMP WITH TIME ZONE;
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS daemon_id TEXT;
-ALTER TABLE workers ALTER COLUMN daemon_id SET NOT NULL;
-
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
