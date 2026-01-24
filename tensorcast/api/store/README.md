@@ -80,10 +80,12 @@ managing clients manually.
 - `artifact.prefetch(device=..., ctx=..., options=...) -> Operation[PrefetchedReplica]` issues background
   materialization (`wait_for_completion=False`) and returns an operation handle. Use `op.result(timeout_s=...)` (or
   `op.wait(...)`) to block and `op.cancel()` to best-effort release the operation record. Prefetch defaults to
-  `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases.
+  `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
+  GPU-only; CPU targets are rejected because they require PID-bound handle leases.
 - `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
   (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
   supports `renew()` / `release()`.
+- `ctx.deadline_ms` clamps retry and polling budgets for control-plane actions so waits do not exceed the call budget.
 
 ## Fallback Preferences
 

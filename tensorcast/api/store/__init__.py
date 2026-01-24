@@ -30,6 +30,7 @@ from tensorcast.api.operation import (
     Operation,
     OperationError,
     OperationStatus,
+    OperationTimeoutError,
     PollingOperation,
 )
 from tensorcast.api.store.artifact import (
@@ -292,13 +293,50 @@ class Store:
         artifact_id: str | None = None,
         ctx: CallContext | None = None,
     ) -> Operation[PersistenceStatusResult]:
-        del ctx
         op_id = task_id or f"persist:{artifact_id or ''}"
+        created_at = time.monotonic()
+
+        def _ctx_remaining_timeout_s() -> float | None:
+            if ctx is None or ctx.deadline_ms is None:
+                return None
+            remaining = (float(ctx.deadline_ms) / 1000.0) - (
+                time.monotonic() - created_at
+            )
+            return max(0.0, remaining)
+
+        def _query() -> PersistenceStatusResult:
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                raise OperationTimeoutError(
+                    "Operation deadline exceeded (ctx.deadline_ms)",
+                    retryable=True,
+                )
+            resp = self._runtime.ensure_client().query_persistence_status(
+                task_id=task_id,
+                artifact_id=artifact_id,
+                timeout_s=timeout_s if timeout_s is not None else 10.0,
+            )
+            return self._persistence_status_from_proto(resp)
 
         def _status() -> OperationStatus:
-            result = self.query_persistence_status(
-                task_id=task_id, artifact_id=artifact_id
-            )
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                return OperationStatus(
+                    state="degraded",
+                    message="CallContext deadline exceeded",
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message="CallContext deadline exceeded",
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
+            result = _query()
             state: str
             if result.state in {"pending", "running", "unknown"}:
                 state = "running"
@@ -337,12 +375,13 @@ class Store:
             )
 
         def _result() -> PersistenceStatusResult:
-            return self.query_persistence_status(
-                task_id=task_id, artifact_id=artifact_id
-            )
+            return _query()
 
         return PollingOperation(
-            operation_id=op_id, status_fn=_status, result_fn=_result
+            operation_id=op_id,
+            status_fn=_status,
+            result_fn=_result,
+            ctx=ctx,
         )
 
     # ------------------------------------------------------------------

@@ -667,6 +667,7 @@ class DaemonCtl:
         view_id: str,
         device_id: int,
         ttl_ms: int | None,
+        timeout_s: float | None = None,
     ) -> store_daemon_pb2.CreatePlacementLeaseResponse:
         with self._client_span("Client/CreatePlacementLease") as span:
             request = store_daemon_pb2.CreatePlacementLeaseRequest(
@@ -676,12 +677,13 @@ class DaemonCtl:
             )
             if ttl_ms is not None:
                 request.ttl_ms = int(ttl_ms)
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
             try:
                 response: store_daemon_pb2.CreatePlacementLeaseResponse = (
                     self._unary_call(
                         self.stub_v2.CreatePlacementLease,
                         request,
-                        timeout=5.0,
+                        timeout=call_timeout,
                         span=span,
                         retries=1,
                     )
@@ -696,18 +698,20 @@ class DaemonCtl:
         *,
         lease_token: bytes,
         ttl_ms: int,
+        timeout_s: float | None = None,
     ) -> store_daemon_pb2.RenewPlacementLeaseResponse:
         with self._client_span("Client/RenewPlacementLease") as span:
             request = store_daemon_pb2.RenewPlacementLeaseRequest(
                 lease_token=bytes(lease_token),
                 ttl_ms=int(ttl_ms),
             )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
             try:
                 response: store_daemon_pb2.RenewPlacementLeaseResponse = (
                     self._unary_call(
                         self.stub_v2.RenewPlacementLease,
                         request,
-                        timeout=5.0,
+                        timeout=call_timeout,
                         span=span,
                         retries=1,
                     )
@@ -721,17 +725,19 @@ class DaemonCtl:
         self,
         *,
         lease_token: bytes,
+        timeout_s: float | None = None,
     ) -> store_daemon_pb2.ReleasePlacementLeaseResponse:
         with self._client_span("Client/ReleasePlacementLease") as span:
             request = store_daemon_pb2.ReleasePlacementLeaseRequest(
                 lease_token=bytes(lease_token),
             )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
             try:
                 response: store_daemon_pb2.ReleasePlacementLeaseResponse = (
                     self._unary_call(
                         self.stub_v2.ReleasePlacementLease,
                         request,
-                        timeout=5.0,
+                        timeout=call_timeout,
                         span=span,
                         retries=1,
                     )

@@ -133,6 +133,25 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "cuda_ipc_spawn_helper_lib",
+    srcs = ["testing/cuda_ipc_spawn_helper.cc"],
+    hdrs = ["testing/cuda_ipc_spawn_helper.h"],
+    deps = [
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+cc_binary(
+    name = "cuda_ipc_helper",
+    srcs = ["testing/cuda_ipc_helper.cc"],
+    deps = [
+        "//core/cuda:cuda_api_lib",
+        "//core/cuda:device_guard_lib",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
+sc_cc_library(
     name = "handle_lease_registry_lib",
     srcs = ["state/handle_lease_registry.cc"],
     hdrs = ["state/handle_lease_registry.h"],
@@ -924,7 +943,9 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_lease_copy_test",
     srcs = ["service/grpc_service_impl_lease_copy_test.cc"],
+    data = [":cuda_ipc_helper"],
     deps = [
+        ":cuda_ipc_spawn_helper_lib",
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
@@ -939,7 +960,9 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_lip_same_device_denial_test",
     srcs = ["service/grpc_service_impl_lip_same_device_denial_test.cc"],
+    data = [":cuda_ipc_helper"],
     deps = [
+        ":cuda_ipc_spawn_helper_lib",
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
@@ -953,7 +976,9 @@ cc_test(
 cc_test(
     name = "grpc_service_impl_lip_ttl_expiry_test",
     srcs = ["service/grpc_service_impl_lip_ttl_expiry_test.cc"],
+    data = [":cuda_ipc_helper"],
     deps = [
+        ":cuda_ipc_spawn_helper_lib",
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
         "//core/store:store_engine",
@@ -1155,8 +1180,10 @@ cc_test(
 cc_test(
     name = "materialize_into_target_validation_test",
     srcs = ["service/materialize_into_target_validation_test.cc"],
+    data = [":cuda_ipc_helper"],
     deps = [
         ":background_scheduler_hdr",
+        ":cuda_ipc_spawn_helper_lib",
         ":device_resolver_hdr",
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",

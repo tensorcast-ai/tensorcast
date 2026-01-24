@@ -104,3 +104,14 @@ def test_prefetch_uses_deterministic_operation_id() -> None:
     assert replica.operation_id == expected
     assert replica.daemon_id == daemon_id
 
+
+def test_prefetch_without_ctx_generates_operation_id() -> None:
+    store = _Store()
+    artifact = Artifact(store_ref=weakref.ref(store), artifact_id="aid")
+
+    op = artifact.prefetch(device="cuda:0")
+
+    assert store._materialization.calls
+    replica_uuid = str(store._materialization.calls[0]["replica_uuid"] or "")
+    assert replica_uuid
+    assert op.operation_id == replica_uuid

@@ -266,7 +266,7 @@ def test_prefetch_returns_operation():
         canonical_index_bytes=canonical_bytes,
     )
 
-    op = artifact.prefetch(device="cpu")
+    op = artifact.prefetch(device="cuda:0")
 
     from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
@@ -276,6 +276,22 @@ def test_prefetch_returns_operation():
         pipeline.calls[0]["lease_mode"]
         == store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE
     )
+
+
+def test_prefetch_rejects_cpu_device() -> None:
+    canonical_bytes, payload = _build_payload({"foo": torch.ones(1)})
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    with pytest.raises(ArtifactError) as excinfo:
+        artifact.prefetch(device="cpu")
+    assert excinfo.value.status_code == "INVALID_ARGUMENT"
 
 
 def test_release_blocks_materialization():

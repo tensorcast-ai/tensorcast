@@ -555,6 +555,7 @@ class Artifact:
         Semantics:
         - Daemon-owned residency (VRAM/DRAM is owned by the daemon).
         - Defaults to `NO_LEASE` (does not create PID UseLeases; does not mint IPC handle leases).
+        - GPU-only: CPU prefetch is rejected because it requires PID-bound handle leases.
         - Uses a deterministic **operation id** (sent as `replica_uuid`) when `ctx.idempotency_key` is provided.
         - Cache identity follows StoreEngine `ReplicaKey` (engine dedup is `ReplicaKey`-based; operation ids are not).
         - Prefetch does not imply pinning. To keep a replica resident, callers must use `pin_device_residency(...)`.

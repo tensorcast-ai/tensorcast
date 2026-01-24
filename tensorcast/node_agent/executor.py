@@ -107,6 +107,13 @@ def _call_context_from_proto(ctx: plan_pb2.CallContext) -> CallContext:
     )
 
 
+def _ctx_timeout_s(ctx: CallContext) -> float | None:
+    if ctx.deadline_ms is None:
+        return None
+    timeout_s = float(ctx.deadline_ms) / 1000.0
+    return max(0.0, timeout_s)
+
+
 def _view_spec_from_proto(
     view_spec: store_daemon_pb2.ViewSpec,
 ) -> ViewSpecBuildResult | None:
@@ -360,7 +367,7 @@ class NodeAgentExecutor:
                     action=action_name,
                     status=_status_success("dry-run"),
                 )
-            return self._execute_worker_action(plan, step)
+            return self._execute_worker_action(plan, step, call_ctx=call_ctx)
         if target.target_type == plan_pb2.TARGET_TYPE_INSTANCE:
             if self._instance_id is None or target_id != self._instance_id:
                 return NodeAgentStepResult(
@@ -393,16 +400,20 @@ class NodeAgentExecutor:
         )
 
     def _execute_worker_action(
-        self, plan: plan_pb2.PlanSpec, step: plan_pb2.PlanStep
+        self,
+        plan: plan_pb2.PlanSpec,
+        step: plan_pb2.PlanStep,
+        *,
+        call_ctx: CallContext,
     ) -> NodeAgentStepResult:
         action = step.action
         action_kind = action.WhichOneof("kind")
         if action_kind == "prefetch":
-            return self._prefetch(plan, step, action.prefetch)
+            return self._prefetch(plan, step, action.prefetch, call_ctx=call_ctx)
         if action_kind == "pin_device_residency":
-            return self._pin(plan, step, action.pin_device_residency)
+            return self._pin(plan, step, action.pin_device_residency, call_ctx=call_ctx)
         if action_kind == "unpin_device_residency":
-            return self._unpin(step, action.unpin_device_residency)
+            return self._unpin(step, action.unpin_device_residency, call_ctx=call_ctx)
         return NodeAgentStepResult(
             step_id=step.step_id,
             target_id=step.target.target_id,
@@ -619,6 +630,8 @@ class NodeAgentExecutor:
         plan: plan_pb2.PlanSpec,
         step: plan_pb2.PlanStep,
         action: plan_pb2.PrefetchAction,
+        *,
+        call_ctx: CallContext,
     ) -> NodeAgentStepResult:
         selection = action.selection
         target_id = step.target.target_id
@@ -650,6 +663,18 @@ class NodeAgentExecutor:
         else:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU
             device_uuid = device_uuid_for(device_id)
+        timeout_s = _ctx_timeout_s(call_ctx)
+        if timeout_s is not None and timeout_s <= 0:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="prefetch",
+                status=_status_failed(
+                    "CallContext deadline exceeded",
+                    status_code="DEADLINE_EXCEEDED",
+                    retryable=True,
+                ),
+            )
         try:
             self._client.materialize_by_artifact_id_v2(
                 artifact_id=selection.artifact_id,
@@ -662,6 +687,7 @@ class NodeAgentExecutor:
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
                 lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
+                timeout_s=timeout_s,
             )
         except Exception as exc:  # noqa: BLE001
             return NodeAgentStepResult(
@@ -686,16 +712,31 @@ class NodeAgentExecutor:
         plan: plan_pb2.PlanSpec,
         step: plan_pb2.PlanStep,
         action: plan_pb2.PinDeviceResidencyAction,
+        *,
+        call_ctx: CallContext,
     ) -> NodeAgentStepResult:
         target_id = step.target.target_id
         view_id = action.selection.view_id
         ttl_ms = action.ttl_ms if action.HasField("ttl_ms") else None
+        timeout_s = _ctx_timeout_s(call_ctx)
+        if timeout_s is not None and timeout_s <= 0:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="pin_device_residency",
+                status=_status_failed(
+                    "CallContext deadline exceeded",
+                    status_code="DEADLINE_EXCEEDED",
+                    retryable=True,
+                ),
+            )
         try:
             self._client.create_placement_lease(
                 artifact_id=action.selection.artifact_id,
                 view_id=view_id,
                 device_id=int(action.device_id),
                 ttl_ms=ttl_ms,
+                timeout_s=timeout_s,
             )
         except Exception as exc:  # noqa: BLE001
             return NodeAgentStepResult(
@@ -719,11 +760,26 @@ class NodeAgentExecutor:
         self,
         step: plan_pb2.PlanStep,
         action: plan_pb2.UnpinDeviceResidencyAction,
+        *,
+        call_ctx: CallContext,
     ) -> NodeAgentStepResult:
         target_id = step.target.target_id
+        timeout_s = _ctx_timeout_s(call_ctx)
+        if timeout_s is not None and timeout_s <= 0:
+            return NodeAgentStepResult(
+                step_id=step.step_id,
+                target_id=target_id,
+                action="unpin_device_residency",
+                status=_status_failed(
+                    "CallContext deadline exceeded",
+                    status_code="DEADLINE_EXCEEDED",
+                    retryable=True,
+                ),
+            )
         try:
             resp = self._client.release_placement_lease(
-                lease_token=bytes(action.capability_token)
+                lease_token=bytes(action.capability_token),
+                timeout_s=timeout_s,
             )
         except Exception as exc:  # noqa: BLE001
             return NodeAgentStepResult(

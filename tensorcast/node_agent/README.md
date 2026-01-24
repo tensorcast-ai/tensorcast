@@ -11,6 +11,7 @@ adapter (transform plugins + target resolution).
 - Execute instance-scoped steps (`transform_into`, `transform_register`) through
   the Engine Adapter registry.
 - Enforce target identity checks (`daemon_id`, optional `instance_id`).
+- Propagate `CallContext.deadline_ms` to daemon RPC timeouts for worker steps.
 - Provide a gRPC surface (`NodeAgentService`) for plan execution and agent info.
 
 ## Current limitations

@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
 
-from tensorcast.api._device import CPU_DEVICE_ID
 from tensorcast.api._view_ops import (
     SliceSpec,
     ViewSpecBuildResult,
@@ -96,6 +95,19 @@ def _decode_capability_token(token: str) -> bytes:
     return base64.urlsafe_b64decode(raw + padding)
 
 
+def _ctx_timeout_s(ctx: CallContext | None) -> float | None:
+    if ctx is None or ctx.deadline_ms is None:
+        return None
+    timeout_s = float(ctx.deadline_ms) / 1000.0
+    if timeout_s <= 0:
+        raise ArtifactError(
+            "CallContext deadline exceeded",
+            status_code="DEADLINE_EXCEEDED",
+            retryable=False,
+        )
+    return max(0.001, timeout_s)
+
+
 @dataclass(frozen=True, slots=True)
 class PlacementPin:
     pin_id: int
@@ -120,13 +132,14 @@ class PlacementPin:
         return runtime
 
     def renew(self, *, ttl_ms: int, ctx: CallContext | None = None) -> "PlacementPin":
-        del ctx
+        timeout_s = _ctx_timeout_s(ctx)
         resp = (
             self._runtime()
             .ensure_client()
             .renew_placement_lease(
                 lease_token=_decode_capability_token(self.capability_token),
                 ttl_ms=int(ttl_ms),
+                timeout_s=timeout_s,
             )
         )
         expires_at_ms: int | None = None
@@ -149,12 +162,13 @@ class PlacementPin:
         )
 
     def release(self, *, ctx: CallContext | None = None) -> None:
-        del ctx
+        timeout_s = _ctx_timeout_s(ctx)
         _ = (
             self._runtime()
             .ensure_client()
             .release_placement_lease(
                 lease_token=_decode_capability_token(self.capability_token),
+                timeout_s=timeout_s,
             )
         )
 
@@ -584,11 +598,13 @@ class Artifact:
             if isinstance(device, int)
             else torch.device(device)
         )
-        device_id = (
-            CPU_DEVICE_ID
-            if device_obj.type == "cpu"
-            else int(device_obj.index if device_obj.index is not None else 0)
-        )
+        if device_obj.type == "cpu":
+            raise ArtifactError(
+                "prefetch does not support CPU devices",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        device_id = int(device_obj.index if device_obj.index is not None else 0)
         daemon_id = (
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
@@ -608,6 +624,8 @@ class Artifact:
         replica_uuid = deterministic_replica_uuid or (
             self._fallback.replica_uuid if self._fallback else None
         )
+        if not replica_uuid:
+            replica_uuid = uuid.uuid4().hex
 
         opts = options or GetArtifactOptions()
         opts = opts.model_copy(
@@ -682,7 +700,6 @@ class Artifact:
         ttl_ms: int | None,
         ctx: CallContext | None = None,
     ) -> Operation[PlacementPin]:
-        del ctx
         if ttl_ms is not None and int(ttl_ms) <= 0:
             raise ArtifactError(
                 "ttl_ms must be positive when provided",
@@ -703,11 +720,13 @@ class Artifact:
                 )
             device_id = int(device_obj.index if device_obj.index is not None else 0)
         view_id = self._control_plane_view_id(runtime)
+        timeout_s = _ctx_timeout_s(ctx)
         resp = runtime.ensure_client().create_placement_lease(
             artifact_id=artifact_id,
             view_id=view_id,
             device_id=device_id,
             ttl_ms=ttl_ms,
+            timeout_s=timeout_s,
         )
         token = bytes(resp.lease_token) if hasattr(resp, "lease_token") else b""
         if not token:
@@ -760,6 +779,7 @@ class Artifact:
             status_fn=lambda: status,
             result_fn=lambda: pin,
             cancel_fn=_cancel,
+            ctx=ctx,
         )
 
     def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:

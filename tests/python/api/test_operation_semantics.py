@@ -6,7 +6,13 @@ import weakref
 
 import pytest
 
-from tensorcast.api.operation import DaemonReplicaOperation, OperationTimeoutError
+from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    DaemonReplicaOperation,
+    OperationStatus,
+    OperationTimeoutError,
+    PollingOperation,
+)
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
@@ -113,3 +119,14 @@ def test_daemon_replica_operation_cancel() -> None:
     assert op.cancel() is True
     assert client.released == ["op-4"]
 
+
+def test_polling_operation_respects_ctx_deadline() -> None:
+    ctx = CallContext(deadline_ms=0)
+    op = PollingOperation(
+        operation_id="op-5",
+        status_fn=lambda: OperationStatus(state="running"),
+        result_fn=lambda: "ok",
+        ctx=ctx,
+    )
+    with pytest.raises(OperationTimeoutError):
+        op.wait()

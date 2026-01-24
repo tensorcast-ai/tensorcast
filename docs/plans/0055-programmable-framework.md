@@ -242,6 +242,29 @@ Implement the programmable, artifact-first control-plane primitives defined in `
   - [x] Milestone 4.5: Plan execution integration tests
     - [x] Add Node Agent PlanSpec execution tests (success + failure/cancel paths).
 
+# Phase 5: Contracts-as-Tests Checklist (post-implementation hardening)
+
+- [x] C5.1 Prefetch operation identity (no implicit UUID fan-out)
+  - [x] Always send a non-empty `replica_uuid` for `Artifact.prefetch(...)`, even when `ctx.idempotency_key` is absent
+        (per-call UUID reused across internal retries).
+    - Code: `tensorcast/api/store/artifact.py`
+    - Test: `tests/python/api/test_prefetch_operation.py` (new case for no-ctx prefetch).
+- [x] C5.2 CPU prefetch semantics are explicit and documented
+  - [x] Reject CPU prefetch in the SDK when `lease_mode=NO_LEASE` (avoid daemon-side INVALID_ARGUMENT).
+    - Code: `tensorcast/api/store/artifact.py`
+    - Tests: `tests/python/api/test_artifact_handle.py` (update), `tests/python/api/test_prefetch_operation.py` (ensure GPU path remains OK).
+  - [x] Update docs to reflect CPU prefetch behavior.
+    - Docs: `tensorcast/api/store/README.md`, `tensorcast/api/README.md`, `docs/designs/0055-programmable-framework.md`
+- [x] C5.3 CallContext deadline budget is enforced end-to-end
+  - [x] Clamp materialization retry budgets to `ctx.deadline_ms` and propagate per-RPC timeouts.
+    - Code: `tensorcast/api/store/materialization.py`
+  - [x] Polling operations respect `ctx.deadline_ms` (persistence + placement pin).
+    - Code: `tensorcast/api/operation.py`, `tensorcast/api/store/__init__.py`, `tensorcast/api/store/artifact.py`
+    - Test: `tests/python/api/test_operation_semantics.py` (new polling deadline case).
+  - [x] Node Agent worker actions propagate `ctx.deadline_ms` to daemon RPC timeouts.
+    - Code: `tensorcast/node_agent/executor.py`, `tensorcast/daemon_ctl.py`
+    - Test: `tests/python/node_agent/test_plan_execution.py` (new timeout propagation cases).
+
 # Tests & Acceptance Criteria
 
 - [x] Deterministic operation ids:

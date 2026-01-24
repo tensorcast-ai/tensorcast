@@ -42,6 +42,7 @@ from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
     FallbackOptions,
+    RetryPolicy,
     SpanAttributeValue,
 )
 from tensorcast.api.store.view_composer import compute_view_id, compute_view_subset_hash
@@ -1817,6 +1818,26 @@ class MaterializationPipeline:
         )
         attempt = 1
         start_time = time.monotonic()
+        if ctx is not None and ctx.deadline_ms is not None and policy is not None:
+            ctx_budget_s = float(ctx.deadline_ms) / 1000.0
+            if ctx_budget_s <= 0:
+                raise ArtifactError(
+                    "CallContext deadline exceeded",
+                    status_code="DEADLINE_EXCEEDED",
+                    retryable=False,
+                )
+            if policy.deadline_seconds <= 0:
+                effective_deadline = ctx_budget_s
+            else:
+                effective_deadline = min(policy.deadline_seconds, ctx_budget_s)
+            if effective_deadline != policy.deadline_seconds:
+                policy = RetryPolicy(
+                    deadline_seconds=effective_deadline,
+                    max_attempts=policy.max_attempts,
+                    base_backoff_seconds=policy.base_backoff_seconds,
+                    backoff_multiplier=policy.backoff_multiplier,
+                    jitter=policy.jitter,
+                )
         span_name = "Store/GetInto" if method == "get_into" else "Store/Get"
         attributes: dict[str, SpanAttributeValue] = {
             "tc.store.daemon": self._runtime.daemon_endpoint,

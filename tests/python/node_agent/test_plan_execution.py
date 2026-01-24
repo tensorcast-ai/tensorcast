@@ -10,13 +10,22 @@ from tensorcast.proto.plan.v1 import plan_pb2
 
 
 class _DaemonStub:
+    def __init__(self) -> None:
+        self.materialize_timeout_s: float | None = None
+        self.placement_timeout_s: float | None = None
+        self.release_timeout_s: float | None = None
+
     def materialize_by_artifact_id_v2(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.materialize_timeout_s = kwargs.get("timeout_s")
         return None
 
     def create_placement_lease(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.placement_timeout_s = kwargs.get("timeout_s")
         return None
 
     def release_placement_lease(self, *args, **kwargs):  # noqa: ANN002, ANN003
+        self.release_timeout_s = kwargs.get("timeout_s")
+
         class _Resp:
             released = True
 
@@ -104,3 +113,40 @@ def test_node_agent_marks_dependents_cancelled_on_failure() -> None:
     assert result.ok is False
     assert result.steps["s1"].status.state == "failed"
     assert result.steps["s2"].status.state == "cancelled"
+
+
+def test_node_agent_propagates_deadline_to_worker_actions() -> None:
+    daemon = _DaemonStub()
+    spec = plan_pb2.PlanSpec(plan_id="plan-3")
+    spec.context.request_id = "req-3"
+    spec.context.deadline_ms = 1500
+
+    step1 = spec.steps.add()
+    step1.step_id = "s1"
+    step1.target.target_type = plan_pb2.TARGET_TYPE_WORKER
+    step1.target.target_id = "daemon-1"
+    action1 = step1.action.prefetch
+    action1.selection.CopyFrom(_selection())
+    action1.device_id = 0
+
+    step2 = spec.steps.add()
+    step2.step_id = "s2"
+    step2.target.target_type = plan_pb2.TARGET_TYPE_WORKER
+    step2.target.target_id = "daemon-1"
+    action2 = step2.action.pin_device_residency
+    action2.selection.CopyFrom(_selection())
+    action2.device_id = 0
+
+    executor = NodeAgentExecutor(
+        daemon_id="daemon-1",
+        daemon_address="127.0.0.1:50051",
+        instance_id="inst-1",
+        engine_adapter=None,
+        client_factory=lambda _addr: daemon,
+    )
+    result = executor.execute_plan(spec)
+    assert result.ok
+    assert daemon.materialize_timeout_s is not None
+    assert abs(float(daemon.materialize_timeout_s) - 1.5) < 0.1
+    assert daemon.placement_timeout_s is not None
+    assert abs(float(daemon.placement_timeout_s) - 1.5) < 0.1

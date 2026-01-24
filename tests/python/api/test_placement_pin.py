@@ -17,8 +17,15 @@ class _Client:
         self.released: list[bytes] = []
 
     def create_placement_lease(
-        self, *, artifact_id: str, view_id: str, device_id: int, ttl_ms: int | None
+        self,
+        *,
+        artifact_id: str,
+        view_id: str,
+        device_id: int,
+        ttl_ms: int | None,
+        timeout_s: float | None = None,
     ) -> store_daemon_pb2.CreatePlacementLeaseResponse:
+        del timeout_s
         self.created.append((artifact_id, view_id, int(device_id), ttl_ms))
         resp = store_daemon_pb2.CreatePlacementLeaseResponse(
             lease_id=123,
@@ -30,8 +37,13 @@ class _Client:
         return resp
 
     def renew_placement_lease(
-        self, *, lease_token: bytes, ttl_ms: int
+        self,
+        *,
+        lease_token: bytes,
+        ttl_ms: int,
+        timeout_s: float | None = None,
     ) -> store_daemon_pb2.RenewPlacementLeaseResponse:
+        del timeout_s
         self.renewed.append((bytes(lease_token), int(ttl_ms)))
         resp = store_daemon_pb2.RenewPlacementLeaseResponse(lease_id=123)
         ts = timestamp_pb2.Timestamp()
@@ -40,8 +52,9 @@ class _Client:
         return resp
 
     def release_placement_lease(
-        self, *, lease_token: bytes
+        self, *, lease_token: bytes, timeout_s: float | None = None
     ) -> store_daemon_pb2.ReleasePlacementLeaseResponse:
+        del timeout_s
         self.released.append(bytes(lease_token))
         return store_daemon_pb2.ReleasePlacementLeaseResponse(released=True)
 
@@ -83,4 +96,3 @@ def test_pin_device_residency_returns_operation_and_pin() -> None:
 
     assert op.cancel() is True
     pin.release()
-

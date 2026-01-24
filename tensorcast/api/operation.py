@@ -341,17 +341,45 @@ class PollingOperation(Operation[T]):
         status_fn: Callable[[], OperationStatus],
         result_fn: Callable[[], T],
         cancel_fn: Callable[[], bool] | None = None,
+        ctx: CallContext | None = None,
     ) -> None:
         self.operation_id = str(operation_id)
         self._status_fn = status_fn
         self._result_fn = result_fn
         self._cancel_fn = cancel_fn
+        self._ctx = ctx
+        self._created_at = time.monotonic()
+
+    def _ctx_remaining_timeout_s(self) -> float | None:
+        if self._ctx is None or self._ctx.deadline_ms is None:
+            return None
+        elapsed_s = time.monotonic() - self._created_at
+        remaining_s = (float(self._ctx.deadline_ms) / 1000.0) - elapsed_s
+        return max(0.0, remaining_s)
 
     def status(self) -> OperationStatus:
         return self._status_fn()
 
     def wait(self, *, timeout_s: float | None = None) -> T:
-        deadline = None if timeout_s is None else time.monotonic() + float(timeout_s)
+        overall_timeout_s = timeout_s
+        ctx_remaining = self._ctx_remaining_timeout_s()
+        if ctx_remaining is not None:
+            overall_timeout_s = (
+                ctx_remaining
+                if overall_timeout_s is None
+                else max(0.0, min(float(overall_timeout_s), ctx_remaining))
+            )
+            if overall_timeout_s <= 0:
+                raise OperationTimeoutError(
+                    "Operation deadline exceeded (ctx.deadline_ms)",
+                    retryable=True,
+                )
+
+        deadline = (
+            None
+            if overall_timeout_s is None
+            else time.monotonic() + float(overall_timeout_s)
+        )
         sleep_s = 0.05
         while True:
             status = self.status()
