@@ -4,6 +4,7 @@
 Pytest configuration and shared fixtures.
 """
 
+import contextlib
 import logging
 import os
 from collections.abc import Iterator
@@ -47,6 +48,22 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
     """Skip tests that require CUDA when neither real nor fake backend is present."""
     if "requires_cuda_or_fake" in item.keywords and not has_cuda_or_fake():
         pytest.skip("CUDA driver unavailable and fake CUDA backend not enabled")
+
+
+@pytest.fixture(autouse=True, scope="function")
+def reset_tensorcast_singletons() -> Iterator[None]:
+    """Ensure daemon client singletons never leak across tests."""
+    from tensorcast import daemon_ctl, startup
+
+    startup.shutdown()
+    with contextlib.suppress(Exception):
+        daemon_ctl._shutdown_daemon_clients()  # type: ignore[attr-defined]
+    try:
+        yield
+    finally:
+        startup.shutdown()
+        with contextlib.suppress(Exception):
+            daemon_ctl._shutdown_daemon_clients()  # type: ignore[attr-defined]
 
 
 @pytest.fixture(scope="function")
