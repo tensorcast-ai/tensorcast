@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Tests for the artifact transport functionality of the GlobalStoreServicer.
@@ -66,6 +66,7 @@ def test_transport_concurrency(servicer, test_context, memory_info):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{memory_info.node_id}",
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
     assert worker_response.status == global_store_pb2.Status.STATUS_OK
@@ -142,6 +143,7 @@ def test_transport_wait_timeout(servicer, test_context, memory_info):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{memory_info.node_id}",
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
     assert worker_response.status == global_store_pb2.Status.STATUS_OK
@@ -206,6 +208,7 @@ def test_concurrent_transport_requests(servicer, test_context, memory_info):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{memory_info.node_id}",
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
     assert worker_response.status == global_store_pb2.Status.STATUS_OK
@@ -296,6 +299,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{gpu_info.node_id}",
     )
     gpu_worker_response = servicer.RegisterWorker(gpu_worker_request, test_context)
     assert gpu_worker_response.status == global_store_pb2.Status.STATUS_OK
@@ -308,6 +312,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{ram_info.node_id}",
     )
     ram_worker_response = servicer.RegisterWorker(ram_worker_request, test_context)
     assert ram_worker_response.status == global_store_pb2.Status.STATUS_OK
@@ -320,6 +325,7 @@ def test_transport_memory_type_priority(servicer, test_context):
         p2p_port=8001,
         mem_pool_total_size=10 * 1024 * 1024 * 1024,  # 10GB
         mem_pool_available_size=10 * 1024 * 1024 * 1024,  # 10GB
+        daemon_id=f"daemon_{disk_info.node_id}",
     )
     disk_worker_response = servicer.RegisterWorker(disk_worker_request, test_context)
     assert disk_worker_response.status == global_store_pb2.Status.STATUS_OK

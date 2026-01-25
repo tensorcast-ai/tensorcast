@@ -52,6 +52,10 @@ Authoritative package namespace: `tensorcast.config.v1`. Separate top‑level me
 - `GlobalStoreConfig` (Python Global Store)
   - `database`, `server` (`listen`, worker pool, `grpc`), `worker_policy`, `observability`.
 
+- `NodeAgentConfig` (Python Node Agent)
+  - `server` (`listen`, `grpc`), `daemon_target`, `identity` (daemon_id/instance_id/engine),
+    `global_store` endpoints + heartbeat, `engine_adapter` (target TTL + plugins), `observability`.
+
 - `ClientConfig` (Python client/CLI)
   - `daemon.target` (`SocketAddress`), `bin_path`, `python_interpreter`, `storage.default_root`, client defaults and observability.
 
@@ -105,6 +109,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 - Authoritative files (do not duplicate field listings here):
   - `proto/tensorcast/config/v1/daemon_config.proto`
   - `proto/tensorcast/config/v1/global_store_config.proto`
+  - `proto/tensorcast/config/v1/node_agent_config.proto`
   - `proto/tensorcast/config/v1/client_config.proto`
   - `proto/tensorcast/config/v1/common.proto`
 - Conventions:
@@ -141,6 +146,7 @@ Tests cover normalization of enum aliases in both Global Store and Client loader
 # Acceptance Criteria
 
 - Daemon and Global Store start with only `--config` and reject unknown keys in the file.
+- Node Agent starts with only `--config` and rejects unknown keys in the file.
 - Protobuf schemas exist for `DaemonConfig`, `GlobalStoreConfig`, `ClientConfig` under `tensorcast.config.v1` with common types extracted.
 - Loaders in C++ and Python apply the same defaults and equivalent normalization rules:
   - Enum aliases (e.g., `grpc`, `info`) are accepted and canonicalized.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 
@@ -24,12 +25,25 @@ from tensorcast.api._region_cache import (
 )
 from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
-from tensorcast.api.store.artifact import Artifact, ArtifactDescriptor, TensorMeta
+from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    Operation,
+    OperationError,
+    OperationStatus,
+    OperationTimeoutError,
+    PollingOperation,
+)
+from tensorcast.api.store.artifact import (
+    Artifact,
+    ArtifactDescriptor,
+    PlacementPin,
+    PrefetchedReplica,
+    TensorMeta,
+)
 from tensorcast.api.store.async_ops import ArtifactFuture
 from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
-    PrefetchTicket,
 )
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
@@ -270,6 +284,121 @@ class Store:
             degraded_reason=resp.degraded_reason or None,
             last_error=resp.last_error or None,
             shards=tuple(shards),
+        )
+
+    def persistence_operation(
+        self,
+        *,
+        task_id: str | None = None,
+        artifact_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[PersistenceStatusResult]:
+        op_id = task_id or f"persist:{artifact_id or ''}"
+        created_at = time.monotonic()
+
+        def _ctx_remaining_timeout_s() -> float | None:
+            if ctx is None or ctx.deadline_ms is None:
+                return None
+            remaining = (float(ctx.deadline_ms) / 1000.0) - (
+                time.monotonic() - created_at
+            )
+            return max(0.0, remaining)
+
+        def _query() -> PersistenceStatusResult:
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                raise OperationTimeoutError(
+                    "Operation deadline exceeded (ctx.deadline_ms)",
+                    retryable=True,
+                )
+            resp = self._runtime.ensure_client().query_persistence_status(
+                task_id=task_id,
+                artifact_id=artifact_id,
+                timeout_s=timeout_s if timeout_s is not None else 10.0,
+            )
+            return self._persistence_status_from_proto(resp)
+
+        def _status() -> OperationStatus:
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                return OperationStatus(
+                    state="degraded",
+                    message="CallContext deadline exceeded",
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message="CallContext deadline exceeded",
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
+            try:
+                result = _query()
+            except OperationTimeoutError as exc:
+                return OperationStatus(
+                    state="degraded",
+                    message=str(exc),
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message=str(exc),
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
+            state: str
+            if result.state in {"pending", "running", "unknown"}:
+                state = "running"
+            elif result.state == "success":
+                state = "success"
+            elif result.state == "failed":
+                state = "failed"
+            elif result.state == "degraded":
+                state = "degraded"
+            else:
+                state = "running"
+            error: OperationError | None = None
+            if state in {"failed", "degraded"}:
+                message = (
+                    result.last_error
+                    or result.degraded_reason
+                    or "persistence degraded"
+                )
+                error = OperationError(
+                    status_code="INTERNAL"
+                    if state == "failed"
+                    else "DEADLINE_EXCEEDED",
+                    message=message,
+                    retryable=True,
+                    context={
+                        "task_id": result.task_id,
+                        "artifact_id": result.artifact_id,
+                    },
+                )
+            return OperationStatus(
+                state=state,  # type: ignore[arg-type]
+                message=result.degraded_reason or None,
+                progress=float(result.progress),
+                as_of_ms=int(time.time() * 1000),
+                error=error,
+            )
+
+        def _result() -> PersistenceStatusResult:
+            return _query()
+
+        return PollingOperation(
+            operation_id=op_id,
+            status_fn=_status,
+            result_fn=_result,
+            ctx=ctx,
         )
 
     # ------------------------------------------------------------------
@@ -690,7 +819,8 @@ __all__ = [
     "LeaseHandle",
     "MaterializationPayload",
     "MaterializationBatcher",
-    "PrefetchTicket",
+    "PlacementPin",
+    "PrefetchedReplica",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",

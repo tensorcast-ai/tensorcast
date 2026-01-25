@@ -616,6 +616,32 @@ class DaemonCtl:
                 raise
         return response
 
+    def wait_replica_status(
+        self,
+        ticket: store_daemon_pb2.ReplicaTicket,
+        *,
+        timeout_ms: int | None = None,
+    ) -> store_daemon_pb2.WaitReplicaStatusResponse:
+        with self._client_span("Client/WaitReplicaStatus") as span:
+            request = store_daemon_pb2.WaitReplicaStatusRequest(ticket=ticket)
+            if timeout_ms is not None:
+                request.timeout_ms = int(timeout_ms)
+            timeout_s: float = 610.0
+            if timeout_ms is not None and timeout_ms > 0:
+                timeout_s = max(1.0, float(timeout_ms) / 1000.0 + 1.0)
+            try:
+                response: store_daemon_pb2.WaitReplicaStatusResponse = self._unary_call(
+                    self.stub_v2.WaitReplicaStatus,
+                    request,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     def release_replica(
         self, ticket: store_daemon_pb2.ReplicaTicket
     ) -> store_daemon_pb2.ReleaseReplicaResponse:
@@ -628,6 +654,93 @@ class DaemonCtl:
                     timeout=5.0,
                     span=span,
                     retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def create_placement_lease(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str,
+        device_id: int,
+        ttl_ms: int | None,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.CreatePlacementLeaseResponse:
+        with self._client_span("Client/CreatePlacementLease") as span:
+            request = store_daemon_pb2.CreatePlacementLeaseRequest(
+                artifact_id=str(artifact_id),
+                view_id=str(view_id),
+                device_id=int(device_id),
+            )
+            if ttl_ms is not None:
+                request.ttl_ms = int(ttl_ms)
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.CreatePlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreatePlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def renew_placement_lease(
+        self,
+        *,
+        lease_token: bytes,
+        ttl_ms: int,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.RenewPlacementLeaseResponse:
+        with self._client_span("Client/RenewPlacementLease") as span:
+            request = store_daemon_pb2.RenewPlacementLeaseRequest(
+                lease_token=bytes(lease_token),
+                ttl_ms=int(ttl_ms),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.RenewPlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.RenewPlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def release_placement_lease(
+        self,
+        *,
+        lease_token: bytes,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.ReleasePlacementLeaseResponse:
+        with self._client_span("Client/ReleasePlacementLease") as span:
+            request = store_daemon_pb2.ReleasePlacementLeaseRequest(
+                lease_token=bytes(lease_token),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.ReleasePlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.ReleasePlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
@@ -654,6 +767,8 @@ class DaemonCtl:
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -676,6 +791,8 @@ class DaemonCtl:
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -698,6 +815,8 @@ class DaemonCtl:
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -718,6 +837,8 @@ class DaemonCtl:
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> (
         store_daemon_pb2.MaterializeReplicaResponse
         | bytes
@@ -758,6 +879,7 @@ class DaemonCtl:
                 target_device_type=target_device_type,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
                 preference=preference_value,
+                lease_mode=lease_mode,
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
@@ -779,7 +901,7 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
                         request,
-                        timeout=60,
+                        timeout=60 if timeout_s is None else timeout_s,
                         span=span,
                         retries=1,
                     )
@@ -857,6 +979,8 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
 
     @overload
@@ -874,6 +998,8 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
 
     @overload
@@ -891,6 +1017,8 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, str, str]: ...
 
     def materialize_by_key_v2(
@@ -906,6 +1034,8 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> (
         store_daemon_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
@@ -944,6 +1074,7 @@ class DaemonCtl:
                 replica_uuid=replica_uuid,
                 preference=preference_value,
                 target_device_type=target_device_type,
+                lease_mode=lease_mode,
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
@@ -955,7 +1086,7 @@ class DaemonCtl:
                 response: store_daemon_pb2.MaterializeByKeyResponse = self._unary_call(
                     self.stub_v2.MaterializeByKey,
                     request,
-                    timeout=60,
+                    timeout=60 if timeout_s is None else timeout_s,
                     span=span,
                     retries=1,
                 )
@@ -1249,6 +1380,22 @@ class DaemonCtl:
                     local_handle_socket_path=local_handle_socket_path,
                     cpu_shared_memory_enabled=cpu_shared_memory_enabled,
                 )
+
+    def get_worker_status(self) -> store_daemon_pb2.GetWorkerStatusResponse:
+        with self._client_span("Client/GetWorkerStatus") as span:
+            request = store_daemon_pb2.GetWorkerStatusRequest()
+            try:
+                response: store_daemon_pb2.GetWorkerStatusResponse = self._unary_call(
+                    self.stub_v2.GetWorkerStatus,
+                    request,
+                    timeout=5.0,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
 
     # ------------------------------------------------------------------
     # Memory Artifact registration (outer-layer client API)

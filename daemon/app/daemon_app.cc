@@ -116,6 +116,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .region_registry = app->kernel_->region_registry(),
       .lip_manager = app->kernel_->lip_manager(),
       .persistence_manager = app->kernel_->persistence_manager(),
+      .sessions_service = app->kernel_->sessions_service(),
+      .lifecycle_manager = app->kernel_->lifecycle_manager(),
+      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

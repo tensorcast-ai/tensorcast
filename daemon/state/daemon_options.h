@@ -40,6 +40,9 @@ struct DaemonOptions {
   // Shared storage root for disk paths (required).
   std::filesystem::path storage_path;
 
+  // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
+  std::string daemon_id;
+
   // Local handle plane (UDS) for FD handoff + lease release.
   std::string local_handle_socket_path;
   // When unset, the daemon uses a conservative default (see HandleLeaseRegistry::Options).

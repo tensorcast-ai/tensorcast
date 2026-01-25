@@ -29,6 +29,7 @@ from tensorcast.global_store.exceptions import (
     ValidationError,
 )
 from tensorcast.global_store.models import (
+    Instance,
     MemoryType,
     PersistenceShardStatus,
     PersistenceStatus,
@@ -42,6 +43,7 @@ from tensorcast.global_store.repositories import (
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
     ChunkDirectoryRepository,
+    InstanceRepository,
     LeafRepository,
     ReplicaRepository,
     TransportRepository,
@@ -58,6 +60,7 @@ from tensorcast.global_store.repositories.key_mapping_repository import (
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
+    InstanceService,
     PlacementService,
     RecoveryService,
     TransportService,
@@ -156,6 +159,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.artifact_indices = ArtifactIndexRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
+        self.instance_repository = InstanceRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
         self.variant_repository = VariantRepository(self.connection)
         self.leaf_repository = LeafRepository(self.connection)
@@ -173,6 +177,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.worker_service = WorkerService(
             self.worker_repository, self.replica_repository
         )
+        self.instance_service = InstanceService(
+            self.instance_repository, self.worker_repository
+        )
         self.chunk_service = ChunkService(self.chunk_directory_repository)
         self.view_state_service = ViewStateService(
             self.variant_repository, self.leaf_repository
@@ -185,7 +192,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
         # Initialize recovery service for high availability
         self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository
+            self.worker_repository, self.replica_repository, self.worker_service
         )
 
         self._initiate_startup_recovery()
@@ -355,6 +362,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 try:
                     # -------- Cleanup inactive workers --------
                     self.worker_service.cleanup_inactive_workers()
+                    # -------- Cleanup inactive instances --------
+                    if self.instance_service:
+                        try:
+                            self.instance_service.cleanup_inactive_instances()
+                        except Exception:
+                            logger.exception("Error cleaning up inactive instances")
 
                     # -------- Cleanup expired transports --------
                     if self.transport_service:
@@ -1362,8 +1375,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.RegisterWorkerResponse:
         """Register a new worker."""
         try:
+            daemon_id = (request.daemon_id or "").strip()
+            if not daemon_id:
+                context.set_details("daemon_id is required")
+                return global_store_pb2.RegisterWorkerResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
             # Convert proto to domain artifact
             worker = Worker(
+                daemon_id=daemon_id,
                 node_id=request.node_id,
                 node_address=request.node_address,
                 grpc_port=request.grpc_port,
@@ -1375,6 +1395,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             # Span attributes with worker metadata
             set_span_attributes(
                 {
+                    "tc.worker.daemon_id": str(worker.daemon_id),
                     "tc.worker.node_id": worker.node_id,
                     "tc.worker.node_address": worker.node_address,
                     "tc.worker.grpc_port": int(worker.grpc_port),
@@ -1427,8 +1448,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
                 # Single, enriched registration log (recovery)
                 logger.info(
-                    "Worker registered: worker_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s prev_worker_id=%s state_sync_required=%s expected_state_version=%d",
+                    "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s prev_worker_id=%s state_sync_required=%s expected_state_version=%d",
                     registered.worker_id,
+                    (registered.daemon_id or ""),
                     worker.node_id,
                     worker.node_address,
                     int(worker.grpc_port),
@@ -1487,8 +1509,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
                 # Single, enriched registration log (normal)
                 logger.info(
-                    "Worker registered: worker_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s",
+                    "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s",
                     registered.worker_id,
+                    (registered.daemon_id or ""),
                     worker.node_id,
                     worker.node_address,
                     int(worker.grpc_port),
@@ -1726,6 +1749,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
                 worker_info = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
                     worker_id=worker.worker_id,
+                    daemon_id=str(worker.daemon_id or ""),
                     node_id=worker.node_id,
                     node_address=worker.node_address,
                     grpc_port=worker.grpc_port,
@@ -1750,6 +1774,136 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.ListActiveWorkersResponse()
+
+    # ========== Instance Methods ==========
+
+    def RegisterInstance(
+        self,
+        request: global_store_pb2.RegisterInstanceRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.RegisterInstanceResponse:
+        """Register a new engine instance."""
+        try:
+            instance = Instance(
+                instance_id=request.instance_id,
+                daemon_id=request.daemon_id,
+                worker_id=request.worker_id if request.HasField("worker_id") else None,
+                engine=request.engine,
+                signals_endpoint=request.signals_endpoint or None,
+                labels=dict(request.labels) if request.labels else {},
+            )
+            registered = self.instance_service.register_instance(instance)
+            return global_store_pb2.RegisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                instance_id=registered.instance_id,
+                heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
+            )
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return global_store_pb2.RegisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error registering instance")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.RegisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def InstanceHeartbeat(
+        self,
+        request: global_store_pb2.InstanceHeartbeatRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.InstanceHeartbeatResponse:
+        """Process instance heartbeat."""
+        try:
+            worker_id = request.worker_id if request.HasField("worker_id") else None
+            success = self.instance_service.heartbeat(
+                request.instance_id, worker_id=worker_id
+            )
+            return global_store_pb2.InstanceHeartbeatResponse(
+                status=global_store_pb2.Status.STATUS_OK
+                if success
+                else global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return global_store_pb2.InstanceHeartbeatResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error processing instance heartbeat")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.InstanceHeartbeatResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def UnregisterInstance(
+        self,
+        request: global_store_pb2.UnregisterInstanceRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UnregisterInstanceResponse:
+        """Unregister an instance."""
+        try:
+            success = self.instance_service.unregister_instance(request.instance_id)
+            return global_store_pb2.UnregisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_OK
+                if success
+                else global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+        except ValidationError as e:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(e))
+            return global_store_pb2.UnregisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error unregistering instance")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.UnregisterInstanceResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ListActiveInstances(
+        self,
+        request: global_store_pb2.ListActiveInstancesRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ListActiveInstancesResponse:
+        """List active instances."""
+        try:
+            instances = self.instance_service.list_active_instances(
+                include_unavailable=request.include_unavailable
+            )
+            infos: list[global_store_pb2.ListActiveInstancesResponse.InstanceInfo] = []
+            for inst in instances:
+                last_ts = timestamp_pb2.Timestamp()
+                if inst.last_heartbeat:
+                    last_ts.FromSeconds(int(inst.last_heartbeat.timestamp()))
+                else:
+                    last_ts.FromSeconds(0)
+                infos.append(
+                    global_store_pb2.ListActiveInstancesResponse.InstanceInfo(
+                        instance_id=inst.instance_id,
+                        daemon_id=inst.daemon_id,
+                        worker_id=inst.worker_id or "",
+                        engine=inst.engine,
+                        signals_endpoint=inst.signals_endpoint or "",
+                        last_heartbeat_ts=last_ts,
+                        labels=dict(inst.labels) if inst.labels else {},
+                        status=self._determine_instance_status(inst),
+                    )
+                )
+            return global_store_pb2.ListActiveInstancesResponse(instances=infos)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error listing active instances")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.ListActiveInstancesResponse()
 
     # ========== High Availability Methods ==========
 
@@ -2227,6 +2381,21 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # Otherwise
         return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED
 
+    def _determine_instance_status(
+        self, inst: Instance
+    ) -> global_store_pb2.ConnectionStatus:
+        if not inst.last_heartbeat:
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED
+        now_ts = time.time()
+        last_hb_ts = inst.last_heartbeat.timestamp()
+        timeout_sec = self.config.heartbeat_timeout_ms / 1000.0
+        age = now_ts - last_hb_ts
+        if age <= timeout_sec:
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_CONNECTED
+        if age <= timeout_sec * 2:
+            return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_RECONNECTING
+        return global_store_pb2.ConnectionStatus.CONNECTION_STATUS_DISCONNECTED
+
     # ========== Testing Utilities ===========
 
     def reset_state(self) -> None:
@@ -2247,6 +2416,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             "artifact_indices",
             "artifacts",
             "workers",
+            "instances",
         ]
         for table in tables:
             try:
@@ -2270,6 +2440,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.replica_repository = ReplicaRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
+        self.instance_repository = InstanceRepository(self.connection)
 
         self.artifact_service = ArtifactService(self.replica_repository)
         self.transport_service = TransportService(
@@ -2279,7 +2450,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.worker_repository, self.replica_repository
         )
         self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository
+            self.worker_repository, self.replica_repository, self.worker_service
         )
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")

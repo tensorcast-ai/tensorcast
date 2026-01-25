@@ -3,10 +3,13 @@
 #pragma once
 
 #include <chrono>
+#include <cstdint>
 #include <optional>
 #include <string>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/ready_signal.h"
 #include "core/store/materialization/contracts/loading_spec.h"
@@ -47,14 +50,29 @@ struct SessionEntry {
 
 class ReplicaSessionManager {
  public:
+  enum class PutResult : uint8_t { kInserted, kJoined };
+
   explicit ReplicaSessionManager(std::chrono::seconds ttl) : ttl_(ttl) {}
 
-  void put(
+  [[nodiscard]] absl::StatusOr<PutResult> put_if_absent_or_join(
       const std::string& replica_uuid,
       const store::loading::ReplicaKey& key,
       std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal) {
     absl::MutexLock l(&mu_);
-    sessions_[replica_uuid] = SessionEntry{key, std::move(ready_signal), now() + ttl_};
+    auto it = sessions_.find(replica_uuid);
+    if (it != sessions_.end()) {
+      if (expired(it->second)) {
+        sessions_.erase(it);
+      } else {
+        if (it->second.key != key) {
+          return absl::FailedPreconditionError("replica_uuid already exists with a different ReplicaKey");
+        }
+        it->second.expiry = now() + ttl_;
+        return PutResult::kJoined;
+      }
+    }
+    sessions_.emplace(replica_uuid, SessionEntry{key, std::move(ready_signal), now() + ttl_});
+    return PutResult::kInserted;
   }
 
   std::optional<SessionEntry> get(const std::string& replica_uuid) {

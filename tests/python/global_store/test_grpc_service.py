@@ -10,6 +10,11 @@ import grpc
 from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.config.settings import (
+    GlobalStoreConfig,
+    get_config,
+    set_config,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -308,6 +313,10 @@ class TestGRPCService:
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""
         try:
+            try:
+                get_config()
+            except RuntimeError:
+                set_config(GlobalStoreConfig())
             # Create a servicer with the file path - DuckDB will create the file
             servicer1 = GlobalStoreServicer(db_file=temp_db_file)
 
@@ -319,6 +328,7 @@ class TestGRPCService:
                 p2p_port=8002,
                 mem_pool_total_size=10000000000,
                 mem_pool_available_size=8000000000,
+                daemon_id="daemon_test_node_1",
             )
             worker_response = servicer1.RegisterWorker(worker_request, test_context)
 
@@ -404,6 +414,7 @@ class TestGRPCService:
         """Test worker registration functionality"""
         request = global_store_pb2.RegisterWorkerRequest(
             node_id="test_node_1",
+            daemon_id="daemon_test_1",
             node_address="192.168.1.10",
             grpc_port=8001,
             p2p_port=8002,
@@ -418,6 +429,45 @@ class TestGRPCService:
         assert len(response.worker_id) > 0
         assert response.heartbeat_interval_ms > 0
 
+    def test_worker_registration_daemon_id_is_stable_identity(
+        self, servicer, test_context
+    ):
+        """Registering with the same daemon_id should upsert the same worker_id."""
+        request1 = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_1",
+            daemon_id="daemon_stable",
+            node_address="192.168.1.10",
+            grpc_port=8001,
+            p2p_port=8002,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+        )
+        response1 = servicer.RegisterWorker(request1, test_context)
+        assert response1.status == global_store_pb2.Status.STATUS_OK
+
+        request2 = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_1",
+            daemon_id="daemon_stable",
+            node_address="192.168.1.11",
+            grpc_port=8005,
+            p2p_port=8006,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=7000000000,
+        )
+        response2 = servicer.RegisterWorker(request2, test_context)
+        assert response2.status == global_store_pb2.Status.STATUS_OK
+        assert response2.worker_id == response1.worker_id
+
+        list_request = global_store_pb2.ListActiveWorkersRequest(
+            include_unavailable=True
+        )
+        list_response = servicer.ListActiveWorkers(list_request, test_context)
+        info_by_id = {w.worker_id: w for w in list_response.workers}
+        info = info_by_id[response1.worker_id]
+        assert info.daemon_id == "daemon_stable"
+        assert info.node_address == "192.168.1.11"
+        assert info.grpc_port == 8005
+
     def test_worker_heartbeat(self, servicer, test_context):
         """Test worker heartbeat functionality"""
         # First register a worker
@@ -428,6 +478,7 @@ class TestGRPCService:
             p2p_port=8002,
             mem_pool_total_size=10000000000,
             mem_pool_available_size=8000000000,
+            daemon_id="daemon_test_node_1",
         )
         register_response = servicer.RegisterWorker(register_request, test_context)
 
@@ -453,6 +504,7 @@ class TestGRPCService:
             p2p_port=8002,
             mem_pool_total_size=10000000000,
             mem_pool_available_size=8000000000,
+            daemon_id="daemon_test_node_1",
         )
         register_response = servicer.RegisterWorker(register_request, test_context)
 
@@ -470,10 +522,11 @@ class TestGRPCService:
     def test_list_active_workers(self, servicer, test_context):
         """Test listing active workers"""
         # Register multiple workers
-        worker_ids = []
+        worker_records = []
         for i in range(3):
             register_request = global_store_pb2.RegisterWorkerRequest(
                 node_id=f"test_node_{i}",
+                daemon_id=f"daemon_{i}",
                 node_address=f"192.168.1.{10+i}",
                 grpc_port=8001 + i,
                 p2p_port=8002 + i,
@@ -481,7 +534,7 @@ class TestGRPCService:
                 mem_pool_available_size=8000000000,
             )
             register_response = servicer.RegisterWorker(register_request, test_context)
-            worker_ids.append(register_response.worker_id)
+            worker_records.append((register_response.worker_id, f"daemon_{i}"))
 
         # List workers
         list_request = global_store_pb2.ListActiveWorkersRequest(
@@ -490,9 +543,10 @@ class TestGRPCService:
         list_response = servicer.ListActiveWorkers(list_request, test_context)
 
         assert len(list_response.workers) >= 3
-        listed_worker_ids = [w.worker_id for w in list_response.workers]
-        for worker_id in worker_ids:
-            assert worker_id in listed_worker_ids
+        info_by_id = {w.worker_id: w for w in list_response.workers}
+        for worker_id, daemon_id in worker_records:
+            assert worker_id in info_by_id
+            assert info_by_id[worker_id].daemon_id == daemon_id
 
     def test_get_artifact_info(
         self, servicer, test_context, memory_info, registered_worker

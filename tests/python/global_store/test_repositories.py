@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for Global Store repository layer."""
 
@@ -19,6 +19,7 @@ class TestRepositories:
         # Create
         worker = Worker(
             worker_id="test_worker",
+            daemon_id="daemon_1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -32,6 +33,7 @@ class TestRepositories:
         # Read
         found = worker_repo.find_by_id("test_worker")
         assert found is not None
+        assert found.daemon_id == "daemon_1"
         assert found.node_id == "node1"
 
         # Update heartbeat
@@ -43,6 +45,36 @@ class TestRepositories:
         assert deleted is True
         assert worker_repo.find_by_id("test_worker") is None
 
+    def test_worker_repository_find_by_daemon_id(self, repositories):
+        """Test finding worker by stable daemon_id."""
+        worker_repo = repositories["worker"]
+
+        worker = Worker(
+            worker_id="test_worker",
+            daemon_id="daemon_abc",
+            node_id="node1",
+            node_address="192.168.1.1",
+            grpc_port=50051,
+            p2p_port=50052,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+        )
+        worker_repo.create(worker)
+
+        found = worker_repo.find_by_daemon_id("daemon_abc")
+        assert found is not None
+        assert found.worker_id == "test_worker"
+
+        assert worker_repo.find_by_daemon_id("missing") is None
+
+        # By default inactive workers are excluded.
+        assert worker_repo.mark_inactive("test_worker") is True
+        assert worker_repo.find_by_daemon_id("daemon_abc") is None
+        assert (
+            worker_repo.find_by_daemon_id("daemon_abc", include_inactive=True)
+            is not None
+        )
+
     def test_worker_repository_find_by_node(self, repositories):
         """Test finding worker by node_id."""
         worker_repo = repositories["worker"]
@@ -50,6 +82,7 @@ class TestRepositories:
         # Create worker
         worker = Worker(
             worker_id="test_worker",
+            daemon_id="daemon_unique_node",
             node_id="unique_node",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -72,6 +105,7 @@ class TestRepositories:
         for i in range(3):
             worker = Worker(
                 worker_id=f"worker_{i}",
+                daemon_id=f"daemon_{i}",
                 node_id=f"node_{i}",
                 node_address=f"192.168.1.{i+1}",
                 grpc_port=50051 + i,
@@ -157,6 +191,7 @@ class TestRepositories:
         # Create worker first
         worker = Worker(
             worker_id="worker1",
+            daemon_id="daemon_worker1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -235,6 +270,7 @@ class TestRepositories:
         # Create worker first
         worker = Worker(
             worker_id="worker1",
+            daemon_id="daemon_worker1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -313,6 +349,7 @@ class TestRepositories:
         # Create worker
         worker = Worker(
             worker_id="temp_worker",
+            daemon_id="daemon_temp_worker",
             node_id="temp_node",
             node_address="192.168.1.100",
             grpc_port=50051,

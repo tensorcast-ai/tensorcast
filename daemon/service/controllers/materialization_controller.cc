@@ -220,7 +220,7 @@ absl::StatusOr<std::string> compute_target_layout_multihash(
   return store::loader::compute_data_multihash_from_seekable_source(src, total_size);
 }
 
-void register_session_and_refs(
+absl::Status register_session_and_refs(
     SessionsService& sessions,
     RefTracker& refs,
     const store::loading::ReplicaKey& replica_key,
@@ -229,12 +229,16 @@ void register_session_and_refs(
     int32_t pid,
     bool allow_pid_ref) {
   if (!replica_uuid.empty()) {
-    sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
+    auto st = sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
+    if (!st.ok()) {
+      return st;
+    }
   }
   if (!allow_pid_ref || pid <= 0) {
-    return;
+    return absl::OkStatus();
   }
   refs.add_ref(replica_key, pid);
+  return absl::OkStatus();
 }
 
 absl::StatusOr<std::vector<uint32_t>> build_export_chunks_for_replica(
@@ -1052,10 +1056,15 @@ grpc::Status MaterializationController::materialize_replica(
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
   const bool cpu_target = dev.type == DeviceType::CPU;
   const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  const int32_t effective_pid = loopback_peer ? req.pid() : 0;
+  const bool no_lease = req.lease_mode() == v2::LeaseMode::LEASE_MODE_NO_LEASE;
+  const int32_t effective_pid = (loopback_peer && !no_lease) ? req.pid() : 0;
   if (req.wait_for_completion() && !loopback_peer) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
+  }
+  if (no_lease && req.wait_for_completion()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "lease_mode=NO_LEASE requires wait_for_completion=false"};
   }
   if (cpu_target) {
     if (!loopback_peer) {
@@ -1227,6 +1236,9 @@ grpc::Status MaterializationController::materialize_replica(
   }
 
   auto finalize_response = [&]() -> grpc::Status {
+    if (no_lease) {
+      resp.clear_mem_handle();
+    }
     if (!resp.view_index_json().empty() && resp.view_index_bytes().empty()) {
       resp.set_view_index_bytes(resp.view_index_json());
     }
@@ -1261,15 +1273,20 @@ grpc::Status MaterializationController::materialize_replica(
   const bool view_requested = view_spec.has_value() || request_view_id.has_value();
   std::optional<store::loading::ReplicaKey> lip_replica_key;
   if (has_artifact && !view_requested && dev.type == DeviceType::GPU) {
+    absl::Status session_status = absl::OkStatus();
     auto satisfied = d_.lip.try_satisfy_from_lip(
         resolved_artifact_id,
         dev.ordinal,
         [&](const store::loading::ReplicaKey& rkey) {
           lip_replica_key = rkey;
-          register_session_and_refs(
+          session_status = register_session_and_refs(
               d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
         },
         resp.mutable_mem_handle());
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
     if (!satisfied.ok()) {
       // Same-device denial should fall back to the engine path just like MaterializeByKey.
       if (!absl::IsFailedPrecondition(satisfied.status())) {
@@ -1352,8 +1369,20 @@ grpc::Status MaterializationController::materialize_replica(
   const auto& handle = *result;
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  register_session_and_refs(
-      d_.sessions, d_.refs, handle.replica_key, handle.ready_signal, req.replica_uuid(), effective_pid, loopback_peer);
+  {
+    const absl::Status session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        handle.replica_key,
+        handle.ready_signal,
+        req.replica_uuid(),
+        effective_pid,
+        loopback_peer);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
+  }
   if (has_disk)
     resp.set_disk_path(normalized_disk_path->string());
   if (cpu_target) {
@@ -1469,10 +1498,15 @@ grpc::Status MaterializationController::materialize_by_key(
       : v2::DeviceType::DEVICE_TYPE_GPU;
   const bool cpu_target = requested_type == v2::DeviceType::DEVICE_TYPE_CPU;
   const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  const int32_t effective_pid = loopback_peer ? req.pid() : 0;
+  const bool no_lease = req.lease_mode() == v2::LeaseMode::LEASE_MODE_NO_LEASE;
+  const int32_t effective_pid = (loopback_peer && !no_lease) ? req.pid() : 0;
   if (req.wait_for_completion() && !loopback_peer) {
     resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
+  }
+  if (no_lease && req.wait_for_completion()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return {StatusCode::INVALID_ARGUMENT, "lease_mode=NO_LEASE requires wait_for_completion=false"};
   }
   span->SetAttribute("tc.device.type", static_cast<int64_t>(requested_type));
   const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
@@ -1517,6 +1551,9 @@ grpc::Status MaterializationController::materialize_by_key(
   }
 
   auto finalize_response = [&]() -> grpc::Status {
+    if (no_lease) {
+      resp.clear_mem_handle();
+    }
     auto layout_or = resolve_layout_json_by_key(resp, d_.engine);
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
@@ -1561,15 +1598,20 @@ grpc::Status MaterializationController::materialize_by_key(
   // Try LIP fast path first (GPU only)
   std::optional<store::loading::ReplicaKey> lip_replica_key;
   if (!cpu_target) {
+    absl::Status session_status = absl::OkStatus();
     auto satisfied = d_.lip.try_satisfy_from_lip(
         mapping.artifact_id,
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
           lip_replica_key = rkey;
-          register_session_and_refs(
+          session_status = register_session_and_refs(
               d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
         },
         resp.mutable_mem_handle());
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
     if (!satisfied.ok()) {
       // If LIP path fails for reasons like same-device denial, fall back to engine path.
       // Only propagate errors that indicate a broader failure.
@@ -1637,8 +1679,20 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
-  register_session_and_refs(
-      d_.sessions, d_.refs, handle.replica_key, handle.ready_signal, req.replica_uuid(), effective_pid, loopback_peer);
+  {
+    const absl::Status session_status = register_session_and_refs(
+        d_.sessions,
+        d_.refs,
+        handle.replica_key,
+        handle.ready_signal,
+        req.replica_uuid(),
+        effective_pid,
+        loopback_peer);
+    if (!session_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(session_status);
+    }
+  }
   if (cpu_target) {
     if (!handle.cpu_memfd_region.has_value()) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);

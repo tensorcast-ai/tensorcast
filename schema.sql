@@ -18,6 +18,8 @@
 -- Workers table
 CREATE TABLE IF NOT EXISTS workers (
     worker_id TEXT PRIMARY KEY,
+    -- Stable daemon identity (required; from daemon config); preferred control-plane identity.
+    daemon_id TEXT NOT NULL,
     node_id TEXT NOT NULL,
     node_address TEXT NOT NULL,
     grpc_port INTEGER NOT NULL,
@@ -37,15 +39,31 @@ CREATE TABLE IF NOT EXISTS workers (
     UNIQUE(node_address, grpc_port)
 );
 
--- Ensure new worker lifecycle columns exist on upgrades.
-ALTER TABLE workers ADD COLUMN IF NOT EXISTS inactive_at TIMESTAMP WITH TIME ZONE;
-
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_node_id ON workers (node_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_daemon_id_unique ON workers (daemon_id);
 CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
 CREATE INDEX IF NOT EXISTS idx_workers_inactive_at ON workers (inactive_at);
+
+-- Engine instance registry (node-local engine processes)
+CREATE TABLE IF NOT EXISTS instances (
+    instance_id TEXT PRIMARY KEY,
+    daemon_id TEXT NOT NULL,
+    worker_id TEXT NULL,
+    engine TEXT NOT NULL,
+    signals_endpoint TEXT,
+    labels_json TEXT NOT NULL DEFAULT '{}',
+    registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    inactive_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_instances_daemon_id ON instances (daemon_id);
+CREATE INDEX IF NOT EXISTS idx_instances_worker_id ON instances (worker_id);
+CREATE INDEX IF NOT EXISTS idx_instances_last_heartbeat ON instances (last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_instances_inactive_at ON instances (inactive_at);
 -- Memory tier telemetry snapshots (short retention)
 CREATE TABLE IF NOT EXISTS memory_tier_snapshots (
     node_id TEXT NOT NULL,

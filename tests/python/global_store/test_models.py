@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for Global Store domain models."""
 
@@ -78,6 +78,7 @@ class TestModels:
         """Test Worker creation and properties."""
         worker = Worker(
             worker_id="worker_1",
+            daemon_id="daemon_1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -93,6 +94,7 @@ class TestModels:
         """Test worker with full memory utilization."""
         worker = Worker(
             worker_id="worker_1",
+            daemon_id="daemon_1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -107,6 +109,7 @@ class TestModels:
         """Test worker with zero total memory."""
         worker = Worker(
             worker_id="worker_1",
+            daemon_id="daemon_1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -121,6 +124,7 @@ class TestModels:
         """Test worker accepting requests status."""
         worker = Worker(
             worker_id="worker_1",
+            daemon_id="daemon_1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,

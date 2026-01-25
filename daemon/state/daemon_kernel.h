@@ -19,6 +19,7 @@
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
+#include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/registration_manager.h"
 #include "daemon/state/replica_session_manager.h"
@@ -123,6 +124,10 @@ class DaemonKernel {
     return *identity_store_;
   }
 
+  [[nodiscard]] PlacementLeaseTokens& placement_lease_tokens() const {
+    return *placement_lease_tokens_;
+  }
+
   [[nodiscard]] ShutdownSignal& shutdown_signal() {
     return shutdown_signal_;
   }
@@ -157,6 +162,7 @@ class DaemonKernel {
   std::unique_ptr<VerificationTracker> verif_tracker_;
   std::unique_ptr<RegistrationManager> reg_mgr_;
   std::unique_ptr<HandleLeaseRegistry> handle_leases_;
+  std::unique_ptr<PlacementLeaseTokens> placement_lease_tokens_;
 
   std::unique_ptr<SessionsService> sessions_svc_;
   std::unique_ptr<LipBridge> lip_bridge_;

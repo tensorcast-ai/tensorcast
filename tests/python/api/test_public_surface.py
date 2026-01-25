@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -13,6 +13,16 @@ def test_tensorcast_exports_artifact_helpers() -> None:
     assert callable(tc.artifact)
     assert hasattr(tc, "artifact_async")
     assert callable(tc.artifact_async)
+
+
+def test_tensorcast_exports_programmable_primitives() -> None:
+    assert hasattr(tc, "context")
+    assert callable(tc.context)
+    assert hasattr(tc, "CallContext")
+    assert hasattr(tc, "Operation")
+    assert hasattr(tc, "plan")
+    assert callable(tc.plan)
+    assert hasattr(tc, "Plan")
 
 
 def test_store_register_and_put_accept_policy_argument() -> None:

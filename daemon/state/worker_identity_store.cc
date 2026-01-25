@@ -6,6 +6,11 @@
 
 namespace tensorcast::daemon {
 
+void WorkerIdentityStore::set_daemon_id(std::string daemon_id) {
+  absl::MutexLock lock(&mu_);
+  daemon_id_ = std::move(daemon_id);
+}
+
 void WorkerIdentityStore::set_registered(std::string worker_id, std::string node_id) {
   std::string node_id_copy;
   {
@@ -28,6 +33,11 @@ std::string WorkerIdentityStore::worker_id() const {
 std::string WorkerIdentityStore::node_id() const {
   absl::MutexLock lock(&mu_);
   return node_id_;
+}
+
+std::string WorkerIdentityStore::daemon_id() const {
+  absl::MutexLock lock(&mu_);
+  return daemon_id_;
 }
 
 } // namespace tensorcast::daemon

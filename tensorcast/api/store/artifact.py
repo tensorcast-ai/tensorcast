@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import threading
 import time
+import uuid
 import weakref
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import timezone
 from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
@@ -17,6 +20,13 @@ from tensorcast.api._view_ops import (
     ViewSpecBuildResult,
     _coerce_slice_spec,
     build_view_spec,
+)
+from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    DaemonReplicaOperation,
+    Operation,
+    OperationStatus,
+    PollingOperation,
 )
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
@@ -36,10 +46,12 @@ from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
     compute_view_id,
 )
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
+    from tensorcast.api._config import GetArtifactOptions
     from tensorcast.api.store import Store
-    from tensorcast.api.store.batch_context import BatchContext, PrefetchTicket
+    from tensorcast.api.store.batch_context import BatchContext
     from tensorcast.api.store.runtime import StoreRuntimeContext
 
 
@@ -60,6 +72,105 @@ class ArtifactDescriptor:
     tensor_metas: Mapping[str, TensorMeta]
     total_bytes: int
     generation: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class PrefetchedReplica:
+    artifact_id: str
+    view_id: str
+    operation_id: str
+    device_id: int
+    daemon_id: str
+    source: str | None
+
+
+def _encode_capability_token(token: bytes) -> str:
+    raw = base64.urlsafe_b64encode(token).decode("ascii")
+    return raw.rstrip("=")
+
+
+def _decode_capability_token(token: str) -> bytes:
+    raw = token.strip()
+    padding = "=" * (-len(raw) % 4)
+    return base64.urlsafe_b64decode(raw + padding)
+
+
+def _ctx_timeout_s(ctx: CallContext | None) -> float | None:
+    if ctx is None or ctx.deadline_ms is None:
+        return None
+    timeout_s = float(ctx.deadline_ms) / 1000.0
+    if timeout_s <= 0:
+        raise ArtifactError(
+            "CallContext deadline exceeded",
+            status_code="DEADLINE_EXCEEDED",
+            retryable=False,
+        )
+    return max(0.001, timeout_s)
+
+
+@dataclass(frozen=True, slots=True)
+class PlacementPin:
+    pin_id: int
+    capability_token: str
+    daemon_id: str
+    artifact_id: str
+    view_id: str
+    device_id: int
+    expires_at_ms: int | None
+    runtime_ref: "weakref.ReferenceType[StoreRuntimeContext]" = field(
+        repr=False, compare=False
+    )
+
+    def _runtime(self) -> "StoreRuntimeContext":
+        runtime = self.runtime_ref()
+        if runtime is None or runtime.closed:
+            raise ArtifactError(
+                "Store runtime is closed",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        return runtime
+
+    def renew(self, *, ttl_ms: int, ctx: CallContext | None = None) -> "PlacementPin":
+        timeout_s = _ctx_timeout_s(ctx)
+        resp = (
+            self._runtime()
+            .ensure_client()
+            .renew_placement_lease(
+                lease_token=_decode_capability_token(self.capability_token),
+                ttl_ms=int(ttl_ms),
+                timeout_s=timeout_s,
+            )
+        )
+        expires_at_ms: int | None = None
+        if resp.HasField("expires_at"):
+            try:
+                expires_at_ms = int(
+                    resp.expires_at.ToDatetime(tzinfo=timezone.utc).timestamp() * 1000
+                )
+            except Exception:  # noqa: BLE001
+                expires_at_ms = None
+        return PlacementPin(
+            pin_id=int(resp.lease_id),
+            capability_token=self.capability_token,
+            daemon_id=self.daemon_id,
+            artifact_id=self.artifact_id,
+            view_id=self.view_id,
+            device_id=self.device_id,
+            expires_at_ms=expires_at_ms,
+            runtime_ref=self.runtime_ref,
+        )
+
+    def release(self, *, ctx: CallContext | None = None) -> None:
+        timeout_s = _ctx_timeout_s(ctx)
+        _ = (
+            self._runtime()
+            .ensure_client()
+            .release_placement_lease(
+                lease_token=_decode_capability_token(self.capability_token),
+                timeout_s=timeout_s,
+            )
+        )
 
 
 class ArtifactSerializedFallback(TypedDict):
@@ -240,6 +351,7 @@ class Artifact:
         *,
         device: torch.device | str,
         names: Sequence[str] | None = None,
+        ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
         artifact_id = self._ensure_identified()
         effective_index = self._effective_index()
@@ -265,6 +377,7 @@ class Artifact:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            ctx=ctx,
         )
         state: dict[str, torch.Tensor] | None = None
         try:
@@ -283,9 +396,10 @@ class Artifact:
         *,
         device: torch.device | str,
         cache: bool = True,  # cache retained for compatibility, no-op in v2
+        ctx: CallContext | None = None,
     ) -> torch.Tensor:
         _ = cache  # cache parameter is reserved for future use
-        result = self.tensor_dict(device=device, names=[name])
+        result = self.tensor_dict(device=device, names=[name], ctx=ctx)
         if name not in result:
             raise ArtifactError(
                 f"Tensor '{name}' missing from materialized payload",
@@ -299,6 +413,7 @@ class Artifact:
         target: dict[str, torch.Tensor],
         *,
         device: torch.device | str | None = None,
+        ctx: CallContext | None = None,
     ) -> None:
         artifact_id = self._ensure_identified()
         effective_index = self._effective_index()
@@ -322,6 +437,7 @@ class Artifact:
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            ctx=ctx,
         )
 
     def tensor_into(
@@ -330,6 +446,7 @@ class Artifact:
         target_tensor: torch.Tensor,
         *,
         device: torch.device | str | None = None,
+        ctx: CallContext | None = None,
     ) -> None:
         if not isinstance(target_tensor, torch.Tensor):
             raise ArtifactError(
@@ -360,6 +477,7 @@ class Artifact:
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
             tensor_names=requested_names,
+            ctx=ctx,
         )
 
     def view(
@@ -450,8 +568,12 @@ class Artifact:
         )
 
     def prefetch(
-        self, *, device: torch.device | str
-    ) -> tuple["Artifact", "PrefetchTicket"]:
+        self,
+        *,
+        device: torch.device | str | int,
+        ctx: CallContext | None = None,
+        options: GetArtifactOptions | None = None,
+    ) -> Operation[PrefetchedReplica]:
         from tensorcast.api._config import GetArtifactOptions
 
         artifact_id = self._ensure_identified()
@@ -462,6 +584,7 @@ class Artifact:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
+
         view_spec_proto = self._view_spec.proto if self._view_spec else None
         view_data_hash = (
             self._view_metadata.view_data_hash if self._view_metadata else None
@@ -469,12 +592,53 @@ class Artifact:
         view_index_hint = (
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
-        opts = GetArtifactOptions(wait_for_completion=False, enable_verification=False)
-        replica_uuid = self._fallback.replica_uuid if self._fallback else None
+
+        device_obj = (
+            torch.device(f"cuda:{int(device)}")
+            if isinstance(device, int)
+            else torch.device(device)
+        )
+        if device_obj.type == "cpu":
+            raise ArtifactError(
+                "prefetch does not support CPU devices",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        device_id = int(device_obj.index if device_obj.index is not None else 0)
+        daemon_id = (
+            getattr(runtime, "daemon_id", None) or None
+        ) or runtime.daemon_endpoint
+        view_id = self._control_plane_view_id(runtime)
+        selection_hash = hashlib.sha256(
+            f"{artifact_id}|{view_id}".encode("utf-8")
+        ).hexdigest()
+
+        deterministic_replica_uuid: str | None = None
+        if ctx is not None and ctx.idempotency_key:
+            ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
+            action_fingerprint = f"prefetch|daemon={daemon_id}|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+            deterministic_replica_uuid = str(
+                uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}")
+            )
+
+        replica_uuid = deterministic_replica_uuid or (
+            self._fallback.replica_uuid if self._fallback else None
+        )
+        if not replica_uuid:
+            replica_uuid = uuid.uuid4().hex
+
+        opts = options or GetArtifactOptions()
+        opts = opts.model_copy(
+            update={
+                "wait_for_completion": False,
+                "enable_verification": False,
+            }
+        )
+
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
-            device=device,
+            device=device_obj,
             fallback=self._fallback,
             tensor_names=None,
             canonical_index_hint=self._canonical_index_bytes,
@@ -484,21 +648,35 @@ class Artifact:
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
             options=opts,
+            ctx=ctx,
+            lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
         )
-        replica = (
-            payload.ticket_replica_uuid or payload.replica_uuid or replica_uuid or ""
-        )
-        expires_at: float | None = payload.ticket_expires_at_ts
-        if expires_at is None and payload.ticket_created_at_ts is not None:
-            expires_at = payload.ticket_created_at_ts + 30.0
-        from tensorcast.api.store.batch_context import PrefetchTicket
+        self._update_metadata_from_payload(payload, runtime)
+        operation_id = payload.ticket_replica_uuid or payload.replica_uuid or ""
+        if not operation_id:
+            raise ArtifactError(
+                "Daemon returned empty operation_id for prefetch",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
 
-        fallback_with_ticket = (
-            self._fallback.model_copy(update={"replica_uuid": replica})
-            if self._fallback is not None
-            else FallbackOptions(replica_uuid=replica)
+        source: str | None = None
+        if payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_P2P:
+            source = "p2p"
+        elif payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_DISK:
+            source = "disk"
+        elif payload.source == store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA:
+            source = "local"
+
+        replica = PrefetchedReplica(
+            artifact_id=artifact_id,
+            view_id=view_id,
+            operation_id=operation_id,
+            device_id=device_id,
+            daemon_id=daemon_id,
+            source=source,
         )
-        prefetched_handle = self.with_fallback(fallback_with_ticket)
+
         try:
             from tensorcast.api import _metrics as store_metrics
 
@@ -507,16 +685,102 @@ class Artifact:
             )
         except Exception:  # noqa: BLE001
             pass
-        ticket = PrefetchTicket(
-            replica_uuid=replica,
+
+        return DaemonReplicaOperation(
+            operation_id=operation_id,
+            runtime_ref=weakref.ref(runtime),
+            ctx=ctx,
+            result_factory=lambda: replica,
+        )
+
+    def pin_device_residency(
+        self,
+        *,
+        device: str | int,
+        ttl_ms: int | None,
+        ctx: CallContext | None = None,
+    ) -> Operation[PlacementPin]:
+        if ttl_ms is not None and int(ttl_ms) <= 0:
+            raise ArtifactError(
+                "ttl_ms must be positive when provided",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        artifact_id = self._ensure_identified()
+        _, runtime, _ = self._require_components()
+        if isinstance(device, int):
+            device_id = int(device)
+        else:
+            device_obj = torch.device(device)
+            if device_obj.type == "cpu":
+                raise ArtifactError(
+                    "pin_device_residency does not support CPU devices",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            device_id = int(device_obj.index if device_obj.index is not None else 0)
+        view_id = self._control_plane_view_id(runtime)
+        timeout_s = _ctx_timeout_s(ctx)
+        resp = runtime.ensure_client().create_placement_lease(
             artifact_id=artifact_id,
-            device=torch.device(device),
-            expires_at=expires_at,
-            started_at=time.monotonic(),
-            view_hash=view_data_hash,
+            view_id=view_id,
+            device_id=device_id,
+            ttl_ms=ttl_ms,
+            timeout_s=timeout_s,
+        )
+        token = bytes(resp.lease_token) if hasattr(resp, "lease_token") else b""
+        if not token:
+            raise ArtifactError(
+                "CreatePlacementLease returned empty lease_token",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        expires_at_ms: int | None = None
+        if resp.HasField("expires_at"):
+            try:
+                expires_at_ms = int(
+                    resp.expires_at.ToDatetime(tzinfo=timezone.utc).timestamp() * 1000
+                )
+            except Exception:  # noqa: BLE001
+                expires_at_ms = None
+
+        pin = PlacementPin(
+            pin_id=int(resp.lease_id),
+            capability_token=_encode_capability_token(token),
+            daemon_id=(getattr(runtime, "daemon_id", None) or None)
+            or runtime.daemon_endpoint,
+            artifact_id=artifact_id,
+            view_id=view_id,
+            device_id=device_id,
+            expires_at_ms=expires_at_ms,
             runtime_ref=weakref.ref(runtime),
         )
-        return prefetched_handle, ticket
+
+        status = OperationStatus(
+            state="success",
+            message="placement pin active",
+            as_of_ms=int(time.time() * 1000),
+        )
+
+        def _cancel() -> bool:
+            try:
+                return bool(
+                    runtime.ensure_client()
+                    .release_placement_lease(
+                        lease_token=_decode_capability_token(pin.capability_token),
+                    )
+                    .released
+                )
+            except Exception:
+                return False
+
+        return PollingOperation(
+            operation_id=f"pin:{pin.pin_id}",
+            status_fn=lambda: status,
+            result_fn=lambda: pin,
+            cancel_fn=_cancel,
+            ctx=ctx,
+        )
 
     def with_fallback(self, fallback: FallbackOptions | str) -> Artifact:
         parsed = FallbackOptions.parse(fallback)
@@ -681,6 +945,37 @@ class Artifact:
                 retryable=False,
             )
         return store, store._runtime, store._materialization
+
+    def _control_plane_view_id(self, runtime: "StoreRuntimeContext") -> str:
+        if self._view_metadata is not None:
+            return str(self._view_metadata.view_id)
+        if self._view_spec is None or self._view_spec.is_identity:
+            return ""
+        view_proto = self._view_spec.proto
+        if view_proto is None:
+            raise ArtifactError(
+                "View spec proto missing while resolving view_id",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None:
+            try:
+                canonical_index_bytes = (
+                    runtime.ensure_client().get_artifact_index_by_id(
+                        self._ensure_identified()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                raise map_materialization_error(exc) from exc
+        try:
+            return compute_view_id(view_proto, canonical_index_bytes)
+        except Exception as exc:  # noqa: BLE001
+            raise ArtifactError(
+                "Failed to compute view_id for control-plane action",
+                status_code="INTERNAL",
+                retryable=False,
+            ) from exc
 
     def _runtime_if_available(self) -> StoreRuntimeContext | None:
         store = self._store_ref() if self._store_ref is not None else None
@@ -1165,4 +1460,10 @@ class Artifact:
         return tuple(ordered)
 
 
-__all__ = ["Artifact", "ArtifactDescriptor", "TensorMeta"]
+__all__ = [
+    "Artifact",
+    "ArtifactDescriptor",
+    "PlacementPin",
+    "PrefetchedReplica",
+    "TensorMeta",
+]

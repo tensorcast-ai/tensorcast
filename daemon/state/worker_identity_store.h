@@ -16,6 +16,8 @@ class WorkerIdentityStore {
  public:
   explicit WorkerIdentityStore(PersistenceManager* persistence_mgr = nullptr) : persistence_mgr_(persistence_mgr) {}
 
+  void set_daemon_id(std::string daemon_id);
+
   void set_registered(std::string worker_id) {
     set_registered(std::move(worker_id), /*node_id=*/"");
   }
@@ -28,6 +30,7 @@ class WorkerIdentityStore {
 
   std::string worker_id() const;
   std::string node_id() const;
+  std::string daemon_id() const;
 
  private:
   PersistenceManager* persistence_mgr_; // Not owned.
@@ -35,6 +38,7 @@ class WorkerIdentityStore {
   mutable absl::Mutex mu_;
   std::string worker_id_ ABSL_GUARDED_BY(mu_);
   std::string node_id_ ABSL_GUARDED_BY(mu_);
+  std::string daemon_id_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

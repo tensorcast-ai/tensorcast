@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for concurrency and thread-safety in Global Store."""
 
@@ -24,6 +24,7 @@ class TestConcurrency:
         for i in range(num_workers):
             workers.append(Worker(
                 worker_id=f"concurrent_worker_{i}",
+                daemon_id=f"daemon_concurrent_{i}",
                 node_id=f"node_concurrent_{i}",
                 node_address=f"192.168.{i // 255}.{i % 255 + 1}",
                 grpc_port=40000 + i,
@@ -108,6 +109,7 @@ class TestConcurrency:
         for i in range(5):
             worker = Worker(
                 worker_id=f"transport_worker_{i}",
+                daemon_id=f"daemon_transport_{i}",
                 node_id=f"transport_node_{i}",
                 node_address=f"192.168.200.{i+1}",
                 grpc_port=20000 + i,
@@ -202,6 +204,7 @@ class TestConcurrency:
         for i in range(num_workers):
             worker = Worker(
                 worker_id=f"heartbeat_worker_{i}",
+                daemon_id=f"daemon_heartbeat_{i}",
                 node_id=f"heartbeat_node_{i}",
                 node_address=f"192.168.210.{i+1}",
                 grpc_port=37000 + i,
@@ -264,6 +267,7 @@ class TestConcurrency:
         # First register a worker
         worker = Worker(
             worker_id="limit_worker",
+            daemon_id="daemon_limit_worker",
             node_id="limit_node",
             node_address="192.168.220.1",
             grpc_port=22000,
@@ -417,6 +421,7 @@ class TestRaceConditions:
         # First register a worker
         worker = Worker(
             worker_id="race_worker",
+            daemon_id="daemon_race_worker",
             node_id="race_node",
             node_address="192.168.240.1",
             grpc_port=23000,
@@ -501,6 +506,7 @@ class TestRaceConditions:
         # Register worker
         worker = Worker(
             worker_id="unregister_worker",
+            daemon_id="daemon_unregister_worker",
             node_id="unregister_node",
             node_address="192.168.250.1",
             grpc_port=44000,

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Integration tests for Global Store full stack."""
 
@@ -17,6 +17,7 @@ class TestIntegration:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -66,6 +67,7 @@ class TestIntegration:
         for i in range(3):
             worker = worker_service.register_worker(
                 Worker(
+                    daemon_id=f"daemon_node{i}",
                     node_id=f"node{i}",
                     node_address=f"192.168.1.{i+1}",
                     grpc_port=50051 + i,
@@ -119,6 +121,7 @@ class TestIntegration:
         # Setup worker and replica
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -177,6 +180,7 @@ class TestIntegration:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_heartbeat_node",
                 node_id="heartbeat_node",
                 node_address="192.168.1.100",
                 grpc_port=50051,
@@ -229,6 +233,7 @@ class TestIntegration:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_update_node",
                 node_id="update_node",
                 node_address="192.168.1.200",
                 grpc_port=50051,
@@ -294,6 +299,7 @@ class TestIntegration:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_consistency_node",
                 node_id="consistency_node",
                 node_address="192.168.1.150",
                 grpc_port=50051,
@@ -355,6 +361,7 @@ class TestIntegration:
         # Register single worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_multi_model_node",
                 node_id="multi_model_node",
                 node_address="192.168.1.250",
                 grpc_port=50051,

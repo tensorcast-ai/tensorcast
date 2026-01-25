@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Shared fixtures and utilities for Global Store tests."""
 
@@ -17,6 +17,7 @@ from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
+    InstanceRepository,
     LeafRepository,
     ReplicaRepository,
     TransportRepository,
@@ -25,6 +26,7 @@ from tensorcast.global_store.repositories import (
 )
 from tensorcast.global_store.services import (
     ArtifactService,
+    InstanceService,
     TransportService,
     ViewStateService,
     WorkerService,
@@ -159,6 +161,7 @@ def registered_worker(servicer, test_context):
         p2p_port=8002,
         mem_pool_total_size=10000000000,
         mem_pool_available_size=8000000000,
+        daemon_id="daemon_test_node_1",
     )
     worker_response = servicer.RegisterWorker(worker_request, test_context)
     return worker_response.worker_id
@@ -186,6 +189,7 @@ def repositories(db_connection):
         "variant": VariantRepository(db_connection),
         "leaf": LeafRepository(db_connection),
         "worker": WorkerRepository(db_connection),
+        "instance": InstanceRepository(db_connection),
     }
 
 
@@ -222,6 +226,7 @@ observability:
             repositories["replica"], repositories["transport"]
         ),
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
+        "instance": InstanceService(repositories["instance"], repositories["worker"]),
         "view_state": ViewStateService(
             repositories["variant"], repositories["leaf"]
         ),
@@ -237,6 +242,7 @@ def sample_worker():
     """Create a sample Worker instance for testing."""
     return Worker(
         worker_id="test_worker",
+        daemon_id="daemon_test_worker",
         node_id="node1",
         node_address="192.168.1.1",
         grpc_port=50051,
@@ -303,6 +309,7 @@ def create_test_workers(num_workers):
     for i in range(num_workers):
         workers.append(Worker(
             worker_id=f"worker{i}",
+            daemon_id=f"daemon_worker{i}",
             node_id=f"node{i}",
             node_address=f"192.168.1.{i+1}",
             grpc_port=50051 + i,

@@ -16,13 +16,17 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 
 - gRPC surface for artifact loading, lifecycle, key mapping, and status.
 - Orchestration via controllers with strong input validation and deadline handling.
-- Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
+- Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking. Session joins are safe under retries: reusing a `replica_uuid` for a different `ReplicaKey` fails fast (`FAILED_PRECONDITION`) instead of silently overwriting state.
+- Programmable control-plane RPCs for operation-scoped wait/cancel: `QueryReplicaStatus`, `WaitReplicaStatus` (unary long-poll), and `ReleaseReplica` operate on `replica_uuid` operation records (not replica identity).
+- Placement pin RPCs (`CreatePlacementLease`, `RenewPlacementLease`, `ReleasePlacementLease`) expose daemon-owned placement pins behind a daemon-scoped capability token (`lease_token`) for renew/release.
+- Materialization supports explicit `lease_mode`; `NO_LEASE` is used for process-independent daemon-owned actions (prefetch/pinning) and disables PID-bound use leases / IPC handle lease minting.
 - Local-only handle plane (Unix domain socket) for handle leases: exchanges CPU memfd FDs (`SCM_RIGHTS`) and releases `lease_token`s when client tensor views are destroyed. Handle leases are only minted for loopback/UDS gRPC callers; CPU shared-memory materialization is rejected for non-loopback peers. When `engine.cpu_shared_memory.enabled=true` and `lifecycle.handle_leases.local_handle_socket_path` is empty, the daemon auto-selects
   `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on `TENSORCAST_INSTANCE`); set the socket path explicitly when daemon and client SDK run in different pods. Handle lease minting can be rate-limited via `lifecycle.handle_leases.max_mints_per_second` as a guardrail against buggy/abusive clients. Handle-lease TTL is disabled by default (PID-exit + explicit release); operators may enable TTL as a crash/bug backstop. Metrics: `tc_handle_leases_active_gauge`, `tc_handle_cpu_exports_active_gauge`.
 - Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks. The lifecycle manager exposes a schedule hook so the scheduler can be rescheduled immediately when the earliest deadline changes, minimizing expiry drift.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
 - Handles view registration uploads (slice/transpose) without feature flags: `RegistrationController` streams view chunks to the StoreEngine and publishes variant telemetry through Global Store (see [Variant View Registration Telemetry](../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry)).
 - Enforces routable advertisement when registering with Global Store; if `server.advertise.host` is set but non-routable, startup fails. Resolution prefers `server.advertise.host`, then a routable `server.listen.host`, then the outbound route IP to the configured Global Store endpoint, and finally the default interface IP. Startup fails if no routable IP can be determined, and the resolved advertise address is logged.
+- HA registration/heartbeats require a stable `daemon_id` (from daemon config) so Global Store can reconcile restarts and address changes without using address:port as identity.
 - When `server.storage_path` is set, the daemon canonicalizes this shared disk root on startup and rejects `disk_path` inputs that escape it; when empty, disk materialization is disabled and `disk_path` inputs are rejected.
 - Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
 - Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
@@ -82,6 +86,7 @@ flowchart TB
 
 Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.
+- `WaitReplicaStatus` is a unary long-poll: `timeout_ms=0` waits until the replica reaches a terminal state or the RPC deadline expires; `timeout_ms>0` bounds the server-side wait and is clamped to the RPC deadline.
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
 - `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
 - `MaterializeIntoTarget` requires `artifact_id`, accepts canonical or view-indexed layouts (including subset-packed and multi-storage coalesced targets), and can optionally verify external target writes when `engine.enable_external_target_verification=true`; verification failures poison the region and return `DATA_LOSS`.
@@ -120,7 +125,7 @@ Contract highlights:
   `ref_tracker.h`, `handle_lease_registry.{h,cc}`, `ipc_region_registry.{h,cc}`, `transport_lock_manager.h`,
   `verification_tracker.h`, `background_scheduler.h`, `sweep_tasks.h`, `persistence_manager.{h,cc}`, `local_handle_server.{h,cc}`).
 - `util/`: shared helpers (`path_utils.{h,cc}`, `identity_utils.{h,cc}`, `deadline_utils.h`, `grpc_peer_utils.{h,cc}`, `status_utils.h`).
-- `testing/`: shared daemon service harness for gRPC tests.
+- `testing/`: shared daemon service harness for gRPC tests, plus the spawn-based `cuda_ipc_helper` used by CUDA IPC tests.
 - `common/`: low-level safe syscall wrappers (`safe_sys.h`).
 
 ## Build, Run, Test
@@ -128,6 +133,7 @@ Contract highlights:
 - Build binary: `bazel build //daemon:tensorcast_daemon`
 - Launch with unified config: see `../docs/deployment/store-daemon.md`
 - C++ tests: `bazel test //daemon:grpc_service_impl_registration_test` (and related `*_test.cc` in this directory)
+- CUDA IPC tests spawn `//daemon:cuda_ipc_helper` via runfiles; when running outside Bazel, build it in `bazel-bin/daemon/`.
 
 ## Error Handling Conventions
 

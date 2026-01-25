@@ -18,6 +18,7 @@ logger = init_logger(__name__)
 _WORKER_SELECT = """
     SELECT
         workers.worker_id,
+        workers.daemon_id,
         workers.node_id,
         workers.node_address,
         workers.grpc_port,
@@ -75,6 +76,23 @@ class WorkerRepository(BaseRepository):
             return self._row_to_model(result)
         return None
 
+    def find_by_daemon_id(
+        self, daemon_id: str, *, include_inactive: bool = False
+    ) -> Worker | None:
+        """Find a worker by stable daemon_id."""
+        if not daemon_id:
+            return None
+        cursor = self.get_cursor()
+        result = cursor.execute(
+            f"{_WORKER_SELECT} WHERE workers.daemon_id = ?"
+            + ("" if include_inactive else " AND workers.inactive_at IS NULL"),
+            [daemon_id],
+        ).fetchone()
+
+        if result:
+            return self._row_to_model(result)
+        return None
+
     def find_by_address_port(
         self, node_address: str, grpc_port: int, *, include_inactive: bool = True
     ) -> Worker | None:
@@ -100,13 +118,14 @@ class WorkerRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO workers (
-                    worker_id, node_id, node_address, grpc_port, p2p_port,
+                    worker_id, daemon_id, node_id, node_address, grpc_port, p2p_port,
                     mem_pool_total_size, mem_pool_available_size,
                     accepting_new_requests, state_version, state_checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     worker.worker_id,
+                    worker.daemon_id,
                     worker.node_id,
                     worker.node_address,
                     worker.grpc_port,
@@ -142,7 +161,7 @@ class WorkerRepository(BaseRepository):
             result = cursor.execute(
                 f"""
                 UPDATE workers
-                SET node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
+                SET daemon_id = ?, node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
                     mem_pool_total_size = ?, mem_pool_available_size = ?,
                     accepting_new_requests = ?,
                     last_heartbeat = CURRENT_TIMESTAMP,
@@ -152,6 +171,7 @@ class WorkerRepository(BaseRepository):
                 RETURNING worker_id
                 """,
                 [
+                    worker.daemon_id,
                     worker.node_id,
                     worker.node_address,
                     worker.grpc_port,
@@ -538,33 +558,34 @@ class WorkerRepository(BaseRepository):
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""
         memory_tier_state = None
-        if row[13] is not None:
+        if row[14] is not None:
             memory_tier_state = WorkerMemoryTierState(
-                stable_total_bytes=row[13],
-                stable_used_bytes=row[14],
-                preemptible_total_bytes=row[15],
-                preemptible_marked_bytes=row[16],
-                faults_per_sec=row[17] or 0.0,
-                rehydrate_p99_ns=row[18] or 0,
-                enable_preemptible=bool(row[19]),
-                memory_tier_config_json=row[20] or "{}",
-                snapshot_epoch_ns=row[21] or 0,
+                stable_total_bytes=row[14],
+                stable_used_bytes=row[15],
+                preemptible_total_bytes=row[16],
+                preemptible_marked_bytes=row[17],
+                faults_per_sec=row[18] or 0.0,
+                rehydrate_p99_ns=row[19] or 0,
+                enable_preemptible=bool(row[20]),
+                memory_tier_config_json=row[21] or "{}",
+                snapshot_epoch_ns=row[22] or 0,
             )
 
         return Worker(
             worker_id=row[0],
-            node_id=row[1],
-            node_address=row[2],
-            grpc_port=row[3],
-            p2p_port=row[4],
-            mem_pool_total_size=row[5],
-            mem_pool_available_size=row[6],
-            accepting_new_requests=row[7],
-            registered_at=row[8],
-            last_heartbeat=row[9],
-            inactive_at=row[10],
-            state_version=row[11],
-            state_checksum=row[12] or "",
+            daemon_id=row[1] or "",
+            node_id=row[2],
+            node_address=row[3],
+            grpc_port=row[4],
+            p2p_port=row[5],
+            mem_pool_total_size=row[6],
+            mem_pool_available_size=row[7],
+            accepting_new_requests=row[8],
+            registered_at=row[9],
+            last_heartbeat=row[10],
+            inactive_at=row[11],
+            state_version=row[12],
+            state_checksum=row[13] or "",
             memory_tier_state=memory_tier_state,
         )
 

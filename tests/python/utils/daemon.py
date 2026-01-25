@@ -67,6 +67,7 @@ def start_daemon_binary(
     local_handle_socket_path: str | None = None,
     stable_bytes: int | None = None,
     handle_lease_ttl: str = "10m",
+    daemon_id: str | None = None,
 ) -> subprocess.Popen:
     """Start the C++ daemon with a unified minimal config for tests.
 
@@ -81,6 +82,8 @@ def start_daemon_binary(
     storage_path.mkdir(parents=True, exist_ok=True)
     env = build_daemon_process_env(os.environ)
     fake_cuda = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
+    if not daemon_id:
+        daemon_id = f"test-daemon-{os.getpid()}-{port}-{int(time.time() * 1000)}"
 
     engine_pool_bytes = 268435456 if fake_cuda else 67108864
     comm_gpu_pool_bytes = 268435456 if fake_cuda else 67108864
@@ -92,6 +95,7 @@ def start_daemon_binary(
             "num_threads": 2,
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
         },
+        "daemon_id": daemon_id,
         "engine": {
             "artifact_chunk_bytes": 8388608,
             "streaming_buffer_chunks": 4,

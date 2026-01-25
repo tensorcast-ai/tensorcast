@@ -19,7 +19,7 @@ links:
 
 # Summary
 
-Phase 3 completes the **Lazy Artifact Handle** program by layering view composition, batching, async materialization, and prefetch tickets on top of the Phase 1 pipeline upgrade (`0036-01`) and the Phase 2 core handle (`0036-02`). An `Artifact` object represents a deferred reference to a stored artifact—holding identity and metadata without immediately transferring tensor data. Users gain explicit control over when and which tensors materialize, enabling partial loading, source-aware fetching, and composable view derivation.
+Phase 3 completes the **Lazy Artifact Handle** program by layering view composition, batching, async materialization, and prefetch operations on top of the Phase 1 pipeline upgrade (`0036-01`) and the Phase 2 core handle (`0036-02`). An `Artifact` object represents a deferred reference to a stored artifact—holding identity and metadata without immediately transferring tensor data. Users gain explicit control over when and which tensors materialize, enabling partial loading, source-aware fetching, and composable view derivation.
 
 The shift from eager `store.get() → dict[str, Tensor]` to `tc.artifact() → Artifact` followed by explicit `.tensor_dict()` / `.tensor()` transforms the API from **imperative** (fetch now) to **declarative** (describe intent, execute later).
 
@@ -45,9 +45,9 @@ full = artifact.tensor_dict(device="cuda:0")  # all tensors
 
 1. **View composition & derivation** — `.view()`, `.subset()`, and `ViewBuilder` produce child artifacts with composed `ViewSpec` objects, including validation and placement rules.
 2. **Materialization batching & async coalescing** — `BatchContext` (sync) and `MaterializationBatcher` (async) reduce per-tensor RPC overhead while preserving iterator semantics from Phase 1.
-3. **Prefetch tickets & replica reuse** — `prefetch()` exposes tickets backed by daemon `wait_for_completion=false` responses, plus explicit `QueryReplicaStatus` / `ReleaseReplica`.
+3. **Prefetch operations & replica reuse** — `prefetch()` exposes operations backed by daemon `wait_for_completion=false` responses, plus explicit `QueryReplicaStatus` / `ReleaseReplica`.
 4. **Disk parity foundation** — View composition and batching APIs work identically for disk-backed artifacts (constructed via `tc.from_disk()`). The actual `from_disk()` entry point is implemented in Phase 4 (`0036-04-disk-artifact-variant.md`).
-5. **Extended fallback & source policies** — `FallbackOptions` gains explicit `prefer` modes, checksum controls, and per-handle `replica_uuid` wiring to integrate with prefetch tickets.
+5. **Extended fallback & source policies** — `FallbackOptions` gains explicit `prefer` modes, checksum controls, and per-handle `replica_uuid` wiring to integrate with prefetch operations.
 6. **Public async surface** — Async `tensor*` variants integrate with the batcher and store event loop without blocking the existing runtime executor.
 
 ## Non-Goals
@@ -70,7 +70,7 @@ Phase 2 already established `artifact.py` and `cache.py`. This phase adds the hi
 | Module | Contents | Notes |
 |--------|----------|-------|
 | `tensorcast/api/store/view_composer.py` | `ViewSpecComposer`, `ViewBuilder`, helpers for composing RFC‑0016 view plans | Consumes canonical metadata from Phase 2 |
-| `tensorcast/api/store/batch_context.py` | `BatchContext`, `MaterializationBatcher`, `PendingFetch`, `PrefetchTicket` | Couples to the Phase 1 iterator + daemon ticket fields |
+| `tensorcast/api/store/batch_context.py` | `BatchContext`, `MaterializationBatcher`, `PendingFetch` | Couples to the Phase 1 iterator + daemon ticket fields |
 
 Public entry points (`tensorcast.api.store`) continue to re-export the new symbols so user code can simply call `tc.artifact(...).view(...)` or `tc.from_disk(...)`.
 
@@ -80,21 +80,26 @@ See `0036-02-artifact-handle-core.md` for the base handle + store binding diagra
 
 ## Daemon & RPC Extensions
 
-Phase 1 already introduced the v2 selective-materialization RPC. Phase 3 adds two incremental capabilities required for prefetch tickets and explicit source policies:
+Phase 1 already introduced the v2 selective-materialization RPC. Phase 3 adds two incremental capabilities required for prefetch operations and explicit source policies:
 
-- **Replica Tickets** – `MaterializeReplicaResponse` now carries an optional `ReplicaTicket { string replica_uuid, string device_uuid, google.protobuf.Timestamp expires_at, LoadStatus status }` whenever `wait_for_completion=false`. The SDK surfaces that via `Artifact.prefetch()` and later passes the `replica_uuid` back through `Materialize*` requests. Two lightweight RPCs are added:
+- **Replica Tickets** – `MaterializeReplicaResponse` now carries an optional `ReplicaTicket { string replica_uuid, string device_uuid, google.protobuf.Timestamp expires_at, LoadStatus status }` whenever `wait_for_completion=false`. The SDK uses that ticket to back `Operation[PrefetchedReplica]` returned by `Artifact.prefetch()` and later passes the `replica_uuid` back through `Materialize*` requests. Two lightweight RPCs are added:
   - `QueryReplicaStatus(QueryReplicaStatusRequest)` – accepts a request wrapper containing the `ReplicaTicket` and returns `{status, expires_at}` so the SDK can await readiness without reissuing a materialize call.
-  - `ReleaseReplica(ReleaseReplicaRequest)` – accepts the same wrapper pattern to allow explicit cleanup when the ticket is abandoned before consumption.
+  - `ReleaseReplica(ReleaseReplicaRequest)` – accepts the same wrapper pattern to allow explicit cleanup when the operation is abandoned before consumption.
 - **Source Preferences** – `SourcePreference preference` and `DiskFallbackHint` (disk path + checksum policy) become first-class request fields. They are wired directly from the extended `FallbackOptions` documented below so that daemon-side schedulers can differentiate `local_only`, `disk-first`, or `p2p` requests without relying on heuristics.
 
 All other protocol changes (tensor-name subsets, descriptor iterators) remain as defined in `0036-01`.
 
 ## Public API
 
+> Update (2026-01-23): The `Artifact.prefetch` surface is now defined by
+> `docs/designs/0055-programmable-framework.md` and returns
+> `Operation[PrefetchedReplica]` (with daemon-side operation tracking). Ticket handling is
+> internal to the operation implementation.
+
 ### Entry points added in Phase 3
 
 - `tc.artifact_async(...)` / `Store.artifact_async(...)` – coroutine factory that mirrors `tc.artifact` but defers identity resolution onto the store event loop for async workflows.
-- `Artifact.prefetch()` – kicks off background loads and exposes tickets (paired with new RPC fields).
+- `Artifact.prefetch()` – kicks off background loads and exposes operations (paired with new RPC fields).
 - Async `Artifact.tensor_async()` / `.tensor_dict_async()` – surfaced as coroutines rather than `ArtifactFuture`.
 - Sync helpers `Artifact.view()`, `.subset()`, `.view_builder()` are exported via `tensorcast.api.store`.
 
@@ -108,7 +113,7 @@ Phase 2 already covered identity, metadata, and synchronous `tensor*` helpers. T
 - `Artifact.view_builder()` — fluent API that records multiple operations before materializing a child handle.
 - `Artifact.batch(device=...)` — sync batching context manager described below.
 - `Artifact.tensor_async()` / `.tensor_dict_async()` — coroutine equivalents wired into `MaterializationBatcher`.
-- `Artifact.prefetch(device=...)` — kicks off background materialization and returns a `PrefetchTicket`.
+- `Artifact.prefetch(device=...)` — kicks off background materialization and returns an `Operation[PrefetchedReplica]`.
 
 All additions reuse the same locking/state rules documented in `0036-02`; only the behaviors listed above are new.
 
@@ -205,7 +210,7 @@ Compatibility strategy:
 
 - Existing callers that pass `prefer_disk=True` continue to work; the constructor maps it to `prefer="disk"` if `prefer` is not explicitly provided.
 - `StoreOptions.fallback` remains optional; unspecified fields fall back to the per-session defaults.
-- The new `replica_uuid` surfaces Prefetch tickets without changing eager APIs—legacy code simply leaves it `None`.
+- The new `replica_uuid` surfaces prefetch operations without changing eager APIs—legacy code simply leaves it `None`.
 - SDK-to-daemon translation lives in `FallbackResolver`, ensuring the new enum is forwarded through RPCs while the rest of the Python code keeps a stable signature.
 
 ## Internal Architecture
@@ -559,36 +564,13 @@ All branches route through the daemon per [0038-daemon-only-disk-materialization
 
 ### Prefetch Integration
 
-`artifact.prefetch(device=...)` issues `MaterializeReplicaRequest` with `wait_for_completion=False` (now fully supported end-to-end) and returns a `PrefetchTicket`. The daemon immediately replies with `{replica_uuid, load_status, device_uuid, expires_at}` while continuing to build the replica in the background. Clients can either poll `ticket.is_ready` (backed by `QueryReplicaStatus`) or optimistically invoke `.tensor_dict()` which reuses the `replica_uuid` hint.
+`artifact.prefetch(device=...)` issues `MaterializeReplicaRequest` with `wait_for_completion=False` (now fully supported end-to-end) and returns an `Operation[PrefetchedReplica]`. The daemon immediately replies with `{replica_uuid, load_status, device_uuid, expires_at}` while continuing to build the replica in the background. Callers can wait on the operation or optimistically invoke `.tensor_dict()` which reuses the `replica_uuid` hint.
 
 ```python
-@dataclass
-class PrefetchTicket:
-    """Handle to a background prefetch operation."""
-    replica_uuid: str
-    artifact_id: str
-    device: torch.device
-    expires_at: float
-    started_at: float  # time.monotonic()
-    ttl_seconds: float = 30.0
-    
-    @property
-    def is_ready(self) -> bool:
-        """True if replica is fully materialized."""
-        ...
-    
-    @property
-    def is_expired(self) -> bool:
-        """True if TTL exceeded."""
-        ...
-    
-    def wait(self, timeout: float | None = None) -> bool:
-        """Block until ready or timeout. Returns True if ready."""
-        ...
-    
-    def cancel(self) -> None:
-        """Request daemon to unload the prefetched replica."""
-        ...
+op = artifact.prefetch(device="cuda:0")
+op.wait(timeout_s=30)
+status = op.status()
+op.cancel()
 ```
 
 #### Prefetch Flow
@@ -602,7 +584,7 @@ sequenceDiagram
     U->>A: prefetch(device="cuda:0")
     A->>D: MaterializeReplicaRequest(wait=False, preference=...)
     D-->>A: replica_uuid + load_status (immediate)
-    A-->>U: PrefetchTicket
+    A-->>U: Operation[PrefetchedReplica]
     
     Note over D: Background materialization
     
@@ -613,7 +595,7 @@ sequenceDiagram
     A-->>U: tensors
 ```
 
-Subsequent `.tensor_dict()` calls reuse the prefetched replica via the new RPC field **and** by copying `replica_uuid` into `FallbackOptions`. The daemon recognizes the hint, pins the staged replica (or finishes it if still in-flight), and skips redundant data movement. If the request targets a different device or arrives after `expires_at`, the daemon returns `FAILED_PRECONDITION`; the SDK drops the stale ticket, records a metric, and retries without a replica hint so correctness is preserved.
+Subsequent `.tensor_dict()` calls reuse the prefetched replica via the new RPC field **and** by copying `replica_uuid` into `FallbackOptions`. The daemon recognizes the hint, pins the staged replica (or finishes it if still in-flight), and skips redundant data movement. If the request targets a different device or arrives after `expires_at`, the daemon returns `FAILED_PRECONDITION`; the SDK drops the stale replica hint, records a metric, and retries without a replica hint so correctness is preserved.
 
 # Invariants & Error Model
 
@@ -735,7 +717,7 @@ for a in artifacts:
 # Naming Compliance
 
 All new public names follow Python naming in `AGENTS.md`:
-- Classes: `Artifact`, `ArtifactDescriptor`, `TensorMeta`, `ViewBuilder`, `PrefetchTicket`, `BatchContext`
+- Classes: `Artifact`, `ArtifactDescriptor`, `TensorMeta`, `ViewBuilder`, `BatchContext`
 - Functions/methods: `artifact()`, `from_disk()`, `tensor_dict()`, `tensor()`, `with_fallback()`, `view_builder()`
 
 # References

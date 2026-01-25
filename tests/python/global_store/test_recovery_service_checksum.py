@@ -3,7 +3,10 @@
 # Copyright (c) 2025, TensorCast Team.
 
 from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.services.recovery_service import RecoveryService
+from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -17,8 +20,21 @@ def _fnv1a_64(value: str) -> str:
     return f"{hash_val:016x}"
 
 
+def _make_recovery_service(repositories) -> RecoveryService:
+    try:
+        get_config()
+    except RuntimeError:
+        set_config(GlobalStoreConfig())
+    worker_service = WorkerService(repositories["worker"], repositories["replica"])
+    return RecoveryService(
+        repositories["worker"],
+        repositories["replica"],
+        worker_service,
+    )
+
+
 def test_checksum_format_matches_daemon(repositories):
-    service = RecoveryService(repositories["worker"], repositories["replica"])
+    service = _make_recovery_service(repositories)
 
     replicas = [
         Replica(
@@ -42,7 +58,7 @@ def test_checksum_format_matches_daemon(repositories):
 
 
 def test_checksum_is_stable_and_availability_sensitive(repositories):
-    service = RecoveryService(repositories["worker"], repositories["replica"])
+    service = _make_recovery_service(repositories)
 
     replicas = [
         Replica(
@@ -80,11 +96,12 @@ def test_checksum_is_stable_and_availability_sensitive(repositories):
 
 
 def test_force_full_sync_allows_empty_inventory_removal(repositories):
-    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    recovery = _make_recovery_service(repositories)
     worker_id = "worker-force"
     repositories["worker"].create_or_update(
         Worker(
             worker_id=worker_id,
+            daemon_id="daemon-force",
             node_id="node-force",
             node_address="10.0.0.2",
             grpc_port=50051,
@@ -142,12 +159,13 @@ def test_force_full_sync_allows_empty_inventory_removal(repositories):
 
 
 def test_availability_drift_triggers_update(repositories):
-    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    recovery = _make_recovery_service(repositories)
     worker_id = "worker-availability"
 
     repositories["worker"].create_or_update(
         Worker(
             worker_id=worker_id,
+            daemon_id="daemon-availability",
             node_id="node-availability",
             node_address="10.0.0.10",
             grpc_port=50051,
@@ -218,11 +236,12 @@ def test_availability_drift_triggers_update(repositories):
 
 
 def test_stale_sync_token_is_ignored(repositories):
-    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    recovery = _make_recovery_service(repositories)
     worker_id = "worker-stale"
     repositories["worker"].create_or_update(
         Worker(
             worker_id=worker_id,
+            daemon_id="daemon-stale",
             node_id="node-stale",
             node_address="10.0.0.30",
             grpc_port=50051,
@@ -254,12 +273,13 @@ def test_stale_sync_token_is_ignored(repositories):
 
 
 def test_endpoint_drift_triggers_update(repositories):
-    recovery = RecoveryService(repositories["worker"], repositories["replica"])
+    recovery = _make_recovery_service(repositories)
     worker_id = "worker-endpoint"
 
     repositories["worker"].create_or_update(
         Worker(
             worker_id=worker_id,
+            daemon_id="daemon-endpoint",
             node_id="node-endpoint",
             node_address="10.0.0.10",
             grpc_port=50051,

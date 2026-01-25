@@ -81,9 +81,8 @@ def init_db(db: DuckDBPyConnection) -> None:
     # Check if tables already exist in this specific connection
     res = db.execute("SHOW TABLES").fetchall()
     if len(res) > 0:
-        logger.info(
-            "Database already initialized; re-applying schema for idempotent upgrades"
-        )
+        logger.info("Database already initialized; skipping schema re-apply")
+        return
 
     sql_file_path = _resolve_schema_path()
     statements = parse_sql_file(sql_file_path)

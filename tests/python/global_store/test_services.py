@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for Global Store service layer."""
 
@@ -28,6 +28,7 @@ class TestServices:
 
         # Register new worker
         worker = Worker(
+            daemon_id="daemon_node1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -41,6 +42,7 @@ class TestServices:
 
         # Register again (should update)
         worker2 = Worker(
+            daemon_id="daemon_node1",
             node_id="node1",
             node_address="192.168.1.1",
             grpc_port=50051,
@@ -53,6 +55,39 @@ class TestServices:
         assert updated.worker_id == registered.worker_id
         assert updated.p2p_port == 50053
 
+    def test_worker_service_registration_daemon_id_identity(self, services):
+        """Test daemon_id-based identity (address/port may change)."""
+        worker_service = services["worker"]
+
+        registered = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_a",
+                node_id="node1",
+                node_address="192.168.1.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        assert registered.daemon_id == "daemon_a"
+
+        updated = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_a",
+                node_id="node1",
+                node_address="192.168.1.2",
+                grpc_port=50055,
+                p2p_port=50056,
+                mem_pool_total_size=2048,
+                mem_pool_available_size=2048,
+            )
+        )
+        assert updated.worker_id == registered.worker_id
+        assert updated.daemon_id == "daemon_a"
+        assert updated.node_address == "192.168.1.2"
+        assert updated.grpc_port == 50055
+
     def test_worker_service_validation(self, services):
         """Test worker validation."""
         worker_service = services["worker"]
@@ -60,6 +95,19 @@ class TestServices:
         # Missing node_id
         with pytest.raises(ValidationError, match="Node ID is required"):
             worker_service.register_worker(Worker())
+
+        # Missing daemon_id
+        with pytest.raises(ValidationError, match="daemon_id is required"):
+            worker_service.register_worker(
+                Worker(
+                    node_id="node1",
+                    node_address="192.168.1.1",
+                    grpc_port=50051,
+                    p2p_port=50052,
+                    mem_pool_total_size=1024,
+                    mem_pool_available_size=1024,
+                )
+            )
 
         # Invalid port
         with pytest.raises(ValidationError, match="gRPC port must be between"):
@@ -100,6 +148,7 @@ class TestServices:
         # Register worker first
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -125,6 +174,7 @@ class TestServices:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -166,6 +216,7 @@ class TestServices:
         for i in range(3):
             worker = worker_service.register_worker(
                 Worker(
+                    daemon_id=f"daemon_{i}",
                     node_id=f"node_{i}",
                     node_address=f"192.168.1.{i+1}",
                     grpc_port=50051 + i,
@@ -194,6 +245,7 @@ class TestServices:
         # Register worker first
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -242,6 +294,7 @@ class TestServices:
 
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -273,6 +326,7 @@ class TestServices:
         # Register worker and replica
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -311,6 +365,7 @@ class TestServices:
         # Register worker
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -353,6 +408,7 @@ class TestServices:
         # Setup worker and replica
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -415,6 +471,7 @@ class TestServices:
         # Setup worker and replica with low concurrency
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node_timeout_test",
                 node_id="node_timeout_test",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -468,6 +525,7 @@ class TestServices:
         # Setup worker and replica with low concurrency
         worker = worker_service.register_worker(
             Worker(
+                daemon_id="daemon_node1",
                 node_id="node1",
                 node_address="192.168.1.1",
                 grpc_port=50051,
@@ -562,6 +620,7 @@ class TestServices:
         for i in range(3):
             worker = worker_service.register_worker(
                 Worker(
+                    daemon_id=f"daemon_{i}",
                     node_id=f"node_{i}",
                     node_address=f"192.168.1.{i+1}",
                     grpc_port=50051 + i,

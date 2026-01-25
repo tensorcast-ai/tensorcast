@@ -249,7 +249,8 @@ class IGlobalStoreClient {
       uint64_t mem_pool_total_size,
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
-      std::string_view previous_worker_id = {}) = 0;
+      std::string_view previous_worker_id = {},
+      std::string_view daemon_id = {}) = 0;
 
   virtual absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
@@ -260,7 +261,8 @@ class IGlobalStoreClient {
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
       global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
-      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+      const RpcOptions& rpc_options = RpcOptions{},
+      std::string_view daemon_id = {}) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
@@ -415,7 +417,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t mem_pool_total_size,
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
-      std::string_view previous_worker_id = {}) override;
+      std::string_view previous_worker_id = {},
+      std::string_view daemon_id = {}) override;
 
   // Enhanced heartbeat with HA state fields
   absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
@@ -427,7 +430,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
       global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
-      const RpcOptions& rpc_options = RpcOptions{}) override;
+      const RpcOptions& rpc_options = RpcOptions{},
+      std::string_view daemon_id = {}) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 

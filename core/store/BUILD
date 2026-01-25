@@ -49,6 +49,15 @@ sc_header_only_library(
     ],
 )
 
+sc_header_only_library(
+    name = "testing_global_store_client_stub",
+    hdrs = ["testing/global_store_client_stub.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":global_store_client",
+    ],
+)
+
 # UMA target is canonical: depend on //core/store/replica:unified_memory_authority
 
 # ========== Core store components ==========

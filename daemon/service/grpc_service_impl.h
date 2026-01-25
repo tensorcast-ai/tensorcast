@@ -13,6 +13,9 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
+#include "daemon/state/placement_lease_tokens.h"
+#include "daemon/state/session_lifecycle.h"
+#include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -36,6 +39,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
     PersistenceManager* persistence_manager{nullptr};
+    SessionsService& sessions_service;
+    SessionLifecycleManager& lifecycle_manager;
+    PlacementLeaseTokens& placement_lease_tokens;
     ShutdownSignal& shutdown_signal;
   };
 
@@ -141,6 +147,36 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::ResolveArtifactFromDiskRequest* req,
       v2::ResolveArtifactFromDiskResponse* resp) override;
 
+  grpc::Status QueryReplicaStatus(
+      grpc::ServerContext* ctx,
+      const v2::QueryReplicaStatusRequest* req,
+      v2::QueryReplicaStatusResponse* resp) override;
+
+  grpc::Status WaitReplicaStatus(
+      grpc::ServerContext* ctx,
+      const v2::WaitReplicaStatusRequest* req,
+      v2::WaitReplicaStatusResponse* resp) override;
+
+  grpc::Status ReleaseReplica(
+      grpc::ServerContext* ctx,
+      const v2::ReleaseReplicaRequest* req,
+      v2::ReleaseReplicaResponse* resp) override;
+
+  grpc::Status CreatePlacementLease(
+      grpc::ServerContext* ctx,
+      const v2::CreatePlacementLeaseRequest* req,
+      v2::CreatePlacementLeaseResponse* resp) override;
+
+  grpc::Status RenewPlacementLease(
+      grpc::ServerContext* ctx,
+      const v2::RenewPlacementLeaseRequest* req,
+      v2::RenewPlacementLeaseResponse* resp) override;
+
+  grpc::Status ReleasePlacementLease(
+      grpc::ServerContext* ctx,
+      const v2::ReleasePlacementLeaseRequest* req,
+      v2::ReleasePlacementLeaseResponse* resp) override;
+
   grpc::Status PublishReplicaKey(
       grpc::ServerContext* ctx,
       const v2::PublishReplicaKeyRequest* req,
@@ -190,6 +226,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
   PersistenceManager* persistence_manager_;
+  SessionsService* sessions_service_;
+  SessionLifecycleManager* lifecycle_manager_;
+  PlacementLeaseTokens* placement_lease_tokens_;
   ShutdownSignal* shutdown_signal_;
   Options opts_;
 };

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import queue
 import threading
 import time
@@ -17,7 +16,6 @@ import torch
 
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api.store.types import ArtifactError
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
     from tensorcast.api.store.artifact import Artifact
@@ -263,79 +261,4 @@ class MaterializationBatcher:
             )
 
 
-@dataclass(slots=True)
-class PrefetchTicket:
-    replica_uuid: str
-    artifact_id: str
-    device: torch.device
-    expires_at: float | None
-    started_at: float
-    view_hash: str | None
-    runtime_ref: weakref.ReferenceType["StoreRuntimeContext"]
-
-    @property
-    def is_expired(self) -> bool:
-        return bool(self.expires_at is not None and time.monotonic() > self.expires_at)
-
-    def _runtime(self) -> "StoreRuntimeContext":
-        runtime = self.runtime_ref()
-        if runtime is None or runtime.closed:
-            raise ArtifactError(
-                "Store runtime is closed",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-        return runtime
-
-    def wait(self, timeout: float | None = None) -> bool:
-        if self.is_expired:
-            store_metrics.record_prefetch_event(
-                self._runtime().daemon_endpoint, status="expired"
-            )
-            return False
-        runtime = self._runtime()
-        client = runtime.ensure_client()
-        ticket = store_daemon_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
-        deadline = None if timeout is None else time.monotonic() + timeout
-        while True:
-            if deadline is not None and time.monotonic() > deadline:
-                store_metrics.record_prefetch_event(
-                    runtime.daemon_endpoint, status="timeout"
-                )
-                return False
-            if self.is_expired:
-                store_metrics.record_prefetch_event(
-                    runtime.daemon_endpoint, status="expired"
-                )
-                return False
-            try:
-                resp = client.query_replica_status(ticket)
-                status = (
-                    resp.ticket.status if resp and resp.HasField("ticket") else None
-                )
-                if status not in (
-                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
-                    store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_UNSPECIFIED,
-                ):
-                    store_metrics.record_prefetch_event(
-                        runtime.daemon_endpoint, status="ready"
-                    )
-                    return True
-            except Exception:
-                return False
-            time.sleep(0.05)
-
-    def cancel(self) -> None:
-        runtime = self.runtime_ref()
-        if runtime is None or runtime.closed:
-            return
-        client = runtime.ensure_client()
-        ticket = store_daemon_pb2.ReplicaTicket(replica_uuid=self.replica_uuid)
-        with contextlib.suppress(Exception):
-            client.release_replica(ticket)
-            store_metrics.record_prefetch_event(
-                runtime.daemon_endpoint, status="released"
-            )
-
-
-__all__ = ["BatchContext", "MaterializationBatcher", "PrefetchTicket"]
+__all__ = ["BatchContext", "MaterializationBatcher"]

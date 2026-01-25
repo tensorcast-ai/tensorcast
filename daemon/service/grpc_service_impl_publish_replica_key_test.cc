@@ -12,6 +12,7 @@
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/store/store_engine.h"
+#include "core/store/testing/global_store_client_stub.h"
 #include "grpcpp/server_context.h"
 
 namespace {
@@ -36,145 +37,10 @@ tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::pa
   return opts;
 }
 
-class KeyMappingGlobalStoreClient final : public tensorcast::store::components::IGlobalStoreClient {
+class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
-  absl::Status initialize() override {
-    return absl::OkStatus();
-  }
-
-  absl::StatusOr<tensorcast::store::components::WorkerRegistrationInfo> register_worker(
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      uint32_t,
-      uint64_t,
-      uint64_t,
-      bool,
-      std::string_view) override {
-    return absl::UnimplementedError("register_worker not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<tensorcast::global_store::v1::WorkerHeartbeatResponse> send_heartbeat_enhanced(
-      std::string_view,
-      uint64_t,
-      bool,
-      uint64_t,
-      std::string_view,
-      const std::vector<std::string>&,
-      int64_t,
-      tensorcast::global_store::v1::ConnectionStatus,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("send_heartbeat_enhanced not needed for key-mapping tests");
-  }
-
-  absl::Status unregister_worker(std::string_view, bool) override {
-    return absl::UnimplementedError("unregister_worker not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<std::string> register_replica(
-      std::string_view,
-      std::string_view,
-      const tensorcast::store::DeviceKey&,
-      tensorcast::common::memory::MemoryLocation,
-      uint64_t,
-      uint32_t) override {
-    return absl::UnimplementedError("register_replica not needed for key-mapping tests");
-  }
-
-  absl::Status record_variant_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
-      override {
-    return absl::UnimplementedError("record_variant_residency not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<std::string> register_memory_replica(
-      std::string_view,
-      std::string_view,
-      const tensorcast::store::DeviceKey&,
-      uint64_t,
-      std::string_view,
-      const std::vector<std::string>&,
-      const std::vector<uint64_t>&,
-      const std::optional<std::string>&,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const std::optional<std::string>&) override {
-    return absl::UnimplementedError("register_memory_replica not needed for key-mapping tests");
-  }
-
-  absl::Status unregister_replica(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("unregister_replica not needed for key-mapping tests");
-  }
-
-  absl::Status unregister_replica_by_worker(
-      std::string_view,
-      std::string_view,
-      std::optional<tensorcast::common::memory::MemoryLocation>,
-      std::optional<uint32_t>) override {
-    return absl::UnimplementedError("unregister_replica_by_worker not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const tensorcast::store::DeviceKey&,
-      uint32_t) override {
-    return absl::UnimplementedError("request_replica_transport not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::TransportSession> request_view_transport(
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      std::string_view,
-      uint32_t,
-      const tensorcast::store::DeviceKey&,
-      uint32_t) override {
-    return absl::UnimplementedError("request_view_transport not needed for key-mapping tests");
-  }
-
-  absl::Status complete_replica_transport(std::string_view) override {
-    return absl::UnimplementedError("complete_replica_transport not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::RemoteReplicaInfo>> get_artifact_replicas(
-      std::string_view) override {
-    return absl::UnimplementedError("get_artifact_replicas not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<std::vector<tensorcast::store::components::ChunkLocationInfo>> query_chunk_locations(
-      std::string_view,
-      const std::vector<uint32_t>&) override {
-    return absl::UnimplementedError("query_chunk_locations not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::StateSyncResult> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
-      bool,
-      const tensorcast::store::components::StateSyncToken&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("synchronize_worker_state not needed for key-mapping tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::FullStateSyncResult> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      const tensorcast::store::components::StateSyncToken&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("request_full_state_sync not needed for key-mapping tests");
-  }
-
   bool is_connected() const override {
     return true;
-  }
-
-  absl::Status batch_update_chunk_states(
-      std::string_view,
-      std::string_view,
-      const std::vector<tensorcast::store::components::ChunkStateUpdate>&) override {
-    return absl::UnimplementedError("batch_update_chunk_states not needed for key-mapping tests");
   }
 
   absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view key) override {
@@ -183,10 +49,6 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
       return absl::NotFoundError("key not found");
     }
     return it->second;
-  }
-
-  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view) override {
-    return absl::UnimplementedError("get_artifact_index_by_id not needed for key-mapping tests");
   }
 
   absl::Status upsert_key_mapping(
@@ -205,24 +67,6 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::components::
   absl::Status revoke_key_mapping(std::string_view key) override {
     mappings_.erase(std::string(key));
     return absl::OkStatus();
-  }
-
-  absl::StatusOr<tensorcast::store::components::PlacementPlanResult> plan_placement(
-      std::string_view,
-      tensorcast::global_store::v1::PlacementPolicy,
-      const std::vector<tensorcast::store::components::PlacementShardSpec>&,
-      std::string_view) override {
-    return absl::UnimplementedError("plan_placement not needed for key-mapping tests");
-  }
-
-  absl::Status report_persistence_status(const tensorcast::store::components::PersistenceReport&) override {
-    return absl::UnimplementedError("report_persistence_status not needed for key-mapping tests");
-  }
-
-  void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
-
-  absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate&) override {
-    return absl::UnimplementedError("update_artifact_view_state not needed for key-mapping tests");
   }
 
   std::string last_disk_path;

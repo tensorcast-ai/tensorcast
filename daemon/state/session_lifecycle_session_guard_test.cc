@@ -33,7 +33,7 @@ TEST_CASE("Session guard expiry erases session entry", "[daemon][lifecycle][sess
   ReplicaKey key{.artifact_id = "mi2:test:session", .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
   auto ready = std::make_shared<tensorcast::common::ReadySignal<absl::Status>>();
   ready->set_value(absl::OkStatus());
-  sessions.put(sid, key, ready);
+  REQUIRE(sessions.put_if_absent_or_join(sid, key, ready).ok());
   REQUIRE(sessions.get(sid).has_value());
 
   // Create a short-lived session keepalive and let it expire
