@@ -372,12 +372,12 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       return absl::InvalidArgumentError("view registration exceeds canonical byte space");
     }
     if (view_opts.registration_kind == ViewRegistrationKind::kPiece) {
-      if (covered_bytes >= canonical_size) {
-        return absl::InvalidArgumentError("piece registration must be partial; full coverage is not allowed");
-      }
       if (view_plan->forward.transform.requires_materialization ||
           view_plan->inverse_transform.requires_materialization) {
         return absl::FailedPreconditionError("piece registration only supports selection-only views (no transpose)");
+      }
+      if (covered_bytes >= canonical_size) {
+        return absl::InvalidArgumentError("piece registration must be partial; full coverage is not allowed");
       }
       if (reg.total_size_bytes != view_size_bytes) {
         return absl::InvalidArgumentError("piece registration total_size_bytes must equal view_size_bytes");
@@ -780,7 +780,11 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   DeviceKey dev_key = entry->plan == PendingRegistrationContext::Plan::kStableDram
       ? DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""}
       : DeviceRegistry::instance().gpu_key(entry->device_id);
-  loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .device = dev_key, .replica = 0};
+  std::optional<std::string> view_id;
+  if (entry->view_state && !entry->view_state->options.view_id.empty()) {
+    view_id = entry->view_state->options.view_id;
+  }
+  loading::ReplicaKey mi2_key{.artifact_id = entry->artifact_id, .view_id = view_id, .device = dev_key, .replica = 0};
   const bool allow_idempotent = entry->view_state == nullptr && entry->id_kind == common::ArtifactIdKind::kMi2;
   bool reuse_existing = false;
   if (allow_idempotent) {

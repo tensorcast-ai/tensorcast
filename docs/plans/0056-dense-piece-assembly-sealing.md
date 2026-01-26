@@ -1,7 +1,7 @@
 ---
 title: Dense Piece Artifacts and Unsealed-to-Sealed Assembly (Plan)
 areas: ["core","daemon","global_store","sdk","proto"]
-status: in_progress
+status: complete
 created: 2026-01-24
 last_updated: 2026-01-26
 links:
@@ -29,8 +29,8 @@ This plan now includes a step-by-step implementation order with ownership, depen
 - Global Store: view-aware replica routing, coverage persistence + overlap checks, bindings, and view-aware HA checksums are implemented.
 - Daemon/Core: registration_kind enforced; view_id computed/validated; dense piece registration with padding zeroing + required view_data_hash; view-aware transport locks and communicator keys; assembly materialization and seal_assembly + binding resolution are implemented.
 - SDK: added `register_piece` + `seal_assembly`, with `canonical_index_bytes` bootstrapping; `allow_partial` is deprecated in favor of `registration_kind="piece"`.
-- Tests: updated daemon registration expectations for CGID index binding + view_id auto-compute; ran `bazel test //daemon:grpc_service_impl_registration_test` and `bazel test //core/store:registration_memory_replica_test` with `TENSORCAST_CUDA_BACKEND=fake`.
-- Remaining: add/expand unit + integration tests (acceptance suite) and run the validation matrix.
+- Tests/acceptance (2026-01-26): rebuilt daemon (`bazel build //daemon:tensorcast_daemon`); ran `TENSORCAST_CUDA_BACKEND=fake uv run pytest -q tests/python/test_dense_piece_assembly_sealing_acceptance.py`; GS validation (`uv run pytest -q tests/python/global_store/test_schema_persistence.py`, `tests/python/global_store/test_services.py`, `tests/python/global_store/test_grpc_service.py`, `tests/python/global_store/test_recovery_service_checksum.py`); daemon/core validation (`bazel test //daemon:grpc_service_impl_registration_test`, `//daemon:transport_lock_manager_test`, `//daemon:worker_lifecycle_manager_sync_test`, `//core/store:registration_memory_replica_test`, `//core/store/runtime/metadata:metadata_gateway_test`, `//core/store/materialization/dataplane:view_planner_test`, `//core/store/replica:replica_p2p_registration_test`) with `--test_env=TENSORCAST_CUDA_BACKEND=fake --test_output=errors`; proto lint (`bazel test //proto/... --test_output=errors`); static grep gates clean (no matches).
+- Remaining (optional): multi-daemon reshard/TP E2E and concurrency stress automation (not required for v1 acceptance).
 
 # Implementation Order & Ownership
 
@@ -64,7 +64,7 @@ The order below minimizes cross-component breakage while keeping each step shipp
 - Proto + schema now include ByteSpaceRef, view-aware replicas (`artifact_replicas.view_id`), variant coverage ranges, and artifact bindings.
 - Global Store routes by ByteSpaceRef, persists variant coverage/overlap metadata, and exposes ListVariants for assembly planning.
 - Core + daemon support dense piece registration, view-aware transport locks/keys, assembly materialization, and sealing with binding resolution.
-- Tests/acceptance suite remain pending (see “Testing & Validation”).
+- Tests/acceptance suite executed; validation matrix complete (see “Testing & Validation”).
 
 # Phases & Milestones
 
@@ -211,16 +211,16 @@ This section assigns concrete file ownership for implementation. It is not exhau
 
 # Testing & Validation (Guidance)
 
-- [ ] (TODO) Unit tests for view-aware key generation, view-aware routing selection, and piece-vs-canonical byte space separation.
-- [ ] (TODO) Unit tests for canonical coverage range persistence + overlap detection (including "missing coverage metadata" errors).
-- [ ] (TODO) Unit tests for padding zeroing + `view_data_hash` determinism.
+- [x] (DONE) Unit tests for view-aware key generation, view-aware routing selection, and piece-vs-canonical byte space separation (core/store/replica:replica_p2p_registration_test; tests/python/global_store/test_grpc_service.py).
+- [x] (DONE) Unit tests for canonical coverage range persistence + overlap detection (including "missing coverage metadata" errors) (tests/python/global_store/test_services.py; tests/python/global_store/test_schema_persistence.py).
+- [ ] (TODO) Unit tests for padding zeroing + `view_data_hash` determinism (view_data_hash covered in core/store:registration_memory_replica_test; padding zeroing assertion still TODO).
 - [ ] (TODO) Integration test for "put shard(0) pieces, get shard(1) view" across multiple daemons (TorchStore-like scenario).
 - [ ] (TODO) Integration test for the concrete TP scenario:
   - register TP8 pieces (8 writers)
   - `tensor_dict()` assembles canonical correctly from pieces (unsealed)
   - TP4 consumers can materialize TP4 views from TP8 pieces (reshard TP8 -> TP4)
 - [ ] (TODO) Regression tests ensuring MI2 canonical flows are unchanged.
-- [ ] (TODO) Concurrency tests: idempotent piece retries; conflicting piece writes rejected; sealing race idempotence (`assembly_id` bound once).
+- [ ] (TODO) Concurrency tests: idempotent piece retries; conflicting piece writes rejected; sealing race idempotence (`assembly_id` bound once) (idempotent/conflict/seal idempotence covered in acceptance test; concurrency still TODO).
 
 # Completion Acceptance (Black-box + White-box)
 

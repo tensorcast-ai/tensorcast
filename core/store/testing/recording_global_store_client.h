@@ -7,6 +7,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -23,6 +24,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool connected{true};
   bool allow_replica_transport{false};
   bool allow_view_transport{false};
+  bool replica_transport_not_found{false};
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
   std::vector<std::string> registered_replicas;
@@ -41,7 +43,21 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool fail_acknowledge_lease{false};
   std::string remote_node_id{"stub-remote"};
   std::string plan_degraded_reason{"insufficient_remote_capacity"};
+  std::string remote_node_address{"127.0.0.1"};
+  uint32_t remote_node_port{12345};
   std::optional<std::string> canonical_index_json;
+
+  struct TransportReplicaInfo {
+    std::string artifact_id;
+    std::optional<std::string> view_id;
+    uint64_t memory_size{0};
+    std::vector<std::string> remote_memory_keys;
+    std::vector<uint64_t> buffer_sizes;
+    common::memory::MemoryLocation memory_type{common::memory::MemoryLocation::CPU};
+    int device_id{0};
+  };
+
+  std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -105,19 +121,31 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   absl::StatusOr<std::string> register_memory_replica(
       std::string_view artifact_id,
       std::string_view,
-      const tensorcast::store::DeviceKey&,
-      uint64_t,
+      const tensorcast::store::DeviceKey& device,
+      uint64_t size_bytes,
       std::string_view,
-      const std::vector<std::string>&,
-      const std::vector<uint64_t>&,
+      const std::vector<std::string>& remote_memory_keys,
+      const std::vector<uint64_t>& buffer_sizes,
       const std::optional<std::string>&,
       std::string_view,
       std::string_view,
       uint32_t,
       const std::optional<std::string>&,
-      std::optional<std::string_view>,
+      std::optional<std::string_view> view_id,
       const std::optional<common::v1::ArtifactDescriptor>&) override {
     registered_replicas.emplace_back(std::string(artifact_id));
+    TransportReplicaInfo info;
+    info.artifact_id = std::string(artifact_id);
+    if (view_id.has_value()) {
+      info.view_id = std::string(*view_id);
+    }
+    info.memory_size = size_bytes;
+    info.remote_memory_keys = remote_memory_keys;
+    info.buffer_sizes = buffer_sizes;
+    info.memory_type =
+        (device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+    info.device_id = device.ordinal;
+    transport_replicas[transport_key(info.artifact_id, view_id)] = std::move(info);
     return std::string("memory_replica");
   }
 
@@ -168,10 +196,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey& target_device,
       uint32_t) override {
     replica_requests.emplace_back(std::string(artifact_id));
+    if (replica_transport_not_found) {
+      return absl::NotFoundError("replica transport not found in RecordingGlobalStoreClient");
+    }
     if (!allow_replica_transport) {
       return absl::UnavailableError("replica transport disabled in RecordingGlobalStoreClient");
     }
-    return make_transport_session(artifact_id, target_device);
+    auto it = transport_replicas.find(transport_key(artifact_id, std::nullopt));
+    if (it == transport_replicas.end()) {
+      return make_transport_session(artifact_id, target_device);
+    }
+    return make_transport_session(it->second, target_device);
   }
 
   absl::StatusOr<components::TransportSession> request_view_transport(
@@ -186,7 +221,11 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
     }
-    return make_transport_session(artifact_id, target_device);
+    auto it = transport_replicas.find(transport_key(artifact_id, view_id));
+    if (it == transport_replicas.end()) {
+      return absl::NotFoundError("view transport not found in RecordingGlobalStoreClient");
+    }
+    return make_transport_session(it->second, target_device);
   }
 
   absl::Status complete_replica_transport(std::string_view) override {
@@ -346,6 +385,15 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
 
  private:
+  std::string transport_key(std::string_view artifact_id, std::optional<std::string_view> view_id) const {
+    std::string key(artifact_id);
+    key.push_back('|');
+    if (view_id.has_value()) {
+      key.append(view_id->data(), view_id->size());
+    }
+    return key;
+  }
+
   static components::TransportSession make_transport_session(
       std::string_view artifact_id,
       const tensorcast::store::DeviceKey& target_device) {
@@ -360,6 +408,23 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     session.remote_replica.device_id = target_device.ordinal;
     session.remote_replica.remote_memory_keys = {"tensor.data_0"};
     session.remote_replica.buffer_sizes = {16};
+    session.remote_replica.verification_json = "{}";
+    return session;
+  }
+
+  components::TransportSession make_transport_session(
+      const TransportReplicaInfo& info,
+      const tensorcast::store::DeviceKey&) const {
+    components::TransportSession session;
+    session.transport_id = "test-transport";
+    session.remote_replica.node_id = remote_node_id;
+    session.remote_replica.node_address = remote_node_address;
+    session.remote_replica.node_port = remote_node_port;
+    session.remote_replica.memory_size = info.memory_size;
+    session.remote_replica.memory_type = info.memory_type;
+    session.remote_replica.device_id = info.device_id;
+    session.remote_replica.remote_memory_keys = info.remote_memory_keys;
+    session.remote_replica.buffer_sizes = info.buffer_sizes;
     session.remote_replica.verification_json = "{}";
     return session;
   }

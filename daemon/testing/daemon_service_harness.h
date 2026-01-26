@@ -9,6 +9,7 @@
 #include "absl/status/statusor.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/materialization_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
@@ -26,7 +27,8 @@ class DaemonServiceHarness {
   static absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> create(
       std::shared_ptr<store::StoreEngine> engine,
       DaemonOptions options,
-      std::shared_ptr<common::AsyncRuntime> async_runtime = nullptr);
+      std::shared_ptr<common::AsyncRuntime> async_runtime = nullptr,
+      std::shared_ptr<store::components::IGlobalStoreClient> global_store_client = nullptr);
 
   ~DaemonServiceHarness();
 

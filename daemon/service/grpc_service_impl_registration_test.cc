@@ -10,6 +10,7 @@
 #include "absl/log/log.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "grpcpp/server_context.h"
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -48,7 +49,8 @@ tensorcast::daemon::v2::ViewSpec make_narrow_view_spec(int start, int length) {
 std::unique_ptr<tensorcast::daemon::DaemonServiceHarness> make_harness(
     const std::shared_ptr<tensorcast::store::StoreEngine>& engine) {
   tensorcast::daemon::DaemonOptions options;
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options);
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, options, nullptr, gs_client);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());

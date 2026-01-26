@@ -234,7 +234,7 @@ TEST_CASE(
   StoreEngine store = make_store(
       temp_root,
       /*pool_size_bytes=*/32ULL * 1024 * 1024,
-      /*chunk_size_bytes=*/canonical_size);
+      /*chunk_size_bytes=*/4096);
   auto gs_stub = std::make_shared<RecordingGlobalStoreClient>();
   store.set_global_store_client_for_testing(gs_stub);
 
@@ -345,7 +345,7 @@ TEST_CASE(
   StoreEngine store = make_store(
       temp_root,
       /*pool_size_bytes=*/32ULL * 1024 * 1024,
-      /*chunk_size_bytes=*/canonical_size);
+      /*chunk_size_bytes=*/4096);
   auto gs_stub = std::make_shared<RecordingGlobalStoreClient>();
   store.set_global_store_client_for_testing(gs_stub);
 
