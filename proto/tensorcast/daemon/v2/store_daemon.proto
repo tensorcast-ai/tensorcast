@@ -70,6 +70,8 @@ service StoreDaemonService {
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+  // Seal an assembly (cgid) into a stable mi2 identity.
+  rpc SealAssembly(SealAssemblyRequest) returns (SealAssemblyResponse) {}
 
   // ========== Persistence ==========
   // See docs/architecture/api/policy-persistence.md for policy and task flow.
@@ -281,7 +283,14 @@ message ViewRegistrationOptions {
   TransformPlacement placement = 3;
   uint64 canonical_size_bytes = 4;
   repeated CanonicalRange ranges = 5;
-  bool allow_partial = 6;
+  bool allow_partial = 6 [deprecated = true];
+  ViewRegistrationKind registration_kind = 7;
+}
+
+enum ViewRegistrationKind {
+  VIEW_REGISTRATION_KIND_UNSPECIFIED = 0;
+  VIEW_REGISTRATION_KIND_CANONICAL = 1;
+  VIEW_REGISTRATION_KIND_PIECE = 2;
 }
 
 message DiskFallbackHint {
@@ -651,6 +660,7 @@ message LockTransportChunksRequest {
   optional int32 device_id = 3;
   // Optional TTL extension hint (milliseconds) applied to active leases if granted.
   optional uint32 extend_ttl_ms = 4;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 5;
 }
 
 // Lock chunks response
@@ -1059,6 +1069,17 @@ message GetArtifactIndexByIdRequest {
 }
 message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
+}
+
+message SealAssemblyRequest {
+  string assembly_id = 1;
+  bool publish_canonical = 2;
+}
+
+message SealAssemblyResponse {
+  string sealed_artifact_id = 1;
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
+  bool already_sealed = 3;
 }
 
 // ========== Persistence ==========

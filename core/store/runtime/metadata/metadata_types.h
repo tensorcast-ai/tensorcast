@@ -43,6 +43,8 @@ enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 
 
 using CanonicalRange = tensorcast::store::view::CanonicalRange;
 
+enum class ViewRegistrationKind : uint8_t { kUnspecified = 0, kCanonical = 1, kPiece = 2 };
+
 enum class RegistrationPlan : uint8_t { kCoalesced = 0, kStableDram = 1 };
 
 struct StableDramOptions {
@@ -56,7 +58,7 @@ struct ViewRegistration {
   ViewPlacement placement{ViewPlacement::kUnspecified};
   uint64_t canonical_size_bytes{0};
   std::vector<CanonicalRange> canonical_ranges;
-  bool allow_partial{false};
+  ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
 };
 
 struct ArtifactRegistration {
@@ -102,7 +104,7 @@ struct RegistrationCommitResult {
   std::optional<std::string> view_data_multihash;
   std::optional<std::string> view_index_json;
   std::vector<CanonicalRange> canonical_ranges;
-  bool allow_partial{false};
+  ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
 };
 
@@ -124,6 +126,7 @@ struct RegistrationPublication {
   std::string artifact_id;
   DeviceKey device;
   uint64_t size_bytes{0};
+  std::optional<std::string> view_id;
   std::string tensor_index_key;
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
@@ -131,6 +134,9 @@ struct RegistrationPublication {
   std::string encoding{"json"};
   std::string schema_version{"v3"};
   std::optional<std::string> verification_json;
+  std::string index_multihash;
+  std::string data_multihash;
+  common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
 };
 
 class RegistrationPublisher {

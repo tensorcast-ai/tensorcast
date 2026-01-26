@@ -50,11 +50,43 @@ def test_checksum_format_matches_daemon(repositories):
         )
     ]
 
-    expected_state = "artifact-format:node-format:10.0.0.1:50051:0:RAM:1;"
+    expected_state = "artifact-format::node-format:10.0.0.1:50051:0:RAM:1;"
     wrong_state = "artifact-format:RAM:0:1:node-format:10.0.0.1:50051;"
 
     assert service._compute_state_checksum(replicas) == _fnv1a_64(expected_state)
     assert service._compute_state_checksum(replicas) != _fnv1a_64(wrong_state)
+
+
+def test_checksum_includes_view_identity(repositories):
+    service = _make_recovery_service(repositories)
+
+    canonical = Replica(
+        artifact_id="artifact-view",
+        node_id="node-view",
+        node_address="10.0.0.1",
+        node_port=50051,
+        memory_size=256,
+        memory_type=MemoryType.RAM,
+        device_id=0,
+        worker_id="worker-view",
+        is_available=True,
+    )
+    view = Replica(
+        artifact_id="artifact-view",
+        node_id="node-view",
+        node_address="10.0.0.1",
+        node_port=50051,
+        memory_size=256,
+        memory_type=MemoryType.RAM,
+        device_id=0,
+        worker_id="worker-view",
+        is_available=True,
+    )
+    view.byte_space = view.byte_space.view("view-1")
+
+    checksum_canonical = service._compute_state_checksum([canonical])
+    checksum_view = service._compute_state_checksum([view])
+    assert checksum_canonical != checksum_view
 
 
 def test_checksum_is_stable_and_availability_sensitive(repositories):

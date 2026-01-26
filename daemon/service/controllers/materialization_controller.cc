@@ -30,6 +30,7 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
+#include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
@@ -132,6 +133,25 @@ std::optional<std::string> parse_mi2_data_multihash(std::string_view artifact_id
     return std::nullopt;
   }
   return std::string(data_mh);
+}
+
+absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
+    std::string_view artifact_id) {
+  if (!client || !client->is_connected()) {
+    return std::nullopt;
+  }
+  if (common::infer_artifact_id_kind(artifact_id) != common::ArtifactIdKind::kCgid) {
+    return std::nullopt;
+  }
+  auto binding_or = client->get_artifact_binding(artifact_id);
+  if (binding_or.ok()) {
+    return binding_or->to_artifact_id;
+  }
+  if (absl::IsNotFound(binding_or.status())) {
+    return std::nullopt;
+  }
+  return binding_or.status();
 }
 
 struct TargetLayoutSpan {
@@ -1169,10 +1189,28 @@ grpc::Status MaterializationController::materialize_replica(
   }
   const bool has_artifact = artifact_id.has_value() && !artifact_id->empty();
   const bool has_disk = normalized_disk_path.has_value();
-  const std::string resolved_artifact_id = has_artifact ? *artifact_id : std::string();
+  std::string resolved_artifact_id = has_artifact ? *artifact_id : std::string();
+  std::optional<std::string> bound_artifact_id;
+  std::optional<std::string> fallback_artifact_id;
+  if (has_artifact) {
+    auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
+    if (!binding_or.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(binding_or.status());
+    }
+    if (binding_or->has_value()) {
+      const auto& bound = binding_or->value();
+      fallback_artifact_id = resolved_artifact_id;
+      bound_artifact_id = bound;
+      resolved_artifact_id = bound;
+    }
+  }
   if (has_artifact) {
     span->SetAttribute("tc.artifact.id", resolved_artifact_id);
     resp.set_artifact_id(resolved_artifact_id);
+    if (bound_artifact_id.has_value()) {
+      span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
+    }
   }
   if (prefer_p2p && !has_artifact) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
@@ -1184,6 +1222,8 @@ grpc::Status MaterializationController::materialize_replica(
   std::optional<store::loader::ViewPlan> view_plan;
   std::optional<std::string> canonical_index_json;
   std::optional<std::string> request_view_id;
+  const std::string& index_source_artifact_id =
+      fallback_artifact_id.has_value() ? *fallback_artifact_id : resolved_artifact_id;
 
   switch (req.view_identity_case()) {
     case v2::MaterializeReplicaRequest::kView: {
@@ -1195,7 +1235,7 @@ grpc::Status MaterializationController::materialize_replica(
         return to_grpc_status(spec_or.status());
       }
       view_spec = std::move(*spec_or);
-      auto index_or = d_.engine.get_canonical_index_by_id(resolved_artifact_id);
+      auto index_or = d_.engine.get_canonical_index_by_id(index_source_artifact_id);
       if (!index_or.ok()) {
         return to_grpc_status(index_or.status());
       }
@@ -1362,6 +1402,22 @@ grpc::Status MaterializationController::materialize_replica(
                                                                 : store::StoreEngine::MaterializeMode::AUTO;
 
   auto result = d_.engine.materialize_replica(dev, mode, hints);
+  if (!result.ok() && view_requested && fallback_artifact_id.has_value() && absl::IsNotFound(result.status())) {
+    hints.artifact_id = *fallback_artifact_id;
+    if (hints.variant.has_value()) {
+      hints.variant->canonical_artifact_id = *fallback_artifact_id;
+    }
+    auto fallback_or = d_.engine.materialize_replica(dev, mode, hints);
+    if (fallback_or.ok()) {
+      result = std::move(fallback_or);
+      resolved_artifact_id = *fallback_artifact_id;
+      resp.set_artifact_id(resolved_artifact_id);
+      span->SetAttribute("tc.artifact.id", resolved_artifact_id);
+    } else {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(fallback_or.status());
+    }
+  }
   if (!result.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return to_grpc_status(result.status());
@@ -1583,7 +1639,18 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(mapping_or.status());
   }
   const auto& mapping = *mapping_or;
-  span->SetAttribute("tc.artifact.id", mapping.artifact_id);
+  std::string resolved_artifact_id = mapping.artifact_id;
+  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
+  if (!binding_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(binding_or.status());
+  }
+  if (binding_or->has_value()) {
+    const auto& bound = binding_or->value();
+    span->SetAttribute("tc.artifact.bound", bound);
+    resolved_artifact_id = bound;
+  }
+  span->SetAttribute("tc.artifact.id", resolved_artifact_id);
   std::string used_disk_path;
   if (!mapping.disk_path.empty() && effective_policy.allow_disk) {
     auto normalized_or = normalize_disk_path(mapping.disk_path, storage_path_);
@@ -1600,7 +1667,7 @@ grpc::Status MaterializationController::materialize_by_key(
   if (!cpu_target) {
     absl::Status session_status = absl::OkStatus();
     auto satisfied = d_.lip.try_satisfy_from_lip(
-        mapping.artifact_id,
+        resolved_artifact_id,
         req.device_id(),
         [&](const store::loading::ReplicaKey& rkey) {
           lip_replica_key = rkey;
@@ -1665,7 +1732,7 @@ grpc::Status MaterializationController::materialize_by_key(
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
-  hints.artifact_id = mapping.artifact_id;
+  hints.artifact_id = resolved_artifact_id;
   if (!used_disk_path.empty()) {
     hints.disk_path = used_disk_path;
   }
@@ -1755,7 +1822,7 @@ grpc::Status MaterializationController::materialize_by_key(
     }
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-  resp.set_artifact_id(mapping.artifact_id);
+  resp.set_artifact_id(resolved_artifact_id);
   resp.set_used_disk_path(used_disk_path);
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
@@ -1800,6 +1867,17 @@ grpc::Status MaterializationController::materialize_into_target(
     record_materialize_into_target(
         "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required for MaterializeIntoTarget"};
+  }
+
+  std::string resolved_artifact_id = req.artifact_id();
+  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
+  if (!binding_or.ok()) {
+    record_materialize_into_target(
+        "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(binding_or.status());
+  }
+  if (binding_or->has_value()) {
+    resolved_artifact_id = binding_or->value();
   }
   if (req.has_disk_fallback() && req.disk_fallback().disk_path().empty()) {
     record_materialize_into_target(
@@ -2258,7 +2336,7 @@ grpc::Status MaterializationController::materialize_into_target(
   if (d_.external_target_verification_enabled) {
     if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED && !has_view_transform &&
         !has_subset) {
-      expected_data_hash = parse_mi2_data_multihash(req.artifact_id());
+      expected_data_hash = parse_mi2_data_multihash(resolved_artifact_id);
     } else if (resolved_view_id.has_value()) {
       expected_data_hash = view_data_hash;
     }
@@ -2370,7 +2448,7 @@ grpc::Status MaterializationController::materialize_into_target(
   }
 
   store::loading::MaterializeHints hints;
-  hints.artifact_id = req.artifact_id();
+  hints.artifact_id = resolved_artifact_id;
   if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
     if (!effective_policy.allow_disk) {
       record_materialize_into_target(
@@ -2393,7 +2471,7 @@ grpc::Status MaterializationController::materialize_into_target(
 
   if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
     store::loading::VariantIdentity variant;
-    variant.canonical_artifact_id = req.artifact_id();
+    variant.canonical_artifact_id = resolved_artifact_id;
     if (resolved_view_id.has_value()) {
       variant.view_id = *resolved_view_id;
     }
@@ -2448,7 +2526,7 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  resp.set_artifact_id(req.artifact_id());
+  resp.set_artifact_id(resolved_artifact_id);
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
   resp.set_canonical_index_bytes(*canonical_json_or);
@@ -2568,6 +2646,49 @@ grpc::Status MaterializationController::get_artifact_index_by_id(
   if (!bytes_or.ok())
     return to_grpc_status(bytes_or.status());
   resp.set_tensor_index_data(*bytes_or);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status MaterializationController::seal_assembly(
+    RpcContext& rctx,
+    const v2::SealAssemblyRequest& req,
+    v2::SealAssemblyResponse& resp) {
+  auto& span = rctx.span();
+  span->SetAttribute("tc.artifact.id", req.assembly_id());
+
+  if (req.assembly_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "assembly_id is required"};
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  auto result_or = d_.engine.seal_assembly(req.assembly_id(), req.publish_canonical());
+  if (!result_or.ok()) {
+    return to_grpc_status(result_or.status());
+  }
+  const auto& result = *result_or;
+  resp.set_sealed_artifact_id(result.sealed_artifact_id);
+  resp.set_already_sealed(result.already_sealed);
+  auto* desc = resp.mutable_descriptor_();
+  desc->set_artifact_id(result.sealed_artifact_id);
+  if (!result.index_multihash.empty()) {
+    desc->set_index_multihash(result.index_multihash);
+  }
+  if (!result.data_multihash.empty()) {
+    desc->set_data_multihash(result.data_multihash);
+  }
+  if (!result.schema_version.empty()) {
+    desc->set_schema_version(result.schema_version);
+  }
+  if (!result.encoding.empty()) {
+    desc->set_encoding(result.encoding);
+  }
+  if (result.total_size > 0) {
+    desc->set_total_size(result.total_size);
+  }
+  desc->set_id_kind(tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
   rctx.mark_success();
   return Status::OK;
 }

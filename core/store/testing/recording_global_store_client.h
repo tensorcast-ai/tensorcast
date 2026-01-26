@@ -28,6 +28,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> registered_replicas;
   std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
   std::vector<components::VariantViewUpdate> view_updates;
+  std::vector<components::VariantInfo> variant_infos;
+  std::optional<components::ArtifactBinding> artifact_binding;
   std::vector<components::MemoryTierStatusPayload> memory_tier_statuses;
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
   std::vector<components::PlacementPlanResult> placement_plans;
@@ -82,7 +84,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey&,
       common::memory::MemoryLocation,
       uint64_t,
-      uint32_t) override {
+      uint32_t,
+      std::optional<std::string_view>) override {
     if (fail_register_replica) {
       return absl::UnavailableError("register_replica disabled in RecordingGlobalStoreClient");
     }
@@ -111,7 +114,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       std::string_view,
       uint32_t,
-      const std::optional<std::string>&) override {
+      const std::optional<std::string>&,
+      std::optional<std::string_view>,
+      const std::optional<common::v1::ArtifactDescriptor>&) override {
     registered_replicas.emplace_back(std::string(artifact_id));
     return std::string("memory_replica");
   }
@@ -132,6 +137,27 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     view_requests.emplace_back(update.view_id);
     view_updates.push_back(update);
     return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<components::VariantInfo>> list_variants(std::string_view) override {
+    return variant_infos;
+  }
+
+  absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {
+    if (!artifact_binding.has_value()) {
+      return absl::NotFoundError("artifact binding not found");
+    }
+    return *artifact_binding;
+  }
+
+  absl::StatusOr<components::ArtifactBindingResult> upsert_artifact_binding(
+      const components::ArtifactBinding& binding) override {
+    bool created = !artifact_binding.has_value();
+    artifact_binding = binding;
+    components::ArtifactBindingResult result;
+    result.binding = binding;
+    result.created = created;
+    return result;
   }
 
   absl::StatusOr<components::TransportSession> request_replica_transport(
@@ -167,7 +193,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<components::RemoteReplicaInfo>> get_artifact_replicas(std::string_view) override {
+  absl::StatusOr<std::vector<components::RemoteReplicaInfo>> get_artifact_replicas(
+      std::string_view,
+      std::optional<std::string_view>) override {
     return absl::UnimplementedError("get_artifact_replicas not supported in test stub");
   }
 

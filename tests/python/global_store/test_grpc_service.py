@@ -200,6 +200,96 @@ class TestGRPCService:
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
 
+    def test_request_replica_transport_respects_byte_space(
+        self, servicer, test_context, registered_worker
+    ):
+        artifact_id = "artifact-bytespace"
+
+        canonical_info = common_pb2.MemoryInfo(
+            node_id=str(uuid.uuid4()),
+            node_address="192.168.1.10",
+            node_port=8010,
+            memory_size=1024,
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+            device_id=0,
+            byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+            ),
+        )
+        view_id = "view-1"
+        view_info = common_pb2.MemoryInfo(
+            node_id=str(uuid.uuid4()),
+            node_address="192.168.1.11",
+            node_port=8011,
+            memory_size=256,
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+            device_id=0,
+            byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
+            ),
+        )
+
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=canonical_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=view_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        view_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            local_memory_info=canonical_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
+            ),
+        )
+        view_response = servicer.RequestReplicaTransport(view_request, test_context)
+        assert view_response.status == global_store_pb2.Status.STATUS_OK
+        assert view_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert view_response.remote_memory_info.byte_space.id == view_id
+
+        canonical_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            local_memory_info=canonical_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+            ),
+        )
+        canonical_response = servicer.RequestReplicaTransport(
+            canonical_request, test_context
+        )
+        assert canonical_response.status == global_store_pb2.Status.STATUS_OK
+        assert canonical_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
+
     def test_get_artifact_index_by_id_with_multibase(self, servicer, test_context, memory_info, registered_worker):
         index_bytes = b'{"tensor":[0,4,[1],[1],"float32",0]}'
 
@@ -230,6 +320,49 @@ class TestGRPCService:
             test_context,
         )
 
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.tensor_index_data == index_bytes
+
+    def test_register_replica_honors_descriptor_binding(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        index_bytes = b'{"tensor":[0,16,[4],[1],"float32",0]}'
+
+        def _multibase(d: bytes) -> str:
+            digest = hashlib.sha256(d).digest()
+            mh = b"\x12\x20" + digest
+            encoded = base64.b32encode(mh).decode("ascii").strip("=").lower()
+            return "b" + encoded
+
+        index_mh = _multibase(index_bytes)
+        artifact_id = "cgid:test-assembly"
+        descriptor = common_pb2.ArtifactDescriptor(
+            artifact_id=artifact_id,
+            index_multihash=index_mh,
+            data_multihash="",
+            schema_version="v3",
+            encoding="json",
+            total_size=16,
+            id_kind=common_pb2.ARTIFACT_ID_KIND_CGID,
+        )
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+            tensor_index_data=index_bytes,
+            encoding="json",
+            schema_version="v3",
+            descriptor=descriptor,
+        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        resp = servicer.GetArtifactIndexById(
+            global_store_pb2.GetArtifactIndexByIdRequest(artifact_id=artifact_id),
+            test_context,
+        )
         assert resp.status == global_store_pb2.Status.STATUS_OK
         assert resp.tensor_index_data == index_bytes
 
@@ -715,7 +848,7 @@ class TestGRPCService:
         request.leaf_idxs.extend([0, 1])
         response = servicer.GetArtifactInfoById(request, test_context)
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
-        assert len(response.replicas) == 1
+        assert len(response.replicas) == 0
         assert len(response.partial_coverage) == 1
         detail = response.partial_coverage[0]
         assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT

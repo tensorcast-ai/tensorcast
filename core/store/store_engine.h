@@ -31,6 +31,7 @@
 #include "core/store/runtime/replica/replica_info.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/runtime/runtime_env.h"
+#include "core/store/seal_assembly_result.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
@@ -86,6 +87,8 @@ class StoreEngine {
       uint64_t generation,
       const loading::MaterializeHints& hints = {});
 
+  absl::StatusOr<SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
+
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
       const P2PSource& source,
@@ -116,6 +119,7 @@ class StoreEngine {
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
   using ViewPlacement = runtime::metadata::ViewPlacement;
+  using ViewRegistrationKind = runtime::metadata::ViewRegistrationKind;
   using CanonicalRange = runtime::metadata::CanonicalRange;
   using ViewRegistration = runtime::metadata::ViewRegistration;
 
@@ -177,7 +181,9 @@ class StoreEngine {
   /**
    * @brief Returns the set of devices where a given artifact_id is already loaded.
    */
-  [[nodiscard]] std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
+  [[nodiscard]] std::vector<DeviceKey> get_resident_devices(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   [[nodiscard]] std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
 
@@ -186,7 +192,9 @@ class StoreEngine {
    *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
    *        when the artifact resides on multiple GPUs (ambiguous without a device).
    */
-  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   /**
    * @brief Inject a custom Global Store client (primarily for testing).

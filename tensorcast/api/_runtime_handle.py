@@ -1,10 +1,12 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from tensorcast.daemon_ctl import DaemonCtl
+if TYPE_CHECKING:
+    from tensorcast.daemon_ctl import DaemonCtl
 
 
 @dataclass(frozen=True, slots=True)

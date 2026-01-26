@@ -41,6 +41,12 @@ sc_header_only_library(
 )
 
 sc_header_only_library(
+    name = "seal_assembly_result",
+    hdrs = ["seal_assembly_result.h"],
+    visibility = ["//visibility:public"],
+)
+
+sc_header_only_library(
     name = "testing_recording_global_store_client",
     hdrs = ["testing/recording_global_store_client.h"],
     visibility = ["//visibility:public"],
@@ -311,6 +317,7 @@ sc_cc_library(
         ":eviction_service",
         ":global_store_client",
         ":memory_tier_budget",
+        ":seal_assembly_result",
         ":store_engine_options",
         ":view_utils",
         ":worker_identity",

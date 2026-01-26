@@ -71,4 +71,10 @@ absl::Status IngestionRuntime::register_replica_with_global_store(
   return materialization_facade_->register_replica_with_global_store(key, artifact_id_override);
 }
 
+absl::StatusOr<SealAssemblyResult> IngestionRuntime::seal_assembly(
+    std::string_view assembly_id,
+    bool publish_canonical) {
+  return materialization_facade_->seal_assembly(assembly_id, publish_canonical);
+}
+
 } // namespace tensorcast::store::runtime

@@ -142,6 +142,7 @@ struct ValidationFixture {
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,
+                .global_store_client = global_store_client,
                 .lifecycle = nullptr,
                 .external_target_verification_enabled = external_target_verification_enabled,
                 .storage_path = storage_root,

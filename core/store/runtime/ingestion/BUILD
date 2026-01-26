@@ -46,6 +46,7 @@ sc_cc_library(
         "//core/common:pinned_buffer_pool_lib",
         "//core/store:device_types",
         "//core/store:replica_registry",
+        "//core/store:seal_assembly_result",
         "//core/store:store_engine_options",
         "//core/store/materialization/control:materialization_backend",
         "//core/store/materialization/control:materialize_orchestrator",

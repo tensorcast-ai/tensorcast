@@ -32,6 +32,13 @@ service GlobalStoreService {
   // Upsert variant metadata and batched leaf digests
   rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
 
+  // List variant (view) metadata for an artifact
+  rpc ListVariants(ListVariantsRequest) returns (ListVariantsResponse) {}
+
+  // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
+  rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
+  rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
+
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
 
@@ -341,6 +348,27 @@ message UpdateArtifactViewStateResponse {
   Status status = 1;
 }
 
+message ListVariantsRequest {
+  string artifact_id = 1;
+  tensorcast.common.v1.Pagination pagination = 2;
+}
+
+message VariantInfo {
+  string view_id = 1;
+  string view_spec_json = 2;
+  uint64 view_size = 3;
+  string view_data_hash = 4;
+  google.protobuf.Timestamp verified_at = 5;
+  CanonicalCoverage canonical_coverage = 6;
+  repeated Range canonical_ranges = 7;
+}
+
+message ListVariantsResponse {
+  Status status = 1;
+  repeated VariantInfo variants = 2;
+  tensorcast.common.v1.PageInfo page_info = 3;
+}
+
 message CanonicalCoverage {
   uint64 total_bytes = 1;
   uint64 covered_bytes = 2;
@@ -353,6 +381,7 @@ message VariantUpsert {
   string view_data_hash = 4;
   google.protobuf.Timestamp verified_at = 5;
   CanonicalCoverage canonical_coverage = 6;
+  repeated Range canonical_ranges = 7;
 }
 
 enum ByteSpaceKind {
@@ -377,6 +406,37 @@ message PartialCoverageDetail {
   ByteSpaceKind space_kind = 1;
   string space_id = 2;
   repeated Range missing_ranges = 3;
+}
+
+enum ArtifactBindingKind {
+  ARTIFACT_BINDING_KIND_UNSPECIFIED = 0;
+  ARTIFACT_BINDING_KIND_SEAL = 1;
+}
+
+message ArtifactBinding {
+  string from_artifact_id = 1;
+  string to_artifact_id = 2;
+  ArtifactBindingKind kind = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message GetArtifactBindingRequest {
+  string artifact_id = 1;
+}
+
+message GetArtifactBindingResponse {
+  Status status = 1;
+  ArtifactBinding binding = 2;
+}
+
+message UpsertArtifactBindingRequest {
+  ArtifactBinding binding = 1;
+}
+
+message UpsertArtifactBindingResponse {
+  Status status = 1;
+  ArtifactBinding binding = 2;
+  bool created = 3;
 }
 
 // Get artifact index request
@@ -472,6 +532,7 @@ message RequestReplicaTransportRequest {
   string source_node_id = 4;
   string source_address = 5;
   uint32 source_port = 6;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 7;
 }
 
 message RequestReplicaTransportResponse {

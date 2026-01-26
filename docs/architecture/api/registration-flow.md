@@ -126,7 +126,9 @@ The commit response is the boundary where the artifact becomes addressable:
 - `artifact_descriptor` contains the content-addressed artifact id and related metadata.
 - `existed=true` indicates idempotent join of an existing local replica/lease.
 - `local_stable_tier` reports whether synchronous local stable admission succeeded (see below).
-- view fields (`view_id`, `canonical_ranges`, `allow_partial`) apply to view registrations.
+- view fields (`view_id`, `canonical_ranges`, `registration_kind`) apply to view
+  registrations. `allow_partial` is deprecated and maps to
+  `registration_kind=PIECE`.
 
 ## Lease In Place Path
 

@@ -217,7 +217,8 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       const DeviceKey&,
       MemoryLocation,
       uint64_t,
-      uint32_t) override {
+      uint32_t,
+      std::optional<std::string_view>) override {
     registered_artifacts.emplace_back(artifact_id);
     ++register_calls;
     if (!next_register_status.ok()) {
@@ -243,7 +244,9 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       std::string_view,
       std::string_view,
       uint32_t,
-      const std::optional<std::string>&) override {
+      const std::optional<std::string>&,
+      std::optional<std::string_view>,
+      const std::optional<tensorcast::common::v1::ArtifactDescriptor>&) override {
     registered_artifacts.emplace_back(artifact_id);
     ++register_calls;
     if (!next_register_status.ok()) {
@@ -266,6 +269,19 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
 
   absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate&) override {
     return absl::OkStatus();
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::VariantInfo>> list_variants(std::string_view) override {
+    return absl::UnimplementedError("list_variants not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ArtifactBinding> get_artifact_binding(std::string_view) override {
+    return absl::UnimplementedError("get_artifact_binding not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::ArtifactBindingResult> upsert_artifact_binding(
+      const tensorcast::store::components::ArtifactBinding&) override {
+    return absl::UnimplementedError("upsert_artifact_binding not used in tests");
   }
 
   absl::StatusOr<tensorcast::store::components::TransportSession> request_replica_transport(
@@ -294,7 +310,8 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
   }
 
   absl::StatusOr<std::vector<tensorcast::store::components::RemoteReplicaInfo>> get_artifact_replicas(
-      std::string_view) override {
+      std::string_view,
+      std::optional<std::string_view>) override {
     return absl::UnimplementedError("get_artifact_replicas not used in tests");
   }
 

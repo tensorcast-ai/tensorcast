@@ -82,6 +82,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
+      .global_store_client = nullptr,
       .lifecycle = &kernel->lifecycle_manager(),
       .handle_leases = kernel->handle_leases(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
@@ -94,6 +95,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .reg = kernel->registration_manager(),
       .lip = kernel->lip_manager(),
       .refs = kernel->ref_tracker(),
+      .global_store_client = nullptr,
       .lifecycle = &kernel->lifecycle_manager(),
       .regions = kernel->region_registry(),
   };

@@ -45,6 +45,25 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
       return client_or.status();
     }
     auto client = std::move(*client_or);
+    std::optional<common::v1::ArtifactDescriptor> descriptor;
+    if (!publication.index_multihash.empty() || !publication.data_multihash.empty()) {
+      common::v1::ArtifactDescriptor desc;
+      desc.set_artifact_id(publication.artifact_id);
+      if (!publication.index_multihash.empty()) {
+        desc.set_index_multihash(publication.index_multihash);
+      }
+      if (!publication.data_multihash.empty()) {
+        desc.set_data_multihash(publication.data_multihash);
+      }
+      desc.set_schema_version(publication.schema_version);
+      desc.set_encoding(publication.encoding);
+      desc.set_total_size(publication.size_bytes);
+      desc.set_id_kind(
+          publication.id_kind == common::ArtifactIdKind::kCgid
+              ? tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_CGID
+              : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+      descriptor = std::move(desc);
+    }
     auto reg_or = client->register_memory_replica(
         publication.artifact_id,
         worker_id(),
@@ -57,7 +76,9 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         publication.encoding,
         publication.schema_version,
         /*max_concurrency=*/1,
-        publication.verification_json);
+        publication.verification_json,
+        publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
+        descriptor);
     if (!reg_or.ok()) {
       return reg_or.status();
     }
@@ -195,7 +216,8 @@ absl::Status MetadataGateway::register_replica(
       artifact_id,
       key.device,
       loc,
-      *size_or);
+      *size_or,
+      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt);
   if (!register_status.ok()) {
     return register_status;
   }

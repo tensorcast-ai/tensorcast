@@ -53,6 +53,17 @@ managing clients manually.
   are computed exactly once in the derived view (no double-application of the
   parent slice).
 
+## Piece Registration and Sealing
+
+- `Store.register_piece(...)` registers dense view pieces under an assembly id
+  (`cgid:`). Pieces are selection-only (narrow only), do not allow transpose,
+  and require server placement.
+- Pass `canonical_index_bytes` to bootstrap a new assembly without needing
+  Global Store state. `register_view(..., registration_kind="piece")` is
+  equivalent, while `allow_partial` is deprecated.
+- `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
+  into a stable MI2 identity and returns the bound descriptor.
+
 ## Deferred Slice Materialization (vLLM)
 
 - `artifact.deferred_loader(device=..., packing="append", capacity_bytes=...)` returns

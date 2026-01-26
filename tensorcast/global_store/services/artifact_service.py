@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Service for artifact replica operations."""
 
@@ -13,7 +13,7 @@ from tensorcast.global_store.metrics import (
     set_replicas_per_memtype,
     set_total_replicas,
 )
-from tensorcast.global_store.models import MemoryType, Replica
+from tensorcast.global_store.models import ByteSpaceKind, MemoryType, Replica
 from tensorcast.global_store.repositories import ReplicaRepository
 from tensorcast.global_store.services.address_validation import ensure_routable_address
 from tensorcast.logger import init_logger
@@ -41,6 +41,10 @@ class ArtifactService:
         # Validate replica
         if not replica.artifact_id:
             raise ValidationError("artifact_id is required")
+        if replica.byte_space.kind == ByteSpaceKind.VIEW and not replica.byte_space.id:
+            raise ValidationError("view replicas require byte_space.id (view_id)")
+        if replica.byte_space.kind == ByteSpaceKind.CANONICAL and replica.byte_space.id:
+            raise ValidationError("canonical replicas must not set byte_space.id")
         if not replica.node_id:
             raise ValidationError("Node ID is required")
         if not replica.worker_id:
@@ -159,9 +163,13 @@ class ArtifactService:
             )
         return ok
 
-    def get_artifact_replicas(self, artifact_id: str) -> List[Replica]:
+    def get_artifact_replicas(
+        self, artifact_id: str, view_id: str | None = None
+    ) -> List[Replica]:
         """Get all available replicas for an artifact."""
-        replicas = self.replica_repository.find_by_filters(artifact_id=artifact_id)
+        replicas = self.replica_repository.find_by_filters(
+            artifact_id=artifact_id, view_id=view_id
+        )
 
         # Filter only available replicas
         available = [r for r in replicas if r.is_available]
@@ -185,12 +193,14 @@ class ArtifactService:
     def list_replicas(
         self,
         artifact_id: Optional[str] = None,
+        view_id: Optional[str] = None,
         node_id: Optional[str] = None,
         memory_type: Optional[MemoryType] = None,
     ) -> List[Replica]:
         """List replicas with optional filters."""
         return self.replica_repository.find_by_filters(
             artifact_id=artifact_id,
+            view_id=view_id,
             node_id=node_id,
             memory_type=memory_type,
         )

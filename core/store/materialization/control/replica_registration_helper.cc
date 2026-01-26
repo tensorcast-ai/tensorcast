@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/control/replica_registration_helper.h"
 
@@ -12,14 +12,16 @@ absl::Status ReplicaRegistrationHelper::register_local_replica(
     std::string_view artifact_id,
     const DeviceKey& device,
     common::memory::MemoryLocation location,
-    uint64_t size_bytes) {
+    uint64_t size_bytes,
+    std::optional<std::string_view> view_id) {
   auto reg_or = gs_client->register_replica(
       artifact_id,
       worker_id,
       device,
       location,
       size_bytes,
-      /*max_concurrency=*/1);
+      /*max_concurrency=*/1,
+      view_id);
 
   if (!reg_or.ok()) {
     LOG(WARNING) << "Failed to register replica replica with Global Store: " << reg_or.status();

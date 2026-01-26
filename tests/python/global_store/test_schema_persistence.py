@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -15,6 +15,11 @@ def _index_names(conn, table: str) -> set[str]:
         [table.lower()],
     ).fetchall()
     return {row[0] for row in rows}
+
+
+def _column_names(conn, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+    return {str(row[1]).lower() for row in rows}
 
 
 def test_persistence_tables_and_indexes_present(db_connection) -> None:
@@ -39,6 +44,26 @@ def test_persistence_tables_and_indexes_present(db_connection) -> None:
 
     status_indexes = _index_names(db_connection, "artifact_persistence_status")
     assert "idx_artifact_persistence_status_artifact_state" in status_indexes
+
+
+def test_piece_schema_columns_present(db_connection) -> None:
+    tables = {row[0].lower() for row in db_connection.execute("SHOW TABLES").fetchall()}
+    assert "artifact_replicas" in tables
+    assert "variants" in tables
+    assert "variant_coverage_ranges" in tables
+    assert "artifact_bindings" in tables
+
+    replica_columns = _column_names(db_connection, "artifact_replicas")
+    assert "view_id" in replica_columns
+
+    variant_columns = _column_names(db_connection, "variants")
+    assert {
+        "canonical_size_bytes",
+        "canonical_bytes_covered",
+    }.issubset(variant_columns)
+
+    binding_columns = _column_names(db_connection, "artifact_bindings")
+    assert {"from_artifact_id", "to_artifact_id", "kind"}.issubset(binding_columns)
 
 
 def test_persistence_tables_accept_inserts(db_connection) -> None:

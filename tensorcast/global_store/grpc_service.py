@@ -8,6 +8,7 @@ This provides the gRPC interface layer, delegating business logic to services.
 
 import base64
 import binascii
+import hashlib
 import ipaddress
 import threading
 import time
@@ -24,11 +25,14 @@ from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
 from tensorcast.global_store.exceptions import (
+    DatabaseError,
     NotFoundError,
     TimeoutError,
     ValidationError,
 )
 from tensorcast.global_store.models import (
+    ByteSpaceKind,
+    ByteSpaceRef,
     Instance,
     MemoryType,
     PersistenceShardStatus,
@@ -40,6 +44,7 @@ from tensorcast.global_store.models import (
     Worker,
 )
 from tensorcast.global_store.repositories import (
+    ArtifactBindingRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
     ChunkDirectoryRepository,
@@ -47,6 +52,7 @@ from tensorcast.global_store.repositories import (
     LeafRepository,
     ReplicaRepository,
     TransportRepository,
+    VariantCoverageRepository,
     VariantRepository,
     WorkerRepository,
 )
@@ -162,7 +168,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.instance_repository = InstanceRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
         self.variant_repository = VariantRepository(self.connection)
+        self.variant_coverage_repository = VariantCoverageRepository(self.connection)
         self.leaf_repository = LeafRepository(self.connection)
+        self.binding_repository = ArtifactBindingRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
         self.placement_repository = ArtifactPlacementRepository(self.connection)
         self.persistence_status_repository = ArtifactPersistenceStatusRepository(
@@ -182,7 +190,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         )
         self.chunk_service = ChunkService(self.chunk_directory_repository)
         self.view_state_service = ViewStateService(
-            self.variant_repository, self.leaf_repository
+            self.variant_repository,
+            self.leaf_repository,
+            self.variant_coverage_repository,
         )
         self.placement_service = PlacementService(
             self.worker_repository,
@@ -282,6 +292,32 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         if len(digest) != 32:
             return None
         return digest.hex()
+
+    @staticmethod
+    def _sha256_digest_to_multibase(digest: bytes) -> str | None:
+        """Convert raw SHA-256 digest bytes to multibase base32 multihash."""
+        if len(digest) != 32:
+            return None
+        multihash = b"\x12\x20" + digest
+        b32 = base64.b32encode(multihash).decode("ascii").lower().rstrip("=")
+        return f"b{b32}"
+
+    @classmethod
+    def _index_bytes_to_multibase_sha256(cls, data: bytes) -> str | None:
+        if not data:
+            return None
+        digest = hashlib.sha256(data).digest()
+        return cls._sha256_digest_to_multibase(digest)
+
+    @classmethod
+    def _hex_sha256_to_multibase(cls, value: str) -> str | None:
+        if not value:
+            return None
+        try:
+            digest = bytes.fromhex(value)
+        except ValueError:
+            return None
+        return cls._sha256_digest_to_multibase(digest)
 
     @classmethod
     def _policy_from_proto(cls, value: global_store_pb2.PlacementPolicy) -> str:
@@ -473,7 +509,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
             available_replicas: list[common_pb2.MemoryInfo] = []
             if include_replicas:
-                replicas = self.artifact_service.get_artifact_replicas(artifact_id)
+                replica_view_id = space_id if space_kind == "V" else None
+                replicas = self.artifact_service.get_artifact_replicas(
+                    artifact_id, view_id=replica_view_id
+                )
                 available_replicas = [self._replica_to_memory_info(r) for r in replicas]
 
             view_meta_msg: Optional[global_store_pb2.ViewMeta] = None
@@ -672,9 +711,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 view_data_hash = variant.view_data_hash or None
                 canonical_size: Optional[int] = None
                 canonical_covered: Optional[int] = None
+                canonical_ranges: list[tuple[int, int]] = []
                 if variant.HasField("canonical_coverage"):
                     canonical_size = int(variant.canonical_coverage.total_bytes)
                     canonical_covered = int(variant.canonical_coverage.covered_bytes)
+                if variant.canonical_ranges:
+                    canonical_ranges = [
+                        (int(r.off), int(r.len)) for r in variant.canonical_ranges
+                    ]
                 variant_payload = VariantUpsertPayload(
                     artifact_id=artifact_id,
                     view_id=variant.view_id,
@@ -684,6 +728,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     verified_at=verified_at,
                     canonical_size_bytes=canonical_size,
                     canonical_bytes_covered=canonical_covered,
+                    canonical_ranges=canonical_ranges or None,
                 )
 
             leaf_payloads: list[LeafWritePayload] = []
@@ -725,8 +770,38 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
         except ValueError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
+            message = str(exc)
+            if any(
+                key in message
+                for key in (
+                    "coverage metadata missing",
+                    "overlapping canonical coverage",
+                    "canonical range mismatch",
+                    "view_data_hash conflict",
+                )
+            ):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            else:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(message)
+            return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except DatabaseError as exc:
+            message = str(exc)
+            if any(
+                key in message
+                for key in (
+                    "coverage metadata missing",
+                    "overlapping canonical coverage",
+                    "canonical range mismatch",
+                    "view_data_hash conflict",
+                )
+            ):
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
             return global_store_pb2.UpdateArtifactViewStateResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
@@ -737,6 +812,189 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(exc))
             return global_store_pb2.UpdateArtifactViewStateResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ListVariants(
+        self,
+        request: global_store_pb2.ListVariantsRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ListVariantsResponse:
+        """List variant metadata for an artifact."""
+        artifact_id = request.artifact_id
+        if not artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("artifact_id is required")
+            return global_store_pb2.ListVariantsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            page_size = 100
+            page_token = ""
+            if request.HasField("pagination"):
+                if request.pagination.page_size:
+                    page_size = int(request.pagination.page_size)
+                if request.pagination.page_token:
+                    page_token = request.pagination.page_token
+            offset = int(page_token) if page_token else 0
+
+            rows, total = self.variant_repository.list_by_artifact(
+                artifact_id=artifact_id, limit=page_size, offset=offset
+            )
+
+            variants: list[global_store_pb2.VariantInfo] = []
+            for row in rows:
+                variant = global_store_pb2.VariantInfo(
+                    view_id=str(row["view_id"]),
+                    view_spec_json=str(row["view_spec_json"]),
+                    view_size=int(row["view_size"]),
+                )
+                if row.get("view_data_hash"):
+                    variant.view_data_hash = str(row["view_data_hash"])
+                if row.get("verified_at"):
+                    ts = self._datetime_to_timestamp(row["verified_at"])
+                    if ts is not None:
+                        variant.verified_at.CopyFrom(ts)
+                if (
+                    row.get("canonical_size_bytes") is not None
+                    or row.get("canonical_bytes_covered") is not None
+                ):
+                    coverage = global_store_pb2.CanonicalCoverage()
+                    if row.get("canonical_size_bytes") is not None:
+                        coverage.total_bytes = int(row["canonical_size_bytes"])
+                    if row.get("canonical_bytes_covered") is not None:
+                        coverage.covered_bytes = int(row["canonical_bytes_covered"])
+                    variant.canonical_coverage.CopyFrom(coverage)
+
+                ranges = self.variant_coverage_repository.get_ranges(
+                    artifact_id=artifact_id, view_id=str(row["view_id"])
+                )
+                for off, length in ranges:
+                    variant.canonical_ranges.add(off=off, len=length)
+
+                variants.append(variant)
+
+            next_token = ""
+            if offset + page_size < total:
+                next_token = str(offset + page_size)
+            page_info = common_pb2.PageInfo(
+                next_page_token=next_token, total_size=total
+            )
+
+            return global_store_pb2.ListVariantsResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                variants=variants,
+                page_info=page_info,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to list variants for %s", artifact_id)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.ListVariantsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def GetArtifactBinding(
+        self,
+        request: global_store_pb2.GetArtifactBindingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetArtifactBindingResponse:
+        artifact_id = request.artifact_id
+        if not artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("artifact_id is required")
+            return global_store_pb2.GetArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            row = self.binding_repository.get(artifact_id)
+            if row is None:
+                return global_store_pb2.GetArtifactBindingResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            kind = global_store_pb2.ARTIFACT_BINDING_KIND_UNSPECIFIED
+            if str(row["kind"]).lower() == "seal":
+                kind = global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
+            binding = global_store_pb2.ArtifactBinding(
+                from_artifact_id=str(row["from_artifact_id"]),
+                to_artifact_id=str(row["to_artifact_id"]),
+                kind=kind,
+            )
+            ts = self._datetime_to_timestamp(row.get("created_at"))
+            if ts is not None:
+                binding.created_at.CopyFrom(ts)
+            return global_store_pb2.GetArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_OK, binding=binding
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to get artifact binding for %s", artifact_id)
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.GetArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def UpsertArtifactBinding(
+        self,
+        request: global_store_pb2.UpsertArtifactBindingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpsertArtifactBindingResponse:
+        if not request.HasField("binding"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("binding is required")
+            return global_store_pb2.UpsertArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        binding = request.binding
+        if not binding.from_artifact_id or not binding.to_artifact_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("binding requires from_artifact_id and to_artifact_id")
+            return global_store_pb2.UpsertArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        kind = "seal"
+        if (
+            binding.kind == global_store_pb2.ARTIFACT_BINDING_KIND_UNSPECIFIED
+            or binding.kind == global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
+        ):
+            kind = "seal"
+        else:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("unsupported binding kind")
+            return global_store_pb2.UpsertArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            row, created = self.binding_repository.upsert(
+                from_artifact_id=binding.from_artifact_id,
+                to_artifact_id=binding.to_artifact_id,
+                kind=kind,
+            )
+            kind_proto = global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
+            resp_binding = global_store_pb2.ArtifactBinding(
+                from_artifact_id=str(row["from_artifact_id"]),
+                to_artifact_id=str(row["to_artifact_id"]),
+                kind=kind_proto,
+            )
+            ts = self._datetime_to_timestamp(row.get("created_at"))
+            if ts is not None:
+                resp_binding.created_at.CopyFrom(ts)
+            return global_store_pb2.UpsertArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                binding=resp_binding,
+                created=created,
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return global_store_pb2.UpsertArtifactBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to upsert artifact binding")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.UpsertArtifactBindingResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
@@ -786,44 +1044,73 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     span_attrs["tc.worker.id"] = worker_id
                 set_span_attributes(span_attrs)
 
-            # RFC-0007: Persist content-addressed descriptor into `artifacts` table if possible.
-            # Parse `mi2:` artifact_id and extract index/data multihash when present. If the
-            # upstream StoreDaemon later extends the proto to include descriptor, prefer that.
+            # RFC-0007: Persist artifact descriptor into `artifacts` table.
             artifact_id = registered.artifact_id
+            descriptor = request.descriptor if request.HasField("descriptor") else None
+            if descriptor is not None and descriptor.artifact_id:
+                artifact_id = descriptor.artifact_id
+
             kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
-            if artifact_id and kind is ArtifactIdKind.MI2:
-                parts = artifact_id.split(":", 2)
-                index_mh = parts[1] if len(parts) == 3 else None
-                data_mh = parts[2] if len(parts) == 3 else None
+            if descriptor is not None and descriptor.id_kind:
+                kind = (
+                    ArtifactIdKind.MI2
+                    if descriptor.id_kind
+                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
+                    else ArtifactIdKind.CGID
+                    if descriptor.id_kind
+                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
+                    else kind
+                )
+
+            if artifact_id:
+                index_mh = None
+                data_mh = None
                 encoding = "json"
+                schema_version = schema_version_value
+                id_kind = "MI2" if kind is ArtifactIdKind.MI2 else "CGID"
+                if descriptor is not None:
+                    if descriptor.index_multihash:
+                        index_mh = descriptor.index_multihash
+                    if descriptor.data_multihash:
+                        data_mh = descriptor.data_multihash
+                    if descriptor.encoding:
+                        encoding = descriptor.encoding
+                    if descriptor.schema_version:
+                        schema_version = descriptor.schema_version
+                if kind is ArtifactIdKind.MI2 and (index_mh is None or data_mh is None):
+                    parts = artifact_id.split(":", 2)
+                    if len(parts) == 3:
+                        index_mh = index_mh or parts[1]
+                        data_mh = data_mh or parts[2]
+                if not index_mh:
+                    if (
+                        request.HasField("tensor_index_data")
+                        and request.tensor_index_data
+                    ):
+                        derived = self._index_bytes_to_multibase_sha256(
+                            request.tensor_index_data
+                        )
+                        if derived is not None:
+                            index_mh = derived
+                    if not index_mh and request.mem_info.tensor_index_key:
+                        derived = self._hex_sha256_to_multibase(
+                            request.mem_info.tensor_index_key
+                        )
+                        if derived is not None:
+                            index_mh = derived
                 try:
                     self.artifacts_repo.upsert_artifact(
                         artifact_id=artifact_id,
                         index_multihash=index_mh,
                         data_multihash=data_mh,
-                        schema_version=schema_version_value,
+                        schema_version=schema_version,
                         encoding=encoding,
                         hash_params_json=None,
-                        id_kind="MI2",
+                        id_kind=id_kind,
                     )
                 except Exception as e:  # noqa: BLE001
                     logger.warning(
                         f"Failed to upsert artifacts entry for {artifact_id}: {e}"
-                    )
-            elif artifact_id and kind is ArtifactIdKind.CGID:
-                try:
-                    self.artifacts_repo.upsert_artifact(
-                        artifact_id=artifact_id,
-                        index_multihash=None,
-                        data_multihash=None,
-                        schema_version=schema_version_value,
-                        encoding="json",
-                        hash_params_json=None,
-                        id_kind="CGID",
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"Failed to upsert CGID artifact entry for {artifact_id}: {e}"
                     )
 
             # If canonical index data is provided, store it for de-duplication
@@ -1176,9 +1463,33 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 }
             )
 
+            requested_view_id: str | None = None
+            if request.HasField("requested_byte_space"):
+                space = request.requested_byte_space
+                if space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+                    if not space.id:
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        context.set_details("requested_byte_space VIEW requires id")
+                        return global_store_pb2.RequestReplicaTransportResponse(
+                            status=global_store_pb2.Status.STATUS_ERROR
+                        )
+                    requested_view_id = space.id
+                elif space.kind in (
+                    common_pb2.BYTE_SPACE_KIND_CANONICAL,
+                    common_pb2.BYTE_SPACE_KIND_UNSPECIFIED,
+                ):
+                    requested_view_id = None
+                else:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("unsupported requested_byte_space kind")
+                    return global_store_pb2.RequestReplicaTransportResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+
             # Request transport
             replica, transport_id = self.transport_service.request_transport(
                 artifact_id=request.artifact_id,
+                view_id=requested_view_id,
                 source_node_id=request.source_node_id,
                 source_address=request.source_address,
                 source_port=request.source_port,
@@ -2295,6 +2606,17 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             buffer_sizes=replica.buffer_sizes,
             verification_json=replica.verification_json or "",
         )
+        if replica.byte_space.kind == ByteSpaceKind.VIEW:
+            memory_info.byte_space.CopyFrom(
+                common_pb2.ByteSpaceRef(
+                    kind=common_pb2.BYTE_SPACE_KIND_VIEW,
+                    id=replica.byte_space.id or "",
+                )
+            )
+        else:
+            memory_info.byte_space.CopyFrom(
+                common_pb2.ByteSpaceRef(kind=common_pb2.BYTE_SPACE_KIND_CANONICAL)
+            )
         creation_proto = self._datetime_to_timestamp(replica.created_at)
         if creation_proto is not None:
             memory_info.creation_ts.CopyFrom(creation_proto)
@@ -2327,8 +2649,22 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         else:
             domain_mem_type = MemoryType.DISK
 
+        byte_space = ByteSpaceRef.canonical()
+        if hasattr(mem_info, "byte_space") and mem_info.HasField("byte_space"):
+            if mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+                view_id = mem_info.byte_space.id.strip()
+                if not view_id:
+                    raise ValidationError("byte_space VIEW requires id")
+                byte_space = ByteSpaceRef.view(view_id)
+            elif mem_info.byte_space.kind in (
+                common_pb2.BYTE_SPACE_KIND_CANONICAL,
+                common_pb2.BYTE_SPACE_KIND_UNSPECIFIED,
+            ):
+                byte_space = ByteSpaceRef.canonical()
+
         return Replica(
             artifact_id=artifact_id,
+            byte_space=byte_space,
             node_id=mem_info.node_id,
             node_address=mem_info.node_address,
             node_port=mem_info.node_port,

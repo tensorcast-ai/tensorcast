@@ -37,6 +37,17 @@ enum MemoryType {
   MEMORY_TYPE_DISK = 3;
 }
 
+enum ByteSpaceKind {
+  BYTE_SPACE_KIND_UNSPECIFIED = 0;
+  BYTE_SPACE_KIND_CANONICAL = 1;
+  BYTE_SPACE_KIND_VIEW = 2;
+}
+
+message ByteSpaceRef {
+  ByteSpaceKind kind = 1;
+  string id = 2;
+}
+
 message MemoryInfo {
   string node_id = 1;
   string node_address = 2;
@@ -54,6 +65,7 @@ message MemoryInfo {
   // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
   string verification_json = 14;
   google.protobuf.Timestamp expires_at = 15;
+  ByteSpaceRef byte_space = 16;
 }
 
 message ReplicaRef {

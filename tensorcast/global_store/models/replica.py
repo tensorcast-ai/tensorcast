@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Artifact replica domain artifact."""
 
@@ -27,6 +27,29 @@ class MemoryType(Enum):
         return priority_map[self]
 
 
+class ByteSpaceKind(Enum):
+    """Byte space kind for replica routing."""
+
+    CANONICAL = "CANONICAL"
+    VIEW = "VIEW"
+
+
+@dataclass(frozen=True)
+class ByteSpaceRef:
+    """Byte space identifier for routing and replica identity."""
+
+    kind: ByteSpaceKind
+    id: str | None = None
+
+    @staticmethod
+    def canonical() -> "ByteSpaceRef":
+        return ByteSpaceRef(kind=ByteSpaceKind.CANONICAL, id=None)
+
+    @staticmethod
+    def view(view_id: str) -> "ByteSpaceRef":
+        return ByteSpaceRef(kind=ByteSpaceKind.VIEW, id=view_id)
+
+
 @dataclass
 class Replica:
     """Represents a artifact replica in the distributed storage system."""
@@ -34,6 +57,7 @@ class Replica:
     # Identity
     replica_id: UUID = field(default_factory=uuid4)
     artifact_id: str = ""  # content-addressed artifact ID (mi2:...)
+    byte_space: ByteSpaceRef = field(default_factory=ByteSpaceRef.canonical)
     disk_path: str | None = None  # physical path for disk-based replicas (optional)
 
     # Location

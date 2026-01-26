@@ -33,6 +33,7 @@ from tensorcast.api._register import (
     _merge_canonical_ranges,
     _register_artifact_core,
 )
+from tensorcast.api._view_ops import ViewSpecBuildResult
 from tensorcast.api.store.async_ops import ArtifactFuture, TrackedExecutor
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import (
@@ -50,7 +51,7 @@ from tensorcast.api.store.retry import (
     should_retry,
 )
 from tensorcast.api.store.runtime import StoreRuntimeContext
-from tensorcast.api.store.types import ArtifactError, SpanAttributeValue
+from tensorcast.api.store.types import ArtifactError, CanonicalIndex, SpanAttributeValue
 from tensorcast.api.store.views import (
     ResolvedViewInputs,
     TransformPlacement,
@@ -161,59 +162,279 @@ class RegistrationPipeline:
         ttl_ms: int | None = None,
         allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
+        canonical_index_bytes: bytes | None = None,
+        registration_kind: str | int | None = None,
         resolver: Callable[..., ResolvedViewInputs] | None = None,
     ) -> RegisteredArtifact:
-        view_resolver = resolver or self._views.resolve_view_inputs
-        resolved = view_resolver(
-            artifact_id=artifact_id,
-            key=key,
-            slices=slices,
-            transpose=transpose,
-            view_id=view_id,
+        resolved_kind = self._normalize_registration_kind(
+            registration_kind, allow_partial=allow_partial
         )
-        if resolved.variant == "id":
+        if (
+            resolved_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            and not artifact_id
+            and not key
+        ):
             raise ArtifactError(
-                "View registration via pre-existing view_id is not supported yet",
-                status_code="UNIMPLEMENTED",
+                "Piece registration requires an assembly_id (artifact_id) or key",
+                status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        assert resolved.build_result is not None
-        if resolved.build_result.is_identity:
+        view_resolver = resolver or self._views.resolve_view_inputs
+        resolved_artifact_id: str | None = artifact_id
+        if canonical_index_bytes is not None:
+            if artifact_id is None:
+                raise ArtifactError(
+                    "canonical_index_bytes requires artifact_id",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if key is not None:
+                raise ArtifactError(
+                    "Specify either artifact_id or key, not both",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if view_id is not None:
+                raise ArtifactError(
+                    "View registration via pre-existing view_id is not supported yet",
+                    status_code="UNIMPLEMENTED",
+                    retryable=False,
+                )
+            if not slices and not transpose:
+                raise ArtifactError(
+                    "View registration requires slices/transpose or view_id",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+            build_result = self._views._build_view_spec(
+                canonical_index=canonical_index,
+                slices=slices,
+                transpose=transpose,
+            )
+        else:
+            resolved = view_resolver(
+                artifact_id=artifact_id,
+                key=key,
+                slices=slices,
+                transpose=transpose,
+                view_id=view_id,
+            )
+            if resolved.variant == "id":
+                raise ArtifactError(
+                    "View registration via pre-existing view_id is not supported yet",
+                    status_code="UNIMPLEMENTED",
+                    retryable=False,
+                )
+            canonical_index_bytes = resolved.canonical_index_bytes
+            assert canonical_index_bytes is not None
+            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+            assert resolved.build_result is not None
+            build_result = resolved.build_result
+            resolved_artifact_id = resolved.artifact_id
+
+        placement_enum = self._views.resolve_transform_placement(
+            placement,
+            has_transpose=build_result.has_transpose,
+            for_registration=True,
+        )
+        view_ctx, upload_tensors = self._build_view_registration(
+            canonical_index_bytes=canonical_index_bytes,
+            canonical_index=canonical_index,
+            build_result=build_result,
+            tensors=tensors,
+            placement_enum=placement_enum,
+            registration_kind=resolved_kind,
+        )
+        return self._perform_registration(
+            upload_tensors,
+            artifact_id=resolved_artifact_id
+            if resolved_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            else None,
+            key=key,
+            plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            ttl_override=ttl_ms,
+            view_registration=view_ctx,
+        )
+
+    def register_piece(
+        self,
+        tensors: Mapping[str, torch.Tensor],
+        *,
+        assembly_id: str,
+        key: str | None = None,
+        slices: Mapping[str, Sequence[object]] | None = None,
+        canonical_index_bytes: bytes | None = None,
+        placement: str | None = None,
+        ttl_ms: int | None = None,
+        options: RegisterArtifactOptions | None = None,
+        resolver: Callable[..., ResolvedViewInputs] | None = None,
+    ) -> RegisteredArtifact:
+        if not assembly_id:
+            raise ArtifactError(
+                "assembly_id is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not slices:
+            raise ArtifactError(
+                "Piece registration requires slices",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if canonical_index_bytes is not None:
+            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+            build_result = self._views._build_view_spec(
+                canonical_index=canonical_index,
+                slices=slices,
+                transpose=None,
+            )
+        else:
+            view_resolver = resolver or self._views.resolve_view_inputs
+            resolved = view_resolver(
+                artifact_id=assembly_id,
+                key=None,
+                slices=slices,
+                transpose=None,
+                view_id=None,
+            )
+            if resolved.variant == "id":
+                raise ArtifactError(
+                    "Piece registration via pre-existing view_id is not supported yet",
+                    status_code="UNIMPLEMENTED",
+                    retryable=False,
+                )
+            canonical_index_bytes = resolved.canonical_index_bytes
+            assert canonical_index_bytes is not None
+            canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+            assert resolved.build_result is not None
+            build_result = resolved.build_result
+
+        placement_enum = self._views.resolve_transform_placement(
+            placement,
+            has_transpose=False,
+            for_registration=True,
+        )
+        view_ctx, upload_tensors = self._build_view_registration(
+            canonical_index_bytes=canonical_index_bytes,
+            canonical_index=canonical_index,
+            build_result=build_result,
+            tensors=tensors,
+            placement_enum=placement_enum,
+            registration_kind=store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+        )
+        return self._perform_registration(
+            upload_tensors,
+            artifact_id=assembly_id,
+            key=key,
+            plan=PlanType.VRAM_COALESCED,
+            options_override=options,
+            ttl_override=ttl_ms,
+            view_registration=view_ctx,
+        )
+
+    @staticmethod
+    def _normalize_registration_kind(
+        registration_kind: str | int | None,
+        *,
+        allow_partial: bool,
+    ) -> int:
+        resolved: int | None = None
+        if registration_kind is None:
+            resolved = (
+                store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+                if allow_partial
+                else store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
+            )
+        elif isinstance(registration_kind, str):
+            normalized = registration_kind.strip().lower()
+            if normalized in {"piece", "partial"}:
+                resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            elif normalized in {"canonical", "canon"}:
+                resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
+        elif isinstance(registration_kind, int) and registration_kind in (
+            store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL,
+            store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
+        ):
+            resolved = int(registration_kind)
+        if resolved is None:
+            raise ArtifactError(
+                "registration_kind must be 'canonical' or 'piece'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if allow_partial:
+            if resolved != store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
+                raise ArtifactError(
+                    "allow_partial is deprecated; use registration_kind='piece'",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            logger.warning("allow_partial is deprecated; use registration_kind='piece'")
+        return resolved
+
+    def _build_view_registration(
+        self,
+        *,
+        canonical_index_bytes: bytes,
+        canonical_index: CanonicalIndex,
+        build_result: ViewSpecBuildResult,
+        tensors: Mapping[str, torch.Tensor],
+        placement_enum: TransformPlacement,
+        registration_kind: int,
+    ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
+        if build_result.is_identity:
             raise ArtifactError(
                 "View registration requires explicit view operations",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        placement_enum = self._views.resolve_transform_placement(
-            placement,
-            has_transpose=resolved.has_transpose,
-            for_registration=True,
-        )
-        assert resolved.canonical_index_bytes is not None
-        canonical_index_bytes = resolved.canonical_index_bytes
-        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-        plan_metadata = _compute_view_plan_metadata(
-            canonical_index_bytes, resolved.build_result
-        )
+        if registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
+            if build_result.has_transpose:
+                raise ArtifactError(
+                    "Piece registration does not allow transpose",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if placement_enum != TransformPlacement.TRANSFORM_PLACEMENT_SERVER:
+                raise ArtifactError(
+                    "Piece registration requires placement='SERVER'",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+        plan_metadata = _compute_view_plan_metadata(canonical_index_bytes, build_result)
         canonical_ranges = _merge_canonical_ranges(plan_metadata.write_chunks)
+        if (
+            registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+            and not canonical_ranges
+        ):
+            raise ArtifactError(
+                "Piece registration produced empty canonical coverage",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
         view_options = store_daemon_pb2.ViewRegistrationOptions()
-        if resolved.view_id:
-            view_options.view_id = resolved.view_id
-        assert resolved.build_result.proto is not None
-        view_options.spec.CopyFrom(resolved.build_result.proto)
+        if build_result.proto is None:
+            raise ArtifactError(
+                "View spec missing for registration",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        view_options.spec.CopyFrom(build_result.proto)
         view_options.placement = placement_enum
         view_options.canonical_size_bytes = canonical_index.total_size_bytes
+        view_options.registration_kind = registration_kind
         for rng in canonical_ranges:
             range_proto = view_options.ranges.add()
             range_proto.offset = rng.offset
             range_proto.length = rng.length
-        view_options.allow_partial = bool(allow_partial)
         upload_tensors: dict[str, torch.Tensor]
         if placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_SERVER:
             upload_tensors = dict(tensors)
         elif placement_enum == TransformPlacement.TRANSFORM_PLACEMENT_CLIENT:
             upload_tensors = _materialize_canonical_tensors(
-                canonical_index_bytes, resolved.build_result, tensors
+                canonical_index_bytes, build_result, tensors
             )
         else:
             raise ArtifactError(
@@ -221,7 +442,6 @@ class RegistrationPipeline:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-
         view_ctx = ViewRegistrationContext(
             canonical_index_bytes=canonical_index_bytes,
             view_options=view_options,
@@ -229,16 +449,9 @@ class RegistrationPipeline:
             plan=plan_metadata,
             tensors=dict(tensors),
             canonical_ranges=canonical_ranges,
-            allow_partial=allow_partial,
+            registration_kind=registration_kind,
         )
-        return self._perform_registration(
-            upload_tensors,
-            key=key,
-            plan=PlanType.VRAM_COALESCED,
-            options_override=options,
-            ttl_override=ttl_ms,
-            view_registration=view_ctx,
-        )
+        return view_ctx, upload_tensors
 
     @staticmethod
     def _require_cuda_tensors(tensors: Mapping[str, torch.Tensor]) -> None:

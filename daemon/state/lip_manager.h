@@ -6,6 +6,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,18 +54,30 @@ class LipManager {
   void put_lease(const std::string& registration_id, const ArtifactDeviceKey& key, LipLeaseEntry entry);
   absl::Status keepalive_lease(const std::string& registration_id, int owner_pid, uint64_t epoch, uint32_t ttl_ms);
   absl::Status revoke_by_registration_id(const std::string& registration_id);
-  std::optional<LipLeaseEntry> find_active_by_artifact_id(const std::string& artifact_id) const;
-  bool has_active_on_device(const std::string& artifact_id, int device_id) const;
+  std::optional<LipLeaseEntry> find_active_by_artifact_id(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
+  bool has_active_on_device(
+      std::string_view artifact_id,
+      int device_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
   void sweep_expired_and_dead_pids();
 
   // Remove the commit lease for (artifact, device) when the owner pid matches.
   // Best-effort: returns true on removal, false if not found or owner mismatch.
-  bool revoke_commit_lease_if_owner_matches(const std::string& artifact_id, int device_id, int owner_pid);
+  bool revoke_commit_lease_if_owner_matches(
+      std::string_view artifact_id,
+      int device_id,
+      int owner_pid,
+      std::optional<std::string_view> view_id = std::nullopt);
 
   // Extend TTL for an active lease by artifact_id and optionally bump TTL on
   // any region-backed storages referenced by the lease. Returns OK if lease
   // found and updated, NOT_FOUND if no active lease, or another status.
-  absl::Status extend_ttl_for_artifact(const std::string& artifact_id, uint32_t extend_ttl_ms);
+  absl::Status extend_ttl_for_artifact(
+      std::string_view artifact_id,
+      uint32_t extend_ttl_ms,
+      std::optional<std::string_view> view_id = std::nullopt);
 
   // Quiesce a LIP artifact to block new staged exports.
   void quiesce_artifact(const std::string& artifact_id);

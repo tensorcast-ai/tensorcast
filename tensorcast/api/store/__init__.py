@@ -74,7 +74,11 @@ from tensorcast.api.store.types import (
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
 from tensorcast.daemon_ctl import get_daemon_client
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import DeregisterArtifactOutcome, VramRegionHandle
+from tensorcast.types import (
+    DeregisterArtifactOutcome,
+    SealAssemblyResult,
+    VramRegionHandle,
+)
 
 
 class Store:
@@ -188,6 +192,8 @@ class Store:
         ttl_ms: int | None = None,
         allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
+        canonical_index_bytes: bytes | None = None,
+        registration_kind: str | int | None = None,
     ) -> RegisteredArtifact:
         return self._registration.register_view(
             tensors,
@@ -199,6 +205,32 @@ class Store:
             placement=placement,
             ttl_ms=ttl_ms,
             allow_partial=allow_partial,
+            options=options,
+            canonical_index_bytes=canonical_index_bytes,
+            registration_kind=registration_kind,
+            resolver=self._views.resolve_view_inputs,
+        )
+
+    def register_piece(
+        self,
+        tensors: TensorDict,
+        *,
+        assembly_id: str,
+        key: str | None = None,
+        slices: Mapping[str, Sequence[object]] | None = None,
+        canonical_index_bytes: bytes | None = None,
+        placement: str | None = None,
+        ttl_ms: int | None = None,
+        options: RegisterArtifactOptions | None = None,
+    ) -> RegisteredArtifact:
+        return self._registration.register_piece(
+            tensors,
+            assembly_id=assembly_id,
+            key=key,
+            slices=slices,
+            canonical_index_bytes=canonical_index_bytes,
+            placement=placement,
+            ttl_ms=ttl_ms,
             options=options,
             resolver=self._views.resolve_view_inputs,
         )
@@ -255,6 +287,19 @@ class Store:
             task_id=task_id, artifact_id=artifact_id
         )
         return self._persistence_status_from_proto(resp)
+
+    def seal_assembly(
+        self,
+        assembly_id: str,
+        *,
+        publish_canonical: bool = True,
+        timeout_s: float = 120.0,
+    ) -> SealAssemblyResult:
+        return self._runtime.ensure_client().seal_assembly(
+            assembly_id,
+            publish_canonical=publish_canonical,
+            timeout_s=timeout_s,
+        )
 
     def _persistence_status_from_proto(
         self, resp: store_daemon_pb2.QueryPersistenceStatusResponse
@@ -672,6 +717,8 @@ def register_view(
     ttl_ms: int | None = None,
     allow_partial: bool = False,
     options: RegisterArtifactOptions | None = None,
+    canonical_index_bytes: bytes | None = None,
+    registration_kind: str | int | None = None,
 ) -> RegisteredArtifact:
     return _coerce_store().register_view(
         tensors,
@@ -683,6 +730,31 @@ def register_view(
         placement=placement,
         ttl_ms=ttl_ms,
         allow_partial=allow_partial,
+        options=options,
+        canonical_index_bytes=canonical_index_bytes,
+        registration_kind=registration_kind,
+    )
+
+
+def register_piece(
+    tensors: TensorDict,
+    *,
+    assembly_id: str,
+    key: str | None = None,
+    slices: Mapping[str, Sequence[object]] | None = None,
+    canonical_index_bytes: bytes | None = None,
+    placement: str | None = None,
+    ttl_ms: int | None = None,
+    options: RegisterArtifactOptions | None = None,
+) -> RegisteredArtifact:
+    return _coerce_store().register_piece(
+        tensors,
+        assembly_id=assembly_id,
+        key=key,
+        slices=slices,
+        canonical_index_bytes=canonical_index_bytes,
+        placement=placement,
+        ttl_ms=ttl_ms,
         options=options,
     )
 
@@ -771,6 +843,19 @@ def query_persistence_status(
     )
 
 
+def seal_assembly(
+    assembly_id: str,
+    *,
+    publish_canonical: bool = True,
+    timeout_s: float = 120.0,
+) -> SealAssemblyResult:
+    return _coerce_store().seal_assembly(
+        assembly_id,
+        publish_canonical=publish_canonical,
+        timeout_s=timeout_s,
+    )
+
+
 def artifact(
     *,
     artifact_id: str | None = None,
@@ -844,9 +929,11 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "register_view",
+    "register_piece",
     "register_vram_region",
     "unregister_vram_region",
     "deregister_artifact",
+    "seal_assembly",
     "get_daemon_client",
     "require_runtime",
     "_register_artifact_core",

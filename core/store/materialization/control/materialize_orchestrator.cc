@@ -137,19 +137,6 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           local_identity_.p2p_port,
           target_device,
           /*wait_timeout_ms=*/30000);
-      if (!transport_or.ok()) {
-        if (absl::IsNotFound(transport_or.status()) || absl::IsUnimplemented(transport_or.status())) {
-          LOG(INFO) << "Variant transport unavailable for view_id=" << *view_id << " (" << transport_or.status()
-                    << "); falling back to canonical routing";
-          transport_or = gs_client_->request_replica_transport(
-              artifact_id,
-              local_identity_.node_id,
-              local_identity_.node_address,
-              local_identity_.p2p_port,
-              target_device,
-              /*wait_timeout_ms=*/30000);
-        }
-      }
     } else {
       transport_or = gs_client_->request_replica_transport(
           artifact_id,

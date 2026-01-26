@@ -40,6 +40,7 @@ class TransportService:
     def request_transport(
         self,
         artifact_id: str,
+        view_id: str | None,
         source_node_id: str,
         source_address: str,
         source_port: int,
@@ -64,7 +65,7 @@ class TransportService:
         start_time = time.time()
         end_time = start_time + (wait_timeout_ms / 1000 if wait_timeout_ms > 0 else 0)
 
-        if not self.replica_repository.has_any_replica(artifact_id):
+        if not self.replica_repository.has_any_replica(artifact_id, view_id):
             inc_transport_request(artifact_id, "not_found")
             observe_transport_wait(artifact_id, time.time() - start_time)
             raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
@@ -74,6 +75,7 @@ class TransportService:
                 # Try to find and claim an available replica
                 replica = self.replica_repository.find_available_for_transport(
                     artifact_id=artifact_id,
+                    view_id=view_id,
                     heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 )
 
@@ -110,7 +112,7 @@ class TransportService:
 
             # Check timeout
             if time.time() >= end_time:
-                if not self.replica_repository.has_any_replica(artifact_id):
+                if not self.replica_repository.has_any_replica(artifact_id, view_id):
                     inc_transport_request(artifact_id, "not_found")
                     wait_sec = time.time() - start_time
                     observe_transport_wait(artifact_id, wait_sec)
@@ -122,6 +124,7 @@ class TransportService:
                     snapshot = (
                         self.replica_repository.get_transport_eligibility_snapshot(
                             artifact_id=artifact_id,
+                            view_id=view_id,
                             heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms
                             / 1000,
                         )

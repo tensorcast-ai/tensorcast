@@ -116,6 +116,8 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "RegisteredArtifact": ("tensorcast.api", "RegisteredArtifact"),
     "RegisteredLease": ("tensorcast.api", "RegisteredLease"),
     "RegistrationResult": ("tensorcast.api", "RegistrationResult"),
+    "SealAssemblyResult": ("tensorcast.api", "SealAssemblyResult"),
+    "ViewRegistrationKind": ("tensorcast.api", "ViewRegistrationKind"),
     "Store": ("tensorcast.api", "Store"),
     "StoreOptions": ("tensorcast.api", "StoreOptions"),
     "build_indices_from_safetensors": (
@@ -151,7 +153,9 @@ _LAZY_ATTRS: dict[str, tuple[str, str]] = {
     "register": ("tensorcast.api.store", "register"),
     "register_async": ("tensorcast.api.store", "register_async"),
     "register_view": ("tensorcast.api.store", "register_view"),
+    "register_piece": ("tensorcast.api.store", "register_piece"),
     "register_vram_region": ("tensorcast.api.store", "register_vram_region"),
+    "seal_assembly": ("tensorcast.api.store", "seal_assembly"),
     "store": ("tensorcast.api.store", "store"),
     "unregister_vram_region": ("tensorcast.api.store", "unregister_vram_region"),
     "init": ("tensorcast.startup", "init"),

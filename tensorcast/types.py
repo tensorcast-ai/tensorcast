@@ -130,6 +130,7 @@ class CanonicalRange(BaseModel):
 
 
 LocalStableTierStatus = Literal["ready", "degraded", "skipped"]
+ViewRegistrationKind = Literal["canonical", "piece"]
 
 
 class LocalStableTierResult(BaseModel):
@@ -150,8 +151,19 @@ class CommitResult(BaseModel):
     view_index_json: bytes | None = None
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
+    registration_kind: ViewRegistrationKind = "canonical"
     allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
+
+
+class SealAssemblyResult(BaseModel):
+    """Seal outcome with the bound MI2 descriptor."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sealed_artifact_id: str
+    descriptor: ArtifactDescriptor
+    already_sealed: bool = False
 
 
 # ------------------------------ Plan models --------------------------------
@@ -321,6 +333,8 @@ __all__ = [
     "ArtifactDescriptor",
     "CanonicalRange",
     "CommitResult",
+    "ViewRegistrationKind",
+    "SealAssemblyResult",
     "PlanBase",
     "CoalescedPlan",
     "LeasePlan",

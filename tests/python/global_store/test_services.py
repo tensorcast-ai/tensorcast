@@ -8,6 +8,7 @@ import pytest
 
 from tensorcast.global_store import metrics
 from tensorcast.global_store.exceptions import (
+    DatabaseError,
     NotFoundError,
     TimeoutError,
     ValidationError,
@@ -435,6 +436,7 @@ class TestServices:
         # Request transport
         selected, transport_id = transport_service.request_transport(
             artifact_id="test_artifact",
+            view_id=None,
             source_node_id="source_node",
             source_address="192.168.2.1",
             source_port=9090,
@@ -456,6 +458,7 @@ class TestServices:
         with pytest.raises(NotFoundError):
             transport_service.request_transport(
                 artifact_id="nonexistent_artifact",
+                view_id=None,
                 source_node_id="source",
                 source_address="192.168.1.1",
                 source_port=8080,
@@ -498,6 +501,7 @@ class TestServices:
         # Request first transport (should succeed)
         _, transport_id = transport_service.request_transport(
             artifact_id="test_timeout_artifact",
+            view_id=None,
             source_node_id="source_1",
             source_address="192.168.2.1",
             source_port=9090,
@@ -507,6 +511,7 @@ class TestServices:
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
                 artifact_id="test_timeout_artifact",
+                view_id=None,
                 source_node_id="source_2",
                 source_address="192.168.2.2",
                 source_port=9091,
@@ -554,6 +559,7 @@ class TestServices:
         for i in range(2):
             _, transport_id = transport_service.request_transport(
                 artifact_id="test_artifact",
+                view_id=None,
                 source_node_id=f"source_{i}",
                 source_address="192.168.2.1",
                 source_port=9090 + i,
@@ -564,6 +570,7 @@ class TestServices:
         with pytest.raises(TimeoutError):
             transport_service.request_transport(
                 artifact_id="test_artifact",
+                view_id=None,
                 source_node_id="source_3",
                 source_address="192.168.2.1",
                 source_port=9093,
@@ -576,6 +583,7 @@ class TestServices:
         # Now request should succeed
         _, transport_id = transport_service.request_transport(
             artifact_id="test_artifact",
+            view_id=None,
             source_node_id="source_3",
             source_address="192.168.2.1",
             source_port=9093,
@@ -656,6 +664,7 @@ class TestServices:
         # Request transport - should select GPU replica with lower load (node_1)
         selected, transport_id = transport_service.request_transport(
             artifact_id="balanced_artifact",
+            view_id=None,
             source_node_id="client",
             source_address="192.168.2.1",
             source_port=9000,
@@ -782,6 +791,7 @@ class TestServices:
             verified_at=None,
             canonical_size_bytes=1024,
             canonical_bytes_covered=512,
+            canonical_ranges=[(0, 512)],
         )
 
         backlog_value = metrics.VIEW_PARTIAL_BACKLOG_GAUGE.labels(
@@ -829,4 +839,73 @@ class TestServices:
                         digest=b"\x01" * 32,
                     ),
                 ],
+            )
+
+    def test_view_state_service_requires_coverage_metadata_for_partial(self, services):
+        view_state_service = services["view_state"]
+        with pytest.raises(DatabaseError, match="coverage metadata missing"):
+            view_state_service.record_variant_registration(
+                artifact_id="mi2:index:partial",
+                view_id="view-partial",
+                view_spec_json="{}",
+                view_size=64,
+                view_data_hash="vh",
+                verified_at=None,
+                canonical_size_bytes=256,
+                canonical_bytes_covered=128,
+                canonical_ranges=None,
+            )
+
+    def test_view_state_service_rejects_overlapping_ranges(self, services):
+        view_state_service = services["view_state"]
+        view_state_service.record_variant_registration(
+            artifact_id="mi2:index:overlap",
+            view_id="view-a",
+            view_spec_json="{}",
+            view_size=64,
+            view_data_hash="vh-a",
+            verified_at=None,
+            canonical_size_bytes=256,
+            canonical_bytes_covered=64,
+            canonical_ranges=[(0, 64)],
+        )
+
+        with pytest.raises(DatabaseError, match="overlapping canonical coverage"):
+            view_state_service.record_variant_registration(
+                artifact_id="mi2:index:overlap",
+                view_id="view-b",
+                view_spec_json="{}",
+                view_size=64,
+                view_data_hash="vh-b",
+                verified_at=None,
+                canonical_size_bytes=256,
+                canonical_bytes_covered=64,
+                canonical_ranges=[(32, 64)],
+            )
+
+    def test_view_state_service_rejects_view_data_hash_conflict(self, services):
+        view_state_service = services["view_state"]
+        view_state_service.record_variant_registration(
+            artifact_id="mi2:index:hash",
+            view_id="view-hash",
+            view_spec_json="{}",
+            view_size=128,
+            view_data_hash="hash-a",
+            verified_at=None,
+            canonical_size_bytes=128,
+            canonical_bytes_covered=128,
+            canonical_ranges=[(0, 128)],
+        )
+
+        with pytest.raises(DatabaseError, match="view_data_hash conflict"):
+            view_state_service.record_variant_registration(
+                artifact_id="mi2:index:hash",
+                view_id="view-hash",
+                view_spec_json="{}",
+                view_size=128,
+                view_data_hash="hash-b",
+                verified_at=None,
+                canonical_size_bytes=128,
+                canonical_bytes_covered=128,
+                canonical_ranges=[(0, 128)],
             )
