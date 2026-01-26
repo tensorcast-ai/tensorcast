@@ -1,0 +1,16 @@
+diff --git a/include/jemalloc/internal/BUILD.bazel b/include/jemalloc/internal/BUILD.bazel
+index 8bd966f..3b33741 100644
+--- a/include/jemalloc/internal/BUILD.bazel
++++ b/include/jemalloc/internal/BUILD.bazel
+@@ -314,8 +314,8 @@ configure_header(
+         define_macro_if("JEMALLOC_MALLOC_THREAD_CLEANUP", "@platforms//os:freebsd") |
+         # JEMALLOC_THREADED_INIT: GNU systems
+         define_macro_if("JEMALLOC_THREADED_INIT", "//settings/platform:gnu") |
+-        # JEMALLOC_TLS_MODEL: Assume initial-exec TLS on modern systems
+-        define_macro_if_with("JEMALLOC_TLS_MODEL", "//settings/platform:posix", "__attribute__((tls_model(\"initial-exec\")))") |
++        # JEMALLOC_TLS_MODEL: Keep dlopen-friendly (avoid initial-exec static TLS).
++        define_macro_if_with("JEMALLOC_TLS_MODEL", "//settings/platform:posix", "") |
+         # JEMALLOC_DEBUG: Configurable flag
+         define_macro_if("JEMALLOC_DEBUG", "//settings/flags:debug") |
+         # JEMALLOC_STATS: Configurable flag
+         define_macro_if("JEMALLOC_STATS", "//settings/flags:stats") |
