@@ -1,7 +1,6 @@
 ---
 title: Dense Piece Artifacts and Unsealed-to-Sealed Assembly (Plan)
 areas: ["core","daemon","global_store","sdk","proto"]
-status: complete
 created: 2026-01-24
 last_updated: 2026-01-26
 links:
@@ -19,7 +18,7 @@ Current scope (normative; see design for full details):
 - Assembly synthesis is selection-only (target view must not require compute transforms).
 - Pieces must be partial (identity/full-coverage views are rejected for piece registration).
 - No LIP pieces (piece registration is implemented only for non-LIP plans).
-- No legacy partial semantics: `allow_partial` / “canonical with holes/zero-fill” is removed; partial coverage is represented only via `registration_kind=PIECE`.
+- No legacy partial semantics: `allow_partial` remains present but is deprecated and rejected (no “canonical with holes/zero-fill”); partial coverage is represented only via `registration_kind=PIECE`.
 
 This plan now includes a step-by-step implementation order with ownership, dependencies, and concrete deliverables. It is intended to be executable without additional scaffolding.
 
@@ -204,10 +203,22 @@ This section assigns concrete file ownership for implementation. It is not exhau
   - Allow view_size_bytes total size for piece registration.
   - Reject non-selection-only pieces and identity views.
 
-# Rollout
+# Rollout & Backout
+
+## Rollout
 
 - Rollout sequence: proto+schema+GS view-aware routing first, then daemon/core piece path, then SDK exposure.
 - This work is a breaking change for partial registration semantics; update SDK/daemon/GS together (no legacy fallback paths).
+
+## Backout
+
+- Backout strategy: revert the 0056 change set as a unit (SDK + daemon/core + Global Store) rather than attempting a dual-path compatibility mode.
+- Schema changes are additive (`schema.sql` adds columns/tables); no DB rollback is required for a backout. Old code ignores extra columns/tables safely.
+- Operational steps:
+  - Stop/rollback clients that use `register_piece` / `registration_kind=PIECE` and sealing APIs.
+  - Deploy the previous Global Store and daemon versions together.
+  - Re-run MI2 canonical registration/materialization smoke tests to confirm baseline behavior.
+- Known consequence: any already-registered piece assemblies may become inaccessible to older code until re-upgraded; treat them as orphaned data and clean up later if needed.
 
 # Testing & Validation (Guidance)
 
@@ -446,3 +457,10 @@ These are intentionally narrow "tripwires" for regressions on the exact pitfalls
   - `rg -n \"request_view_transport fell back to canonical routing\" core/store/components/global_store_client.cc` returns no matches.
 - Inventory/checksum must not be artifact-id-only anymore:
   - `rg -n \"artifact_id:node_id\" daemon/ha/worker_lifecycle_manager.cc` should show the ByteSpace-aware format (with view ByteSpace identity in the stable string).
+
+# Risks & Tracking
+
+- **Cross-version skew** (Owner: Release): ByteSpaceRef + required `registration_kind` is not safe under mixed SDK/daemon/GS versions; mitigate with coordinated rollout/backout and explicit errors (no silent fallback).
+- **Metadata growth** (Owner: Global Store): `variant_coverage_ranges` can become large for many small pieces; mitigate with range coalescing, pagination (`ListVariants`), and future “manifest blob” option.
+- **Sealing races and idempotence** (Owner: Global Store + Daemon): concurrent sealers must converge on a single binding; mitigate with uniqueness in `artifact_bindings`, idempotent RPC semantics, and acceptance Scenario F.
+- **Performance variance** (Owner: Core): worst-case assembly can devolve into many small reads; mitigate by preferring exact-view fast path, coalescing selection plans, and caching derived view replicas when beneficial.

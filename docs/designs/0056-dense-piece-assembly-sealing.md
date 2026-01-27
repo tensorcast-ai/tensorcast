@@ -2,9 +2,9 @@
 slug: dense-piece-assembly-sealing
 title: Dense Piece Artifacts and Unsealed-to-Sealed Assembly
 areas: ["core","daemon","global_store","sdk","proto"]
-status: draft
+status: implemented
 created: 2026-01-24
-last_updated: 2026-01-25
+last_updated: 2026-01-26
 related_code:
   - schema.sql
   - docs/designs/0016-artifact-view-v1.md
@@ -76,7 +76,7 @@ This design describes the **executable** implementation we intend to build now. 
 - **Pieces must be partial**: `VIEW_REGISTRATION_KIND_PIECE` MUST represent partial canonical coverage. A `ViewSpec` that normalizes to an identity/full-coverage view is rejected for piece registration (callers should seal/publish or register canonical-kind instead).
 - **Pieces are cache-like by default**: piece replicas are treated as ephemeral residency unless an explicit policy requests durability (sealing remains the recommended path to durable MI2).
 - **No LIP pieces**: `VIEW_REGISTRATION_KIND_PIECE` MUST be implemented only for non-LIP registration plans (e.g., coalesced / stable-dram). Lease-in-place (VRAM_LEASED) is not supported for pieces in this phase.
-- **No legacy partial semantics**: `allow_partial` is not a piece signal and “canonical with holes/zero-fill” is removed. Partial coverage is represented only via `registration_kind=PIECE` + dense view replicas.
+- **No legacy partial semantics**: `allow_partial` is deprecated and MUST be false; requests setting `allow_partial=true` MUST fail with `FAILED_PRECONDITION` (legacy “canonical with holes/zero-fill” is removed). Partial coverage is represented only via `registration_kind=PIECE` + dense view replicas.
 - **Padding determinism**: any padding bytes introduced by view alignment MUST be zeroed in the stored view buffer (not just during hashing). The `view_data_hash` MUST cover the entire view ByteSpace, including padding zeros, using the same multibase/multihash SHA-256 scheme as `index_multihash` (leaf chunk size aligned with the canonical verification policy).
 - **Coverage enforcement requires ranges**: this phase MUST persist canonical coverage ranges for each piece (or an equivalent manifest) so overlaps and completeness can be validated deterministically. If coverage ranges are unavailable, assembly and sealing MUST fail with `FAILED_PRECONDITION` ("coverage metadata missing").
 
@@ -850,12 +850,13 @@ To enforce “no overlaps across different view_id” and to prove completeness,
 CREATE TABLE IF NOT EXISTS variant_coverage_ranges (
   artifact_id TEXT NOT NULL,
   view_id TEXT NOT NULL,
-  canonical_offset BIGINT NOT NULL,
-  canonical_length BIGINT NOT NULL,
-  PRIMARY KEY (artifact_id, view_id, canonical_offset)
+  range_offset BIGINT NOT NULL,
+  range_length BIGINT NOT NULL,
+  PRIMARY KEY (artifact_id, view_id, range_offset, range_length)
 );
 
-CREATE INDEX IF NOT EXISTS idx_variant_coverage_artifact ON variant_coverage_ranges(artifact_id, view_id);
+CREATE INDEX IF NOT EXISTS idx_variant_coverage_artifact ON variant_coverage_ranges(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_variant_coverage_view ON variant_coverage_ranges(artifact_id, view_id);
 ```
 
 Alternative: store a compact “coverage manifest” blob referenced from `variants` if range counts are large. Either way, assembly/seal requires canonical range visibility.
@@ -883,7 +884,7 @@ The Global Store persists these ranges in `variant_coverage_ranges` (or an equiv
 
 Introduce a single canonical discriminator for “which ByteSpace is being referenced”:
 
-- `enum ByteSpaceKind { BYTE_SPACE_KIND_CANONICAL = 0; BYTE_SPACE_KIND_VIEW = 1; }`
+- `enum ByteSpaceKind { BYTE_SPACE_KIND_UNSPECIFIED = 0; BYTE_SPACE_KIND_CANONICAL = 1; BYTE_SPACE_KIND_VIEW = 2; }`
 - `message ByteSpaceRef { ByteSpaceKind kind = 1; string id = 2; }`
   - For `BYTE_SPACE_KIND_VIEW`, `id` is the `view_id`.
   - For `BYTE_SPACE_KIND_CANONICAL`, `id` MUST be empty.
@@ -892,19 +893,19 @@ Introduce a single canonical discriminator for “which ByteSpace is being refer
 
 Add `ByteSpaceRef byte_space` so the daemon can register and the GS can return ByteSpace-scoped replicas/routes:
 
-- `ByteSpaceRef byte_space = N;` (field number to be assigned).
+- `ByteSpaceRef byte_space = 16;` (in `tensorcast.common.v1.MemoryInfo`).
 
 ## `RequestReplicaTransportRequest`
 
 Add `ByteSpaceRef requested_byte_space` so transport selection can target a specific ByteSpace:
 
-- `ByteSpaceRef requested_byte_space = N;` (field number to be assigned).
+- `ByteSpaceRef requested_byte_space = 7;` (in `tensorcast.global_store.v1.RequestReplicaTransportRequest`).
 
 ## `LockTransportChunksRequest`
 
 Add `ByteSpaceRef byte_space` to disambiguate locks:
 
-- `ByteSpaceRef byte_space = N;` (field number to be assigned).
+- `ByteSpaceRef byte_space = 5;` (in `tensorcast.daemon.v2.LockTransportChunksRequest`).
 
 ## Global Store transport routing must be ByteSpaceRef-aware
 
@@ -974,7 +975,7 @@ Not required for v1:
 
 - Existing MI2 canonical registration and materialization flows remain unchanged.
 - Existing full-coverage view registration (canonical-kind view registration per design-0016 intent) remains unchanged.
-- `allow_partial` and “canonical with holes/zero-fill” are removed; partial coverage is represented only via `registration_kind=PIECE` and dense view replicas.
+- `allow_partial` remains present but is deprecated and rejected (no more “canonical with holes/zero-fill”); partial coverage is represented only via `registration_kind=PIECE` and dense view replicas.
 - ByteSpaceRef fields are required in routing/locks/exports, so SDK/daemon/GS must be updated together.
 
 ## Acceptance criteria

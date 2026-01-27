@@ -1,5 +1,5 @@
 
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_MISC_MAP_H_
 #define CORE_COMMUNICATOR_MISC_MAP_H_
@@ -41,6 +41,24 @@ class Map {
     } else {
       LOG(FATAL) << "failed to delete key " << key << " from map";
     }
+  }
+
+  bool erase_if(const K& key, const V& expected) {
+    std::unique_lock<std::mutex> lock(mu_);
+    auto itr = map_.find(key);
+    if (itr == map_.end()) {
+      return false;
+    }
+    if (itr->second != expected) {
+      return false;
+    }
+    map_.erase(itr);
+    return true;
+  }
+
+  bool erase_if_present(const K& key) {
+    std::unique_lock<std::mutex> lock(mu_);
+    return map_.erase(key) > 0;
   }
 
   std::vector<std::pair<K, V>> pairs() {
