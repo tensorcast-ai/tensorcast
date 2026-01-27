@@ -739,14 +739,21 @@ class TestGRPCService:
             ),
             leaf_writes=[
                 global_store_pb2.LeafWrite(
-                    space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT,
-                    space_id="view-1",
+                    hash_space=common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_VIEW, id="view-1"
+                        ),
+                    ),
                     leaf_idx=0,
                     digest=b"\x01" * 32,
                 ),
                 global_store_pb2.LeafWrite(
-                    space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
-                    space_id="index_hash",
+                    hash_space=common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                        ),
+                        canonical_index_multihash="index_hash",
+                    ),
                     leaf_idx=2,
                     digest=b"\x02" * 32,
                 ),
@@ -766,7 +773,8 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        view_request.view_id = "view-1"
+        view_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        view_request.requested_byte_space.id = "view-1"
         view_response = servicer.GetArtifactInfoById(view_request, test_context)
 
         assert view_response.status == global_store_pb2.Status.STATUS_OK
@@ -783,8 +791,8 @@ class TestGRPCService:
             artifact_id=artifact_id,
             include_replicas=wrappers_pb2.BoolValue(value=False),
             include_leaves=True,
-            canonical=True,
         )
+        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         canonical_response = servicer.GetArtifactInfoById(
             canonical_request, test_context
         )
@@ -801,7 +809,8 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        partial_request.view_id = "view-1"
+        partial_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        partial_request.requested_byte_space.id = "view-1"
         partial_request.leaf_idxs.extend([0, 3])
         partial_response = servicer.GetArtifactInfoById(partial_request, test_context)
 
@@ -810,8 +819,8 @@ class TestGRPCService:
         assert partial_response.leaves[0].leaf_idx == 0
         assert len(partial_response.partial_coverage) == 1
         detail = partial_response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
-        assert detail.space_id == "view-1"
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert detail.hash_space.byte_space.id == "view-1"
         assert len(detail.missing_ranges) == 1
         assert detail.missing_ranges[0].off == 3
         assert detail.missing_ranges[0].len == 1
@@ -844,15 +853,16 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        request.view_id = "missing-view"
+        request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        request.requested_byte_space.id = "missing-view"
         request.leaf_idxs.extend([0, 1])
         response = servicer.GetArtifactInfoById(request, test_context)
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(response.replicas) == 0
         assert len(response.partial_coverage) == 1
         detail = response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
-        assert detail.space_id == "missing-view"
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert detail.hash_space.byte_space.id == "missing-view"
         assert sorted(r.off for r in detail.missing_ranges) == [0, 1]
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
@@ -902,8 +912,12 @@ class TestGRPCService:
                 artifact_id=artifact_id,
                 leaf_writes=[
                     global_store_pb2.LeafWrite(
-                        space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
-                        space_id="index",
+                        hash_space=common_pb2.HashSpaceRef(
+                            byte_space=common_pb2.ByteSpaceRef(
+                                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                            ),
+                            canonical_index_multihash="index",
+                        ),
                         leaf_idx=0,
                         digest=b"\xaa" * 32,
                     )
@@ -915,8 +929,8 @@ class TestGRPCService:
         canonical_request = global_store_pb2.GetArtifactInfoByIdRequest(
             artifact_id=artifact_id,
             include_leaves=True,
-            canonical=True,
         )
+        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         canonical_request.leaf_idxs.extend([0, 2])
         response = servicer.GetArtifactInfoById(canonical_request, test_context)
 
@@ -924,8 +938,8 @@ class TestGRPCService:
         assert len(response.leaves) == 1 and response.leaves[0].leaf_idx == 0
         assert len(response.partial_coverage) == 1
         detail = response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_CANONICAL
-        assert detail.space_id == "index"
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
+        assert detail.hash_space.canonical_index_multihash == "index"
         assert len(detail.missing_ranges) == 1
         assert detail.missing_ranges[0].off == 2
         assert detail.missing_ranges[0].len == 1

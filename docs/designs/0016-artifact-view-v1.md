@@ -62,8 +62,8 @@ Rules:
 
 ## 1.2 Coordinate Systems
 
-| Term | ID | Byte range | Source |
-|------|----|------------|--------|
+| Term | Hash-space anchor | Byte range | Source |
+|------|-------------------|------------|--------|
 | **Canonical ByteSpace** | `index_multihash` | `[0,total_size)` | canonical index v3 |
 | **Variant ByteSpace**   | `view_id`         | `[0,view_size)`  | canonical index ⊕ ViewSpec |
 
@@ -75,6 +75,15 @@ flowchart LR
   ByteSpace (indexᵐ)] -- ViewSpec --> B[Variant
   ByteSpace (view_id)]
 ```
+
+Clarification:
+
+- In verification-oriented Global Store APIs (e.g., `leaves`, `PartialCoverageDetail`), `space_id` refers to the
+  **hash-space anchor**:
+  - canonical: `space_id = index_multihash`
+  - variant/view: `space_id = view_id`
+- This is distinct from routing-oriented APIs that use `tensorcast.common.v1.ByteSpaceRef` (v2 direction), where
+  canonical ByteSpace is typically represented as `kind=CANONICAL` with an empty `id`.
 
 ## 1.3 Identity
 

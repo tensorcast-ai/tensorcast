@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Pydantic response models and conversion helpers for the dashboard API."""
 
@@ -319,14 +319,22 @@ class PartialCoverageEntry(BaseModel):
     def from_proto(
         cls, detail: global_store_pb2.PartialCoverageDetail
     ) -> "PartialCoverageEntry":
-        mapping = {
-            global_store_pb2.ByteSpaceKind.BYTE_SPACE_KIND_CANONICAL: "CANONICAL",
-            global_store_pb2.ByteSpaceKind.BYTE_SPACE_KIND_VARIANT: "VARIANT",
-        }
-        space_kind = mapping.get(detail.space_kind, "UNSPECIFIED")
+        if not detail.HasField("hash_space"):
+            return cls(space_kind="UNSPECIFIED", space_id="", missing=[])
+        hash_space = detail.hash_space
+        byte_space = hash_space.byte_space
+        if byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL:
+            space_kind = "CANONICAL"
+            space_id = hash_space.canonical_index_multihash
+        elif byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+            space_kind = "VIEW"
+            space_id = byte_space.id
+        else:
+            space_kind = "UNSPECIFIED"
+            space_id = ""
         return cls(
             space_kind=space_kind,
-            space_id=detail.space_id,
+            space_id=space_id,
             missing=[CoverageRange.from_proto(rng) for rng in detail.missing_ranges],
         )
 

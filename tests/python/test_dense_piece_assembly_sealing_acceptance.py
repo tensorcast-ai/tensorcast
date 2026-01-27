@@ -244,10 +244,9 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     assert index_resp.status == global_store_pb2.Status.STATUS_OK
     assert index_resp.tensor_index_data == canonical_index_bytes
 
-    info_req = global_store_pb2.GetArtifactInfoByIdRequest(
-        artifact_id=assembly_id,
-        view_id=commit_a.view_id,
-    )
+    info_req = global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=assembly_id)
+    info_req.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+    info_req.requested_byte_space.id = commit_a.view_id
     info_req.include_view_meta = True
     info_req.include_replicas.CopyFrom(wrappers_pb2.BoolValue(value=True))
     info_resp = gs_stub.GetArtifactInfoById(info_req)

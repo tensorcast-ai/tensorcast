@@ -309,10 +309,7 @@ message GetArtifactInfoByIdRequest {
   string artifact_id = 1; // "mi2:..."
   google.protobuf.BoolValue include_replicas = 2;
   bool include_leaves = 3;
-  oneof space {
-    bool canonical = 4;
-    string view_id = 5;
-  }
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 4;
   repeated uint64 leaf_idxs = 6;
   bool include_view_meta = 7;
 }
@@ -384,17 +381,10 @@ message VariantUpsert {
   repeated Range canonical_ranges = 7;
 }
 
-enum ByteSpaceKind {
-  BYTE_SPACE_KIND_UNSPECIFIED = 0;
-  BYTE_SPACE_KIND_CANONICAL = 1;
-  BYTE_SPACE_KIND_VARIANT = 2;
-}
-
 message LeafWrite {
-  ByteSpaceKind space_kind = 1;
-  string space_id = 2;
-  uint64 leaf_idx = 3;
-  bytes digest = 4;
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  uint64 leaf_idx = 2;
+  bytes digest = 3;
 }
 
 message Range {
@@ -403,9 +393,8 @@ message Range {
 }
 
 message PartialCoverageDetail {
-  ByteSpaceKind space_kind = 1;
-  string space_id = 2;
-  repeated Range missing_ranges = 3;
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  repeated Range missing_ranges = 2;
 }
 
 enum ArtifactBindingKind {

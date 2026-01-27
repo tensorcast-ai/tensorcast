@@ -1121,10 +1121,12 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
     std::optional<std::string_view> view_id) {
   global_store::GetArtifactInfoByIdRequest request;
   request.set_artifact_id(std::string(artifact_id));
+  auto* byte_space = request.mutable_requested_byte_space();
   if (view_id.has_value()) {
-    request.set_view_id(std::string(*view_id));
+    byte_space->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+    byte_space->set_id(std::string(*view_id));
   } else {
-    request.set_canonical(true);
+    byte_space->set_kind(common::v1::BYTE_SPACE_KIND_CANONICAL);
   }
 
   global_store::GetArtifactInfoByIdResponse response;
@@ -1678,7 +1680,8 @@ absl::StatusOr<ViewMetadata> GlobalStoreClient::get_view_metadata(
   }
   global_store::GetArtifactInfoByIdRequest request;
   request.set_artifact_id(std::string(artifact_id));
-  request.set_view_id(std::string(view_id));
+  request.mutable_requested_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+  request.mutable_requested_byte_space()->set_id(std::string(view_id));
   request.set_include_view_meta(true);
 
   global_store::GetArtifactInfoByIdResponse response;

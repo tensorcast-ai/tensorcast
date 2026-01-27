@@ -942,8 +942,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       leaf_writes.reserve(leaf_writes.size() + digests.size());
       for (size_t idx = 0; idx < digests.size(); ++idx) {
         global_store::v1::LeafWrite leaf;
-        leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_VARIANT);
-        leaf.set_space_id(entry->view_state->options.view_id);
+        auto* hash_space = leaf.mutable_hash_space();
+        hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+        hash_space->mutable_byte_space()->set_id(entry->view_state->options.view_id);
         leaf.set_leaf_idx(static_cast<uint64_t>(idx));
         const auto& digest = digests[idx];
         leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
@@ -981,8 +982,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
             leaf_writes.reserve(leaf_writes.size() + digests.size());
             for (size_t idx = 0; idx < digests.size(); ++idx) {
               global_store::v1::LeafWrite leaf;
-              leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_VARIANT);
-              leaf.set_space_id(entry->view_state->options.view_id);
+              auto* hash_space = leaf.mutable_hash_space();
+              hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+              hash_space->mutable_byte_space()->set_id(entry->view_state->options.view_id);
               leaf.set_leaf_idx(static_cast<uint64_t>(idx));
               const auto& digest = digests[idx];
               leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
@@ -1037,8 +1039,9 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       leaf_writes.reserve(leaf_writes.size() + canonical_leaf_indices.size());
       for (size_t i = 0; i < canonical_leaf_indices.size(); ++i) {
         global_store::v1::LeafWrite leaf;
-        leaf.set_space_kind(tensorcast::global_store::v1::BYTE_SPACE_KIND_CANONICAL);
-        leaf.set_space_id(index_multihash);
+        auto* hash_space = leaf.mutable_hash_space();
+        hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_CANONICAL);
+        hash_space->set_canonical_index_multihash(index_multihash);
         leaf.set_leaf_idx(canonical_leaf_indices[i]);
         const auto& digest = (*canonical_digest_or)[i];
         leaf.set_digest(digest.data(), static_cast<int>(digest.size()));

@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from tensorcast.global_store.exceptions import NotFoundError, ValidationError
 from tensorcast.global_store.metrics import observe_state_sync
-from tensorcast.global_store.models import ByteSpaceRef, Replica, Worker
+from tensorcast.global_store.models import ByteSpaceKind, ByteSpaceRef, Replica, Worker
 from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
 from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.logger import init_logger
@@ -495,7 +495,7 @@ class RecoveryService:
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
         )
-        if replica.byte_space.kind == replica.byte_space.kind.VIEW:
+        if replica.byte_space.kind == ByteSpaceKind.VIEW:
             memory_info.byte_space.CopyFrom(
                 common_pb2.ByteSpaceRef(
                     kind=common_pb2.BYTE_SPACE_KIND_VIEW,

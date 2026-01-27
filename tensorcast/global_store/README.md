@@ -285,7 +285,9 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 
 **Key behaviors:**
 - Persists variant view specifications (transformed views of canonical artifacts)
-- Stores Merkle leaf digests keyed by byte-space (canonical or variant)
+- Stores Merkle leaf digests keyed by **HashSpaceRef**:
+  - canonical hash-space is anchored by `index_multihash`
+  - view hash-space is anchored by `view_id`
 - Supports partial verification by querying specific leaf indices
 
 ## Data Model

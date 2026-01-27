@@ -307,13 +307,15 @@ TEST_CASE(
   size_t variant_count = 0;
   size_t canonical_count = 0;
   for (const auto& leaf : update.leaf_writes) {
-    if (leaf.space_kind() == tensorcast::global_store::v1::BYTE_SPACE_KIND_VARIANT) {
+    const auto& hash_space = leaf.hash_space();
+    if (hash_space.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW) {
       ++variant_count;
-      CHECK(leaf.space_id() == "view-full");
+      CHECK(hash_space.byte_space().id() == "view-full");
       CHECK(leaf.leaf_idx() == 0);
       CHECK(leaf.digest().size() == 32);
-    } else if (leaf.space_kind() == tensorcast::global_store::v1::BYTE_SPACE_KIND_CANONICAL) {
+    } else if (hash_space.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL) {
       ++canonical_count;
+      CHECK_FALSE(hash_space.canonical_index_multihash().empty());
       CHECK(leaf.leaf_idx() == 0);
       CHECK(leaf.digest().size() == 32);
     }

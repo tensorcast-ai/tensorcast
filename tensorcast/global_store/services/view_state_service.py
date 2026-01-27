@@ -176,16 +176,20 @@ class ViewStateService:
                     )
 
         if variant is not None:
-            total = variant.canonical_size_bytes
-            covered = variant.canonical_bytes_covered
+            canonical_total = variant.canonical_size_bytes
+            canonical_covered = variant.canonical_bytes_covered
             backlog = None
-            if total is not None and covered is not None and total > 0:
-                capped_covered = min(total, covered)
-                backlog = max(0, total - capped_covered)
+            if (
+                canonical_total is not None
+                and canonical_covered is not None
+                and canonical_total > 0
+            ):
+                capped_covered = min(canonical_total, canonical_covered)
+                backlog = max(0, canonical_total - capped_covered)
                 metrics.set_view_partial_backlog(
                     variant.artifact_id, variant.view_id, backlog
                 )
-            elif total is not None and total == 0:
+            elif canonical_total is not None and canonical_total == 0:
                 metrics.set_view_partial_backlog(
                     variant.artifact_id, variant.view_id, 0
                 )

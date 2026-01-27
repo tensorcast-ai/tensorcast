@@ -339,8 +339,8 @@ class RegistrationPipeline:
         registration_kind: str | int | None,
         *,
         allow_partial: bool,
-    ) -> int:
-        resolved: int | None = None
+    ) -> store_daemon_pb2.ViewRegistrationKind:
+        resolved: store_daemon_pb2.ViewRegistrationKind | None = None
         if registration_kind is None:
             resolved = (
                 store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
@@ -353,11 +353,11 @@ class RegistrationPipeline:
                 resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
             elif normalized in {"canonical", "canon"}:
                 resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
-        elif isinstance(registration_kind, int) and registration_kind in (
-            store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL,
-            store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE,
-        ):
-            resolved = int(registration_kind)
+        elif isinstance(registration_kind, int):
+            if registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL:
+                resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_CANONICAL
+            elif registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE:
+                resolved = store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
         if resolved is None:
             raise ArtifactError(
                 "registration_kind must be 'canonical' or 'piece'",
@@ -382,7 +382,7 @@ class RegistrationPipeline:
         build_result: ViewSpecBuildResult,
         tensors: Mapping[str, torch.Tensor],
         placement_enum: TransformPlacement,
-        registration_kind: int,
+        registration_kind: store_daemon_pb2.ViewRegistrationKind,
     ) -> tuple[ViewRegistrationContext, dict[str, torch.Tensor]]:
         if build_result.is_identity:
             raise ArtifactError(

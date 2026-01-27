@@ -460,26 +460,45 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             include_leaves = request.include_leaves
             include_view_meta = request.include_view_meta
 
-            space_field = request.WhichOneof("space")
             space_kind: Optional[str] = None  # 'C' or 'V'
             space_id: Optional[str] = None
 
-            if include_leaves or include_view_meta or space_field is not None:
-                if space_field is None:
+            requested_byte_space: common_pb2.ByteSpaceRef | None = (
+                request.requested_byte_space
+                if request.HasField("requested_byte_space")
+                else None
+            )
+
+            def build_hash_space_ref(
+                *, space_kind: str, space_id: str
+            ) -> common_pb2.HashSpaceRef:
+                if space_kind == "C":
+                    return common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL
+                        ),
+                        canonical_index_multihash=space_id,
+                    )
+                if space_kind == "V":
+                    return common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=space_id
+                        )
+                    )
+                raise ValidationError(f"Unsupported space_kind: {space_kind}")
+
+            if include_leaves or include_view_meta:  # noqa: SIM102
+                if requested_byte_space is None:
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                     context.set_details(
-                        "space selector required when requesting metadata or leaves"
+                        "requested_byte_space required when requesting metadata or leaves"
                     )
                     return global_store_pb2.GetArtifactInfoByIdResponse(
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
-                if space_field == "canonical":
-                    if not request.canonical:
-                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                        context.set_details("canonical must be true when selected")
-                        return global_store_pb2.GetArtifactInfoByIdResponse(
-                            status=global_store_pb2.Status.STATUS_ERROR
-                        )
+
+            if requested_byte_space is not None:
+                if requested_byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL:
                     space_kind = "C"
                     if not artifact_row or not artifact_row.get("index_multihash"):
                         context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -488,13 +507,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                             status=global_store_pb2.Status.STATUS_NOT_FOUND
                         )
                     space_id = cast(str, artifact_row["index_multihash"])
-                elif space_field == "view_id":
-                    view_id = request.view_id
+                elif requested_byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+                    view_id = requested_byte_space.id
                     if not view_id:
                         context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                        context.set_details(
-                            "view_id is required when selecting variant space"
-                        )
+                        context.set_details("requested_byte_space VIEW requires id")
                         return global_store_pb2.GetArtifactInfoByIdResponse(
                             status=global_store_pb2.Status.STATUS_ERROR
                         )
@@ -502,7 +519,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     space_id = view_id
                 else:
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details("unsupported space selector")
+                    context.set_details("unsupported requested_byte_space kind")
                     return global_store_pb2.GetArtifactInfoByIdResponse(
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
@@ -570,8 +587,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 if space_kind == "V" and variant_row is None:
                     partial_leaf_miss = True
                     detail = global_store_pb2.PartialCoverageDetail(
-                        space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT,
-                        space_id=space_id or "",
+                        hash_space=build_hash_space_ref(
+                            space_kind="V", space_id=space_id or ""
+                        ),
                     )
                     if leaf_filter:
                         for idx in sorted(set(leaf_filter)):
@@ -597,10 +615,9 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                             "requested leaf digests not fully available"
                         )
                         detail = global_store_pb2.PartialCoverageDetail(
-                            space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT
-                            if space_kind == "V"
-                            else global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
-                            space_id=space_id or "",
+                            hash_space=build_hash_space_ref(
+                                space_kind=space_kind, space_id=space_id or ""
+                            ),
                         )
                         existing = {leaf.leaf_idx for leaf in leaves_proto}
                         missing = sorted(
@@ -733,24 +750,40 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
             leaf_payloads: list[LeafWritePayload] = []
             for leaf in request.leaf_writes:
-                if leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_UNSPECIFIED:
-                    raise ValidationError("leaf.space_kind must be set")
-                if not leaf.space_id:
-                    raise ValidationError("leaf.space_id is required")
                 if not leaf.digest:
                     raise ValidationError("leaf.digest is required")
-                if leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_CANONICAL:
+
+                if not leaf.HasField("hash_space"):
+                    raise ValidationError("leaf.hash_space must be set")
+                hash_space = leaf.hash_space
+                if not hash_space.HasField("byte_space"):
+                    raise ValidationError("leaf.hash_space.byte_space must be set")
+                byte_space = hash_space.byte_space
+
+                if byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL:
+                    if not hash_space.canonical_index_multihash:
+                        raise ValidationError(
+                            "leaf.hash_space.canonical_index_multihash is required for CANONICAL"
+                        )
                     space_kind = "C"
-                elif leaf.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT:
+                    space_id = hash_space.canonical_index_multihash
+                elif byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+                    if not byte_space.id:
+                        raise ValidationError(
+                            "leaf.hash_space.byte_space VIEW requires id"
+                        )
                     space_kind = "V"
+                    space_id = byte_space.id
                 else:
-                    raise ValidationError(f"Unsupported space_kind: {leaf.space_kind}")
+                    raise ValidationError(
+                        f"Unsupported leaf.hash_space.byte_space kind: {byte_space.kind}"
+                    )
 
                 leaf_payloads.append(
                     LeafWritePayload(
                         artifact_id=artifact_id,
                         space_kind=space_kind,
-                        space_id=leaf.space_id,
+                        space_id=space_id,
                         leaf_idx=leaf.leaf_idx,
                         digest=bytes(leaf.digest),
                     )
