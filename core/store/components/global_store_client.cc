@@ -30,6 +30,45 @@ namespace tensorcast::store::components {
 namespace global_store = tensorcast::global_store::v1;
 namespace memory_tier = tensorcast::memory_tier::v1;
 
+TransportLease::TransportLease(IGlobalStoreClient* client, std::string transport_id)
+    : client_(client), transport_id_(std::move(transport_id)) {}
+
+TransportLease::TransportLease(TransportLease&& other) noexcept
+    : client_(other.client_), transport_id_(std::move(other.transport_id_)) {
+  other.client_ = nullptr;
+}
+
+TransportLease& TransportLease::operator=(TransportLease&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  complete();
+  client_ = other.client_;
+  transport_id_ = std::move(other.transport_id_);
+  other.client_ = nullptr;
+  return *this;
+}
+
+TransportLease::~TransportLease() {
+  complete();
+}
+
+void TransportLease::release() {
+  client_ = nullptr;
+}
+
+void TransportLease::complete() {
+  if (!client_ || transport_id_.empty()) {
+    return;
+  }
+  absl::Status st = client_->complete_replica_transport(transport_id_);
+  if (!st.ok()) {
+    LOG(WARNING) << "complete_replica_transport failed for " << transport_id_ << ": " << st;
+  }
+  client_ = nullptr;
+  transport_id_.clear();
+}
+
 namespace {
 // Map Global Store Status enum to readable string
 const char* status_to_cstr(global_store::Status s) {

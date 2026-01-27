@@ -441,6 +441,36 @@ class IGlobalStoreClient {
   virtual absl::Status report_persistence_status(const PersistenceReport& report) = 0;
 };
 
+class TransportLease {
+ public:
+  TransportLease() = default;
+  TransportLease(IGlobalStoreClient* client, std::string transport_id);
+
+  TransportLease(const TransportLease&) = delete;
+  TransportLease& operator=(const TransportLease&) = delete;
+
+  TransportLease(TransportLease&& other) noexcept;
+  TransportLease& operator=(TransportLease&& other) noexcept;
+
+  ~TransportLease();
+
+  const std::string& transport_id() const {
+    return transport_id_;
+  }
+
+  bool is_active() const {
+    return client_ != nullptr && !transport_id_.empty();
+  }
+
+  void release();
+
+ private:
+  void complete();
+
+  IGlobalStoreClient* client_{nullptr};
+  std::string transport_id_;
+};
+
 class GlobalStoreClient : public IGlobalStoreClient {
  public:
   explicit GlobalStoreClient(GlobalStoreClientConfig config);

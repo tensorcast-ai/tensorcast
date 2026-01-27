@@ -215,6 +215,7 @@ struct AssemblySourceInfo {
   std::string view_id;
   components::TransportSession session;
   uint64_t view_size_bytes{0};
+  components::TransportLease transport_lease;
 };
 
 struct AssemblySegment {
@@ -238,31 +239,6 @@ struct PieceInterval {
   uint64_t length{0};
   size_t source_index{0};
   uint64_t view_offset{0};
-};
-
-class TransportCompletionGuard {
- public:
-  explicit TransportCompletionGuard(components::IGlobalStoreClient* client) : client_(client) {}
-
-  ~TransportCompletionGuard() {
-    if (!client_) {
-      return;
-    }
-    for (const auto& id : transport_ids_) {
-      absl::Status st = client_->complete_replica_transport(id);
-      if (!st.ok()) {
-        LOG(WARNING) << "complete_replica_transport failed for " << id << ": " << st;
-      }
-    }
-  }
-
-  void add(std::string transport_id) {
-    transport_ids_.push_back(std::move(transport_id));
-  }
-
- private:
-  components::IGlobalStoreClient* client_{nullptr};
-  std::vector<std::string> transport_ids_;
 };
 
 class AssemblySource final : public loader::SeekableSource {
@@ -595,6 +571,7 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
       return session_or.status();
     }
     auto session = std::move(*session_or);
+    components::TransportLease transport_lease(&gs_client, session.transport_id);
     if (variant.view_size_bytes > 0 && session.remote_replica.memory_size != variant.view_size_bytes) {
       return absl::FailedPreconditionError(
           absl::StrCat(
@@ -612,6 +589,7 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
             .view_id = variant.view_id,
             .session = std::move(session),
             .view_size_bytes = variant.view_size_bytes,
+            .transport_lease = std::move(transport_lease),
         });
 
     for (const auto& range : variant.canonical_ranges) {
@@ -1149,7 +1127,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
         absl::StrCat("assembly missing canonical ranges: ", format_missing_ranges(plan.missing_ranges)));
   }
 
-  TransportCompletionGuard transport_guard(gs_client.get());
   auto comm_manager = config_.runtime_context->communication_manager();
   if (!comm_manager || !comm_manager->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
@@ -1157,7 +1134,6 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
   for (const auto& source : plan.sources) {
-    transport_guard.add(source.session.transport_id);
     const auto& remote = source.session.remote_replica;
     if (remote.remote_memory_keys.empty()) {
       return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
@@ -1407,7 +1383,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
         absl::StrCat("seal_assembly missing canonical ranges: ", format_missing_ranges(plan.missing_ranges)));
   }
 
-  TransportCompletionGuard transport_guard(gs_client.get());
   auto comm_manager = config_.runtime_context->communication_manager();
   if (!comm_manager || !comm_manager->is_enabled()) {
     return absl::FailedPreconditionError("Communication not enabled");
@@ -1416,7 +1391,6 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
   for (const auto& source : plan.sources) {
-    transport_guard.add(source.session.transport_id);
     const auto& remote = source.session.remote_replica;
     if (remote.remote_memory_keys.empty()) {
       return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
