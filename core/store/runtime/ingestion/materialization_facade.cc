@@ -18,6 +18,7 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
+#include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_ipc.h"
@@ -32,6 +33,7 @@
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
 #include "core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h"
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
+#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica.h"
@@ -172,6 +174,83 @@ class PlanBackedSeekableSource final : public loader::SeekableSource {
   std::vector<uint64_t> piece_starts_;
   uint64_t total_size_{0};
   uint64_t current_offset_{0};
+};
+
+class CpuMemorySource final : public loader::SeekableSource {
+ public:
+  CpuMemorySource(gsl::not_null<const void*> base_ptr, uint64_t total_size)
+      : base_ptr_(static_cast<const uint8_t*>(base_ptr.get())), total_size_(total_size) {}
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    auto read_or = read_at(current_offset_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or;
+    }
+    current_offset_ += *read_or;
+    return read_or;
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    if (offset >= total_size_) {
+      return static_cast<size_t>(0);
+    }
+    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
+    std::memcpy(dst, base_ptr_ + offset, to_copy);
+    return to_copy;
+  }
+
+ private:
+  const uint8_t* base_ptr_;
+  uint64_t total_size_;
+  uint64_t current_offset_{0};
+};
+
+class LocalReplicaSource final : public loader::SeekableSource {
+ public:
+  static absl::StatusOr<std::shared_ptr<loader::SeekableSource>> Create(
+      std::shared_ptr<replica::Replica> replica,
+      common::memory::MemoryLocation location,
+      int device_id,
+      uint64_t total_size) {
+    if (!replica) {
+      return absl::InvalidArgumentError("local replica source requires replica");
+    }
+    if (total_size == 0) {
+      return absl::InvalidArgumentError("local replica source requires non-zero size");
+    }
+    std::shared_ptr<loader::SeekableSource> source;
+    if (location == common::memory::MemoryLocation::GPU) {
+      const auto gpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
+      if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
+        return absl::FailedPreconditionError("local replica GPU pointer unavailable");
+      }
+      std::array<loader::SegmentPiece, 1> plan{loader::SegmentPiece{loader::SegmentPiece::DATA, 0, total_size, 0}};
+      source = std::make_shared<loader::LinearizedGpuPlanSource>(
+          gsl::not_null<void*>{gpu_ptrs[0]}, device_id, absl::MakeSpan(plan), total_size);
+    } else {
+      const auto cpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
+      if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+        return absl::FailedPreconditionError("local replica CPU pointer unavailable");
+      }
+      source = std::make_shared<CpuMemorySource>(gsl::not_null<const void*>{cpu_ptrs[0]}, total_size);
+    }
+    return std::shared_ptr<loader::SeekableSource>(new LocalReplicaSource(std::move(replica), std::move(source)));
+  }
+
+  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
+    return source_->read(dst, max_bytes);
+  }
+
+  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
+    return source_->read_at(offset, dst, bytes);
+  }
+
+ private:
+  LocalReplicaSource(std::shared_ptr<replica::Replica> replica, std::shared_ptr<loader::SeekableSource> source)
+      : replica_(std::move(replica)), source_(std::move(source)) {}
+
+  std::shared_ptr<replica::Replica> replica_;
+  std::shared_ptr<loader::SeekableSource> source_;
 };
 
 absl::StatusOr<uint64_t> compute_logical_total_size(std::string_view canonical_index_json) {
@@ -656,6 +735,45 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
   return plan;
 }
 
+absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_piece_source(
+    components::ReplicaRegistry& registry,
+    std::string_view assembly_id,
+    std::string_view view_id,
+    const DeviceKey& device,
+    common::memory::MemoryLocation location,
+    int device_id,
+    uint64_t view_size_bytes) {
+  loading::ReplicaKey key;
+  key.artifact_id = std::string(assembly_id);
+  key.view_id = std::string(view_id);
+  key.device = device;
+  key.replica = 0;
+  auto replica_or = registry.find(key);
+  if (!replica_or.ok()) {
+    if (!absl::IsNotFound(replica_or.status())) {
+      return replica_or.status();
+    }
+    const auto candidates = registry.find_by_artifact(assembly_id);
+    for (const auto& candidate : candidates) {
+      if (!candidate.view_id.has_value()) {
+        continue;
+      }
+      if (candidate.view_id.value() != view_id) {
+        continue;
+      }
+      auto candidate_or = registry.find(candidate);
+      if (candidate_or.ok()) {
+        replica_or = std::move(candidate_or);
+        break;
+      }
+    }
+  }
+  if (!replica_or.ok()) {
+    return absl::NotFoundError(absl::StrCat("local replica missing for view_id=", view_id));
+  }
+  return LocalReplicaSource::Create(std::move(*replica_or), location, device_id, view_size_bytes);
+}
+
 MaterializationFacade::MaterializationFacade(Config config)
     : config_(std::move(config)),
       hooks_(config_.hooks),
@@ -936,7 +1054,14 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool allow_p2p = hints.allow_p2p;
   const bool allow_disk = hints.allow_disk;
   const bool has_disk_path = !hints.disk_path.empty();
-  const auto& local_identity = config_.runtime_context->worker_identity();
+  components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
+  if (!is_local_identity(local_identity)) {
+    const auto& options = config_.runtime_context->options();
+    if (!options.p2p_listen_host.empty()) {
+      local_identity.node_address = options.p2p_listen_host;
+    }
+    local_identity.p2p_port = options.p2p_port;
+  }
 
   if (prefer_disk && !allow_disk) {
     return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
@@ -1127,14 +1252,46 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
         absl::StrCat("assembly missing canonical ranges: ", format_missing_ranges(plan.missing_ranges)));
   }
 
-  auto comm_manager = config_.runtime_context->communication_manager();
-  if (!comm_manager || !comm_manager->is_enabled()) {
-    return absl::FailedPreconditionError("Communication not enabled");
+  components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
+  if (!is_local_identity(local_identity)) {
+    const auto& options = config_.runtime_context->options();
+    if (!options.p2p_listen_host.empty()) {
+      local_identity.node_address = options.p2p_listen_host;
+    }
+    local_identity.p2p_port = options.p2p_port;
   }
+  auto comm_manager = config_.runtime_context->communication_manager();
+  const bool comm_enabled = comm_manager && comm_manager->is_enabled();
+  auto& replica_registry = config_.replica_runtime->registry();
   std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources;
   piece_sources.reserve(plan.sources.size());
   for (const auto& source : plan.sources) {
     const auto& remote = source.session.remote_replica;
+    if (is_local_replica(remote, local_identity)) {
+      DeviceKey local_device;
+      if (remote.memory_type == common::memory::MemoryLocation::CPU) {
+        local_device = DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+      } else {
+        const int local_device_id = remote.device_id >= 0 ? remote.device_id : request.target_device().ordinal;
+        local_device = DeviceRegistry::instance().gpu_key(local_device_id);
+      }
+      auto local_or = make_local_piece_source(
+          replica_registry,
+          request.canonical_artifact_id(),
+          source.view_id,
+          local_device,
+          remote.memory_type,
+          remote.device_id,
+          source.view_size_bytes);
+      if (!local_or.ok()) {
+        return local_or.status();
+      }
+      piece_sources.push_back(*local_or);
+      continue;
+    }
+    if (!comm_enabled) {
+      return absl::FailedPreconditionError("Communication not enabled");
+    }
     if (remote.remote_memory_keys.empty()) {
       return absl::FailedPreconditionError(absl::StrCat("remote memory keys missing for view_id=", source.view_id));
     }
@@ -1159,14 +1316,13 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
     piece_sources.push_back(std::make_shared<loader::RemoteKeySource>(std::move(opts)));
   }
 
-  auto registry = &config_.replica_runtime->registry();
   loading::ReplicaKey key;
   key.artifact_id = request.canonical_artifact_id();
   key.view_id = request.requested_view_id();
   key.device = request.target_device();
   key.replica = 0;
 
-  auto existing_or = registry->find(key);
+  auto existing_or = replica_registry.find(key);
   if (existing_or.ok()) {
     const auto& existing = existing_or.value();
     auto ready = existing->ready_signal_for(request.target_location());
@@ -1219,9 +1375,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   replica->set_ready_signal(request.target_location(), absl::OkStatus());
 
-  absl::Status emplace_status = registry->emplace(key, gsl::not_null{replica});
+  absl::Status emplace_status = replica_registry.emplace(key, gsl::not_null{replica});
   if (absl::IsAlreadyExists(emplace_status)) {
-    auto existing_or = registry->find(key);
+    auto existing_or = replica_registry.find(key);
     if (!existing_or.ok()) {
       return existing_or.status();
     }
