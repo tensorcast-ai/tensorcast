@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -21,7 +21,8 @@ class ReplicaRegistrationHelper {
       std::string_view artifact_id,
       const DeviceKey& device,
       common::memory::MemoryLocation location,
-      uint64_t size_bytes);
+      uint64_t size_bytes,
+      std::optional<std::string_view> view_id = std::nullopt);
 };
 
 } // namespace tensorcast::store::materialization::control

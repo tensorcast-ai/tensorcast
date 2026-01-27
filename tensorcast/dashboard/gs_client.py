@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Async Global Store client used by the dashboard backend."""
 
@@ -209,9 +209,10 @@ class GlobalStoreClient:
         request.include_view_meta = include_view
 
         if space_canonical:
-            request.canonical = True
+            request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         elif view_id:
-            request.view_id = view_id
+            request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+            request.requested_byte_space.id = view_id
 
         if leaf_indices:
             request.leaf_idxs.extend(leaf_indices)

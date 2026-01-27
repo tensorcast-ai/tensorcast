@@ -123,8 +123,8 @@ absl::Status execute_inverse_transform(
 
 } // namespace
 
-ViewIngestExecutor::ViewIngestExecutor(ViewWritePlan write_plan, TransformPlan inverse_transform)
-    : inverse_transform_(std::move(inverse_transform)) {
+ViewIngestExecutor::ViewIngestExecutor(ViewWritePlan write_plan, TransformPlan inverse_transform, IngestTarget target)
+    : inverse_transform_(std::move(inverse_transform)), target_(target) {
   chunks_.reserve(write_plan.chunks.size());
   for (auto& chunk : write_plan.chunks) {
     total_view_bytes_ += chunk.length;
@@ -149,8 +149,9 @@ absl::Status ViewIngestExecutor::copy_into_canonical(
     return absl::OkStatus();
   }
 
-  const uint64_t canonical_offset = chunk.chunk.canonical_offset + chunk_offset_bytes;
-  auto* dst = static_cast<std::byte*>(canonical_base_ptr) + static_cast<std::ptrdiff_t>(canonical_offset);
+  const uint64_t target_offset = (target_ == IngestTarget::kView) ? (chunk.chunk.view_offset + chunk_offset_bytes)
+                                                                  : (chunk.chunk.canonical_offset + chunk_offset_bytes);
+  auto* dst = static_cast<std::byte*>(canonical_base_ptr) + static_cast<std::ptrdiff_t>(target_offset);
 
   switch (location) {
     case common::memory::MemoryLocation::CPU:
@@ -264,6 +265,10 @@ absl::Status ViewIngestExecutor::finalize(
   }
   if (!is_complete()) {
     return absl::FailedPreconditionError("view bytes incomplete; cannot finalize");
+  }
+  if (target_ == IngestTarget::kView) {
+    finalized_ = true;
+    return absl::OkStatus();
   }
   if (canonical_base_ptr == nullptr) {
     return absl::InvalidArgumentError("canonical_base_ptr must not be null");

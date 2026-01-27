@@ -42,7 +42,9 @@ class RegistrationManager {
     bool view_registration{false};
     store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
     std::string view_id;
-    bool view_allow_partial{false};
+    store::StoreEngine::ViewRegistrationKind view_registration_kind{
+        store::StoreEngine::ViewRegistrationKind::kUnspecified};
+    uint64_t view_canonical_size_bytes{0};
     uint64_t view_ingested_bytes{0};
     std::vector<store::StoreEngine::CanonicalRange> view_canonical_ranges;
     std::optional<std::string> view_data_multihash;

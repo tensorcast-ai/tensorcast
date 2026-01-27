@@ -107,6 +107,7 @@ struct ResolveFixture {
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,
+                .global_store_client = nullptr,
                 .lifecycle = nullptr,
                 .storage_path = ensure_dir(std::move(storage_root)),
             })) {}

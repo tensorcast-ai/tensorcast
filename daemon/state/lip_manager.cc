@@ -27,6 +27,20 @@ namespace tensorcast::daemon {
 
 namespace {
 
+std::string normalize_view_id(std::optional<std::string_view> view_id) {
+  if (!view_id.has_value() || view_id->empty()) {
+    return "";
+  }
+  return std::string(*view_id);
+}
+
+std::string format_tensor_key(std::string_view artifact_id, std::string_view view_id, std::string_view suffix) {
+  if (view_id.empty()) {
+    return absl::StrCat(artifact_id, "_", suffix);
+  }
+  return absl::StrCat(artifact_id, "_view_", view_id, "_", suffix);
+}
+
 class RegionAcquireGuard {
  public:
   explicit RegionAcquireGuard(IpcRegionRegistry* registry) : registry_(registry) {}
@@ -432,7 +446,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
       return absl::UnimplementedError("LIP chunk crosses segment boundary (unsupported)");
     }
     uint64_t addr = reinterpret_cast<uint64_t>(static_cast<uint8_t*>(seg->map->get()) + (seg->base + (off - seg->dst)));
-    std::string tkey = absl::StrCat(lip.artifact_id, "_GPU_chunk_", idx);
+    std::string tkey = format_tensor_key(lip.artifact_id, lip.view_id, absl::StrCat("GPU_chunk_", idx));
     communicator::engine::Communicator::RegisterTensorOptions ro;
     ro.register_mr = comm_engine.is_rdma_enabled();
     ro.needs_staging = (!comm_engine.is_rdma_enabled());
@@ -500,6 +514,7 @@ absl::Status LipManager::release_staged_export(const std::string& token, store::
 
 void LipManager::put_lease(const std::string& registration_id, const ArtifactDeviceKey& key, LipLeaseEntry entry) {
   absl::MutexLock l(&mu_);
+  entry.view_id = key.view_id;
   reg_to_key_[registration_id] = key;
   leases_[key] = std::move(entry);
 }
@@ -535,13 +550,18 @@ absl::Status LipManager::revoke_by_registration_id(const std::string& registrati
   return absl::OkStatus();
 }
 
-std::optional<LipLeaseEntry> LipManager::find_active_by_artifact_id(const std::string& artifact_id) const {
+std::optional<LipLeaseEntry> LipManager::find_active_by_artifact_id(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  const std::string view_key = normalize_view_id(view_id);
   absl::MutexLock l(&mu_);
   const auto now = std::chrono::steady_clock::now();
   for (const auto& kv : leases_) {
     const auto& key = kv.first;
     const auto& e = kv.second;
     if (key.artifact_id != artifact_id)
+      continue;
+    if (key.view_id != view_key)
       continue;
     if (e.expiry.time_since_epoch().count() > 0 && now > e.expiry)
       continue;
@@ -550,10 +570,14 @@ std::optional<LipLeaseEntry> LipManager::find_active_by_artifact_id(const std::s
   return std::nullopt;
 }
 
-bool LipManager::has_active_on_device(const std::string& artifact_id, int device_id) const {
+bool LipManager::has_active_on_device(
+    std::string_view artifact_id,
+    int device_id,
+    std::optional<std::string_view> view_id) const {
   absl::MutexLock l(&mu_);
   const auto now = std::chrono::steady_clock::now();
-  ArtifactDeviceKey k{.artifact_id = artifact_id, .device_id = device_id};
+  ArtifactDeviceKey k{
+      .artifact_id = std::string(artifact_id), .view_id = normalize_view_id(view_id), .device_id = device_id};
   auto it = leases_.find(k);
   if (it == leases_.end())
     return false;
@@ -595,9 +619,14 @@ void LipManager::sweep_expired_and_dead_pids() {
   }
 }
 
-bool LipManager::revoke_commit_lease_if_owner_matches(const std::string& artifact_id, int device_id, int owner_pid) {
+bool LipManager::revoke_commit_lease_if_owner_matches(
+    std::string_view artifact_id,
+    int device_id,
+    int owner_pid,
+    std::optional<std::string_view> view_id) {
   absl::MutexLock l(&mu_);
-  ArtifactDeviceKey key{.artifact_id = artifact_id, .device_id = device_id};
+  ArtifactDeviceKey key{
+      .artifact_id = std::string(artifact_id), .view_id = normalize_view_id(view_id), .device_id = device_id};
   auto it = leases_.find(key);
   if (it == leases_.end())
     return false;
@@ -618,15 +647,21 @@ bool LipManager::revoke_commit_lease_if_owner_matches(const std::string& artifac
   return true;
 }
 
-absl::Status LipManager::extend_ttl_for_artifact(const std::string& artifact_id, uint32_t extend_ttl_ms) {
+absl::Status LipManager::extend_ttl_for_artifact(
+    std::string_view artifact_id,
+    uint32_t extend_ttl_ms,
+    std::optional<std::string_view> view_id) {
   if (extend_ttl_ms == 0)
     return absl::OkStatus();
+  const std::string view_key = normalize_view_id(view_id);
   std::optional<LipLeaseEntry> found;
   {
     absl::MutexLock l(&mu_);
     const auto now = std::chrono::steady_clock::now();
     for (auto& kv : leases_) {
       if (kv.first.artifact_id != artifact_id)
+        continue;
+      if (kv.first.view_id != view_key)
         continue;
       auto& e = kv.second;
       // Update TTL/expiry
@@ -837,14 +872,15 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   std::string data_multihash;
   CommitLeaseResult out;
 
-  if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
-    auto index_mh_or = common::compute_index_multihash(
-        canonical_index_json.empty() ? std::optional<std::string>() : std::optional<std::string>(canonical_index_json),
-        index_key_hex);
-    if (!index_mh_or.ok())
-      return index_mh_or.status();
-    index_multihash = *index_mh_or;
+  auto index_mh_or = common::compute_index_multihash(
+      canonical_index_json.empty() ? std::optional<std::string>() : std::optional<std::string>(canonical_index_json),
+      index_key_hex);
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+  index_multihash = *index_mh_or;
 
+  if (id_kind == common::ArtifactIdKind::kMi2 || client_artifact_id.empty()) {
     auto data_mh_or = store::loader::compute_data_multihash_from_seekable_source(src, total_size);
     if (!data_mh_or.ok())
       return data_mh_or.status();
@@ -855,7 +891,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
     out.artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
     out.id_kind = common::ArtifactIdKind::kMi2;
   } else {
-    out.index_multihash.clear();
+    out.index_multihash = index_multihash;
     out.data_multihash.clear();
     out.artifact_id = client_artifact_id;
     out.id_kind = common::ArtifactIdKind::kCgid;
@@ -868,7 +904,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   // Enforce device-unique commit for VRAM_LEASED: (artifact_id, device_id)
   {
     absl::MutexLock l(&mu_);
-    ArtifactDeviceKey k{.artifact_id = out.artifact_id, .device_id = device_id};
+    ArtifactDeviceKey k{.artifact_id = out.artifact_id, .view_id = "", .device_id = device_id};
     auto it = leases_.find(k);
     if (it != leases_.end()) {
       const auto now = std::chrono::steady_clock::now();
@@ -906,6 +942,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   LipLeaseEntry lease;
   lease.registration_id = registration_id;
   lease.artifact_id = out.artifact_id;
+  lease.view_id = "";
   lease.client_artifact_id = client_artifact_id;
   lease.id_kind = out.id_kind;
   lease.device_id = device_id;
@@ -921,7 +958,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   lease.verification_json = out.verification_json;
 
   {
-    ArtifactDeviceKey key{.artifact_id = lease.artifact_id, .device_id = lease.device_id};
+    ArtifactDeviceKey key{.artifact_id = lease.artifact_id, .view_id = lease.view_id, .device_id = lease.device_id};
     put_lease(registration_id, key, std::move(lease));
   }
 

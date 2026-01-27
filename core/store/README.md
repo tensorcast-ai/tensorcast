@@ -159,6 +159,11 @@ graph TB
   - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
   - When the runtime Fake CUDA backend is active (`TENSORCAST_CUDA_BACKEND=fake` in tests), view ingestion/transform runs on CPU tensors even for GPU placement and tolerates missing device ids.
   - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
+- View registration now requires `registration_kind`: `CANONICAL` keeps full-coverage semantics, while `PIECE` stores dense view bytes (no canonical zero-fill), enforces selection-only views, computes `view_data_hash` plus canonical coverage ranges, and fails commit if the piece hash cannot be computed.
+- Piece registrations now treat Global Store view-metadata update failures (for example, `view_data_hash` conflicts) as commit failures so immutability violations surface to callers.
+
+- Assembly sealing (v1):
+  - `StoreEngine::seal_assembly(assembly_id, publish_canonical)` assembles canonical bytes from pieces, computes `data_multihash`, persists the `assembly_id → mi2_id` binding, and optionally materializes/publishes a canonical replica for durability.
 
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`

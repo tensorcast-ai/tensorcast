@@ -72,6 +72,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
@@ -85,6 +86,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .reg = app->kernel_->registration_manager(),
       .lip = app->kernel_->lip_manager(),
       .refs = app->kernel_->ref_tracker(),
+      .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .regions = app->kernel_->region_registry(),
   };

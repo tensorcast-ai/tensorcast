@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for variant metadata anchored to canonical artifacts."""
 
@@ -25,6 +25,8 @@ class VariantRepository(BaseRepository):
         view_size: int,
         view_data_hash: Optional[str],
         verified_at: Optional[datetime],
+        canonical_size_bytes: Optional[int] = None,
+        canonical_bytes_covered: Optional[int] = None,
         cursor=None,
     ) -> None:
         """Insert or update a variant row."""
@@ -35,6 +37,8 @@ class VariantRepository(BaseRepository):
             view_size,
             view_data_hash,
             verified_at,
+            canonical_size_bytes,
+            canonical_bytes_covered,
         ]
 
         try:
@@ -47,13 +51,17 @@ class VariantRepository(BaseRepository):
                     view_spec_json,
                     view_size,
                     view_data_hash,
-                    verified_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    verified_at,
+                    canonical_size_bytes,
+                    canonical_bytes_covered
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (artifact_id, view_id) DO UPDATE SET
                     view_spec_json = EXCLUDED.view_spec_json,
                     view_size = EXCLUDED.view_size,
                     view_data_hash = EXCLUDED.view_data_hash,
-                    verified_at = EXCLUDED.verified_at
+                    verified_at = EXCLUDED.verified_at,
+                    canonical_size_bytes = EXCLUDED.canonical_size_bytes,
+                    canonical_bytes_covered = EXCLUDED.canonical_bytes_covered
                 """,
                 params,
             )
@@ -78,6 +86,8 @@ class VariantRepository(BaseRepository):
                    view_size,
                    view_data_hash,
                    verified_at,
+                   canonical_size_bytes,
+                   canonical_bytes_covered,
                    created_at
             FROM variants
             WHERE artifact_id = ? AND view_id = ?
@@ -93,5 +103,59 @@ class VariantRepository(BaseRepository):
             "view_size": row[3],
             "view_data_hash": row[4],
             "verified_at": row[5],
-            "created_at": row[6],
+            "canonical_size_bytes": row[6],
+            "canonical_bytes_covered": row[7],
+            "created_at": row[8],
         }
+
+    def list_by_artifact(
+        self,
+        *,
+        artifact_id: str,
+        limit: int | None = None,
+        offset: int = 0,
+        cursor=None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        """List variants for an artifact with optional pagination."""
+        target = cursor if cursor is not None else self.get_cursor()
+        total_row = target.execute(
+            "SELECT COUNT(*) FROM variants WHERE artifact_id = ?",
+            [artifact_id],
+        ).fetchone()
+        total_size = int(total_row[0]) if total_row else 0
+
+        sql = """
+            SELECT artifact_id,
+                   view_id,
+                   view_spec_json,
+                   view_size,
+                   view_data_hash,
+                   verified_at,
+                   canonical_size_bytes,
+                   canonical_bytes_covered,
+                   created_at
+            FROM variants
+            WHERE artifact_id = ?
+            ORDER BY created_at ASC
+        """
+        params: list[object] = [artifact_id]
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+        rows = target.execute(sql, params).fetchall()
+        items = [
+            {
+                "artifact_id": row[0],
+                "view_id": row[1],
+                "view_spec_json": row[2],
+                "view_size": row[3],
+                "view_data_hash": row[4],
+                "verified_at": row[5],
+                "canonical_size_bytes": row[6],
+                "canonical_bytes_covered": row[7],
+                "created_at": row[8],
+            }
+            for row in rows
+        ]
+        return items, total_size

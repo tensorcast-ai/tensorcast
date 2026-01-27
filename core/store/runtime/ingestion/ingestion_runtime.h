@@ -14,6 +14,7 @@
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_runtime.h"
+#include "core/store/seal_assembly_result.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::runtime {
@@ -69,6 +70,8 @@ class IngestionRuntime {
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override);
+
+  absl::StatusOr<SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
 
  private:
   Config config_;

@@ -128,10 +128,13 @@ canonical artifact. Key behaviours:
 - When the daemon lacks GPU support for a server-side transpose it returns a
   `FAILED_PRECONDITION` status. The client surfaces a clear `ArtifactError`
   instructing callers to retry with `placement="CLIENT"`.
-- `allow_partial=True` permits uploading subsets of canonical byte-space when
-  composing shards; the commit response includes `canonical_ranges` describing
-  the covered offsets. These ranges are forwarded to Global Store so metrics can
-  expose the remaining backlog for each view.
+- `registration_kind="piece"` (or `register_piece`) registers dense view pieces
+  for partial coverage. Piece registration is selection-only (narrow only), does
+  not allow transpose, and requires server placement.
+- `allow_partial` is deprecated and maps to `registration_kind="piece"`. Sparse
+  canonical zero-fill semantics are removed.
+- `canonical_index_bytes` can be supplied to bootstrap a new assembly without
+  requiring prior Global Store state.
 
 The API returns a `RegisteredArtifact` whose `registration_result` carries the
 view identifier, canonical coverage ranges, and variant hash for downstream

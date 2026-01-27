@@ -1,6 +1,8 @@
+"""Client utilities for interacting with the TensorCast Store Daemon."""
+
+from __future__ import annotations
+
 #  Copyright (c) 2025-2026, TensorCast Team.
-
-
 import atexit
 import os
 import random
@@ -8,13 +10,14 @@ import time
 from contextlib import contextmanager, suppress
 from datetime import timezone
 from threading import RLock
-from typing import Any, Iterator, Literal, Sequence, cast, overload
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast, overload
 
 import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast.api._config import StorePolicy
+if TYPE_CHECKING:
+    from tensorcast.api._config import StorePolicy
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -37,6 +40,7 @@ from tensorcast.types import (
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
+    SealAssemblyResult,
     ServerConfig,
     StableDramHandshake,
     VramRegionHandle,
@@ -1594,6 +1598,7 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
+            registration_kind = "piece" if resp.allow_partial else "canonical"
             local_stable_tier = None
             if resp.HasField("local_stable_tier"):
                 status = resp.local_stable_tier.status
@@ -1614,6 +1619,7 @@ class DaemonCtl:
                 view_index_json=view_index_json,
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
+                registration_kind=registration_kind,
                 allow_partial=bool(resp.allow_partial),
                 local_stable_tier=local_stable_tier,
             )
@@ -2108,12 +2114,68 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def seal_assembly(
+        self,
+        assembly_id: str,
+        *,
+        publish_canonical: bool = True,
+        timeout_s: float = 120.0,
+    ) -> SealAssemblyResult:
+        if not assembly_id:
+            raise ValueError("assembly_id is required")
+        req = store_daemon_pb2.SealAssemblyRequest(
+            assembly_id=assembly_id,
+            publish_canonical=bool(publish_canonical),
+        )
+        with self._client_span("Client/SealAssembly") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub.SealAssembly,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise KeyError(str(e)) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"SealAssembly failed: {e}") from e
+
+        desc = resp.descriptor
+        ad = ArtifactDescriptor(
+            artifact_id=desc.artifact_id,
+            index_multihash=desc.index_multihash,
+            data_multihash=desc.data_multihash,
+            schema_version=desc.schema_version,
+            encoding=desc.encoding,
+            total_size=int(desc.total_size),
+            id_kind=desc.id_kind,
+        )
+        sealed_artifact_id = resp.sealed_artifact_id or ad.artifact_id
+        return SealAssemblyResult(
+            sealed_artifact_id=sealed_artifact_id,
+            descriptor=ad,
+            already_sealed=bool(resp.already_sealed),
+        )
+
     @classmethod
     def _policy_to_proto(
         cls, policy: StorePolicy | dict[str, object] | str | None
     ) -> store_daemon_pb2.StorePolicy | None:
         if policy is None:
             return None
+        from tensorcast.api._config import StorePolicy
+
         resolved = StorePolicy.parse(policy)
         if resolved is None:
             return None

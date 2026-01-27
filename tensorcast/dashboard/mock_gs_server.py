@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Mock Global Store gRPC server for running the dashboard locally.
 
@@ -130,8 +130,12 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
         ]
         coverage = [
             global_store_pb2.PartialCoverageDetail(
-                space_kind=global_store_pb2.ByteSpaceKind.BYTE_SPACE_KIND_CANONICAL,
-                space_id=request.artifact_id or "artifact-0",
+                hash_space=common_pb2.HashSpaceRef(
+                    byte_space=common_pb2.ByteSpaceRef(
+                        kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                    ),
+                    canonical_index_multihash="mh-index",
+                ),
                 missing_ranges=[
                     global_store_pb2.Range(off=0, len=1024),
                     global_store_pb2.Range(off=8192, len=512),

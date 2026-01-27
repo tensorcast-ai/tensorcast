@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -15,7 +15,8 @@ namespace tensorcast::store::loader {
 
 /**
  * ViewIngestExecutor incrementally copies view-formatted bytes into canonical
- * replica memory and applies inverse transforms to recover canonical layout.
+ * or view replica memory and applies inverse transforms when targeting the
+ * canonical byte-space.
  *
  * Registration streaming feeds call ingest_chunk() with server-received view
  * payloads. finalize() must be called once all expected bytes have been
@@ -23,7 +24,12 @@ namespace tensorcast::store::loader {
  */
 class ViewIngestExecutor {
  public:
-  ViewIngestExecutor(ViewWritePlan write_plan, TransformPlan inverse_transform);
+  enum class IngestTarget : uint8_t { kCanonical = 0, kView = 1 };
+
+  ViewIngestExecutor(
+      ViewWritePlan write_plan,
+      TransformPlan inverse_transform,
+      IngestTarget target = IngestTarget::kCanonical);
 
   [[nodiscard]] uint64_t expected_view_bytes() const {
     return total_view_bytes_;
@@ -62,6 +68,7 @@ class ViewIngestExecutor {
 
   std::vector<ChunkState> chunks_;
   TransformPlan inverse_transform_;
+  IngestTarget target_{IngestTarget::kCanonical};
   uint64_t total_view_bytes_{0};
   uint64_t ingested_bytes_{0};
   size_t current_chunk_idx_{0};

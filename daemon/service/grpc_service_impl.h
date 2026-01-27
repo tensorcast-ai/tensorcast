@@ -192,6 +192,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::GetArtifactIndexByIdRequest* req,
       v2::GetArtifactIndexByIdResponse* resp) override;
 
+  grpc::Status SealAssembly(
+      grpc::ServerContext* ctx,
+      const v2::SealAssemblyRequest* req,
+      v2::SealAssemblyResponse* resp) override;
+
   grpc::Status StartPersistence(
       grpc::ServerContext* ctx,
       const v2::StartPersistenceRequest* req,

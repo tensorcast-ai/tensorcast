@@ -3,6 +3,7 @@
 #pragma once
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -53,8 +54,12 @@ class ReplicaRuntime {
   std::vector<ReplicaInfo> get_all_replicas_info() const;
   std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
 
-  std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
-  absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+  std::vector<DeviceKey> get_resident_devices(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
+  absl::StatusOr<int> get_unique_gpu_residency(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
   std::vector<loading::ReplicaKey> list_device_replicas(const DeviceKey& device) const;
 
   int wait_replica_ready(const loading::ReplicaKey& key) const;

@@ -304,6 +304,56 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     LOG(INFO) << "Finished CPU Registration Section.";
   }
 
+  SECTION("Load to CPU and Register for Communication with view_id") {
+    LOG(INFO) << "Starting CPU view registration section...";
+    const std::string artifact_id = artifact_id_base + "_cpu_view";
+    const std::string view_id = "view-123";
+    fs::path temp_dir = temp_dir_base / "cpu_view";
+    fs::path artifact_dir = temp_dir / artifact_dir_name;
+    fs::create_directories(artifact_dir);
+    fs::path dummy_file_path = artifact_dir / partition_filename;
+    REQUIRE(create_dummy_file(dummy_file_path, artifact_size));
+    REQUIRE(::tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+    DiskSource disk_src;
+    disk_src.path = temp_dir / artifact_dir_name;
+
+    ReplicaConfig config{
+        .source = disk_src,
+        .artifact_identifier = artifact_id,
+        .device_type = ::tensorcast::DeviceType::CPU,
+        .local_device_id = 0,
+        .pinned_buffer_pool = pinned_pool,
+        .async_runtime = async_runtime,
+        .expected_artifact_size = artifact_size,
+        .p2p_comm_enabled = true,
+        .view_id = view_id,
+    };
+
+    auto replica_or = Replica::create(config);
+    INFO("Replica creation status (view): " << replica_or.status());
+    REQUIRE(replica_or.ok());
+    std::unique_ptr<Replica> replica = std::move(*replica_or);
+
+    auto load_future = replica->ensure_loaded_async(MemoryLocation::CPU);
+    REQUIRE(load_future.valid());
+    REQUIRE(std::move(load_future).get().ok());
+
+    auto reg_info_status = replica->enable_remote_memory_access(MemoryLocation::CPU, comm_mgr->get_engine());
+    INFO("Comm registration status (CPU view): " << reg_info_status.status());
+    REQUIRE(reg_info_status.ok());
+    const auto& reg_info = *reg_info_status;
+    REQUIRE_FALSE(reg_info.remote_memory_keys.empty());
+    REQUIRE(absl::StrContains(reg_info.remote_memory_keys[0], view_id));
+
+    std::error_code ec;
+    fs::remove_all(temp_dir, ec);
+    if (ec) {
+      WARN("Failed to remove CPU view test directory " << temp_dir << ": " << ec.message());
+    }
+    LOG(INFO) << "Finished CPU view registration section.";
+  }
+
   // --- Teardown --- (Clean up base temporary directory)
   LOG(INFO) << "Cleaning up base temporary directory: " << temp_dir_base;
   std::error_code ec;

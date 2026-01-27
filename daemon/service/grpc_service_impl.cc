@@ -512,6 +512,14 @@ Status StoreDaemonServiceImpl::GetArtifactIndexById(
   return materialization_controller_->get_artifact_index_by_id(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::SealAssembly(
+    grpc::ServerContext* ctx,
+    const v2::SealAssemblyRequest* req,
+    v2::SealAssemblyResponse* resp) {
+  RpcContext rctx{"SealAssembly", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->seal_assembly(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::StartPersistence(
     grpc::ServerContext* ctx,
     const v2::StartPersistenceRequest* req,

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstddef>
 #include <functional>
+#include <limits>
 #include <map>
 #include <optional>
 #include <string>
@@ -19,6 +20,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
@@ -27,6 +29,9 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/status_utils.h"
+#include "google/protobuf/io/coded_stream.h"
+#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
+#include "google/protobuf/message.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
 #include "opentelemetry/context/context.h"
@@ -169,6 +174,41 @@ void record_local_stable_tier_metrics(
   }
 }
 
+absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf::Message& message) {
+  const size_t size = message.ByteSizeLong();
+  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+    return absl::OutOfRangeError("proto message too large for deterministic serialization");
+  }
+  std::string buffer;
+  buffer.resize(size);
+  google::protobuf::io::ArrayOutputStream stream(buffer.data(), static_cast<int>(size));
+  google::protobuf::io::CodedOutputStream coded(&stream);
+  coded.SetSerializationDeterministic(true);
+  if (!message.SerializeToCodedStream(&coded) || coded.HadError()) {
+    return absl::InternalError("deterministic proto serialization failed");
+  }
+  return buffer;
+}
+
+absl::StatusOr<std::string> compute_view_id_from_spec(
+    const v2::ViewSpec& view_spec,
+    std::string_view canonical_index_json) {
+  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+  if (!index_mh_or.ok()) {
+    return index_mh_or.status();
+  }
+  auto proto_bytes_or = serialize_deterministic_proto(view_spec);
+  if (!proto_bytes_or.ok()) {
+    return proto_bytes_or.status();
+  }
+  std::vector<uint8_t> buffer;
+  buffer.reserve(proto_bytes_or->size() + index_mh_or->size());
+  buffer.insert(buffer.end(), proto_bytes_or->begin(), proto_bytes_or->end());
+  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer));
+  return common::multibase_multihash_sha256(digest);
+}
+
 absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v2::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
@@ -205,6 +245,18 @@ store::StoreEngine::ViewPlacement ToPlacement(v2::TransformPlacement placement) 
     case v2::TRANSFORM_PLACEMENT_UNSPECIFIED:
     default:
       return store::StoreEngine::ViewPlacement::kUnspecified;
+  }
+}
+
+store::StoreEngine::ViewRegistrationKind ToRegistrationKind(v2::ViewRegistrationKind kind) {
+  switch (kind) {
+    case v2::VIEW_REGISTRATION_KIND_CANONICAL:
+      return store::StoreEngine::ViewRegistrationKind::kCanonical;
+    case v2::VIEW_REGISTRATION_KIND_PIECE:
+      return store::StoreEngine::ViewRegistrationKind::kPiece;
+    case v2::VIEW_REGISTRATION_KIND_UNSPECIFIED:
+    default:
+      return store::StoreEngine::ViewRegistrationKind::kUnspecified;
   }
 }
 
@@ -740,25 +792,73 @@ grpc::Status RegistrationController::begin(
     meta.index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
 
   if (req.has_view()) {
+    if (req.view().allow_partial()) {
+      return {
+          StatusCode::INVALID_ARGUMENT,
+          "allow_partial is deprecated; use registration_kind=VIEW_REGISTRATION_KIND_PIECE"};
+    }
+    if (!req.has_tensor_index_data()) {
+      return {StatusCode::INVALID_ARGUMENT, "view registration requires tensor_index_data"};
+    }
+    if (req.view().spec().tensors().empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "view registration requires non-empty view spec"};
+    }
     auto placement = ToPlacement(req.view().placement());
     if (placement == store::StoreEngine::ViewPlacement::kUnspecified) {
       return {StatusCode::INVALID_ARGUMENT, "view placement must be specified"};
+    }
+    auto registration_kind = ToRegistrationKind(req.view().registration_kind());
+    if (registration_kind == store::StoreEngine::ViewRegistrationKind::kUnspecified) {
+      return {StatusCode::INVALID_ARGUMENT, "view.registration_kind must be specified"};
+    }
+    if (registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece && req.view().ranges_size() > 0) {
+      return {StatusCode::INVALID_ARGUMENT, "view.ranges not supported for piece registration"};
     }
     auto spec_or = BuildViewSpecFromProto(req.view().spec());
     if (!spec_or.ok()) {
       return to_grpc_status(spec_or.status());
     }
     store::StoreEngine::ViewRegistration view_reg;
-    view_reg.view_id = req.view().view_id();
+    auto view_id_or = compute_view_id_from_spec(req.view().spec(), meta.index_data);
+    if (!view_id_or.ok()) {
+      return to_grpc_status(view_id_or.status());
+    }
+    std::string resolved_view_id = req.view().view_id();
+    if (resolved_view_id.empty()) {
+      resolved_view_id = *view_id_or;
+    } else if (resolved_view_id != *view_id_or) {
+      return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
+    }
+    view_reg.view_id = resolved_view_id;
     view_reg.spec = std::move(*spec_or);
     view_reg.placement = placement;
     view_reg.canonical_size_bytes = req.view().canonical_size_bytes();
-    view_reg.allow_partial = req.view().allow_partial();
+    view_reg.registration_kind = registration_kind;
     reg.view = view_reg;
     meta.view_registration = true;
     meta.view_placement = placement;
     meta.view_id = view_reg.view_id;
-    meta.view_allow_partial = view_reg.allow_partial;
+    meta.view_registration_kind = registration_kind;
+    meta.view_canonical_size_bytes = view_reg.canonical_size_bytes;
+  }
+
+  if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
+    if (plan == RegistrationManager::RegPlan::LEASE) {
+      return {StatusCode::FAILED_PRECONDITION, "piece registration does not support lease-in-place"};
+    }
+    if (meta.client_artifact_id.empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
+    }
+    if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+      return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+    }
+    auto binding_or = d_.global_store_client->get_artifact_binding(meta.client_artifact_id);
+    if (binding_or.ok()) {
+      return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
+    }
+    if (!absl::IsNotFound(binding_or.status())) {
+      return to_grpc_status(binding_or.status());
+    }
   }
 
   if (plan == RegistrationManager::RegPlan::COALESCED || plan == RegistrationManager::RegPlan::STABLE_DRAM) {
@@ -1210,6 +1310,25 @@ grpc::Status RegistrationController::commit(
     LOG(INFO) << "RegistrationController::commit: " << req.registration_id() << " no meta";
   }
 
+  if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
+    if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+      return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+    }
+    auto binding_or = d_.global_store_client->get_artifact_binding(meta.client_artifact_id);
+    if (binding_or.ok()) {
+      absl::Status abort_status = d_.engine.abort_registered_artifact(req.registration_id());
+      if (!abort_status.ok()) {
+        LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
+      }
+      auto refs = d_.reg.erase_all_for(req.registration_id());
+      ReleaseRegionRefs(d_.regions, refs);
+      return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
+    }
+    if (!absl::IsNotFound(binding_or.status())) {
+      return to_grpc_status(binding_or.status());
+    }
+  }
+
   if (meta.plan == RegistrationManager::RegPlan::LEASE) {
     // Only LIP (in_place=true) is supported in current release
     if (!meta.lease_in_place) {
@@ -1421,24 +1540,27 @@ grpc::Status RegistrationController::commit(
       r->set_offset(range.offset);
       r->set_length(range.length);
     }
-    resp.set_allow_partial(out.allow_partial);
+    resp.set_allow_partial(out.registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece);
     if (out.view_id.has_value()) {
       meta.view_registration = true;
       meta.view_id = *out.view_id;
       meta.view_canonical_ranges = out.canonical_ranges;
       meta.view_data_multihash = out.view_data_multihash;
+      meta.view_registration_kind = out.registration_kind;
       uint64_t covered_bytes = 0;
       for (const auto& range : out.canonical_ranges) {
         covered_bytes += range.length;
       }
-      if (!out.existed && covered_bytes < out.size_bytes) {
+      uint64_t canonical_size_bytes =
+          meta.view_canonical_size_bytes > 0 ? meta.view_canonical_size_bytes : out.size_bytes;
+      if (!out.existed && covered_bytes < canonical_size_bytes) {
         record_view_partial_metric();
         LOG(INFO) << "View registration partial coverage: artifact_id=" << out.artifact_id
                   << " view_id=" << *out.view_id << " covered_bytes=" << covered_bytes
-                  << " canonical_bytes=" << out.size_bytes << " ingested_view_bytes=" << meta.view_ingested_bytes;
+                  << " canonical_bytes=" << canonical_size_bytes << " ingested_view_bytes=" << meta.view_ingested_bytes;
       } else {
         VLOG(1) << "View registration coverage: artifact_id=" << out.artifact_id << " view_id=" << *out.view_id
-                << " covered_bytes=" << covered_bytes << " canonical_bytes=" << out.size_bytes
+                << " covered_bytes=" << covered_bytes << " canonical_bytes=" << canonical_size_bytes
                 << " ingested_view_bytes=" << meta.view_ingested_bytes;
       }
     }

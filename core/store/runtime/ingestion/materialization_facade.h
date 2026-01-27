@@ -26,6 +26,7 @@
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/replica/replica_runtime.h"
+#include "core/store/seal_assembly_result.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
@@ -65,6 +66,7 @@ struct MaterializationHooks {
 namespace tensorcast::store::runtime::ingestion {
 
 namespace metadata = tensorcast::store::runtime::metadata;
+namespace store = tensorcast::store;
 
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
@@ -129,7 +131,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
 
+  absl::StatusOr<store::SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
+
  private:
+  absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
+
   template <typename SourceT, typename RunnerFn>
   absl::StatusOr<loading::ReplicaHandle> run_pipeline_ingestion(
       IngestionSource source_type,

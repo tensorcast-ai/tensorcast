@@ -85,6 +85,22 @@ TensorCast supports two artifact identity schemes:
 
 The `artifacts` table stores both schemes with `id_kind` discriminating. MI2 identities are derived from multihashes of the tensor index and data, ensuring that identical saves resolve to identical IDs.
 
+### View and Assembly Awareness
+
+Global Store now treats replicas as ByteSpace-scoped:
+
+- Replicas are keyed by `(artifact_id, view_id)` via `MemoryInfo.byte_space` so
+  canonical and view pieces route independently.
+- Variant metadata persists canonical coverage ranges and `view_data_hash` so
+  daemons can assemble and seal from pieces (`ListVariants` returns ranges).
+- `artifact_bindings` records `assembly_id → mi2_id` after sealing so reads can
+  resolve to the sealed identity while preserving view routing semantics.
+- Assembly CGIDs that provide `tensor_index_data` (or an `ArtifactDescriptor`
+  index multihash) persist `index_multihash` so `GetArtifactIndexById` can
+  resolve canonical index bytes before sealing.
+- Replica domain models expose `ByteSpaceKind` and `ByteSpaceRef` for routing
+  and checksum identity across canonical vs view byte spaces.
+
 ### Replica Lifecycle
 
 A replica represents a single copy of an artifact on a specific node. Its lifecycle:
@@ -269,7 +285,9 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 
 **Key behaviors:**
 - Persists variant view specifications (transformed views of canonical artifacts)
-- Stores Merkle leaf digests keyed by byte-space (canonical or variant)
+- Stores Merkle leaf digests keyed by **HashSpaceRef**:
+  - canonical hash-space is anchored by `index_multihash`
+  - view hash-space is anchored by `view_id`
 - Supports partial verification by querying specific leaf indices
 
 ## Data Model

@@ -419,8 +419,10 @@ absl::StatusOr<components::MemoryTierLeaseDescriptor> StoreEngine::release_memor
   return result;
 }
 
-absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(std::string_view artifact_id) const {
-  return replica_runtime_->get_unique_gpu_residency(artifact_id);
+absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  return replica_runtime_->get_unique_gpu_residency(artifact_id, view_id);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
@@ -454,8 +456,10 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
 // ---------------------------------------------------------------------------
 // Query helpers
 // ---------------------------------------------------------------------------
-std::vector<DeviceKey> StoreEngine::get_resident_devices(std::string_view artifact_id) const {
-  return replica_runtime_->get_resident_devices(artifact_id);
+std::vector<DeviceKey> StoreEngine::get_resident_devices(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  return replica_runtime_->get_resident_devices(artifact_id, view_id);
 }
 
 std::vector<StoreEngine::ReplicaInventoryEntry> StoreEngine::get_ha_inventory() const {
@@ -558,6 +562,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
     const loading::MaterializeHints& hints) {
   return ingestion_runtime_->materialize_into_target(
       target_device, target_layout, canonical_index_json, generation, hints);
+}
+
+absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(std::string_view assembly_id, bool publish_canonical) {
+  return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

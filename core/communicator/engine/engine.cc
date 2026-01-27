@@ -1696,12 +1696,17 @@ misc::result_t Communicator::on_new_client(const tcp_transport_t& t) {
     return this->on_receive_request(channel, t, msg);
   });
   t->set_close_func([this](const tcp_transport_t& t) {
-    LOG(INFO) << "[on_new_client] Client connection closed: " << t->get_remote_url();
-    auto channel = channels_.get(t->get_remote_url());
-    if (channel) {
+    const std::string url_key = t->get_remote_url();
+    LOG(INFO) << "[on_new_client] Client connection closed: " << url_key;
+    auto channel = channels_.get(url_key);
+    if (channel && channel->get_control().get() == t.get()) {
       channel->close();
+      if (!channels_.erase_if(url_key, channel)) {
+        VLOG(1) << "[on_new_client] Channel already removed or replaced for " << url_key;
+      }
+    } else {
+      VLOG(1) << "[on_new_client] Channel mismatch or missing for " << url_key;
     }
-    channels_.del(t->get_remote_url());
     return misc::SUCCESS;
   });
   return misc::SUCCESS;
@@ -1753,7 +1758,9 @@ absl::StatusOr<channel_t> Communicator::do_create_channel(const std::string& ip,
       // Only remove the channel if this is the actual control connection
       LOG(INFO) << "[do_create_channel] This is the control connection, removing channel";
       channel->close();
-      channels_.del(url_key);
+      if (!channels_.erase_if(url_key, channel)) {
+        VLOG(1) << "[do_create_channel] Channel already removed or replaced for " << url_key;
+      }
     } else {
       LOG(INFO) << "[do_create_channel] This is not the control connection, keeping channel";
     }
@@ -2741,15 +2748,14 @@ net_dev_t Communicator::get_net_dev(int dev_type, int dev_id, const std::string&
 absl::Status Communicator::close_connection(const std::string& dst_ip, uint16_t dst_port) {
   std::stringstream url;
   url << dst_ip << ":" << dst_port;
-  if (channels_.exist(url.str())) {
-    auto channel = channels_.get(url.str());
-    channels_.del(url.str());
-    if (channel != nullptr) {
-      channel->close();
-    }
-  } else {
+  auto channel = channels_.get(url.str());
+  if (channel == nullptr) {
     return absl::InternalError("could not find the connection");
   }
+  if (!channels_.erase_if(url.str(), channel)) {
+    VLOG(1) << "[close_connection] Channel already removed or replaced for " << url.str();
+  }
+  channel->close();
   return absl::OkStatus();
 }
 
@@ -2761,7 +2767,9 @@ void Communicator::do_channel_gc_loop() {
     for (auto& p : pairs) {
       if (p.second->is_expired(now)) {
         LOG(INFO) << "channel gc " << p.first;
-        channels_.del(p.first);
+        if (!channels_.erase_if(p.first, p.second)) {
+          VLOG(1) << "[channel gc] Channel already removed or replaced for " << p.first;
+        }
         p.second->close();
       }
     }

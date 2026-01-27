@@ -18,13 +18,14 @@ namespace tensorcast::daemon {
 
 struct ArtifactDeviceKey {
   std::string artifact_id;
+  std::string view_id;
   int device_id{0};
   bool operator==(const ArtifactDeviceKey&) const = default;
 };
 
 template <typename H>
 H AbslHashValue(H h, const ArtifactDeviceKey& k) {
-  return H::combine(std::move(h), k.artifact_id, k.device_id);
+  return H::combine(std::move(h), k.artifact_id, k.view_id, k.device_id);
 }
 
 // Lease segment metadata used for LIP registration/commit
@@ -71,6 +72,7 @@ struct RegisterTensorAliasMeta {
 struct LipLeaseEntry {
   std::string registration_id; // original registration id for keepalive/revoke
   std::string artifact_id;
+  std::string view_id;
   std::string client_artifact_id;
   tensorcast::common::ArtifactIdKind id_kind{tensorcast::common::ArtifactIdKind::kMi2};
   int device_id{0};

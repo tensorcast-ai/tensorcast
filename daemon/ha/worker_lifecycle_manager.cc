@@ -46,6 +46,7 @@ namespace {
 
 struct ReplicaSelector {
   std::string artifact_id;
+  std::string view_id;
   commonpb::MemoryType memory_type{commonpb::MEMORY_TYPE_UNSPECIFIED};
   int device_id{0};
 
@@ -54,22 +55,31 @@ struct ReplicaSelector {
 
 struct ReplicaSelectorHash {
   size_t operator()(const ReplicaSelector& selector) const {
-    return absl::HashOf(selector.artifact_id, static_cast<int>(selector.memory_type), selector.device_id);
+    return absl::HashOf(
+        selector.artifact_id, selector.view_id, static_cast<int>(selector.memory_type), selector.device_id);
   }
 };
 
 std::optional<ReplicaSelector> replica_selector_from_memory_info(
     std::string_view artifact_id,
     const commonpb::MemoryInfo& memory_info) {
+  std::string view_id;
+  if (memory_info.has_byte_space() && memory_info.byte_space().kind() == commonpb::BYTE_SPACE_KIND_VIEW) {
+    view_id = memory_info.byte_space().id();
+  }
   switch (memory_info.memory_type()) {
     case commonpb::MEMORY_TYPE_GPU:
       return ReplicaSelector{
           .artifact_id = std::string(artifact_id),
+          .view_id = std::move(view_id),
           .memory_type = commonpb::MEMORY_TYPE_GPU,
           .device_id = static_cast<int>(memory_info.device_id())};
     case commonpb::MEMORY_TYPE_RAM:
       return ReplicaSelector{
-          .artifact_id = std::string(artifact_id), .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0};
+          .artifact_id = std::string(artifact_id),
+          .view_id = std::move(view_id),
+          .memory_type = commonpb::MEMORY_TYPE_RAM,
+          .device_id = 0};
     case commonpb::MEMORY_TYPE_DISK:
     case commonpb::MEMORY_TYPE_UNSPECIFIED:
     default:
@@ -84,18 +94,24 @@ void append_local_replica_selectors(
     if (entry.key.device.ordinal < 0) {
       VLOG(1) << "Skipping GPU replica with unknown device id: artifact_id=" << entry.key.artifact_id;
     } else {
+      const std::string view_id = entry.key.view_id.value_or(std::string());
       out->push_back(
           ReplicaSelector{
               .artifact_id = entry.key.artifact_id,
+              .view_id = view_id,
               .memory_type = commonpb::MEMORY_TYPE_GPU,
               .device_id = entry.key.device.ordinal});
     }
     return;
   }
   if (entry.memory_location == common::memory::MemoryLocation::CPU) {
+    const std::string view_id = entry.key.view_id.value_or(std::string());
     out->push_back(
         ReplicaSelector{
-            .artifact_id = entry.key.artifact_id, .memory_type = commonpb::MEMORY_TYPE_RAM, .device_id = 0});
+            .artifact_id = entry.key.artifact_id,
+            .view_id = view_id,
+            .memory_type = commonpb::MEMORY_TYPE_RAM,
+            .device_id = 0});
   }
 }
 
@@ -103,7 +119,9 @@ void append_replica_keys_for_selector(
     store::StoreEngine& engine,
     const ReplicaSelector& selector,
     std::vector<store::loading::ReplicaKey>* out) {
-  const auto devices = engine.get_resident_devices(selector.artifact_id);
+  const std::optional<std::string_view> view_id =
+      selector.view_id.empty() ? std::nullopt : std::optional<std::string_view>(selector.view_id);
+  const auto devices = engine.get_resident_devices(selector.artifact_id, view_id);
   for (const auto& dev : devices) {
     if (selector.memory_type == commonpb::MEMORY_TYPE_GPU) {
       if (dev.type != DeviceType::GPU || dev.ordinal != selector.device_id) {
@@ -118,7 +136,8 @@ void append_replica_keys_for_selector(
     }
     const auto device_replicas = engine.list_device_replicas(dev);
     for (const auto& key : device_replicas) {
-      if (key.artifact_id == selector.artifact_id) {
+      const std::string key_view_id = key.view_id.value_or(std::string());
+      if (key.artifact_id == selector.artifact_id && key_view_id == selector.view_id) {
         out->push_back(key);
       }
     }
@@ -1479,10 +1498,11 @@ std::string WorkerLifecycleManager::compute_state_checksum(
     uint32_t node_port,
     const std::vector<store::StoreEngine::ReplicaInventoryEntry>& inventory) {
   // Keep format aligned with Global Store's RecoveryService._compute_state_checksum:
-  // artifact_id:node_id:node_address:node_port:device_id:memory_type:available; sorted by
-  // (artifact_id, memory_type, device_id).
+  // artifact_id:view_id:node_id:node_address:node_port:device_id:memory_type:available; sorted by
+  // (artifact_id, view_id, memory_type, device_id).
   struct Entry {
     std::string artifact_id;
+    std::string view_id;
     std::string memory_type;
     int device_id;
     bool available;
@@ -1509,6 +1529,7 @@ std::string WorkerLifecycleManager::compute_state_checksum(
     entries.push_back(
         Entry{
             .artifact_id = entry.key.artifact_id,
+            .view_id = entry.key.view_id.value_or(std::string()),
             .memory_type = std::move(mem_type),
             .device_id = device_id,
             .available = entry.is_available,
@@ -1518,6 +1539,8 @@ std::string WorkerLifecycleManager::compute_state_checksum(
   std::sort(entries.begin(), entries.end(), [](const Entry& lhs, const Entry& rhs) {
     if (lhs.artifact_id != rhs.artifact_id)
       return lhs.artifact_id < rhs.artifact_id;
+    if (lhs.view_id != rhs.view_id)
+      return lhs.view_id < rhs.view_id;
     if (lhs.memory_type != rhs.memory_type)
       return lhs.memory_type < rhs.memory_type;
     return lhs.device_id < rhs.device_id;
@@ -1527,8 +1550,9 @@ std::string WorkerLifecycleManager::compute_state_checksum(
   for (const auto& e : entries) {
     absl::StrAppendFormat(
         &state_str,
-        "%s:%s:%s:%u:%d:%s:%d;",
+        "%s:%s:%s:%s:%u:%d:%s:%d;",
         e.artifact_id,
+        e.view_id,
         node_id,
         node_address,
         node_port,

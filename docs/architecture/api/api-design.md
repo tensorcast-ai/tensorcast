@@ -242,7 +242,7 @@ Key parameter:
 
 ### Store.register_view (register a view-derived artifact)
 
-Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None)`
+Signature: `tensorcast.register_view(tensors, *, artifact_id=None, key=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`
 
 `register_view` is for cases where the canonical artifact can be derived from a
 view/slice/transpose of an existing tensor dict.
@@ -253,12 +253,16 @@ View inputs:
   - Supported forms: a `slice` (defaults to `dim=0`), or `(dim, slice)`.
   - Only one narrow op per tensor; `slice.step` must be `1`.
 - `transpose`: mapping of tensor name → non-empty sequence of `(dim0, dim1)` swaps.
-- `view_id`: alternate identity; when provided, do not provide `slices`/`transpose`.
+- `view_id`: optional deterministic identity. When omitted, the daemon computes it from the canonical index bytes + view spec; when provided, it must match the view spec. Do not supply `view_id` alongside conflicting `slices`/`transpose`.
 - `placement`: `"SERVER"` or `"CLIENT"`.
   - Defaults: registration chooses `"CLIENT"` when transpose is present; otherwise `"SERVER"`.
   - If the daemon rejects `"SERVER"` placement for a view, the SDK surfaces a
     `FAILED_PRECONDITION` with guidance to retry `"CLIENT"`.
-- `allow_partial`: when `True`, allows partial coverage uploads (daemon returns canonical coverage ranges).
+- `registration_kind`: `"canonical"` (default) or `"piece"`. Piece registration is
+  selection-only, rejects transpose, and requires server placement.
+- `canonical_index_bytes`: optional bootstrap path for new assemblies; required to
+  register the first piece without prior Global Store state.
+- `allow_partial`: deprecated compatibility flag mapped to `registration_kind="piece"`.
 
 Example:
 
@@ -273,6 +277,23 @@ reg = tensorcast.register_view(
     options=tensorcast.RegisterArtifactOptions(policy="cache"),
 )
 ```
+
+### Store.register_piece (register a dense view piece)
+
+Signature: `tensorcast.register_piece(tensors, *, assembly_id, key=None, slices=None, canonical_index_bytes=None, placement=None, ttl_ms=None, options=None)`
+
+`register_piece` uploads dense view bytes under an assembly id (`cgid:`) and
+records canonical coverage ranges. Pieces are selection-only (narrow only),
+reject transpose, and require server placement. Provide `canonical_index_bytes`
+to bootstrap the first piece when the assembly does not exist yet.
+
+### Store.seal_assembly (seal an assembly to MI2)
+
+Signature: `tensorcast.seal_assembly(assembly_id, *, publish_canonical=True, timeout_s=120.0)`
+
+`seal_assembly` assembles the canonical byte stream from pieces, computes the
+MI2 data hash, persists the assembly → MI2 binding, and optionally publishes a
+canonical replica for durability.
 
 ## Artifact Handles And Materialization
 

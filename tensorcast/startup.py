@@ -20,7 +20,7 @@ import signal
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from tensorcast import runtime
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
@@ -29,11 +29,9 @@ from tensorcast.cli_utils.health import ping_daemon
 from tensorcast.cli_utils.paths import session_paths
 from tensorcast.client_config_loader import discover_client_config, load_client_config
 from tensorcast.client_runtime import daemon_target_default, set_client_config
-from tensorcast.daemon_ctl import (
-    DaemonCtl,
-    get_daemon_client,
-    release_daemon_client,
-)
+
+if TYPE_CHECKING:
+    from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.daemon_runtime_config import load_daemon_config
 from tensorcast.logger import init_logger, setup_logging
 
@@ -74,6 +72,8 @@ class Context:
             shutdown_process_store()
         if not self._client_released:
             with contextlib.suppress(Exception):
+                from tensorcast.daemon_ctl import release_daemon_client
+
                 release_daemon_client(self.address)
             self._client_released = True
         if self.is_owner and self.session_id:
@@ -201,6 +201,8 @@ def init(
             if not ping_daemon(target_address):
                 raise RuntimeError(f"No daemon found at {target_address}")
             set_daemon_address(target_address)
+            from tensorcast.daemon_ctl import get_daemon_client
+
             client = get_daemon_client(target_address)
             logger.info("✅ Connected to daemon at %s", target_address)
             ctx = Context(
@@ -274,6 +276,8 @@ def init(
         if not daemon_address:
             daemon_address = "127.0.0.1:0"
         set_daemon_address(daemon_address)
+        from tensorcast.daemon_ctl import get_daemon_client
+
         client = get_daemon_client(daemon_address)
         logger.info(
             "✅ tensorcast initialized; daemon at %s (session=%s)",

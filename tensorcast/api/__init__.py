@@ -50,7 +50,12 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
-from tensorcast.types import ArtifactDescriptor, CommitResult
+from tensorcast.types import (
+    ArtifactDescriptor,
+    CommitResult,
+    SealAssemblyResult,
+    ViewRegistrationKind,
+)
 
 __all__ = [
     "Store",
@@ -75,6 +80,8 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "CommitResult",
+    "SealAssemblyResult",
+    "ViewRegistrationKind",
     "ArtifactDescriptor",
     "Artifact",
     "CallContext",

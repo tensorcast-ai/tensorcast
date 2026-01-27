@@ -904,6 +904,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/log",
         "@catch2//:catch2_main",

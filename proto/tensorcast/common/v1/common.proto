@@ -37,6 +37,30 @@ enum MemoryType {
   MEMORY_TYPE_DISK = 3;
 }
 
+enum ByteSpaceKind {
+  BYTE_SPACE_KIND_UNSPECIFIED = 0;
+  BYTE_SPACE_KIND_CANONICAL = 1;
+  BYTE_SPACE_KIND_VIEW = 2;
+}
+
+message ByteSpaceRef {
+  ByteSpaceKind kind = 1;
+  string id = 2;
+}
+
+// HashSpaceRef identifies a verifiable byte stream for hashing and leaf digests.
+//
+// This is distinct from ByteSpaceRef:
+// - ByteSpaceRef is used for routing/residency/locks/transport (physical concerns).
+// - HashSpaceRef is used for verification and proofs (hashing concerns).
+//
+// Canonical hashing is anchored by the canonical index, so `canonical_index_multihash`
+// is required when `byte_space.kind == BYTE_SPACE_KIND_CANONICAL`.
+message HashSpaceRef {
+  ByteSpaceRef byte_space = 1;
+  string canonical_index_multihash = 2;
+}
+
 message MemoryInfo {
   string node_id = 1;
   string node_address = 2;
@@ -54,6 +78,7 @@ message MemoryInfo {
   // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
   string verification_json = 14;
   google.protobuf.Timestamp expires_at = 15;
+  ByteSpaceRef byte_space = 16;
 }
 
 message ReplicaRef {

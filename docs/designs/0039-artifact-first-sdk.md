@@ -45,11 +45,13 @@ Non-Goals
 - Ingestion:
   - `tc.register(tensors, *, key=None, artifact_id=None, options=None, ttl_ms=None)` / `register_async(...)`.
   - `tc.put(tensors, *, key=None, artifact_id=None, options=None, device=None)` / `put_async(...)`.
-  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None)`.
+  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`.
+  - `tc.register_piece(tensors, *, assembly_id, key=None, slices=None, canonical_index_bytes=None, placement=None, ttl_ms=None, options=None)`.
 - Region & lifecycle (advanced):
   - `tc.register_vram_region(device_id, base_ptr, size_bytes, ttl_ms, name=None) -> VramRegionHandle`.
   - `tc.unregister_vram_region(region_id, *, force=None) -> bool`.
   - `tc.deregister_artifact(artifact_id, *, wait=True, drain_timeout_s=None, extend_ttl_ms=None, device_id=None) -> DeregisterArtifactOutcome`.
+  - `tc.seal_assembly(assembly_id, *, publish_canonical=True, timeout_s=120.0)`.
 
 Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_into` (sync/async); `store()` remains for advanced callers but is not required for common flows.
 

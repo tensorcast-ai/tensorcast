@@ -63,7 +63,8 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
       const DeviceKey&,
       common::memory::MemoryLocation,
       uint64_t,
-      uint32_t) override {
+      uint32_t,
+      std::optional<std::string_view>) override {
     return absl::UnimplementedError("register_replica not supported in GlobalStoreClientStub");
   }
 
@@ -84,7 +85,9 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
       std::string_view,
       std::string_view,
       uint32_t,
-      const std::optional<std::string>&) override {
+      const std::optional<std::string>&,
+      std::optional<std::string_view>,
+      const std::optional<common::v1::ArtifactDescriptor>&) override {
     return absl::UnimplementedError("register_memory_replica not supported in GlobalStoreClientStub");
   }
 
@@ -125,7 +128,9 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("complete_replica_transport not supported in GlobalStoreClientStub");
   }
 
-  absl::StatusOr<std::vector<components::RemoteReplicaInfo>> get_artifact_replicas(std::string_view) override {
+  absl::StatusOr<std::vector<components::RemoteReplicaInfo>> get_artifact_replicas(
+      std::string_view,
+      std::optional<std::string_view>) override {
     return absl::UnimplementedError("get_artifact_replicas not supported in GlobalStoreClientStub");
   }
 
@@ -186,6 +191,19 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
 
   absl::Status update_artifact_view_state(const components::VariantViewUpdate&) override {
     return absl::UnimplementedError("update_artifact_view_state not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<components::VariantInfo>> list_variants(std::string_view) override {
+    return absl::UnimplementedError("list_variants not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {
+    return absl::UnimplementedError("get_artifact_binding not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<components::ArtifactBindingResult> upsert_artifact_binding(
+      const components::ArtifactBinding&) override {
+    return absl::UnimplementedError("upsert_artifact_binding not supported in GlobalStoreClientStub");
   }
 
   absl::StatusOr<components::PlacementPlanResult> plan_placement(

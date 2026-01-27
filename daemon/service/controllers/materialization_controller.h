@@ -6,8 +6,10 @@
 
 #include <atomic>
 #include <filesystem>
+#include <memory>
 #include <vector>
 
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/device_resolver.h"
@@ -32,6 +34,7 @@ class MaterializationController {
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
     ShutdownSignal& shutdown_signal;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager* lifecycle{nullptr};
     HandleLeaseRegistry* handle_leases{nullptr};
     bool cpu_shared_memory_enabled{false};
@@ -65,6 +68,8 @@ class MaterializationController {
       RpcContext& rctx,
       const v2::GetArtifactIndexByIdRequest& req,
       v2::GetArtifactIndexByIdResponse& resp);
+
+  grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
 
   grpc::Status confirm(RpcContext& rctx, const v2::ConfirmReplicaRequest& req, v2::ConfirmReplicaResponse& resp) const;
 

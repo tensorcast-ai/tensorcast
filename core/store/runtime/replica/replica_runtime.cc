@@ -212,12 +212,25 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
   return result;
 }
 
-std::vector<DeviceKey> ReplicaRuntime::get_resident_devices(std::string_view artifact_id) const {
+std::vector<DeviceKey> ReplicaRuntime::get_resident_devices(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
   absl::flat_hash_set<DeviceKey, DeviceKeyHash> unique_devices;
   std::vector<DeviceKey> devices;
 
   const auto replica_keys = registry().find_by_artifact(artifact_id);
   for (const auto& key : replica_keys) {
+    if (view_id.has_value()) {
+      if (view_id->empty()) {
+        if (key.view_id.has_value() && !key.view_id->empty()) {
+          continue;
+        }
+      } else if (!key.view_id.has_value() || key.view_id->empty() || *key.view_id != *view_id) {
+        continue;
+      }
+    } else if (key.view_id.has_value() && !key.view_id->empty()) {
+      continue;
+    }
     auto replica_or = registry().find(key);
     if (!replica_or.ok()) {
       continue;
@@ -245,10 +258,26 @@ std::vector<DeviceKey> ReplicaRuntime::get_resident_devices(std::string_view art
   return devices;
 }
 
-absl::StatusOr<int> ReplicaRuntime::get_unique_gpu_residency(std::string_view artifact_id) const {
+absl::StatusOr<int> ReplicaRuntime::get_unique_gpu_residency(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
   int unique_gpu_device = -2; // -2: unknown, -1: none, >=0: unique device
   for (const auto& info : get_all_replicas_info()) {
-    if (info.artifact_id == artifact_id && info.gpu_state == common::memory::MemoryLocation::GPU) {
+    if (info.artifact_id != artifact_id) {
+      continue;
+    }
+    if (view_id.has_value()) {
+      if (view_id->empty()) {
+        if (info.key.view_id.has_value() && !info.key.view_id->empty()) {
+          continue;
+        }
+      } else if (!info.key.view_id.has_value() || info.key.view_id->empty() || *info.key.view_id != *view_id) {
+        continue;
+      }
+    } else if (info.key.view_id.has_value() && !info.key.view_id->empty()) {
+      continue;
+    }
+    if (info.gpu_state == common::memory::MemoryLocation::GPU) {
       if (unique_gpu_device == -2) {
         unique_gpu_device = info.gpu_device_id;
       } else if (unique_gpu_device != info.gpu_device_id) {

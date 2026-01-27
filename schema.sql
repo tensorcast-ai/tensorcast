@@ -150,6 +150,7 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_created_at ON artifacts(created_at);
 CREATE TABLE IF NOT EXISTS artifact_replicas (
     replica_id UUID PRIMARY KEY,
     artifact_id TEXT NOT NULL,             -- FK logical: artifacts.artifact_id
+    view_id TEXT NULL,
     disk_path TEXT NULL,                   -- Original on-disk path (optional)
     node_id TEXT NOT NULL,
     node_address VARCHAR NOT NULL,
@@ -187,6 +188,7 @@ CREATE INDEX IF NOT EXISTS idx_replica_counters_current_requests ON replica_coun
 CREATE INDEX IF NOT EXISTS idx_replica_counters_last_assigned ON replica_counters(last_assigned_at);
 
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_artifact_id ON artifact_replicas(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_replicas_artifact_view ON artifact_replicas(artifact_id, view_id);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_disk_path ON artifact_replicas(disk_path);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_updated_at ON artifact_replicas(updated_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_replicas_node_id ON artifact_replicas(node_id);
@@ -324,6 +326,8 @@ CREATE TABLE IF NOT EXISTS variants (
     view_size BIGINT NOT NULL,
     view_data_hash TEXT,
     verified_at TIMESTAMP WITH TIME ZONE,
+    canonical_size_bytes BIGINT NULL,
+    canonical_bytes_covered BIGINT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (artifact_id, view_id)
 );
@@ -331,6 +335,27 @@ CREATE TABLE IF NOT EXISTS variants (
 CREATE INDEX IF NOT EXISTS idx_variants_artifact ON variants(artifact_id);
 CREATE INDEX IF NOT EXISTS idx_variants_verified_at ON variants(artifact_id, verified_at);
 CREATE INDEX IF NOT EXISTS idx_variants_view_id ON variants(view_id);
+
+-- Canonical coverage ranges per variant view (piece coverage manifest)
+CREATE TABLE IF NOT EXISTS variant_coverage_ranges (
+    artifact_id TEXT NOT NULL,
+    view_id TEXT NOT NULL,
+    range_offset BIGINT NOT NULL,
+    range_length BIGINT NOT NULL,
+    PRIMARY KEY (artifact_id, view_id, range_offset, range_length)
+);
+
+CREATE INDEX IF NOT EXISTS idx_variant_coverage_artifact ON variant_coverage_ranges(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_variant_coverage_view ON variant_coverage_ranges(artifact_id, view_id);
+
+-- Assembly → sealed bindings (cgid -> mi2)
+CREATE TABLE IF NOT EXISTS artifact_bindings (
+    from_artifact_id TEXT PRIMARY KEY,
+    to_artifact_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'seal',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_bindings_to ON artifact_bindings(to_artifact_id);
 
 -- Leaf digests anchored to canonical or variant ByteSpaces
 CREATE TABLE IF NOT EXISTS leaves (

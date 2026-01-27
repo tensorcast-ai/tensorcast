@@ -21,6 +21,7 @@ from tensorcast.global_store.repositories import (
     LeafRepository,
     ReplicaRepository,
     TransportRepository,
+    VariantCoverageRepository,
     VariantRepository,
     WorkerRepository,
 )
@@ -187,6 +188,7 @@ def repositories(db_connection):
         "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
         "variant": VariantRepository(db_connection),
+        "coverage": VariantCoverageRepository(db_connection),
         "leaf": LeafRepository(db_connection),
         "worker": WorkerRepository(db_connection),
         "instance": InstanceRepository(db_connection),
@@ -228,7 +230,9 @@ observability:
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
         "instance": InstanceService(repositories["instance"], repositories["worker"]),
         "view_state": ViewStateService(
-            repositories["variant"], repositories["leaf"]
+            repositories["variant"],
+            repositories["leaf"],
+            repositories["coverage"],
         ),
     }
 

@@ -2,6 +2,7 @@
 
 """Data access repositories for Global Store."""
 
+from .artifact_binding_repository import ArtifactBindingRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
 from .instance_repository import InstanceRepository
 from .leaf_repository import LeafRepository
@@ -13,15 +14,18 @@ from .placement_repository import (
 )
 from .replica_repository import ReplicaRepository
 from .transport_repository import TransportRepository
+from .variant_coverage_repository import VariantCoverageRepository
 from .variant_repository import VariantRepository
 from .worker_repository import WorkerRepository
 
 __all__ = [
+    "ArtifactBindingRepository",
     "ChunkDirectoryRepository",
     "LeafRepository",
     "ReplicaRepository",
     "TransportRepository",
     "VariantRepository",
+    "VariantCoverageRepository",
     "WorkerRepository",
     "InstanceRepository",
     "MemoryTierSnapshotRepository",

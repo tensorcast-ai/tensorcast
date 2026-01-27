@@ -4,10 +4,12 @@
 
 #pragma once
 
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include <gsl/pointers>
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/ipc_region_registry.h"
@@ -27,6 +29,7 @@ class RegistrationController {
     RegistrationManager& reg;
     LipManager& lip;
     RefTracker& refs;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
     IpcRegionRegistry& regions;
   };
