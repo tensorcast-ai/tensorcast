@@ -40,17 +40,18 @@ class TransportService:
     def request_transport(
         self,
         artifact_id: str,
-        view_id: str | None,
         source_node_id: str,
         source_address: str,
         source_port: int,
         wait_timeout_ms: int = 0,
+        view_id: str | None = None,
     ) -> Tuple[Replica, UUID]:
         """
         Request a artifact transport with load balancing.
 
         Args:
             artifact_id: Content-addressed artifact id (mi2:...)
+            view_id: Optional view byte-space id (None for canonical)
             source_node_id: Source node ID
             source_address: Source node address
             source_port: Source node port

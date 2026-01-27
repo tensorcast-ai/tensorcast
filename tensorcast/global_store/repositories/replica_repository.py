@@ -197,8 +197,8 @@ class ReplicaRepository(BaseRepository):
     def find_available_for_transport(
         self,
         artifact_id: str,
-        view_id: str | None,
         heartbeat_timeout_seconds: float,
+        view_id: str | None = None,
     ) -> Replica | None:
         """
         Find best available replica for transport with load balancing.
