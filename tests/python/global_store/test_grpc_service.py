@@ -817,13 +817,13 @@ class TestGRPCService:
         assert partial_response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(partial_response.leaves) == 1
         assert partial_response.leaves[0].leaf_idx == 0
-        assert len(partial_response.partial_coverage) == 1
-        detail = partial_response.partial_coverage[0]
+        assert len(partial_response.partial_leaf_coverage) == 1
+        detail = partial_response.partial_leaf_coverage[0]
         assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
         assert detail.hash_space.byte_space.id == "view-1"
-        assert len(detail.missing_ranges) == 1
-        assert detail.missing_ranges[0].off == 3
-        assert detail.missing_ranges[0].len == 1
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 3
+        assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
     def test_get_artifact_view_info_not_found(
@@ -859,11 +859,13 @@ class TestGRPCService:
         response = servicer.GetArtifactInfoById(request, test_context)
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(response.replicas) == 0
-        assert len(response.partial_coverage) == 1
-        detail = response.partial_coverage[0]
+        assert len(response.partial_leaf_coverage) == 1
+        detail = response.partial_leaf_coverage[0]
         assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
         assert detail.hash_space.byte_space.id == "missing-view"
-        assert sorted(r.off for r in detail.missing_ranges) == [0, 1]
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 0
+        assert detail.missing_leaf_ranges[0].count == 2
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
     def test_register_replica_with_cgid(
@@ -885,10 +887,10 @@ class TestGRPCService:
         assert record["index_multihash"] is None
         assert record["data_multihash"] is None
 
-    def test_get_artifact_canonical_partial_coverage(
+    def test_get_artifact_canonical_partial_leaf_coverage(
         self, servicer, test_context, memory_info, registered_worker
     ):
-        """Canonical leaf queries return partial coverage detail when missing."""
+        """Canonical leaf queries return partial leaf coverage detail when missing."""
         artifact_id = "mi2:index:data"
         servicer.artifacts_repo.upsert_artifact(
             artifact_id=artifact_id,
@@ -936,11 +938,11 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(response.leaves) == 1 and response.leaves[0].leaf_idx == 0
-        assert len(response.partial_coverage) == 1
-        detail = response.partial_coverage[0]
+        assert len(response.partial_leaf_coverage) == 1
+        detail = response.partial_leaf_coverage[0]
         assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
         assert detail.hash_space.canonical_index_multihash == "index"
-        assert len(detail.missing_ranges) == 1
-        assert detail.missing_ranges[0].off == 2
-        assert detail.missing_ranges[0].len == 1
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 2
+        assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND

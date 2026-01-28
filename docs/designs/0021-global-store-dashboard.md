@@ -118,7 +118,10 @@ Read‑only endpoints that map 1:1 (or many:1) to Global Store gRPC calls and me
     - `space=canonical|view` selects index space.
     - `view_id` optional when `space=view`.
     - `leaf_indices=1,2,...` optional selection for leaves.
-  - Returns selected `replicas`, `view_meta`, `leaves`, and `partial_coverage`. When the
+  - Returns selected `replicas`, `view_meta`, `leaves`, and partial results:
+    - `partial_coverage`: missing **byte** coverage ranges (units: bytes) for the selected `HashSpaceRef`.
+    - `partial_leaf_coverage`: missing **leaf digest** ranges (units: leaf indices) for the selected `HashSpaceRef`.
+    When the
     Global Store has recorded descriptor metadata, the response also includes
     `descriptor` with `id_kind`, hashes, schema, and encoding, plus a derived
     `artifact_kind` helper to simplify UI rendering.
@@ -317,7 +320,10 @@ Endpoints — request/response examples (aligned with `tensorcast/dashboard/sche
       { "index": 1, "digest_b64": "..." }
     ],
     "partial_coverage": [
-      { "space_kind": "CANONICAL", "space_id": "default", "missing": [ { "offset": 0, "length": 4096 } ] }
+      { "space_kind": "CANONICAL", "space_id": "index-abc", "missing": [ { "offset": 0, "length": 4096 } ] }
+    ],
+    "partial_leaf_coverage": [
+      { "space_kind": "CANONICAL", "space_id": "index-abc", "missing": [ { "start": 2, "count": 1 } ] }
     ]
   }
   ```

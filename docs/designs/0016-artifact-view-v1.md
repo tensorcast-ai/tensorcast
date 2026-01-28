@@ -334,16 +334,22 @@ message RegisterArtifactResponse {
   string view_data_hash  = 1002;
 }
 
-enum ByteSpaceKind { BS_CANONICAL = 1; BS_VARIANT = 2; }
 message Range { uint64 off = 1; uint64 len = 2; }
 message PartialCoverageDetail {
-  ByteSpaceKind space_kind = 1;
-  string        space_id   = 2; // index_multihash or view_id
-  repeated Range missing_ranges = 3;
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  repeated Range missing_ranges = 2; // units: bytes
+}
+
+message LeafIndexRange { uint64 start = 1; uint64 count = 2; }
+message PartialLeafCoverageDetail {
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  repeated LeafIndexRange missing_leaf_ranges = 2; // units: leaf indices
 }
 ```
 
-`PartialCoverageDetail` is attached via `google.rpc.Status.details` for both retrieval and registration errors.
+`PartialCoverageDetail` describes missing **byte** coverage (units: bytes) for a `HashSpaceRef`.
+Missing Merkle leaf digests MUST be represented separately (units: leaf indices), not by overloading
+`PartialCoverageDetail.missing_ranges`.
 
 # 5. Global Store Integration
 
