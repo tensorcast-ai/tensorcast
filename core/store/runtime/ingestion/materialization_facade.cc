@@ -32,8 +32,11 @@
 #include "core/store/materialization/dataplane/runtime/pump.h"
 #include "core/store/materialization/dataplane/runtime/streaming_buffer_adapter.h"
 #include "core/store/materialization/dataplane/sinks/target_layout_gpu_sink.h"
+#include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
+#include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_program.h"
+#include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
-#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica.h"
@@ -99,112 +102,6 @@ absl::StatusOr<DeviceKey> select_seal_target_device(components::DeviceManager& d
 
 } // namespace
 
-class PlanBackedSeekableSource final : public loader::SeekableSource {
- public:
-  PlanBackedSeekableSource(
-      std::unique_ptr<loader::SeekableSource> source,
-      std::shared_ptr<const std::vector<loader::SegmentPiece>> plan,
-      uint64_t total_size)
-      : source_(std::move(source)), plan_(std::move(plan)), total_size_(total_size) {
-    piece_starts_.reserve(plan_->size());
-    for (const auto& piece : *plan_) {
-      piece_starts_.push_back(piece.dst_offset);
-    }
-  }
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto st = read_at(current_offset_, dst, max_bytes);
-    if (!st.ok()) {
-      return st;
-    }
-    current_offset_ += *st;
-    return st;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_) {
-      return static_cast<size_t>(0);
-    }
-    size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    auto* out = static_cast<uint8_t*>(dst);
-
-    if (piece_starts_.empty()) {
-      return static_cast<size_t>(0);
-    }
-    auto it = std::upper_bound(piece_starts_.begin(), piece_starts_.end(), offset);
-    size_t idx = 0;
-    if (it == piece_starts_.begin()) {
-      idx = 0;
-    } else {
-      idx = static_cast<size_t>(it - piece_starts_.begin() - 1);
-    }
-    if (idx >= plan_->size()) {
-      return static_cast<size_t>(0);
-    }
-
-    while (remaining > 0 && idx < plan_->size()) {
-      const auto& p = (*plan_)[idx];
-      const uint64_t local = offset - p.dst_offset;
-      const size_t avail = static_cast<size_t>(p.length - local);
-      const size_t take = std::min(remaining, avail);
-      if (p.kind == loader::SegmentPiece::PAD) {
-        std::memset(out, 0, take);
-      } else {
-        auto read_or = source_->read_at(p.src_offset + local, out, take);
-        if (!read_or.ok()) {
-          return read_or.status();
-        }
-        if (*read_or != take) {
-          return absl::DataLossError("Short read while materializing into target");
-        }
-      }
-      out += take;
-      offset += take;
-      remaining -= take;
-      if (take == avail) {
-        ++idx;
-      }
-    }
-    return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
-  }
-
- private:
-  std::unique_ptr<loader::SeekableSource> source_;
-  std::shared_ptr<const std::vector<loader::SegmentPiece>> plan_;
-  std::vector<uint64_t> piece_starts_;
-  uint64_t total_size_{0};
-  uint64_t current_offset_{0};
-};
-
-class CpuMemorySource final : public loader::SeekableSource {
- public:
-  CpuMemorySource(gsl::not_null<const void*> base_ptr, uint64_t total_size)
-      : base_ptr_(static_cast<const uint8_t*>(base_ptr.get())), total_size_(total_size) {}
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto read_or = read_at(current_offset_, dst, max_bytes);
-    if (!read_or.ok()) {
-      return read_or;
-    }
-    current_offset_ += *read_or;
-    return read_or;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_) {
-      return static_cast<size_t>(0);
-    }
-    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    std::memcpy(dst, base_ptr_ + offset, to_copy);
-    return to_copy;
-  }
-
- private:
-  const uint8_t* base_ptr_;
-  uint64_t total_size_;
-  uint64_t current_offset_{0};
-};
-
 class LocalReplicaSource final : public loader::SeekableSource {
  public:
   static absl::StatusOr<std::shared_ptr<loader::SeekableSource>> Create(
@@ -224,17 +121,19 @@ class LocalReplicaSource final : public loader::SeekableSource {
       if (gpu_ptrs.empty() || gpu_ptrs[0] == nullptr) {
         return absl::FailedPreconditionError("local replica GPU pointer unavailable");
       }
-      std::array<loader::SegmentPiece, 1> plan{loader::SegmentPiece{loader::SegmentPiece::DATA, 0, total_size, 0}};
-      source = std::make_shared<loader::LinearizedGpuPlanSource>(
-          gsl::not_null<void*>{gpu_ptrs[0]}, device_id, absl::MakeSpan(plan), total_size);
+      source = std::make_shared<loader::GpuMemorySource>(gsl::not_null<void*>{gpu_ptrs[0]}, device_id, total_size);
     } else {
       const auto cpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
       if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
         return absl::FailedPreconditionError("local replica CPU pointer unavailable");
       }
-      source = std::make_shared<CpuMemorySource>(gsl::not_null<const void*>{cpu_ptrs[0]}, total_size);
+      source = std::make_shared<loader::CpuMemorySource>(gsl::not_null<const void*>{cpu_ptrs[0]}, total_size);
     }
     return std::shared_ptr<loader::SeekableSource>(new LocalReplicaSource(std::move(replica), std::move(source)));
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return source_->total_bytes();
   }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
@@ -243,6 +142,18 @@ class LocalReplicaSource final : public loader::SeekableSource {
 
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
     return source_->read_at(offset, dst, bytes);
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override {
+    return source_->supports_direct_write_at();
+  }
+
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override {
+    return source_->read_into_at(src_offset, dest_va_offset, bytes, grant);
   }
 
  private:
@@ -297,19 +208,9 @@ struct AssemblySourceInfo {
   components::TransportLease transport_lease;
 };
 
-struct AssemblySegment {
-  enum class Kind : uint8_t { kData = 0, kPad = 1 };
-  Kind kind{Kind::kData};
-  uint64_t dst_offset{0};
-  uint64_t length{0};
-  size_t source_index{0};
-  uint64_t src_offset{0};
-};
-
 struct AssemblyPlan {
-  uint64_t total_size{0};
+  loader::ByteRangeMap map;
   std::vector<AssemblySourceInfo> sources;
-  std::vector<AssemblySegment> segments;
   std::vector<view::CanonicalRange> missing_ranges;
 };
 
@@ -320,106 +221,17 @@ struct PieceInterval {
   uint64_t view_offset{0};
 };
 
-class AssemblySource final : public loader::SeekableSource {
- public:
-  AssemblySource(
-      std::vector<std::shared_ptr<loader::SeekableSource>> sources,
-      std::vector<AssemblySegment> segments,
-      uint64_t total_size)
-      : sources_(std::move(sources)), segments_(std::move(segments)), total_size_(total_size) {
-    segment_starts_.reserve(segments_.size());
-    for (const auto& seg : segments_) {
-      segment_starts_.push_back(seg.dst_offset);
-    }
-  }
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto st = read_at(current_offset_, dst, max_bytes);
-    if (!st.ok()) {
-      return st;
-    }
-    current_offset_ += *st;
-    return st;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_) {
-      return static_cast<size_t>(0);
-    }
-    size_t remaining = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    auto* out = static_cast<uint8_t*>(dst);
-
-    if (segments_.empty()) {
-      return static_cast<size_t>(0);
-    }
-    auto it = std::upper_bound(segment_starts_.begin(), segment_starts_.end(), offset);
-    size_t idx = 0;
-    if (it == segment_starts_.begin()) {
-      idx = 0;
-    } else {
-      idx = static_cast<size_t>(it - segment_starts_.begin() - 1);
-    }
-    if (idx >= segments_.size()) {
-      return static_cast<size_t>(0);
-    }
-
-    while (remaining > 0 && idx < segments_.size()) {
-      const auto& seg = segments_[idx];
-      if (offset < seg.dst_offset) {
-        return absl::DataLossError("Assembly source gap detected");
-      }
-      const uint64_t local = offset - seg.dst_offset;
-      const uint64_t seg_end = seg.dst_offset + seg.length;
-      if (local >= seg.length) {
-        ++idx;
-        continue;
-      }
-      const size_t avail = static_cast<size_t>(seg_end - offset);
-      const size_t take = std::min(remaining, avail);
-      if (seg.kind == AssemblySegment::Kind::kPad) {
-        std::memset(out, 0, take);
-      } else {
-        if (seg.source_index >= sources_.size()) {
-          return absl::InternalError("Assembly source index out of range");
-        }
-        auto read_or = sources_[seg.source_index]->read_at(seg.src_offset + local, out, take);
-        if (!read_or.ok()) {
-          return read_or.status();
-        }
-        if (*read_or != take) {
-          return absl::DataLossError("Assembly source short read");
-        }
-      }
-      out += take;
-      offset += take;
-      remaining -= take;
-      if (offset >= seg_end) {
-        ++idx;
-      }
-    }
-    return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
-  }
-
-  [[nodiscard]] bool supports_direct_write() const override {
-    return false;
-  }
-
- private:
-  std::vector<std::shared_ptr<loader::SeekableSource>> sources_;
-  std::vector<AssemblySegment> segments_;
-  std::vector<uint64_t> segment_starts_;
-  uint64_t total_size_{0};
-  uint64_t current_offset_{0};
-};
-
 std::vector<AssemblyTargetRange> build_target_ranges_from_view_plan(const loader::ViewPlan& plan) {
   std::vector<AssemblyTargetRange> ranges;
-  ranges.reserve(plan.selection.ranges.size());
-  for (const auto& range : plan.selection.ranges) {
+  ranges.reserve(plan.selection.map.segments.size());
+  for (const auto& range : plan.selection.map.segments) {
+    if (range.length == 0) {
+      continue;
+    }
     AssemblyTargetRange out;
     out.target_offset = range.dst_offset;
     out.length = range.length;
-    if (range.kind == loader::SelectionPlan::Range::Kind::kPad) {
+    if (range.kind == loader::ByteRangeSegment::Kind::kPad) {
       out.kind = AssemblyTargetRange::Kind::kPad;
     } else {
       out.kind = AssemblyTargetRange::Kind::kData;
@@ -433,26 +245,26 @@ std::vector<AssemblyTargetRange> build_target_ranges_from_view_plan(const loader
 absl::StatusOr<std::vector<AssemblyTargetRange>> build_target_ranges_for_canonical(
     std::string_view canonical_index_json,
     uint64_t total_size) {
-  auto plan_or =
-      loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size, /*align_bytes=*/8);
-  if (!plan_or.ok()) {
-    return plan_or.status();
-  }
   std::vector<AssemblyTargetRange> ranges;
-  ranges.reserve(plan_or->size());
-  for (const auto& segment : *plan_or) {
+  auto map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, total_size);
+  if (!map_or.ok()) {
+    return map_or.status();
+  }
+  ranges.reserve(map_or->segments.size());
+  for (const auto& segment : map_or->segments) {
+    if (segment.length == 0) {
+      continue;
+    }
     AssemblyTargetRange out;
     out.target_offset = segment.dst_offset;
     out.length = segment.length;
-    if (segment.kind == loader::SegmentPiece::PAD) {
+    if (segment.kind == loader::ByteRangeSegment::Kind::kPad) {
       out.kind = AssemblyTargetRange::Kind::kPad;
     } else {
       out.kind = AssemblyTargetRange::Kind::kData;
       out.canonical_offset = segment.dst_offset;
     }
-    if (out.length > 0) {
-      ranges.push_back(out);
-    }
+    ranges.push_back(out);
   }
   return ranges;
 }
@@ -506,16 +318,24 @@ std::string format_missing_ranges(absl::Span<const view::CanonicalRange> ranges,
   return out;
 }
 
-absl::Status build_assembly_segments(
+absl::Status build_assembly_map(
     absl::Span<const AssemblyTargetRange> target_ranges,
     const std::vector<PieceInterval>& intervals,
-    std::vector<AssemblySegment>* segments,
+    uint32_t num_sources,
+    uint64_t target_total_size,
+    loader::ByteRangeMap* out_map,
     std::vector<view::CanonicalRange>* missing_ranges) {
-  if (segments == nullptr || missing_ranges == nullptr) {
-    return absl::InvalidArgumentError("assembly segments outputs must not be null");
+  if (out_map == nullptr) {
+    return absl::InvalidArgumentError("assembly map output must not be null");
   }
-  segments->clear();
-  missing_ranges->clear();
+  if (missing_ranges != nullptr) {
+    missing_ranges->clear();
+  }
+
+  loader::ByteRangeMap map;
+  map.total_bytes = target_total_size;
+  map.num_sources = num_sources;
+  map.segments.reserve(target_ranges.size() * 2 + intervals.size());
 
   std::vector<uint64_t> interval_starts;
   interval_starts.reserve(intervals.size());
@@ -539,11 +359,14 @@ absl::Status build_assembly_segments(
       continue;
     }
     if (target.kind == AssemblyTargetRange::Kind::kPad) {
-      AssemblySegment seg;
-      seg.kind = AssemblySegment::Kind::kPad;
-      seg.dst_offset = target.target_offset;
-      seg.length = target.length;
-      segments->push_back(seg);
+      map.segments.push_back(
+          loader::ByteRangeSegment{
+              .kind = loader::ByteRangeSegment::Kind::kPad,
+              .dst_offset = target.target_offset,
+              .length = target.length,
+              .src_offset = 0,
+              .source_index = 0,
+          });
       continue;
     }
 
@@ -556,7 +379,9 @@ absl::Status build_assembly_segments(
       }
       if (idx >= intervals.size() || intervals[idx].canonical_offset > cursor) {
         const uint64_t gap_end = (idx < intervals.size()) ? std::min(end, intervals[idx].canonical_offset) : end;
-        missing_ranges->push_back(view::CanonicalRange{.offset = cursor, .length = gap_end - cursor});
+        if (missing_ranges != nullptr && gap_end > cursor) {
+          missing_ranges->push_back(view::CanonicalRange{.offset = cursor, .length = gap_end - cursor});
+        }
         cursor = gap_end;
         continue;
       }
@@ -565,18 +390,29 @@ absl::Status build_assembly_segments(
       const uint64_t interval_end = interval.canonical_offset + interval.length;
       const uint64_t take_end = std::min(interval_end, end);
       const uint64_t take_len = take_end - cursor;
-      AssemblySegment seg;
-      seg.kind = AssemblySegment::Kind::kData;
-      seg.dst_offset = target.target_offset + (cursor - target.canonical_offset);
-      seg.length = take_len;
-      seg.source_index = interval.source_index;
-      seg.src_offset = interval.view_offset + (cursor - interval.canonical_offset);
-      segments->push_back(seg);
+      map.segments.push_back(
+          loader::ByteRangeSegment{
+              .kind = loader::ByteRangeSegment::Kind::kData,
+              .dst_offset = target.target_offset + (cursor - target.canonical_offset),
+              .length = take_len,
+              .src_offset = interval.view_offset + (cursor - interval.canonical_offset),
+              .source_index = static_cast<uint32_t>(interval.source_index),
+          });
       cursor = take_end;
     }
   }
 
   coalesce_missing_ranges(missing_ranges);
+  if (missing_ranges != nullptr && !missing_ranges->empty()) {
+    *out_map = std::move(map);
+    return absl::OkStatus();
+  }
+
+  auto normalized_or = normalize_byte_range_map(std::move(map));
+  if (!normalized_or.ok()) {
+    return normalized_or.status();
+  }
+  *out_map = std::move(*normalized_or);
   return absl::OkStatus();
 }
 
@@ -675,8 +511,8 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
       coverage_spans.emplace_back(view::CanonicalRange{.offset = range.offset, .length = range.length}, source_index);
     }
 
-    for (const auto& range : forward.selection.ranges) {
-      if (range.kind != loader::SelectionPlan::Range::Kind::kData || range.length == 0) {
+    for (const auto& range : forward.selection.map.segments) {
+      if (range.kind != loader::ByteRangeSegment::Kind::kData || range.length == 0) {
         continue;
       }
       intervals.push_back(
@@ -726,11 +562,12 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
   }
 
   AssemblyPlan plan;
-  plan.total_size = target_total_size;
   plan.sources = std::move(sources);
-  absl::Status seg_status = build_assembly_segments(target_ranges, intervals, &plan.segments, &plan.missing_ranges);
-  if (!seg_status.ok()) {
-    return seg_status;
+  const uint32_t num_sources = static_cast<uint32_t>(plan.sources.size());
+  absl::Status map_status =
+      build_assembly_map(target_ranges, intervals, num_sources, target_total_size, &plan.map, &plan.missing_ranges);
+  if (!map_status.ok()) {
+    return map_status;
   }
   return plan;
 }
@@ -810,6 +647,7 @@ MaterializationFacade::MaterializationFacade(Config config)
   deps.pinned_memory_timeout = config_.pinned_memory_timeout;
   deps.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
   deps.num_threads = config_.num_threads;
+  deps.byte_mapping_config = config_.options->byte_mapping;
   deps.view_hash_computer = config_.runtime_context->view_hash_computer();
   deps.ingest_from_disk = [this](
                               const std::string& artifact_identifier,
@@ -935,22 +773,22 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::StrCat(generation, ":raw:", fallback_hash);
   }();
 
-  std::shared_ptr<std::vector<loader::SegmentPiece>> plan_ptr;
+  std::shared_ptr<loader::ByteRangeMap> map_ptr;
   {
-    absl::MutexLock lock(&segment_plan_mu_);
-    auto it = segment_plan_cache_.find(plan_key);
-    if (it != segment_plan_cache_.end()) {
-      plan_ptr = it->second;
+    absl::MutexLock lock(&byte_range_map_mu_);
+    auto it = byte_range_map_cache_.find(plan_key);
+    if (it != byte_range_map_cache_.end()) {
+      map_ptr = it->second;
     }
   }
-  if (!plan_ptr) {
-    auto plan_or = loader::build_segment_plan_from_canonical_index_json(canonical_index_json, canonical_total_size);
-    if (!plan_or.ok()) {
-      return plan_or.status();
+  if (!map_ptr) {
+    auto map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+    if (!map_or.ok()) {
+      return map_or.status();
     }
-    plan_ptr = std::make_shared<std::vector<loader::SegmentPiece>>(std::move(*plan_or));
-    absl::MutexLock lock(&segment_plan_mu_);
-    segment_plan_cache_.emplace(plan_key, plan_ptr);
+    map_ptr = std::make_shared<loader::ByteRangeMap>(std::move(*map_or));
+    absl::MutexLock lock(&byte_range_map_mu_);
+    byte_range_map_cache_.emplace(plan_key, map_ptr);
   }
 
   auto run_source =
@@ -965,10 +803,26 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return source_or.status();
     }
 
-    std::unique_ptr<loader::SeekableSource> plan_source =
-        std::make_unique<PlanBackedSeekableSource>(std::move(*source_or), plan_ptr, canonical_total_size);
+    loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_into_target");
+    auto program_or = compiler.Compile(*map_ptr);
+    if (!program_or.ok()) {
+      return program_or.status();
+    }
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+    sources.emplace_back(std::move(*source_or));
+    loader::ByteRangeMappedSource::Options map_opts{
+        .path = "materialize_into_target",
+        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+    };
+    auto mapped_or =
+        loader::ByteRangeMappedSource::Create(*map_ptr, *program_or, std::move(sources), std::move(map_opts));
+    if (!mapped_or.ok()) {
+      return mapped_or.status();
+    }
+    std::unique_ptr<loader::SeekableSource> plan_source = std::move(*mapped_or);
     if (view_plan.has_value() && !view_plan->is_identity) {
-      plan_source = loader::make_view_plan_source(std::move(plan_source), view_plan->selection);
+      plan_source =
+          loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
     }
     if (!plan_source) {
       return absl::InternalError("materialize_into_target failed to build view plan source");
@@ -1338,7 +1192,8 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
     return existing_or.status();
   }
 
-  loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan.total_size};
+  const uint64_t plan_total_bytes = plan.map.total_bytes;
+  loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
   replica::ReplicaConfig cfg{
       .source = inline_source,
       .artifact_identifier = key.artifact_id,
@@ -1347,8 +1202,9 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
       .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
       .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
       .artifact_chunk_bytes = config_.artifact_chunk_bytes,
-      .expected_artifact_size = plan.total_size,
+      .expected_artifact_size = plan_total_bytes,
       .view_plan = target_view_plan,
+      .byte_mapping_config = config_.options->byte_mapping,
       .memory_tier_config = config_.options->memory_tier_config,
   };
   cfg.pinned_memory_timeout = config_.pinned_memory_timeout;
@@ -1363,7 +1219,21 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-  auto source = std::make_unique<AssemblySource>(std::move(piece_sources), std::move(plan.segments), plan.total_size);
+  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "assembly");
+  auto program_or = compiler.Compile(plan.map);
+  if (!program_or.ok()) {
+    return program_or.status();
+  }
+  loader::ByteRangeMappedSource::Options map_opts{
+      .path = "assembly",
+      .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+  };
+  auto source_or =
+      loader::ByteRangeMappedSource::Create(plan.map, *program_or, std::move(piece_sources), std::move(map_opts));
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  std::unique_ptr<loader::SeekableSource> source = std::move(*source_or);
   const int concurrency = request.hints().pipeline_concurrency > 0
       ? static_cast<int>(request.hints().pipeline_concurrency)
       : std::max(1, config_.num_threads);
@@ -1572,13 +1442,27 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     piece_sources.push_back(std::make_shared<loader::RemoteKeySource>(std::move(opts)));
   }
 
+  const uint64_t plan_total_bytes = plan.map.total_bytes;
+  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "seal_assembly");
+  auto program_or = compiler.Compile(plan.map);
+  if (!program_or.ok()) {
+    return program_or.status();
+  }
+
   const size_t leaf_chunk_bytes =
       config_.artifact_chunk_bytes == 0 ? static_cast<size_t>(4ULL * 1024 * 1024) : config_.artifact_chunk_bytes;
   if (result.sealed_artifact_id.empty()) {
-    std::vector<AssemblySegment> hash_segments = plan.segments;
-    AssemblySource hash_source(piece_sources, std::move(hash_segments), plan.total_size);
-    auto data_mh_or =
-        loader::compute_data_multihash_from_seekable_source(hash_source, plan.total_size, leaf_chunk_bytes);
+    loader::ByteRangeMappedSource::Options map_opts{
+        .path = "seal_assembly",
+        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+    };
+    auto hash_source_or =
+        loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+    if (!hash_source_or.ok()) {
+      return hash_source_or.status();
+    }
+    auto data_mh_or = loader::compute_data_multihash_from_seekable_source(
+        *hash_source_or.value(), plan_total_bytes, leaf_chunk_bytes);
     if (!data_mh_or.ok()) {
       return data_mh_or.status();
     }
@@ -1620,7 +1504,7 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     return existing_or.status();
   }
   if (!existing_or.ok()) {
-    loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan.total_size};
+    loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = plan_total_bytes};
     replica::ReplicaConfig cfg{
         .source = inline_source,
         .artifact_identifier = key.artifact_id,
@@ -1629,7 +1513,8 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
         .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
         .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
         .artifact_chunk_bytes = config_.artifact_chunk_bytes,
-        .expected_artifact_size = plan.total_size,
+        .expected_artifact_size = plan_total_bytes,
+        .byte_mapping_config = config_.options->byte_mapping,
         .memory_tier_config = config_.options->memory_tier_config,
     };
     cfg.pinned_memory_timeout = config_.pinned_memory_timeout;
@@ -1641,7 +1526,15 @@ absl::StatusOr<store::SealAssemblyResult> MaterializationFacade::seal_assembly(
     }
     auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-    auto source = std::make_unique<AssemblySource>(piece_sources, plan.segments, plan.total_size);
+    loader::ByteRangeMappedSource::Options map_opts{
+        .path = "seal_assembly",
+        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+    };
+    auto source_or = loader::ByteRangeMappedSource::Create(plan.map, *program_or, piece_sources, std::move(map_opts));
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
+    std::unique_ptr<loader::SeekableSource> source = std::move(*source_or);
     const int concurrency = std::max(1, config_.num_threads);
     auto load_future = replica->get_memory_manager().load_async_from_source(
         std::move(source),

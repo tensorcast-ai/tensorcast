@@ -19,7 +19,7 @@
 #include "core/cuda/device_guard.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
-#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
 #include "daemon/state/lip_metadata_utils.h"
 #include "nlohmann/json.hpp"
 
@@ -190,10 +190,11 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   } abort_guard{.engine = engine_.get(), .id = out.registration_id};
 
   // Build plan and zero PAD regions on destination
-  auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(canonical_index_json, total_size, 8);
-  if (!plan_or.ok())
-    return plan_or.status();
-  auto plan = *plan_or;
+  auto map_or = store::loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, total_size);
+  if (!map_or.ok()) {
+    return map_or.status();
+  }
+  const auto& map = *map_or;
 
   auto dst_map_or =
       cuda::IpcMapping::open(out.cuda_ipc_handle_bytes, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
@@ -205,10 +206,10 @@ absl::StatusOr<std::vector<uint8_t>> LipManager::copy_to_new_coalesced(
   if (!dst_guard.status().ok()) {
     return dst_guard.status();
   }
-  for (const auto& p : plan) {
-    if (p.kind != store::loader::SegmentPiece::PAD || p.length == 0)
+  for (const auto& seg : map.segments) {
+    if (seg.kind != store::loader::ByteRangeSegment::Kind::kPad || seg.length == 0)
       continue;
-    auto st = cuda::memset(static_cast<uint8_t*>(dst_dev) + p.dst_offset, 0, static_cast<size_t>(p.length));
+    auto st = cuda::memset(static_cast<uint8_t*>(dst_dev) + seg.dst_offset, 0, static_cast<size_t>(seg.length));
     if (!st.ok())
       return st;
   }
@@ -806,8 +807,17 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
 
     ~LipSeekableSource() override = default;
 
+    [[nodiscard]] uint64_t total_bytes() const override {
+      return total_;
+    }
+
     absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-      return read_at(cur_, dst, max_bytes);
+      auto read_or = read_at(cur_, dst, max_bytes);
+      if (!read_or.ok()) {
+        return read_or;
+      }
+      cur_ += *read_or;
+      return read_or;
     }
 
     absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
@@ -860,6 +870,14 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
         remaining -= take;
       }
       return static_cast<size_t>(out - static_cast<uint8_t*>(dst));
+    }
+
+    [[nodiscard]] bool supports_direct_write_at() const override {
+      return false;
+    }
+
+    absl::StatusOr<size_t> read_into_at(uint64_t, uint64_t, size_t, const DirectWriteGrant&) override {
+      return absl::UnimplementedError("direct write not supported for LIP seekable source");
     }
 
    private:

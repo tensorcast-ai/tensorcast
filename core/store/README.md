@@ -176,7 +176,7 @@ graph TB
 - `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when (and only when) the selection is contiguous, segment-aligned, and no transforms are required.
 - `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the variant `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
 
-These helpers intentionally operate on generic `SeekableSource` instances; the daemon sends either a GPU-backed `LinearizedGpuPlanSource` or a disk-backed source to the hash helper, which keeps verification logic unified across transports.
+These helpers intentionally operate on generic `SeekableSource` instances; the daemon wraps GPU or disk sources in a compiled `ByteRangeMappedSource` so hashing and verification share one execution pipeline across transports.
 
 // VS lock APIs have been removed in UMA V3 final state.
 // Use UMA plan/commit and VS pin_range for CPU residency leasing.
@@ -390,7 +390,7 @@ IO helpers (`write_at`, `map_file_segments`).
 
 During disk ingestion or commit of in-memory registration:
 - `index_multihash` is derived from canonical index bytes (safetensors or tensor_index.json). When absent, it is computed.
-- `data_multihash` is computed by linearizing the canonical SegmentPlan (PAD=0) over the loaded buffer. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing using the runtime-compiled NVRTC SHA256 kernel (with the old CPU streaming path as automatic fallback). The GPU lane now ingests 64-byte message blocks directly, auto-tunes leaf chunking down to 512 KiB to keep ≥4K leaves resident for large tensors, and returns digests via pinned host memory with async copies to overlap compute and transfer. When NVRTC compilation fails, the status text now embeds the compiler log and the exact NVRTC options so driver/toolkit mismatches are easier to diagnose, and the kernel source is self-contained (uint64 typedefs) so NVRTC toolchains without standard headers still compile cleanly.
+- `data_multihash` is computed by compiling the canonical `ByteRangeMap` (DATA + PAD) into a `ByteRangeProgram` and streaming via `ByteRangeMappedSource` with PAD treated as zero. When canonical index bytes are available, hashing injects zeroes for PAD gaps to ensure RP‑A/B/C equivalence; otherwise it falls back to contiguous GPU hashing using the runtime-compiled NVRTC SHA256 kernel (with the old CPU streaming path as automatic fallback). The GPU lane now ingests 64-byte message blocks directly, auto-tunes leaf chunking down to 512 KiB to keep ≥4K leaves resident for large tensors, and returns digests via pinned host memory with async copies to overlap compute and transfer. When NVRTC compilation fails, the status text now embeds the compiler log and the exact NVRTC options so driver/toolkit mismatches are easier to diagnose, and the kernel source is self-contained (uint64 typedefs) so NVRTC toolchains without standard headers still compile cleanly.
 - For disk ingestion, missing descriptors are materialized under the artifact directory:
   - `artifact_descriptor.json` (index/data multihash, sizes)
   - `tensor_index.json` (canonical, when needed)

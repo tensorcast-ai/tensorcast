@@ -24,9 +24,11 @@
 #include "core/store/device_registry.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/loading_spec.h"
-#include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
-#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
+#include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_program.h"
+#include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/verification/verification_utils.h"
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
@@ -162,35 +164,6 @@ absl::Status zero_view_padding(
   return absl::OkStatus();
 }
 
-class CpuMemorySource final : public loader::SeekableSource {
- public:
-  CpuMemorySource(const void* base_ptr, uint64_t total_size)
-      : base_ptr_(static_cast<const uint8_t*>(base_ptr)), total_size_(total_size) {}
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto st = read_at(current_offset_, dst, max_bytes);
-    if (!st.ok()) {
-      return st;
-    }
-    current_offset_ += *st;
-    return st;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_) {
-      return static_cast<size_t>(0);
-    }
-    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    std::memcpy(dst, base_ptr_ + offset, to_copy);
-    return to_copy;
-  }
-
- private:
-  const uint8_t* base_ptr_{nullptr};
-  uint64_t total_size_{0};
-  uint64_t current_offset_{0};
-};
-
 std::string make_registration_id() {
   std::random_device rd;
   std::mt19937_64 gen(rd());
@@ -272,6 +245,7 @@ RegistrationBackend::RegistrationBackend(
       async_runtime_(std::move(resources.async_runtime)),
       memory_tier_budget_(std::move(resources.memory_tier_budget)),
       memory_tier_config_(resources.memory_tier_config),
+      byte_mapping_config_(resources.byte_mapping_config),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
       pinned_memory_timeout_(pinned_memory_timeout),
@@ -411,7 +385,8 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       .pinned_buffer_pool = memory_pool_,
       .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{async_runtime_},
       .artifact_chunk_bytes = artifact_chunk_bytes_,
-      .expected_artifact_size = reg.total_size_bytes};
+      .expected_artifact_size = reg.total_size_bytes,
+      .byte_mapping_config = byte_mapping_config_};
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
   cfg.streaming_buffer_chunks = streaming_buffer_chunks_;
   if (memory_tier_config_.has_value()) {
@@ -686,8 +661,21 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
 
   std::string index_multihash;
   std::string data_multihash;
-  std::vector<loader::SegmentPiece> segment_plan;
-  bool segment_plan_ready = false;
+  std::optional<loader::ByteRangeMap> canonical_map;
+  auto ensure_canonical_map = [&]() {
+    if (canonical_map.has_value()) {
+      return;
+    }
+    if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() && entry->encoding == "json") {
+      auto map_or =
+          loader::build_byte_range_map_from_canonical_index_json(*entry->tensor_index_data, entry->size_bytes);
+      if (map_or.ok()) {
+        canonical_map = std::move(*map_or);
+      } else {
+        LOG(WARNING) << "Failed to rebuild canonical byte map: " << map_or.status();
+      }
+    }
+  };
 
   const bool has_artifact_id_override =
       entry->artifact_id_override.has_value() && !entry->artifact_id_override->empty();
@@ -741,17 +729,28 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         if (!gpu_ptr) {
           return absl::FailedPreconditionError("GPU pointer is null; cannot hash GPU data");
         }
-        if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() && entry->encoding == "json") {
-          auto plan_or = loader::build_segment_plan_from_canonical_index_json(
-              *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
-          if (plan_or.ok()) {
-            segment_plan = std::move(*plan_or);
-            segment_plan_ready = true;
+        ensure_canonical_map();
+        if (canonical_map.has_value()) {
+          auto base_source = std::make_shared<loader::GpuMemorySource>(
+              gsl::not_null<void*>{gpu_ptr}, entry->device_id, entry->size_bytes);
+          loader::ByteRangeCompiler compiler(byte_mapping_config_, "registration_canonical");
+          auto program_or = compiler.Compile(*canonical_map);
+          if (!program_or.ok()) {
+            return program_or.status();
           }
-        }
-        if (segment_plan_ready) {
-          auto mh_or = loader::compute_data_multihash_from_gpu_plan(
-              gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
+          std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+          sources.emplace_back(std::move(base_source));
+          loader::ByteRangeMappedSource::Options map_opts{
+              .path = "registration_canonical",
+              .enable_direct_write_at = byte_mapping_config_.enable_direct_write_at,
+          };
+          auto mapped_or = loader::ByteRangeMappedSource::Create(
+              *canonical_map, *program_or, std::move(sources), std::move(map_opts));
+          if (!mapped_or.ok()) {
+            return mapped_or.status();
+          }
+          auto mh_or =
+              loader::compute_data_multihash_from_seekable_source(*mapped_or.value(), canonical_map->total_bytes);
           if (!mh_or.ok()) {
             return mh_or.status();
           }
@@ -915,22 +914,12 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       }
       absl::StatusOr<loader::verification::ViewHashResult> view_hash_or;
       if (location == common::memory::MemoryLocation::CPU) {
-        CpuMemorySource src(base_ptr, entry->view_state->view_size_bytes);
+        loader::CpuMemorySource src(gsl::not_null<const void*>{base_ptr}, entry->view_state->view_size_bytes);
         view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
             src, entry->view_state->view_size_bytes, *leaf_chunk_bytes);
       } else {
-        std::vector<loader::SegmentPiece> view_plan_segments;
-        view_plan_segments.push_back(
-            loader::SegmentPiece{
-                .kind = loader::SegmentPiece::DATA,
-                .dst_offset = 0,
-                .length = entry->view_state->view_size_bytes,
-                .src_offset = 0});
-        loader::LinearizedGpuPlanSource view_source(
-            gsl::not_null<void*>{base_ptr},
-            entry->device_id,
-            absl::MakeSpan(view_plan_segments),
-            entry->view_state->view_size_bytes);
+        loader::GpuMemorySource view_source(
+            gsl::not_null<void*>{base_ptr}, entry->device_id, entry->view_state->view_size_bytes);
         view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
             view_source, entry->view_state->view_size_bytes, *leaf_chunk_bytes);
       }
@@ -951,47 +940,59 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         leaf_writes.push_back(std::move(leaf));
       }
     } else {
-      if (!segment_plan_ready && entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty() &&
-          entry->encoding == "json") {
-        auto plan_or = loader::build_segment_plan_from_canonical_index_json(
-            *entry->tensor_index_data, entry->size_bytes, /*align_bytes=*/8);
-        if (plan_or.ok()) {
-          segment_plan = std::move(*plan_or);
-          segment_plan_ready = true;
-        } else {
-          LOG(WARNING) << "Failed to rebuild segment plan for view hash: " << plan_or.status();
-        }
-      }
-      if (segment_plan_ready && entry->view_state->plan.forward.selection.total_bytes > 0 &&
-          leaf_chunk_bytes.has_value()) {
+      ensure_canonical_map();
+      const uint64_t view_total = entry->view_state->plan.forward.selection.map.total_bytes;
+      if (canonical_map.has_value() && view_total > 0 && leaf_chunk_bytes.has_value()) {
         void* gpu_ptr = entry->gpu_ptr;
         if (gpu_ptr == nullptr) {
           const auto ptrs = entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::GPU);
           gpu_ptr = (!ptrs.empty() ? ptrs[0] : nullptr);
         }
         if (gpu_ptr != nullptr) {
-          loader::LinearizedGpuPlanSource canonical_source(
-              gsl::not_null<void*>{gpu_ptr}, entry->device_id, absl::MakeSpan(segment_plan), entry->size_bytes);
-          loader::ViewPlanSource view_source(
-              gsl::not_null<loader::SeekableSource*>{&canonical_source}, entry->view_state->plan.forward.selection);
-          auto view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
-              view_source, entry->view_state->plan.forward.selection.total_bytes, *leaf_chunk_bytes);
-          if (view_hash_or.ok()) {
-            view_data_hash = view_hash_or->multihash;
-            const auto& digests = view_hash_or->leaf_digests;
-            leaf_writes.reserve(leaf_writes.size() + digests.size());
-            for (size_t idx = 0; idx < digests.size(); ++idx) {
-              global_store::v1::LeafWrite leaf;
-              auto* hash_space = leaf.mutable_hash_space();
-              hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
-              hash_space->mutable_byte_space()->set_id(entry->view_state->options.view_id);
-              leaf.set_leaf_idx(static_cast<uint64_t>(idx));
-              const auto& digest = digests[idx];
-              leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
-              leaf_writes.push_back(std::move(leaf));
-            }
+          auto base_source = std::make_shared<loader::GpuMemorySource>(
+              gsl::not_null<void*>{gpu_ptr}, entry->device_id, entry->size_bytes);
+          loader::ByteRangeCompiler compiler(byte_mapping_config_, "registration_view");
+          auto program_or = compiler.Compile(*canonical_map);
+          if (!program_or.ok()) {
+            LOG(WARNING) << "Failed to compile canonical byte map for view hash: " << program_or.status();
           } else {
-            LOG(WARNING) << "ComputeTreeHashAndLeaves (view) failed: " << view_hash_or.status();
+            std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+            sources.emplace_back(std::move(base_source));
+            loader::ByteRangeMappedSource::Options map_opts{
+                .path = "registration_view",
+                .enable_direct_write_at = byte_mapping_config_.enable_direct_write_at,
+            };
+            auto mapped_or = loader::ByteRangeMappedSource::Create(
+                *canonical_map, *program_or, std::move(sources), std::move(map_opts));
+            if (!mapped_or.ok()) {
+              LOG(WARNING) << "Failed to build canonical mapped source for view hash: " << mapped_or.status();
+            } else {
+              auto view_source = loader::make_view_plan_source(
+                  std::move(*mapped_or), entry->view_state->plan.forward.selection, byte_mapping_config_);
+              if (!view_source) {
+                LOG(WARNING) << "Failed to build view plan source for view hash";
+              } else {
+                auto view_hash_or = loader::verification::compute_view_tree_hash_and_leaves(
+                    *view_source, view_total, *leaf_chunk_bytes);
+                if (view_hash_or.ok()) {
+                  view_data_hash = view_hash_or->multihash;
+                  const auto& digests = view_hash_or->leaf_digests;
+                  leaf_writes.reserve(leaf_writes.size() + digests.size());
+                  for (size_t idx = 0; idx < digests.size(); ++idx) {
+                    global_store::v1::LeafWrite leaf;
+                    auto* hash_space = leaf.mutable_hash_space();
+                    hash_space->mutable_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+                    hash_space->mutable_byte_space()->set_id(entry->view_state->options.view_id);
+                    leaf.set_leaf_idx(static_cast<uint64_t>(idx));
+                    const auto& digest = digests[idx];
+                    leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
+                    leaf_writes.push_back(std::move(leaf));
+                  }
+                } else {
+                  LOG(WARNING) << "ComputeTreeHashAndLeaves (view) failed: " << view_hash_or.status();
+                }
+              }
+            }
           }
         }
       }

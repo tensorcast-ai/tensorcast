@@ -70,6 +70,7 @@ class RegistrationBackend {
   std::chrono::milliseconds pinned_memory_timeout_{0};
   size_t streaming_buffer_chunks_{16};
   RegistrationPublisher* publisher_;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config_{};
 
   mutable std::mutex pending_mutex_;
   absl::flat_hash_map<std::string, std::shared_ptr<PendingRegistrationContext>> pending_regs_;

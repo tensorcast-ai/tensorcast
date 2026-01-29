@@ -14,7 +14,19 @@ sc_header_only_library(
     hdrs = ["view/view_plan.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":byte_range_map",
         ":view_spec",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_map",
+    srcs = ["byte_range/byte_range_map.cc"],
+    hdrs = ["byte_range/byte_range_map.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "@abseil-cpp//absl/hash",
     ],
 )
 

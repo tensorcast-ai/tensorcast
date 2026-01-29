@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/mux_seekable_source.h"
 
+#include <algorithm>
 #include <map>
 #include "absl/log/log.h"
 #include "opentelemetry/common/attribute_value.h"
@@ -16,6 +17,10 @@ MuxSeekableSource::MuxSeekableSource(
     gsl::not_null<std::shared_ptr<SeekableSource>> fallback)
     : primary_(std::move(primary)), fallback_(std::move(fallback)) {}
 
+uint64_t MuxSeekableSource::total_bytes() const {
+  return std::min(primary_->total_bytes(), fallback_->total_bytes());
+}
+
 absl::StatusOr<size_t> MuxSeekableSource::read(void* dst, size_t max_bytes) {
   // Implement in terms of read_at with current_offset_
   auto st = read_at(current_offset_, dst, max_bytes);
@@ -27,16 +32,17 @@ absl::StatusOr<size_t> MuxSeekableSource::read(void* dst, size_t max_bytes) {
 }
 
 absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, size_t bytes) {
+  const uint64_t total = total_bytes();
+  if (offset >= total || bytes == 0) {
+    return static_cast<size_t>(0);
+  }
+  const size_t bytes_to_read = static_cast<size_t>(std::min<uint64_t>(bytes, total - offset));
   size_t total_read = 0;
   char* ptr = static_cast<char*>(dst);
 
-  if (bytes == 0) {
-    return static_cast<size_t>(0);
-  }
-
   // Try primary for the whole request
   {
-    auto st = primary_->read_at(offset, ptr, bytes);
+    auto st = primary_->read_at(offset, ptr, bytes_to_read);
     if (st.ok()) {
       total_read = *st;
     } else {
@@ -56,13 +62,13 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
   }
 
   // If short or failed and fallback exists, complete the remainder
-  if (total_read < bytes) {
-    size_t remain = bytes - total_read;
+  if (total_read < bytes_to_read) {
+    size_t remain = bytes_to_read - total_read;
     auto fst = fallback_->read_at(offset + total_read, ptr + total_read, remain);
     if (!fst.ok()) {
       // Log fallback failure for debugging
       LOG(WARNING) << "MuxSeekableSource: fallback read_at failed after primary delivered " << total_read << " of "
-                   << bytes << " bytes. Fallback error: " << fst.status();
+                   << bytes_to_read << " bytes. Fallback error: " << fst.status();
 
       // If both primary and fallback failed to deliver any data, return fallback error.
       if (total_read == 0) {
@@ -72,7 +78,7 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
       return total_read;
     }
     total_read += *fst;
-    if (total_read == bytes) {
+    if (total_read == bytes_to_read) {
       // Metrics: record fallback due to short read (primary delivered fewer bytes than requested)
       try {
         static auto meter =
@@ -87,7 +93,32 @@ absl::StatusOr<size_t> MuxSeekableSource::read_at(uint64_t offset, void* dst, si
     }
   }
 
+  if (total_read != bytes_to_read) {
+    return absl::DataLossError("MuxSeekableSource short read before expected EOF");
+  }
   return total_read;
+}
+
+bool MuxSeekableSource::supports_direct_write_at() const {
+  return primary_->supports_direct_write_at() || fallback_->supports_direct_write_at();
+}
+
+absl::StatusOr<size_t> MuxSeekableSource::read_into_at(
+    uint64_t src_offset,
+    uint64_t dest_va_offset,
+    size_t bytes,
+    const DirectWriteGrant& grant) {
+  if (primary_->supports_direct_write_at()) {
+    auto st = primary_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+    if (st.ok()) {
+      return st;
+    }
+    VLOG(1) << "MuxSeekableSource: primary read_into_at failed: " << st.status();
+  }
+  if (fallback_->supports_direct_write_at()) {
+    return fallback_->read_into_at(src_offset, dest_va_offset, bytes, grant);
+  }
+  return absl::UnimplementedError("direct write not supported by mux sources");
 }
 
 } // namespace tensorcast::store::loader

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 
@@ -147,12 +147,15 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
       return got.status();
     }
     if (*got == 0) {
-      break;
+      return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
     }
     total += *got;
     off += *got;
   }
   current_offset_ = off;
+  if (total != to_read) {
+    return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
+  }
   return total;
 }
 
@@ -184,10 +187,13 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
       return got.status();
     }
     if (*got == 0) {
-      break;
+      return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
     }
     total += *got;
     off += *got;
+  }
+  if (total != to_read) {
+    return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
   }
   return total;
 }

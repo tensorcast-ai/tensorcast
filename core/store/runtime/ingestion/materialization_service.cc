@@ -395,6 +395,7 @@ replica::ReplicaConfig MaterializationService::build_copy_replica_config(
       .artifact_chunk_bytes = deps_.artifact_chunk_bytes,
       .expected_artifact_size = expected_size,
       .view_plan = src_replica->view_plan(),
+      .byte_mapping_config = deps_.byte_mapping_config,
       .memory_tier_config = std::move(memory_tier_config)};
   cfg.pinned_memory_timeout = deps_.pinned_memory_timeout;
   cfg.streaming_buffer_chunks = deps_.streaming_buffer_chunks;

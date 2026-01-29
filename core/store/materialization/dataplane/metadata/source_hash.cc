@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 
@@ -21,6 +21,10 @@ class CpuMemorySourceLocal : public SeekableSource {
  public:
   CpuMemorySourceLocal(const void* base_ptr, uint64_t total_size)
       : base_ptr_(static_cast<const uint8_t*>(base_ptr)), total_size_(total_size) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_size_;
+  }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     auto st = read_at(current_offset_, dst, max_bytes);
@@ -71,6 +75,9 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     const size_t got = n_or.value();
     if (got == 0) {
       // Unexpected short read
+      return absl::DataLossError("short read while hashing source");
+    }
+    if (got != to_read) {
       return absl::DataLossError("short read while hashing source");
     }
     leaves.push_back(sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), got)));

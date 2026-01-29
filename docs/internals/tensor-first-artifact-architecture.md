@@ -48,7 +48,7 @@ On the SDK side, `tensorcast/api/_tensor_graph.py` introspects the incoming `sta
 | `TensorAlias` map | Records tensor→storage relationships (offset, logical length, shape, stride, dtype). | Preserves aliasing semantics during layout planning. |
 | `tensor_meta_index` / `tensor_source_index` | Ready-to-hash canonical metadata plus byte spans. | Passed to `_register.py` for coalesced plan computation. |
 
-`tensorcast/api/_register.py` consumes this graph to deduplicate uploads, compute aligned `SegmentPlan`s, and zero-fill PAD ranges before hashing.
+`tensorcast/api/_register.py` consumes this graph to deduplicate uploads, compute aligned canonical byte-range maps (DATA + PAD), and zero-fill PAD ranges before hashing.
 
 ### 1.4 Runtime materialization keeps the ledger intact
 At retrieval time the daemon never hands back “raw memory”; it reconstitutes a tensor dict based on canonical index bytes. `tensorcast/api/_materialize.py`:
@@ -77,7 +77,7 @@ RFC‑0016 adds `ViewSpec` so callers can work with slices or transposes without
    Validates that every tensor uses at most one `narrow` or `transpose`, computes selection metadata (ranges, padding, alignment), and emits both forward (`SelectionPlan`, `TransformPlan`) and inverse (`ViewWritePlan`) structures. This keeps canonical↔variant math identical for load and ingest.
 
 2. **Streaming selection (`core/store/materialization/dataplane/view/view_plan_source.cc`)**  
-   Wraps any loader `SeekableSource` to emit only the canonical byte ranges requested by the view. PAD segments are synthesized on the fly so downstream sinks see contiguous view bytes even when canonical layout is sparse.
+   Compiles the selection `ByteRangeMap` into a `ByteRangeProgram` and wraps any loader `SeekableSource` with a `ByteRangeMappedSource`. PAD spans are synthesized on the fly so downstream sinks see contiguous view bytes even when canonical layout is sparse.
 
 3. **Registration ingestion (`core/store/materialization/dataplane/view/view_ingest_executor.cc`)**  
    Copies uploaded view bytes back into canonical storage using precomputed chunks, enforces contiguity/alignment, and executes inverse transforms (GPU or CPU) before finalizing the replica.
@@ -132,10 +132,10 @@ Tensor-first semantics remain intact even as artifacts bounce between Lease-In-P
 | Situation | Entry point | Tensor representation | Implementation anchors |
 | --- | --- | --- | --- |
 | Lease-In-Place reuse on the same GPU (or peer) | `Store.get*` issues a `MaterializeReplicaRequest` without a view | Existing `ReplicaKey` + CUDA IPC handle exported from prior registration; no copying, just ref-count/lease | [`MaterializationController::materialize_replica`](../../daemon/service/controllers/materialization_controller.cc) tries `lip.try_satisfy_from_lip` before touching the engine, while [`LipManager::copy_to_new_coalesced`](../../daemon/state/lip_manager.cc) rehydrates segments whenever a peer needs a coalesced buffer. |
-| Coalesced VRAM materialization (engine path) | `Store._materialize` streams via `materialize_artifact_v2` | Fresh UMA allocation zero-fills PAD ranges and replays the canonical segment plan | [`StoreEngine::materialize_replica`](../../core/store/store_engine.cc) delegates to ingestion runtimes, and [`build_segment_plan_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/segment_plan_source.cc) emits deterministic DATA/PAD spans so seams stay canonical. |
+| Coalesced VRAM materialization (engine path) | `Store._materialize` streams via `materialize_artifact_v2` | Fresh UMA allocation zero-fills PAD ranges and replays the canonical byte-range map | [`StoreEngine::materialize_replica`](../../core/store/store_engine.cc) delegates to ingestion runtimes, and [`build_byte_range_map_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/byte_range_map_builder.cc) emits deterministic DATA/PAD spans so seams stay canonical. |
 | Host UMA staging & view ingestion | Registration of a view or canonical ingest that cannot alias GPU memory | Host buffers populated according to `SelectionPlan` and replayed into canonical VRAM | [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) streams only the requested ranges, while [`ViewIngestExecutor`](../../core/store/materialization/dataplane/view/view_ingest_executor.cc) enforces contiguity, executes inverse transforms, and copies back into UMA. |
 | Disk-first fallback on the client | `FallbackOptions(prefer_disk=True)` or explicit `disk_path` | Disk path forwarded to daemon with `SourcePolicy(preference=PREFER_DISK, allow flags)`; daemon streams metadata, validates checksums, and reports the actual materialization source | [`MaterializationPipeline._materialize`](../../tensorcast/api/store/materialization.py) resolves key mappings, sets `disk_path`/`preference`, and `MaterializationPayload.source` mirrors the daemon-reported path. |
-| Remote daemon / P2P streaming | Engine needs bytes another daemon already hosts | Chunked `SegmentPlan` ranges copied over communicator sessions before being committed locally | [`StoreEngine::ingest_from_p2p`](../../core/store/store_engine.cc) and [`LipManager::create_staged_export`](../../daemon/state/lip_manager.cc) both consume the same segment metadata, so the receiver observes tensors in canonical byte order even though the source is remote VRAM. |
+| Remote daemon / P2P streaming | Engine needs bytes another daemon already hosts | Chunked `ByteRangeMap` spans copied over communicator sessions before being committed locally | [`StoreEngine::ingest_from_p2p`](../../core/store/store_engine.cc) and [`LipManager::create_staged_export`](../../daemon/state/lip_manager.cc) both consume the same canonical map metadata, so the receiver observes tensors in canonical byte order even though the source is remote VRAM. |
 
 ### 6.2 Canonical data & abstraction graph
 
@@ -150,7 +150,7 @@ flowchart TB
     TSG["TensorStorageGraph<br/>(dedupe storages + alias map)"]:::process
     CI["Canonical index JSON"]:::data
     IDXH["Index & data multihash<br>(mi2 identity)"]:::data
-    SP["Segment/Selection plan<br/>(canonical DATA/PAD ranges)"]:::data
+    BRM["ByteRangeMap / Selection plan<br/>(canonical DATA/PAD spans)"]:::data
     VH["VariantIdentity + ViewPlan<br>(MaterializationController + StoreEngine)"]:::process
     RK["ReplicaKey + CUDA IPC handle<br>(daemon runtime)"]:::data
     MP["MaterializationPayload"]:::data
@@ -161,12 +161,12 @@ flowchart TB
     SD -->|"_tensor_graph.build"| TSG
     TSG -->|"build_canonical_index_json"| CI
     CI -->|"compute_artifact_index_multihash"| IDXH
-    CI -->|"build_segment_plan_from_canonical_index_json"| SP
+    CI -->|"build_byte_range_map_from_canonical_index_json"| BRM
     CI -->|"Global Store descriptor"| GSDesc
     IDXH -->|"Descriptor + hash leaves"| GSDesc
     GSDesc -->|"get_canonical_index_by_id"| CI
     GSDesc -->|"view leaves / descriptors"| VIEW
-    SP -->|"MaterializeHints / ReplicaTarget"| VH
+    BRM -->|"MaterializeHints / ReplicaTarget"| VH
     VIEW -->|"compute_view_plan"| VH
     VH -->|"engine.materialize_replica"| RK
     DISK -->|"tensor_index.json -> canonical index bytes"| CI
@@ -178,8 +178,8 @@ Key relationships:
 
 1. **State dict → TensorStorageGraph.** `_tensor_graph` deduplicates storages, records alias offsets, and emits tensor metadata ready for hashing. This graph is the only place where raw PyTorch tensors are inspected; every later stage deals with byte-level spans.
 2. **TensorStorageGraph → canonical index JSON.** The C++ builder in `canonical_index.cc` enforces sorted tensor keys, 8-byte alignment, and field ordering so the same JSON drives hashing, disk layout, and runtime planners.
-3. **Canonical index ↔ Global Store.** Registration pushes `index_json` + TreeHash leaves into the Global Store descriptor, and later retrieval paths (`StoreEngine::get_canonical_index_by_id`) pull the exact same bytes/view leaves back when computing segment plans or validating variants. That keeps daemon-side planning and client-side validation identical regardless of residency.
-4. **Variant planning.** When a `ViewSpec` is provided, `ViewPlanner::compute_view_plan` augments the base segment plan with selection metadata. The daemon wraps the result in `VariantIdentity`, so downstream loaders see the same byte math whether the source is disk, VRAM, or P2P.
+3. **Canonical index ↔ Global Store.** Registration pushes `index_json` + TreeHash leaves into the Global Store descriptor, and later retrieval paths (`StoreEngine::get_canonical_index_by_id`) pull the exact same bytes/view leaves back when computing byte-range maps or validating variants. That keeps daemon-side planning and client-side validation identical regardless of residency.
+4. **Variant planning.** When a `ViewSpec` is provided, `ViewPlanner::compute_view_plan` augments the base byte-range map with selection metadata. The daemon wraps the result in `VariantIdentity`, so downstream loaders see the same byte math whether the source is disk, VRAM, or P2P.
 5. **Replica handles.** `StoreEngine::materialize_replica` turns `MaterializeHints` (which include references to canonical index bytes, view plans, and residency targets) into `ReplicaKey` + CUDA IPC handles. These handles are the “tensor” as far as the client is concerned; `materialize_artifact_v2` yields a `MaterializationPayload` of descriptors + tensors so client code can hydrate or copy lazily.
 
 This graph separates *data artifacts* (blue) from *abstractions/processors* (orange), making explicit which structure owns tensor semantics at each hop.
@@ -203,7 +203,7 @@ flowchart LR
 
     subgraph External["Shared infrastructure"]
         DISK["tensor.data_* + tensor_index.json"]
-        P2P["Remote daemon VRAM<br/>(SegmentPlan chunks)"]
+        P2P["Remote daemon VRAM<br/>(ByteRangeMap chunks)"]
         GS["Global Store<br/>(descriptor + view leaves)"]
     end
 
@@ -218,7 +218,7 @@ flowchart LR
     CTRL -->|MaterializeHints| ENGINE
     ENGINE -->|coalesced alloc| UMA_GPU
     ENGINE -->|view ingestion chunks| UMA_CPU
-    UMA_CPU -->|SegmentPlan copy| DISK
+    UMA_CPU -->|ByteRangeMap copy| DISK
     UMA_CPU <-->|p2p chunk stream| P2P
     UMA_GPU -->|cuda_ipc_handle via materialize_artifact_v2| GET
 
@@ -230,7 +230,7 @@ flowchart LR
 - **Client orchestration.** `Store._materialize` decides between disk, daemon, and retry policies, while [`materialize_artifact_v2`](../../tensorcast/api/_materialize.py) reconstructs tensors from CUDA IPC handles into a `MaterializationPayload` and keeps canonical/view bytes so downstream verification still hashes what the daemon hashed.
 - **Response validation.** The Python client now treats any non-`MaterializeReplicaResponse` or empty `mem_handle` from daemon key-based materialization as a hard failure before attempting CUDA IPC restores, matching the strictness already applied to artifact-id and view flows.
 - **LIP vs. engine path.** [`MaterializationController::materialize_replica`](../../daemon/service/controllers/materialization_controller.cc) annotates OpenTelemetry spans with LIP hits/misses and only calls the engine when `lip.try_satisfy_from_lip` cannot reuse an existing replica.
-- **Deterministic staging.** [`build_segment_plan_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/segment_plan_source.cc) and [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) turn canonical indices into DATA/PAD runs, so both disk and P2P loaders stream bytes with the same offsets the hashers expect.
+- **Deterministic staging.** [`build_byte_range_map_from_canonical_index_json`](../../core/store/materialization/dataplane/sources/byte_range_map_builder.cc), [`ByteRangeMappedSource`](../../core/store/materialization/dataplane/sources/byte_range_mapped_source.cc), and [`ViewPlanSource`](../../core/store/materialization/dataplane/view/view_plan_source.cc) turn canonical indices into DATA/PAD runs, so both disk and P2P loaders stream bytes with the same offsets the hashers expect.
 - **Variant ingestion safety.** [`ViewIngestExecutor`](../../core/store/materialization/dataplane/view/view_ingest_executor.cc) enforces contiguous writes, backfills PAD, and applies inverse transforms before the UMA ledger wires CUDA IPC handles back to clients, preventing malformed view uploads from corrupting canonical replicas.
 
 Taken together, the figure now shows *which* code moves tensors between resources and *how* the tensor abstraction survives each hop, making it easier to reason about “where the tensor lives” during registration, retrieval, fallback, or view ingestion.

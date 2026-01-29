@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/safetensors_source.h"
 
@@ -104,6 +104,9 @@ absl::StatusOr<size_t> SafetensorsSource::read(void* dst, size_t max_bytes) {
   auto got = pread_fully(fd_, data_start_ + current_offset_, dst, to_read);
   if (!got.ok())
     return got.status();
+  if (*got != to_read) {
+    return absl::DataLossError("SafetensorsSource short read before expected EOF");
+  }
   current_offset_ += *got;
   return got;
 }
@@ -116,7 +119,14 @@ absl::StatusOr<size_t> SafetensorsSource::read_at(uint64_t offset, void* dst, si
     return static_cast<size_t>(0);
   }
   size_t to_read = std::min(bytes, static_cast<size_t>(data_size_ - offset));
-  return pread_fully(fd_, data_start_ + offset, dst, to_read);
+  auto got = pread_fully(fd_, data_start_ + offset, dst, to_read);
+  if (!got.ok()) {
+    return got.status();
+  }
+  if (*got != to_read) {
+    return absl::DataLossError("SafetensorsSource short read before expected EOF");
+  }
+  return got;
 }
 
 } // namespace tensorcast::store::loader

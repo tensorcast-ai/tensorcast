@@ -8,6 +8,7 @@
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "nlohmann/json.hpp"
 
+using tensorcast::store::loader::ByteRangeSegment;
 using tensorcast::store::loader::NarrowOp;
 using tensorcast::store::loader::SelectionPlan;
 using tensorcast::store::loader::TensorViewOps;
@@ -63,14 +64,14 @@ TEST_CASE("ViewPlanner returns identity plan when spec is empty", "[view_planner
   const auto& plan = *plan_or;
 
   REQUIRE(plan.is_identity);
-  CHECK(plan.selection.num_ranges >= 1);
-  CHECK(plan.selection.total_bytes == 32);
+  CHECK(plan.selection.map.segments.size() >= 1);
+  CHECK(plan.selection.map.total_bytes == 32);
   CHECK(plan.view_size_bytes == 32);
   CHECK(plan.selection.is_contiguous);
   CHECK_FALSE(plan.selection.requires_materialization);
-  REQUIRE_FALSE(plan.selection.ranges.empty());
-  const auto& range = plan.selection.ranges.front();
-  CHECK(range.kind == SelectionPlan::Range::Kind::kData);
+  REQUIRE_FALSE(plan.selection.map.segments.empty());
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.kind == ByteRangeSegment::Kind::kData);
   CHECK(range.src_offset == 0);
   CHECK(range.dst_offset == 0);
   CHECK(range.length == 32);
@@ -106,9 +107,9 @@ TEST_CASE("ViewPlanner packs subset names into view index", "[view_planner]") {
   const auto& plan = *plan_or;
 
   CHECK_FALSE(plan.is_identity);
-  REQUIRE(plan.selection.ranges.size() == 1);
-  const auto& range = plan.selection.ranges.front();
-  CHECK(range.kind == SelectionPlan::Range::Kind::kData);
+  REQUIRE(plan.selection.map.segments.size() == 1);
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.kind == ByteRangeSegment::Kind::kData);
   CHECK(range.src_offset == 16);
   CHECK(range.dst_offset == 0);
   CHECK(range.length == 16);
@@ -203,17 +204,16 @@ TEST_CASE("ViewPlanner emits contiguous aligned range for 1D narrow", "[view_pla
   const auto& plan = *plan_or;
 
   CHECK_FALSE(plan.is_identity);
-  CHECK(plan.selection.num_ranges == plan.selection.ranges.size());
-  REQUIRE(plan.selection.ranges.size() == 1);
-  const auto& range = plan.selection.ranges.front();
-  CHECK(range.kind == SelectionPlan::Range::Kind::kData);
+  REQUIRE(plan.selection.map.segments.size() == 1);
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.kind == ByteRangeSegment::Kind::kData);
   CHECK(range.src_offset == 8);
   CHECK(range.dst_offset == 0);
   CHECK(range.length == 16);
   CHECK(plan.selection.is_contiguous);
   CHECK(plan.selection.is_segment_aligned);
   CHECK_FALSE(plan.selection.requires_materialization);
-  CHECK(plan.selection.total_bytes == 16);
+  CHECK(plan.selection.map.total_bytes == 16);
   CHECK(plan.view_size_bytes == 16);
 
   const auto view_json = nlohmann::json::parse(plan.view_index_json);
@@ -256,18 +256,17 @@ TEST_CASE("ViewPlanner emits scatter plan for inner-dimension narrow", "[view_pl
   const auto& plan = *plan_or;
 
   CHECK_FALSE(plan.is_identity);
-  CHECK(plan.selection.ranges.size() == 2);
-  CHECK(plan.selection.num_ranges == 2);
+  CHECK(plan.selection.map.segments.size() == 2);
   CHECK_FALSE(plan.selection.is_contiguous);
   CHECK_FALSE(plan.selection.is_segment_aligned);
   CHECK_FALSE(plan.selection.requires_materialization);
-  CHECK(plan.selection.total_bytes == 16);
+  CHECK(plan.selection.map.total_bytes == 16);
   CHECK(plan.view_size_bytes == 16);
 
-  const auto& first = plan.selection.ranges[0];
-  const auto& second = plan.selection.ranges[1];
-  CHECK(first.kind == SelectionPlan::Range::Kind::kData);
-  CHECK(second.kind == SelectionPlan::Range::Kind::kData);
+  const auto& first = plan.selection.map.segments[0];
+  const auto& second = plan.selection.map.segments[1];
+  CHECK(first.kind == ByteRangeSegment::Kind::kData);
+  CHECK(second.kind == ByteRangeSegment::Kind::kData);
   CHECK(first.dst_offset == 0);
   CHECK(second.dst_offset == 8);
   CHECK(first.length == 8);

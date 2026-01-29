@@ -165,7 +165,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.async_runtime,
       source_type,
       std::move(view_plan),
-      config.transform_placement));
+      config.transform_placement,
+      config.byte_mapping_config));
   return replica_ptr;
 }
 
@@ -180,14 +181,16 @@ Replica::Replica(
     gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     common::memory::MemoryLocation source_type,
     std::optional<loader::ViewPlan> view_plan,
-    loading::TransformPlacement transform_placement)
+    loading::TransformPlacement transform_placement,
+    StoreEngineOptions::ByteMappingConfig byte_mapping_config)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
       async_runtime_(std::move(async_runtime)),
       original_source_type_(source_type),
       view_plan_(std::move(view_plan)),
-      transform_placement_(transform_placement) {}
+      transform_placement_(transform_placement),
+      byte_mapping_config_(std::move(byte_mapping_config)) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -329,7 +332,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     if (view_plan_.has_value() && !view_plan_->is_identity) {
-      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection);
+      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
     }
     std::function<absl::Status()> post_load_fn;
     if (view_plan_.has_value() && !view_plan_->is_identity && view_plan_->transform.requires_materialization &&

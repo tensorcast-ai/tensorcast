@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_all.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -18,6 +18,10 @@ class PrimaryErrorSource : public SeekableSource {
  public:
   explicit PrimaryErrorSource(size_t total) : total_(total) {}
 
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_;
+  }
+
   absl::StatusOr<size_t> read(void* /*dst*/, size_t /*max_bytes*/) override {
     return absl::InternalError("primary error");
   }
@@ -33,6 +37,10 @@ class PrimaryErrorSource : public SeekableSource {
 class FallbackMemorySource : public SeekableSource {
  public:
   explicit FallbackMemorySource(std::string data) : data_(std::move(data)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     return read_at(offset_, dst, max_bytes);

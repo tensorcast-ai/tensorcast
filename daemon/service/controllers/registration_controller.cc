@@ -25,7 +25,7 @@
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/device_registry.h"
-#include "core/store/materialization/dataplane/sources/segment_plan_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/status_utils.h"
@@ -305,30 +305,30 @@ absl::Status copy_to_staging_from_coalesced_gpu(
     int device_id,
     gsl::not_null<void*> dst_dev,
     gsl::not_null<void*> src_dev,
-    absl::Span<const store::loader::SegmentPiece> plan,
+    absl::Span<const store::loader::ByteRangeSegment> segments,
     uint64_t total_size) {
   cuda::CudaDeviceGuard guard(device_id);
   if (!guard.status().ok()) {
     return guard.status();
   }
-  if (plan.empty()) {
+  if (segments.empty()) {
     return cuda::memcpy(dst_dev, src_dev, static_cast<size_t>(total_size), cudaMemcpyDeviceToDevice);
   }
-  for (const auto& p : plan) {
-    if (p.length == 0) {
+  for (const auto& seg : segments) {
+    if (seg.length == 0) {
       continue;
     }
-    if (p.kind == store::loader::SegmentPiece::PAD) {
-      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset, 0, static_cast<size_t>(p.length));
+    if (seg.kind == store::loader::ByteRangeSegment::Kind::kPad) {
+      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + seg.dst_offset, 0, static_cast<size_t>(seg.length));
       if (!st.ok()) {
         return st;
       }
       continue;
     }
     auto st = cuda::memcpy(
-        static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset,
-        static_cast<const uint8_t*>(src_dev.get()) + p.src_offset,
-        static_cast<size_t>(p.length),
+        static_cast<uint8_t*>(dst_dev.get()) + seg.dst_offset,
+        static_cast<const uint8_t*>(src_dev.get()) + seg.src_offset,
+        static_cast<size_t>(seg.length),
         cudaMemcpyDeviceToDevice);
     if (!st.ok()) {
       return st;
@@ -384,7 +384,7 @@ absl::StatusOr<cuda::IpcMapping*> get_or_open_mapping_for_storage(
 absl::Status copy_to_staging_from_lip_sources(
     int device_id,
     gsl::not_null<void*> dst_dev,
-    absl::Span<const store::loader::SegmentPiece> plan,
+    absl::Span<const store::loader::ByteRangeSegment> plan_segments,
     uint64_t total_size,
     absl::Span<const LeaseSegMeta> segments,
     absl::Span<const RegisterStorageMeta> storages,
@@ -394,7 +394,7 @@ absl::Status copy_to_staging_from_lip_sources(
   if (!guard.status().ok()) {
     return guard.status();
   }
-  if (plan.empty()) {
+  if (plan_segments.empty()) {
     return absl::InvalidArgumentError("LIP local-stable copy requires a canonical segment plan");
   }
 
@@ -418,7 +418,7 @@ absl::Status copy_to_staging_from_lip_sources(
 
   std::vector<OpenedSeg> opened;
   opened.reserve(segments.size());
-  for (const auto& seg : segments) {
+  for (const auto& seg : plan_segments) {
     auto it = storage_by_id.find(seg.storage_id);
     if (it == storage_by_id.end()) {
       return absl::InvalidArgumentError("segment references unknown storage_id");
@@ -461,23 +461,23 @@ absl::Status copy_to_staging_from_lip_sources(
     return nullptr;
   };
 
-  for (const auto& p : plan) {
-    if (p.length == 0) {
+  for (const auto& seg : segments) {
+    if (seg.length == 0) {
       continue;
     }
-    if (p.dst_offset > total_size || p.length > total_size || (p.dst_offset + p.length) > total_size) {
+    if (seg.dst_offset > total_size || seg.length > total_size || (seg.dst_offset + seg.length) > total_size) {
       return absl::OutOfRangeError("segment plan dst range out of bounds");
     }
-    if (p.kind == store::loader::SegmentPiece::PAD) {
-      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + p.dst_offset, 0, static_cast<size_t>(p.length));
+    if (seg.kind == store::loader::ByteRangeSegment::Kind::kPad) {
+      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + seg.dst_offset, 0, static_cast<size_t>(seg.length));
       if (!st.ok()) {
         return st;
       }
       continue;
     }
-    uint64_t remaining = p.length;
-    uint64_t src_off = p.src_offset;
-    uint64_t dst_off = p.dst_offset;
+    uint64_t remaining = seg.length;
+    uint64_t src_off = seg.src_offset;
+    uint64_t dst_off = seg.dst_offset;
     while (remaining > 0) {
       const OpenedSeg* seg = find_covering(src_off);
       if (seg == nullptr) {
@@ -644,14 +644,13 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
     if (src_ptr == nullptr) {
       return absl::FailedPreconditionError("GPU source pointer is null for local stable materialization");
     }
-    std::vector<store::loader::SegmentPiece> plan;
+    std::optional<store::loader::ByteRangeMap> canonical_map;
     if (!canonical_index_json.empty()) {
-      auto plan_or = store::loader::build_segment_plan_from_canonical_index_json(
-          canonical_index_json, total_size, /*align_bytes=*/8);
-      if (!plan_or.ok()) {
-        return plan_or.status();
+      auto map_or = store::loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, total_size);
+      if (!map_or.ok()) {
+        return map_or.status();
       }
-      plan = std::move(*plan_or);
+      canonical_map = std::move(*map_or);
     }
     const std::optional<store::components::StableDramCachePolicy> required_policy =
         policy.local_requirement == RequirementLevel::kMust ? stable_policy_opt : std::nullopt;
@@ -666,7 +665,12 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
         required_policy,
         [&](gsl::not_null<void*> dst_dev) -> absl::Status {
           return copy_to_staging_from_coalesced_gpu(
-              device_id, dst_dev, gsl::not_null<void*>{src_ptr}, absl::MakeSpan(plan), total_size);
+              device_id,
+              dst_dev,
+              gsl::not_null<void*>{src_ptr},
+              canonical_map.has_value() ? absl::MakeSpan(canonical_map->segments)
+                                        : absl::Span<const store::loader::ByteRangeSegment>(),
+              total_size);
         });
     if (!commit_or.ok()) {
       return commit_or.status();
@@ -681,10 +685,9 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
     if (index_json.empty()) {
       return absl::FailedPreconditionError("canonical index JSON required for local stable materialization from LIP");
     }
-    auto plan_or =
-        store::loader::build_segment_plan_from_canonical_index_json(index_json, total_size, /*align_bytes=*/8);
-    if (!plan_or.ok()) {
-      return plan_or.status();
+    auto map_or = store::loader::build_byte_range_map_from_canonical_index_json(index_json, total_size);
+    if (!map_or.ok()) {
+      return map_or.status();
     }
     const std::optional<store::components::StableDramCachePolicy> required_policy =
         policy.local_requirement == RequirementLevel::kMust ? stable_policy_opt : std::nullopt;
@@ -702,7 +705,7 @@ absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stab
           return copy_to_staging_from_lip_sources(
               device_id,
               dst_dev,
-              absl::MakeSpan(*plan_or),
+              absl::MakeSpan(map_or->segments),
               total_size,
               absl::MakeSpan(lip.segments),
               absl::MakeSpan(lip.storages),

@@ -88,8 +88,12 @@ sc_header_only_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        ":communication_manager",
+        ":global_store_client",
         "//core/common:async_runtime_lib",
         "//core/common:const_granularity_lib",
+        "//core/common:pinned_buffer_pool_lib",
+        "//core/common:pinned_memory_authority_lib",
     ],
 )
 
@@ -338,7 +342,6 @@ sc_cc_library(
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:loader",
         "//core/store/materialization/dataplane:p2p_loader",
-        "//core/store/materialization/dataplane:segment_plan_source",
         "//core/store/materialization/dataplane:source_hash",
         "//core/store/materialization/dataplane:verification_utils",
         "//core/store/materialization/dataplane:view_ingest_executor",

@@ -417,6 +417,31 @@ int main(int argc, char** argv) {
     opts.memory_tier_config = tiers;
   }
 
+  if (cfg.engine().has_byte_mapping()) {
+    const auto& bm = cfg.engine().byte_mapping();
+    opts.byte_mapping.enable_strided_execution =
+        bm.has_enable_strided_execution() ? bm.enable_strided_execution() : true;
+    opts.byte_mapping.enable_direct_write_at = bm.has_enable_direct_write_at() ? bm.enable_direct_write_at() : true;
+    if (bm.program_cache_entries() > 0) {
+      opts.byte_mapping.program_cache_entries = bm.program_cache_entries();
+    }
+    if (bm.strided_run_min_ranges() > 0) {
+      opts.byte_mapping.strided_run_min_ranges = bm.strided_run_min_ranges();
+    }
+    if (bm.strided_min_row_len_bytes() > 0) {
+      opts.byte_mapping.strided_min_row_len_bytes = bm.strided_min_row_len_bytes();
+    }
+    if (bm.strided_max_amplification() > 0) {
+      opts.byte_mapping.strided_max_amplification = bm.strided_max_amplification();
+    }
+    if (bm.strided_block_target_bytes() > 0) {
+      opts.byte_mapping.strided_block_target_bytes = bm.strided_block_target_bytes();
+    }
+    if (bm.strided_block_max_bytes() > 0) {
+      opts.byte_mapping.strided_block_max_bytes = bm.strided_block_max_bytes();
+    }
+  }
+
   if (opts.cpu_shared_memory_enabled) {
     if (!cfg.engine().has_memory_tiers() || cfg.engine().memory_tiers().stable_bytes() == 0) {
       LOG(ERROR) << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires engine.memory_tiers.stable_bytes > 0";

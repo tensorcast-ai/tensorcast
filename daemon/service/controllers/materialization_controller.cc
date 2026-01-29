@@ -165,6 +165,10 @@ class TargetLayoutGpuSource final : public store::loader::SeekableSource {
   TargetLayoutGpuSource(std::vector<TargetLayoutSpan> spans, uint64_t total_size, int device_id)
       : spans_(std::move(spans)), total_size_(total_size), device_id_(device_id) {}
 
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_size_;
+  }
+
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     auto st = read_at(current_offset_, dst, max_bytes);
     if (!st.ok()) {

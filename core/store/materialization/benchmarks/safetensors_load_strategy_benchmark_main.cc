@@ -1908,6 +1908,13 @@ class RemappedSource final : public SeekableSource {
     std::sort(segments_.begin(), segments_.end(), [](const Segment& a, const Segment& b) {
       return a.dst_offset < b.dst_offset;
     });
+    if (!segments_.empty()) {
+      total_bytes_ = segments_.back().end_offset;
+    }
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_bytes_;
   }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
@@ -1922,6 +1929,9 @@ class RemappedSource final : public SeekableSource {
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
     if (bytes == 0) {
       return 0;
+    }
+    if (offset >= total_bytes_) {
+      return static_cast<size_t>(0);
     }
     const Segment* seg = find_segment_(offset);
     if (seg == nullptr) {
@@ -1956,6 +1966,7 @@ class RemappedSource final : public SeekableSource {
 
   gsl::not_null<SeekableSource*> backing_;
   std::vector<Segment> segments_;
+  uint64_t total_bytes_ = 0;
   absl::Mutex offset_mu_;
   uint64_t current_offset_ ABSL_GUARDED_BY(offset_mu_) = 0;
 };
@@ -4035,6 +4046,10 @@ class MemorySpanSource final : public SeekableSource {
  public:
   MemorySpanSource(gsl::not_null<const uint8_t*> base, uint64_t bytes) : base_(base), bytes_(bytes) {}
 
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return bytes_;
+  }
+
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     absl::MutexLock lock(&offset_mu_);
     const uint64_t off = current_offset_;
@@ -4623,6 +4638,16 @@ class OdirectMultiFileSource final : public SeekableSource {
         s.fd = -1;
       }
     }
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    auto* self = const_cast<OdirectMultiFileSource*>(this);
+    if (auto st = self->open_files(); !st.ok()) {
+      LOG(WARNING) << "OdirectMultiFileSource: open_files failed in total_bytes: " << st;
+      return 0;
+    }
+    absl::MutexLock lock(&mu_);
+    return total_size_aligned_;
   }
 
   absl::Status open_files() {
