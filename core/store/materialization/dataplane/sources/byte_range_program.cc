@@ -17,6 +17,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_fingerprint_encoding.h"
 #include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
@@ -30,19 +31,8 @@ namespace {
 
 constexpr std::string_view kConfigFingerprintVersion = "byte_range_config_v1";
 
-void append_u64(std::string* out, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out->push_back(static_cast<char>(value & 0xFF));
-    value >>= 8;
-  }
-}
-
-void append_u32(std::string* out, uint32_t value) {
-  for (int i = 0; i < 4; ++i) {
-    out->push_back(static_cast<char>(value & 0xFF));
-    value >>= 8;
-  }
-}
+using byte_range_fingerprint_internal::append_u32;
+using byte_range_fingerprint_internal::append_u64;
 
 bool amplification_within_limit(uint64_t stride, uint64_t row_len, uint32_t max_amplification) {
   if (row_len == 0 || max_amplification == 0) {

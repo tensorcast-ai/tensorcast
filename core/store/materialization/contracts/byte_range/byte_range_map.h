@@ -40,8 +40,6 @@ H AbslHashValue(H h, const ByteRangeFingerprint& fp) {
   return H::combine_contiguous(std::move(h), fp.bytes.data(), fp.bytes.size());
 }
 
-[[nodiscard]] std::string byte_range_fingerprint_hex(const ByteRangeFingerprint& fp);
-
 // Normalize a raw byte-range map into canonical form.
 absl::StatusOr<ByteRangeMap> normalize_byte_range_map(ByteRangeMap map);
 

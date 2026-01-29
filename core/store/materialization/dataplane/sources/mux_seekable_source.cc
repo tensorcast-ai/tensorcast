@@ -18,7 +18,7 @@ MuxSeekableSource::MuxSeekableSource(
     : primary_(std::move(primary)), fallback_(std::move(fallback)) {}
 
 uint64_t MuxSeekableSource::total_bytes() const {
-  return std::min(primary_->total_bytes(), fallback_->total_bytes());
+  return std::max(primary_->total_bytes(), fallback_->total_bytes());
 }
 
 absl::StatusOr<size_t> MuxSeekableSource::read(void* dst, size_t max_bytes) {

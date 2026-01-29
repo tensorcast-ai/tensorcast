@@ -22,7 +22,10 @@ sc_header_only_library(
 sc_cc_library(
     name = "byte_range_map",
     srcs = ["byte_range/byte_range_map.cc"],
-    hdrs = ["byte_range/byte_range_map.h"],
+    hdrs = [
+        "byte_range/byte_range_fingerprint_encoding.h",
+        "byte_range/byte_range_map.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//core/common:artifact_hash_lib",

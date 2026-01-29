@@ -10,6 +10,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_fingerprint_encoding.h"
 
 namespace tensorcast::store::loader {
 
@@ -17,19 +18,8 @@ namespace {
 
 constexpr std::string_view kMapFingerprintVersion = "byte_range_map_v1";
 
-void append_u64(std::string* out, uint64_t value) {
-  for (int i = 0; i < 8; ++i) {
-    out->push_back(static_cast<char>(value & 0xFF));
-    value >>= 8;
-  }
-}
-
-void append_u32(std::string* out, uint32_t value) {
-  for (int i = 0; i < 4; ++i) {
-    out->push_back(static_cast<char>(value & 0xFF));
-    value >>= 8;
-  }
-}
+using byte_range_fingerprint_internal::append_u32;
+using byte_range_fingerprint_internal::append_u64;
 
 absl::Status validate_total_bytes(const ByteRangeMap& map) {
   if (map.total_bytes == 0) {
@@ -45,17 +35,6 @@ absl::Status validate_total_bytes(const ByteRangeMap& map) {
 }
 
 } // namespace
-
-std::string byte_range_fingerprint_hex(const ByteRangeFingerprint& fp) {
-  static const char* kHex = "0123456789abcdef";
-  std::string out;
-  out.reserve(fp.bytes.size() * 2);
-  for (uint8_t b : fp.bytes) {
-    out.push_back(kHex[(b >> 4) & 0xF]);
-    out.push_back(kHex[b & 0xF]);
-  }
-  return out;
-}
 
 absl::StatusOr<ByteRangeMap> normalize_byte_range_map(ByteRangeMap map) {
   if (auto st = validate_total_bytes(map); !st.ok()) {

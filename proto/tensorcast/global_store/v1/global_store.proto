@@ -398,7 +398,6 @@ message Range {
   uint64 len = 2;
 }
 
-
 message PartialCoverageDetail {
   // Hash-space anchor for the byte stream whose *byte coverage* is missing.
   //
@@ -411,7 +410,6 @@ message PartialCoverageDetail {
   repeated Range missing_ranges = 2;
 }
 
-
 // A contiguous range in Merkle leaf index space.
 message LeafIndexRange {
   // First missing leaf index (inclusive).
@@ -421,7 +419,6 @@ message LeafIndexRange {
   // NOTE: Leaf indices are NOT byte offsets. Do not treat `start/count` as byte ranges.
   uint64 count = 2;
 }
-
 
 // Missing Merkle leaf digests for a requested HashSpaceRef.
 message PartialLeafCoverageDetail {
@@ -433,7 +430,6 @@ message PartialLeafCoverageDetail {
   // Missing ranges in leaf index space (units: leaf indices).
   repeated LeafIndexRange missing_leaf_ranges = 2;
 }
-
 
 enum ArtifactBindingKind {
   ARTIFACT_BINDING_KIND_UNSPECIFIED = 0;

@@ -229,6 +229,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":memory_source",
         ":source",
         "//core/common:artifact_hash_lib",
         "//core/cuda:cuda_api_lib",

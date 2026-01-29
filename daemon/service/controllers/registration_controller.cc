@@ -418,7 +418,7 @@ absl::Status copy_to_staging_from_lip_sources(
 
   std::vector<OpenedSeg> opened;
   opened.reserve(segments.size());
-  for (const auto& seg : plan_segments) {
+  for (const auto& seg : segments) {
     auto it = storage_by_id.find(seg.storage_id);
     if (it == storage_by_id.end()) {
       return absl::InvalidArgumentError("segment references unknown storage_id");
@@ -461,23 +461,30 @@ absl::Status copy_to_staging_from_lip_sources(
     return nullptr;
   };
 
-  for (const auto& seg : segments) {
-    if (seg.length == 0) {
+  for (const auto& plan : plan_segments) {
+    if (plan.length == 0) {
       continue;
     }
-    if (seg.dst_offset > total_size || seg.length > total_size || (seg.dst_offset + seg.length) > total_size) {
+    if (plan.source_index != 0) {
+      return absl::UnimplementedError("local stable materialization supports only source_index=0 for LIP sources");
+    }
+    if (plan.dst_offset > total_size || plan.length > total_size || (plan.dst_offset + plan.length) > total_size) {
       return absl::OutOfRangeError("segment plan dst range out of bounds");
     }
-    if (seg.kind == store::loader::ByteRangeSegment::Kind::kPad) {
-      auto st = cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + seg.dst_offset, 0, static_cast<size_t>(seg.length));
+    if (plan.kind == store::loader::ByteRangeSegment::Kind::kPad) {
+      auto st =
+          cuda::memset(static_cast<uint8_t*>(dst_dev.get()) + plan.dst_offset, 0, static_cast<size_t>(plan.length));
       if (!st.ok()) {
         return st;
       }
       continue;
     }
-    uint64_t remaining = seg.length;
-    uint64_t src_off = seg.src_offset;
-    uint64_t dst_off = seg.dst_offset;
+    if (plan.src_offset > total_size || plan.length > total_size || (plan.src_offset + plan.length) > total_size) {
+      return absl::OutOfRangeError("segment plan src range out of bounds");
+    }
+    uint64_t remaining = plan.length;
+    uint64_t src_off = plan.src_offset;
+    uint64_t dst_off = plan.dst_offset;
     while (remaining > 0) {
       const OpenedSeg* seg = find_covering(src_off);
       if (seg == nullptr) {

@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
@@ -49,6 +50,15 @@ MultiSafetensorsSource::~MultiSafetensorsSource() {
       s.fd = -1;
     }
   }
+}
+
+uint64_t MultiSafetensorsSource::total_bytes() const {
+  auto* self = const_cast<MultiSafetensorsSource*>(this);
+  if (auto st = self->OpenFiles(); !st.ok()) {
+    LOG(WARNING) << "MultiSafetensorsSource: OpenFiles failed in total_bytes: " << st;
+    return 0;
+  }
+  return total_size_;
 }
 
 absl::Status MultiSafetensorsSource::OpenFiles() {

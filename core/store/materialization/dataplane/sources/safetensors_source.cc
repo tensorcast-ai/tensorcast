@@ -11,6 +11,7 @@
 #include <cstring>
 #include <string>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
@@ -46,6 +47,15 @@ SafetensorsSource::~SafetensorsSource() {
     ::close(fd_);
     fd_ = -1;
   }
+}
+
+uint64_t SafetensorsSource::total_bytes() const {
+  auto* self = const_cast<SafetensorsSource*>(this);
+  if (auto st = self->OpenFile(); !st.ok()) {
+    LOG(WARNING) << "SafetensorsSource: OpenFile failed in total_bytes: " << st;
+    return 0;
+  }
+  return data_size_;
 }
 
 absl::Status SafetensorsSource::OpenFile() {

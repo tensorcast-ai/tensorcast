@@ -876,7 +876,7 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
       return false;
     }
 
-    absl::StatusOr<size_t> read_into_at(uint64_t, uint64_t, size_t, const DirectWriteGrant&) override {
+    absl::StatusOr<size_t> read_into_at(uint64_t, uint64_t, size_t, const store::DirectWriteGrant&) override {
       return absl::UnimplementedError("direct write not supported for LIP seekable source");
     }
 

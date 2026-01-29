@@ -24,12 +24,10 @@ class MultiSafetensorsSource : public SeekableSource {
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
-  [[nodiscard]] uint64_t total_bytes() const override {
-    return total_size_;
-  }
+  [[nodiscard]] uint64_t total_bytes() const override;
 
-  uint64_t total_size() const {
-    return total_size_;
+  [[nodiscard]] uint64_t total_size() const {
+    return total_bytes();
   }
 
  private:
