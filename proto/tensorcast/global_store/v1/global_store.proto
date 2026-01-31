@@ -56,12 +56,9 @@ service GlobalStoreService {
   rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
 
   // ========== Unified Operations ==========
-  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest)
-      returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
-  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest)
-      returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
-  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest)
-      returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
+  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest) returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
+  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest) returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
+  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest) returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
   rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
   rpc UpdateOperation(tensorcast.operation.v1.UpdateOperationRequest) returns (tensorcast.operation.v1.UpdateOperationResponse) {}
 

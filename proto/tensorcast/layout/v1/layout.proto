@@ -45,4 +45,3 @@ message LayoutSpecRecord {
   // Optional audit JSON form (not hashed).
   string layout_json = 3;
 }
-
