@@ -416,6 +416,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .async_runtime = runtime_context_->async_runtime(),
       .memory_tier_budget = runtime_context_->memory_tier_budget(),
       .memory_tier_config = runtime_context_->options().memory_tier_config,
+      .byte_mapping_config = runtime_context_->options().byte_mapping,
   };
   return resources;
 }

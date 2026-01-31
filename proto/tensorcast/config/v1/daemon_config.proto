@@ -122,6 +122,18 @@ message Engine {
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;
+
+  message ByteMapping {
+    optional bool enable_strided_execution = 1;
+    optional bool enable_direct_write_at = 2;
+    uint32 program_cache_entries = 3;
+    uint32 strided_run_min_ranges = 4;
+    uint64 strided_min_row_len_bytes = 5;
+    uint32 strided_max_amplification = 6;
+    uint64 strided_block_target_bytes = 7;
+    uint64 strided_block_max_bytes = 8;
+  }
+  ByteMapping byte_mapping = 13;
 }
 
 message PinnedMemory {

@@ -13,7 +13,7 @@ flowchart LR
   A[User tensors<br>(PyTorch storages)] --> B[Index v2 builder<br>(SDK or daemon)]
   B --> C[Canonical index bytes]
   C --> D[Index multihash<br>(structural fingerprint)]
-  C --> E[Segment plan<br>(DATA + PAD)]
+  C --> E[ByteRange map<br>(DATA + PAD)]
   D --> F[mi2 artifact id]
   E --> G[Transport sources<br>(disk, coalesced VRAM, LIP)]
   G --> H[Consumers<br>(daemon, clients, remote nodes)]
@@ -22,7 +22,7 @@ flowchart LR
 ## Why We Use a Canonical Index
 
 - **Stable structural identity.** The canonical index linearizes tensor layout—offset, size, shape, stride, dtype, storage offset—for every tensor in the artifact. The `index_multihash` over these bytes feeds the mi2 `artifact_id` (`docs/designs/0007-content-addressed-artifact-id.md`), guaranteeing that identical layouts across disk, lease-in-place (LIP), and coalesced VRAM flows collapse onto one identifier. This lets Global Store deduplicate replicas by structure alone before even looking at payload bytes.
-- **Re-hydration without ambiguity.** At load time the Store Engine rebuilds segment plans (`core/store/materialization/dataplane/sources/segment_plan_source.cc`) directly from canonical index JSON/CBOR. This allows deterministic reconstruction of the Artifact Virtual Byte Stream (AVBS) and enables PAD-zeroing so that cross-device copies, padding gaps, and staged disk reloads remain consistent.
+- **Re-hydration without ambiguity.** At load time the Store Engine rebuilds canonical `ByteRangeMap`s (`core/store/materialization/dataplane/sources/byte_range_map_builder.cc`) directly from canonical index JSON/CBOR. This allows deterministic reconstruction of the Artifact Virtual Byte Stream (AVBS) and enables PAD-zeroing so that cross-device copies, padding gaps, and staged disk reloads remain consistent.
 - **Source-agnostic transport.** Whether bytes originate from disk partitions, daemon-owned coalesced VRAM, or CUDA IPC handles exported by a producer, the canonical index gives every consumer the same byte ranges to hash, copy, or verify. Without it, each transport would have to encode ad-hoc metadata about views, padding, and dtype ordering, undermining the unification promised in `docs/designs/0003-unified-memory-registration-avbs-lip.md`.
 
 ## Schema and Invariants
@@ -35,7 +35,7 @@ Index v2 encodes each tensor entry as `[offset, size, shape, stride, dtype, stor
 - **Shape/stride normalization.** Shapes and strides are serialized as unsigned 64-bit lists. Dtypes are lowercased internally to maintain deterministic ordering (`torch_dtype_code` helper).
 - **Storage offsets.** `storage_offset` captures each alias's view into the parent storage. When present, it must not push `storage_offset + size` past the storage boundary; both Python (`tensorcast/api/store.py` validation) and daemon (`daemon/state/lip_metadata_utils.cc:67-78`) enforce the bound.
 
-Together these invariants make the canonical index a pure description of *layout* rather than physical allocation. Physical placement is captured elsewhere (segment plans and CUDA IPC handles) while the index remains transport-neutral.
+Together these invariants make the canonical index a pure description of *layout* rather than physical allocation. Physical placement is captured elsewhere (byte-range maps and CUDA IPC handles) while the index remains transport-neutral.
 
 ## Memory Model Relationships
 
@@ -77,7 +77,7 @@ When the daemon commits a LIP registration (`daemon/state/lip_manager.cc:490-610
 
 1. The commit RPC provides segments (CUDA IPC handles), storages, and aliases.
 2. `build_canonical_index_from_metadata` (`daemon/state/lip_metadata_utils.cc`) rebuilds the canonical index so hashing is authoritative server-side.
-3. The daemon opens CUDA IPC mappings, constructs a `SeekableSource` that stitches segments according to canonical offsets, zero-fills PAD gaps, and hashes the resulting stream to compute `data_multihash`.
+3. The daemon opens CUDA IPC mappings, compiles the canonical `ByteRangeMap`, and streams a `ByteRangeMappedSource` that zero-fills PAD gaps to compute `data_multihash`.
 4. The resulting `index_multihash` determines whether an artifact already exists (`ArtifactDeviceKey` lookup) and whether deduplication or lease extension is possible.
 
 Canonical offsets depend only on storage identity, not per-alias offsets. The daemon mirrors the SDK by emitting storage-level destination offsets and full storage lengths for every alias, so view tensors hash identically across disk, coalesced, and LIP flows.
@@ -90,7 +90,7 @@ Canonical offsets depend only on storage identity, not per-alias offsets. The da
 
 ## Materialization, Transport, and CUDA Memory
 
-- **SegmentPlan + PAD.** From the canonical index JSON, Store Engine builds a `SegmentPlan` (`core/store/materialization/dataplane/sources/segment_plan_source.cc:18-72`). The plan outlines alternating DATA and PAD pieces, ensuring consumers zero-fill gaps consistently.
+- **ByteRangeMap + PAD.** From the canonical index JSON, Store Engine builds a canonical `ByteRangeMap` (`core/store/materialization/dataplane/sources/byte_range_map_builder.cc`) and compiles a `ByteRangeProgram`. The map outlines alternating DATA and PAD spans, ensuring consumers zero-fill gaps consistently.
 - **Coalesced VRAM consumption.** Consumers opening a coalesced replica map exactly the daemon-allocated buffer using CUDA IPC. Because the canonical index encodes the buffer’s logical layout, tensors restored via `restore_tensors` mirror the original storages regardless of intermediate transfers.
 - **LIP consumption.** For lease-in-place replicas, the daemon refuses same-device consumption but can copy over NVLink/PCIe into a coalesced buffer on another device. The canonical index ensures that copy respects view offsets and pad gaps, so the resulting coalesced buffer hashes identically to the producer’s layout.
 - **Cross-node P2P.** When Global Store coordinates remote fetches, the sending daemon reads its replica using canonical offsets (coalesced VRAM or disk) and streams DATA segments to the receiver. Because both sides share the canonical index, the receiver knows exactly how to populate its local buffer and can perform verification using the same offsets.
@@ -99,7 +99,7 @@ Canonical offsets depend only on storage identity, not per-alias offsets. The da
 
 - **CUDA IPC invariants.** `LeaseSegMeta` and `RegisterStorageMeta` tie canonical offsets to CUDA IPC handles. The daemon verifies that each alias fits within its storage bounds before accepting the registration (`daemon/state/lip_metadata_utils.cc:67-78`), preventing mismatched offsets from propagating.
 - **Process isolation.** Consumers never see producer-specific addresses. Canonical offsets are relative to the AVBS, while actual IPC mappings are per-process resources managed inside the daemon (`daemon/state/lip_manager.cc:520-610`).
-- **Cross-node transmissions.** The `SegmentPlan` is agnostic to transport; PAD segments become ranges of zeros, while DATA segments are serialized in the same order independent of source. This uniformity allows hashing and verification to be identical whether bytes came from disk partitions (`tensorcast/csrc/checkpoint_py.cc:316-403`), local GPU memory (`core/store/materialization/dataplane/sources/segment_plan_source.cc:74-146`), or remote daemons.
+- **Cross-node transmissions.** The canonical `ByteRangeMap` is agnostic to transport; PAD spans become ranges of zeros, while DATA spans are serialized in the same order independent of source. This uniformity allows hashing and verification to be identical whether bytes came from disk partitions (`tensorcast/csrc/checkpoint_py.cc:316-403`), local GPU memory (`core/store/materialization/dataplane/sources/byte_range_mapped_source.cc`), or remote daemons.
 
 ## Current Gaps and Risks
 
@@ -120,7 +120,7 @@ Canonical offsets depend only on storage identity, not per-alias offsets. The da
 ## References
 
 - Canonical index builders: `core/store/materialization/dataplane/metadata/canonical_index.{h,cc}`, `tensorcast/api/_indices.py`, `daemon/state/lip_metadata_utils.cc`
-- Hashing & segment plans: `core/store/materialization/dataplane/sources/segment_plan_source.cc`, `tensorcast/csrc/checkpoint_py.cc`
+- Hashing & byte-range maps: `core/store/materialization/dataplane/sources/byte_range_map_builder.cc`, `core/store/materialization/dataplane/sources/byte_range_mapped_source.cc`, `tensorcast/csrc/checkpoint_py.cc`
 - Registration flows: `tensorcast/api/_register.py`, `tensorcast/api/store.py`
 - Lease management: `daemon/state/lip_manager.cc`, `daemon/state/types.h`
 - Design background: `docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`, `docs/architecture/api/api-design.md`

@@ -691,7 +691,7 @@ absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
 }
 
 bool StoreEngine::view_plan_allows_alias(const loader::ViewPlan& plan) {
-  if (plan.selection.total_bytes == 0) {
+  if (plan.selection.map.total_bytes == 0) {
     return false;
   }
   if (plan.selection.requires_materialization) {

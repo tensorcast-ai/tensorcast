@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -19,8 +19,17 @@ class MuxSeekableSource : public SeekableSource {
       gsl::not_null<std::shared_ptr<SeekableSource>> fallback);
   ~MuxSeekableSource() override = default;
 
+  [[nodiscard]] uint64_t total_bytes() const override;
+
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
+
+  [[nodiscard]] bool supports_direct_write_at() const override;
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override;
 
  private:
   gsl::not_null<std::shared_ptr<SeekableSource>> primary_;

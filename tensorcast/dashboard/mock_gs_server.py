@@ -128,7 +128,7 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
             global_store_pb2.Leaf(leaf_idx=0, digest=b"deadbeef"),
             global_store_pb2.Leaf(leaf_idx=1, digest=b"cafebabe"),
         ]
-        coverage = [
+        byte_coverage = [
             global_store_pb2.PartialCoverageDetail(
                 hash_space=common_pb2.HashSpaceRef(
                     byte_space=common_pb2.ByteSpaceRef(
@@ -139,6 +139,19 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 missing_ranges=[
                     global_store_pb2.Range(off=0, len=1024),
                     global_store_pb2.Range(off=8192, len=512),
+                ],
+            )
+        ]
+        leaf_coverage = [
+            global_store_pb2.PartialLeafCoverageDetail(
+                hash_space=common_pb2.HashSpaceRef(
+                    byte_space=common_pb2.ByteSpaceRef(
+                        kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                    ),
+                    canonical_index_multihash="mh-index",
+                ),
+                missing_leaf_ranges=[
+                    global_store_pb2.LeafIndexRange(start=2, count=1),
                 ],
             )
         ]
@@ -161,7 +174,8 @@ class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
             status=global_store_pb2.Status.STATUS_OK,
             replicas=replicas,
             leaves=leaves,
-            partial_coverage=coverage,
+            partial_coverage=byte_coverage,
+            partial_leaf_coverage=leaf_coverage,
             view_meta=view_meta,
             descriptor=descriptor,
         )

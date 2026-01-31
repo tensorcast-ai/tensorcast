@@ -155,6 +155,60 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "byte_range_map_builder",
+    srcs = ["sources/byte_range_map_builder.cc"],
+    hdrs = ["sources/byte_range_map_builder.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_program",
+    srcs = ["sources/byte_range_program.cc"],
+    hdrs = ["sources/byte_range_program.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_mapped_source",
+    srcs = ["sources/byte_range_mapped_source.cc"],
+    hdrs = ["sources/byte_range_mapped_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":byte_range_program",
+        ":source",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "memory_source",
+    srcs = ["sources/memory_source.cc"],
+    hdrs = ["sources/memory_source.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":source",
+        "//core/cuda:cuda_api_lib",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
     name = "mux_seekable_source",
     srcs = ["sources/mux_seekable_source.cc"],
     hdrs = ["sources/mux_seekable_source.h"],
@@ -175,6 +229,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":memory_source",
         ":source",
         "//core/common:artifact_hash_lib",
         "//core/cuda:cuda_api_lib",
@@ -202,23 +257,6 @@ sc_cc_library(
     ],
 )
 
-# Segment plan linearization (AVBS) over GPU memory with PAD=0 semantics
-sc_cc_library(
-    name = "segment_plan_source",
-    srcs = ["sources/segment_plan_source.cc"],
-    hdrs = ["sources/segment_plan_source.h"],
-    visibility = ["//visibility:public"],
-    deps = [
-        ":source",
-        ":source_hash",
-        "//core/cuda:cuda_api_lib",
-        "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/types:span",
-        "@gsl",
-        "@nlohmann_json//:json",
-    ],
-)
-
 sc_cc_library(
     name = "view_planner",
     srcs = ["view/view_planner.cc"],
@@ -226,6 +264,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":canonical_index",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
         "@abseil-cpp//absl/container:flat_hash_map",
@@ -243,13 +282,14 @@ sc_cc_library(
     hdrs = ["view/view_plan_source.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":byte_range_mapped_source",
+        ":byte_range_program",
         ":source",
         ":view_planner",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:view_plan",
         "//core/store/materialization/contracts:view_spec",
-        "@abseil-cpp//absl/synchronization",
         "@gsl",
-        "@opentelemetry-cpp//api:api",
     ],
 )
 

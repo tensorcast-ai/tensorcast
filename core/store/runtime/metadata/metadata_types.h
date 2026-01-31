@@ -30,6 +30,7 @@
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
 
@@ -118,6 +119,7 @@ struct RegistrationResources {
   std::shared_ptr<common::AsyncRuntime> async_runtime;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;

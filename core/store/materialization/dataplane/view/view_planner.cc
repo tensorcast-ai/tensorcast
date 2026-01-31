@@ -163,61 +163,69 @@ bool is_multiple_of(uint64_t value, uint64_t align) {
   return (value % align) == 0;
 }
 
-SelectionPlan::Range make_data_range(uint64_t src, uint64_t dst, uint64_t len) {
-  SelectionPlan::Range r;
-  r.kind = SelectionPlan::Range::Kind::kData;
-  r.src_offset = src;
-  r.dst_offset = dst;
-  r.length = len;
-  return r;
+ByteRangeSegment make_data_segment(uint64_t src, uint64_t dst, uint64_t len) {
+  ByteRangeSegment seg;
+  seg.kind = ByteRangeSegment::Kind::kData;
+  seg.src_offset = src;
+  seg.dst_offset = dst;
+  seg.length = len;
+  seg.source_index = 0;
+  return seg;
 }
 
-SelectionPlan::Range make_pad_range(uint64_t dst, uint64_t len) {
-  SelectionPlan::Range r;
-  r.kind = SelectionPlan::Range::Kind::kPad;
-  r.src_offset = 0;
-  r.dst_offset = dst;
-  r.length = len;
-  return r;
+ByteRangeSegment make_pad_segment(uint64_t dst, uint64_t len) {
+  ByteRangeSegment seg;
+  seg.kind = ByteRangeSegment::Kind::kPad;
+  seg.src_offset = 0;
+  seg.dst_offset = dst;
+  seg.length = len;
+  seg.source_index = 0;
+  return seg;
 }
 
-void finalize_selection_plan(SelectionPlan* plan) {
-  plan->num_ranges = static_cast<uint32_t>(plan->ranges.size());
-  plan->total_bytes = 0;
+absl::Status finalize_selection_plan(SelectionPlan* plan) {
+  if (plan == nullptr) {
+    return absl::InvalidArgumentError("selection plan must not be null");
+  }
+  auto normalized_or = normalize_byte_range_map(std::move(plan->map));
+  if (!normalized_or.ok()) {
+    return normalized_or.status();
+  }
+  plan->map = std::move(*normalized_or);
   bool contiguous = true;
   bool segment_aligned = true;
   uint64_t expected_dst = 0;
-  size_t data_ranges = 0;
-  for (const auto& r : plan->ranges) {
-    plan->total_bytes += r.length;
-    if (r.dst_offset != expected_dst) {
+  size_t data_segments = 0;
+  for (const auto& seg : plan->map.segments) {
+    if (seg.dst_offset != expected_dst) {
       contiguous = false;
     }
-    expected_dst = r.dst_offset + r.length;
-    if (r.kind == SelectionPlan::Range::Kind::kData) {
-      ++data_ranges;
-      if (!is_multiple_of(r.src_offset, kAlignmentBytes) || !is_multiple_of(r.length, kAlignmentBytes)) {
+    expected_dst = seg.dst_offset + seg.length;
+    if (seg.kind == ByteRangeSegment::Kind::kData) {
+      ++data_segments;
+      if (!is_multiple_of(seg.src_offset, kAlignmentBytes) || !is_multiple_of(seg.length, kAlignmentBytes)) {
         segment_aligned = false;
       }
     }
   }
-  plan->is_contiguous = contiguous && data_ranges <= 1;
+  plan->is_contiguous = contiguous && data_segments <= 1;
   plan->is_segment_aligned = plan->is_contiguous && segment_aligned;
+  return absl::OkStatus();
 }
 
 ViewWritePlan build_view_write_plan(const SelectionPlan& selection) {
   ViewWritePlan write_plan;
-  write_plan.chunks.reserve(selection.ranges.size());
-  for (const auto& range : selection.ranges) {
-    if (range.kind != SelectionPlan::Range::Kind::kData) {
+  write_plan.chunks.reserve(selection.map.segments.size());
+  for (const auto& seg : selection.map.segments) {
+    if (seg.kind != ByteRangeSegment::Kind::kData) {
       continue;
     }
     ViewWritePlan::Chunk chunk;
-    chunk.canonical_offset = range.src_offset;
-    chunk.view_offset = range.dst_offset;
-    chunk.length = range.length;
+    chunk.canonical_offset = seg.src_offset;
+    chunk.view_offset = seg.dst_offset;
+    chunk.length = seg.length;
     chunk.segment_aligned =
-        is_multiple_of(range.src_offset, kAlignmentBytes) && is_multiple_of(range.length, kAlignmentBytes);
+        is_multiple_of(seg.src_offset, kAlignmentBytes) && is_multiple_of(seg.length, kAlignmentBytes);
     write_plan.chunks.push_back(std::move(chunk));
   }
   return write_plan;
@@ -317,6 +325,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
   bool has_transform = false;
   uint64_t view_cursor = 0;
   SelectionPlan selection_plan;
+  selection_plan.map.num_sources = 1;
   selection_plan.requires_materialization = false;
   bool any_requires_materialization = false;
   TransformPlan transform_plan;
@@ -354,7 +363,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     const auto& entry = entry_it->second;
     const uint64_t aligned_start = (view_cursor + (kAlignmentBytes - 1)) / kAlignmentBytes * kAlignmentBytes;
     if (aligned_start > view_cursor) {
-      selection_plan.ranges.push_back(make_pad_range(view_cursor, aligned_start - view_cursor));
+      selection_plan.map.segments.push_back(make_pad_segment(view_cursor, aligned_start - view_cursor));
       view_cursor = aligned_start;
     }
 
@@ -459,7 +468,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
             }
             const uint64_t start_elements = prefix_elements + static_cast<uint64_t>(normalized_start) * stride_dim;
             const uint64_t byte_offset = entry.offset + start_elements * element_size;
-            selection_plan.ranges.push_back(make_data_range(byte_offset, view_cursor, block_bytes));
+            selection_plan.map.segments.push_back(make_data_segment(byte_offset, view_cursor, block_bytes));
             view_cursor += block_bytes;
           }
         }
@@ -498,7 +507,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
           meta.storage_offset = 0;
           tensor_data_bytes = entry.size_bytes;
 
-          selection_plan.ranges.push_back(make_data_range(entry.offset, view_cursor, entry.size_bytes));
+          selection_plan.map.segments.push_back(make_data_segment(entry.offset, view_cursor, entry.size_bytes));
           view_cursor += entry.size_bytes;
 
           TensorTransformPlan tensor_transform;
@@ -522,7 +531,7 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     }
 
     if (tensor_identity) {
-      selection_plan.ranges.push_back(make_data_range(entry.offset, view_cursor, entry.size_bytes));
+      selection_plan.map.segments.push_back(make_data_segment(entry.offset, view_cursor, entry.size_bytes));
       view_cursor += entry.size_bytes;
     }
 
@@ -531,7 +540,12 @@ absl::StatusOr<BidirectionalViewPlan> compute_bidirectional_internal(
     metas[name] = meta;
   }
 
-  finalize_selection_plan(&selection_plan);
+  selection_plan.map.total_bytes = view_cursor;
+  selection_plan.map.num_sources = 1;
+  auto sel_status = finalize_selection_plan(&selection_plan);
+  if (!sel_status.ok()) {
+    return sel_status;
+  }
   selection_plan.requires_materialization = any_requires_materialization;
   transform_plan.requires_materialization = any_requires_materialization;
 

@@ -204,7 +204,7 @@ Notes:
 ## Variant View Registration Telemetry
 
 - View registrations are handled by `RegistrationController` and `RegistrationBackend`, which build a bidirectional view plan and stream view writes into the target replica (`core/store/runtime/metadata/registration_backend.cc`).
-- On commit, the backend computes view hash and optional leaf digests (when a segment plan is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
+- On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
 - `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
 - For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_variant_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
 

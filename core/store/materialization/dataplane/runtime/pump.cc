@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/runtime/pump.h"
 
@@ -471,7 +471,7 @@ absl::Status pump_ranges(
   // Capability-driven direct-write path: if destination implements
   // DirectWriteCapable and source supports direct writes (e.g., RDMA),
   // plan windowed grants and stream directly into destination VA ranges.
-  if (src.supports_direct_write()) {
+  if (src.supports_direct_write_at()) {
     if (auto* cap = dynamic_cast<DirectWriteCapable*>(&dst)) {
       const size_t window_bytes = pool.chunk_size();
       if (!g_meter) {
@@ -521,7 +521,7 @@ absl::Status pump_ranges(
             range_staged_fallback = true;
           } else {
             auto t0 = absl::Now();
-            auto got = src.read_into(off, step, *grant_or);
+            auto got = src.read_into_at(off, off, step, *grant_or);
             if (!got.ok()) {
               // retry once on recoverable errors
               auto code = got.status().code();
@@ -533,7 +533,7 @@ absl::Status pump_ranges(
                 static const std::map<std::string, opentelemetry::common::AttributeValue> kEmptyAttrs;
                 g_direct_win_retry_total->Add(
                     1.0, opentelemetry::common::KeyValueIterableView(kEmptyAttrs), opentelemetry::context::Context{});
-                got = src.read_into(off, step, *grant_or);
+                got = src.read_into_at(off, off, step, *grant_or);
               }
               if (!got.ok()) {
                 // mark failure and fallback sticky for remaining of this range
@@ -543,7 +543,7 @@ absl::Status pump_ranges(
                 range_staged_fallback = true;
               } else {
                 if (*got != step)
-                  return absl::OutOfRangeError("Short direct write (window)");
+                  return absl::DataLossError("Short direct write (window)");
                 // metrics for successful window
                 std::map<std::string, opentelemetry::common::AttributeValue> attrs;
                 attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
@@ -558,7 +558,7 @@ absl::Status pump_ranges(
               }
             } else {
               if (*got != step)
-                return absl::OutOfRangeError("Short direct write (window)");
+                return absl::DataLossError("Short direct write (window)");
               std::map<std::string, opentelemetry::common::AttributeValue> attrs;
               attrs.emplace("mode", opentelemetry::common::AttributeValue("direct"));
               g_bytes_total->Add(

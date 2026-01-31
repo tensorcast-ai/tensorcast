@@ -106,6 +106,19 @@ struct StoreEngineOptions {
   // When true, UMA CPU allocations are backed by memfd + MAP_SHARED so they can
   // be exported cross-process for zero-copy CPU tensor materialization.
   bool cpu_shared_memory_enabled{false};
+
+  struct ByteMappingConfig {
+    bool enable_strided_execution{true};
+    bool enable_direct_write_at{true};
+    uint32_t program_cache_entries{256};
+    uint32_t strided_run_min_ranges{128};
+    uint64_t strided_min_row_len_bytes{4096};
+    uint32_t strided_max_amplification{8};
+    uint64_t strided_block_target_bytes{16ULL * 1024 * 1024};
+    uint64_t strided_block_max_bytes{64ULL * 1024 * 1024};
+  };
+
+  ByteMappingConfig byte_mapping{};
 };
 
 } // namespace tensorcast::store

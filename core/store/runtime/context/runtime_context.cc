@@ -37,7 +37,11 @@ RuntimeContext::RuntimeContext(const StoreEngineOptions& options)
       device_manager_(std::make_unique<components::DeviceManager>()),
       replica_registry_(std::make_unique<components::ReplicaRegistry>()),
       metrics_collector_(std::make_unique<components::MetricsCollector>()),
-      view_hash_computer_(std::make_shared<ViewHashComputer>(ViewHashConfig{artifact_chunk_bytes_})),
+      view_hash_computer_(
+          std::make_shared<ViewHashComputer>(ViewHashConfig{
+              .default_leaf_chunk_bytes = artifact_chunk_bytes_,
+              .byte_mapping = options_.byte_mapping,
+          })),
       events_(std::make_unique<RuntimeContextEvents>()),
       ingestion_event_hub_(std::make_unique<ingestion::IngestionEventHub>(events_.get())) {
   if (options_.async_runtime) {

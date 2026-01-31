@@ -80,6 +80,11 @@ export type ArtifactDetailResponse = {
     space_id: string;
     missing: Array<{ offset: number; length: number }>;
   }> | null;
+  partial_leaf_coverage?: Array<{
+    space_kind: string;
+    space_id: string;
+    missing: Array<{ start: number; count: number }>;
+  }> | null;
 };
 
 export type MemoryTierLease = {

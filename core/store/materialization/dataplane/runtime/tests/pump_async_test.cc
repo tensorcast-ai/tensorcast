@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -44,6 +44,10 @@ class TestSeekableSource : public SeekableSource {
   explicit TestSeekableSource(size_t total) : total_(total), data_(total, '\0') {
     for (size_t i = 0; i < total_; ++i)
       data_[i] = static_cast<char>('a' + (i % 26));
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_;
   }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {

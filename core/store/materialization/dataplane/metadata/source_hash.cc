@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 
@@ -8,43 +8,13 @@
 #include "absl/status/status.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
+#include "core/store/materialization/dataplane/sources/memory_source.h"
 
 namespace tensorcast::store::loader {
-
-namespace {
 
 using tensorcast::common::compute_tree_hash_root_sha256;
 using tensorcast::common::multibase_multihash_sha256;
 using tensorcast::common::sha256_digest_bytes;
-
-class CpuMemorySourceLocal : public SeekableSource {
- public:
-  CpuMemorySourceLocal(const void* base_ptr, uint64_t total_size)
-      : base_ptr_(static_cast<const uint8_t*>(base_ptr)), total_size_(total_size) {}
-
-  absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    auto st = read_at(current_offset_, dst, max_bytes);
-    if (!st.ok())
-      return st;
-    current_offset_ += *st;
-    return st;
-  }
-
-  absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
-    if (offset >= total_size_)
-      return static_cast<size_t>(0);
-    const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, total_size_ - offset));
-    std::memcpy(dst, base_ptr_ + offset, to_copy);
-    return to_copy;
-  }
-
- private:
-  const uint8_t* base_ptr_;
-  uint64_t total_size_;
-  uint64_t current_offset_ = 0;
-};
-
-} // namespace
 
 absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     SeekableSource& source,
@@ -73,6 +43,9 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
       // Unexpected short read
       return absl::DataLossError("short read while hashing source");
     }
+    if (got != to_read) {
+      return absl::DataLossError("short read while hashing source");
+    }
     leaves.push_back(sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), got)));
     processed += got;
   }
@@ -84,7 +57,7 @@ absl::StatusOr<std::string> compute_data_multihash_from_cpu_memory(
     gsl::not_null<const void*> base_ptr,
     uint64_t total_size,
     size_t leaf_chunk_bytes) {
-  CpuMemorySourceLocal src(base_ptr.get(), total_size);
+  CpuMemorySource src(base_ptr, total_size);
   return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
 }
 

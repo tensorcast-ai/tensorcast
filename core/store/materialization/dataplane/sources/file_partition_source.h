@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -44,6 +44,10 @@ class FilePartitionSource : public SeekableSource {
   // Multiple threads can call this method concurrently without any
   // synchronization as it doesn't modify any internal state.
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return options_.total_size;
+  }
 
   uint64_t total_size() const {
     return options_.total_size;

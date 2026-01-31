@@ -323,6 +323,34 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
       mt->set_preemptible_low_watermark_ratio(0.4);
     }
   }
+  if (!e->has_byte_mapping()) {
+    e->mutable_byte_mapping();
+  }
+  auto* bm = e->mutable_byte_mapping();
+  if (!bm->has_enable_strided_execution()) {
+    bm->set_enable_strided_execution(true);
+  }
+  if (!bm->has_enable_direct_write_at()) {
+    bm->set_enable_direct_write_at(true);
+  }
+  if (bm->program_cache_entries() == 0) {
+    bm->set_program_cache_entries(256);
+  }
+  if (bm->strided_run_min_ranges() == 0) {
+    bm->set_strided_run_min_ranges(128);
+  }
+  if (bm->strided_min_row_len_bytes() == 0) {
+    bm->set_strided_min_row_len_bytes(4096);
+  }
+  if (bm->strided_max_amplification() == 0) {
+    bm->set_strided_max_amplification(8);
+  }
+  if (bm->strided_block_target_bytes() == 0) {
+    bm->set_strided_block_target_bytes(16ULL * 1024 * 1024);
+  }
+  if (bm->strided_block_max_bytes() == 0) {
+    bm->set_strided_block_max_bytes(64ULL * 1024 * 1024);
+  }
 
   if (cfg->has_pinned_memory()) {
     auto* pm = cfg->mutable_pinned_memory();

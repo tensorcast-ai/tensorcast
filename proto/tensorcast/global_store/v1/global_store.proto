@@ -319,8 +319,12 @@ message GetArtifactInfoByIdResponse {
   repeated tensorcast.common.v1.MemoryInfo replicas = 2; // All replicas under the content ID
   repeated Leaf leaves = 3;
   ViewMeta view_meta = 4;
+  // Missing *byte* coverage in the requested HashSpaceRef byte stream (units: bytes).
+  // Missing Merkle leaf digests MUST be reported via `partial_leaf_coverage` (units: leaf indices), not here.
   repeated PartialCoverageDetail partial_coverage = 5;
   tensorcast.common.v1.ArtifactDescriptor descriptor = 6;
+  // Missing Merkle leaf digests when `include_leaves=true` (units: leaf indices).
+  repeated PartialLeafCoverageDetail partial_leaf_coverage = 7;
 }
 
 message Leaf {
@@ -388,13 +392,43 @@ message LeafWrite {
 }
 
 message Range {
+  // Byte offset in the hash-space byte stream (units: bytes).
   uint64 off = 1;
+  // Byte length in the hash-space byte stream (units: bytes).
   uint64 len = 2;
 }
 
 message PartialCoverageDetail {
+  // Hash-space anchor for the byte stream whose *byte coverage* is missing.
+  //
+  // IMPORTANT:
+  // - `missing_ranges` is expressed in byte offsets/lengths (units: bytes) in this hash-space byte stream.
+  // - It MUST NOT be used to represent missing Merkle leaf digests (use PartialLeafCoverageDetail instead).
+  // - Leaf indices are not byte offsets; there is no stable conversion without the hashing schema.
   tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  // Missing byte ranges in the hash-space byte stream (units: bytes).
   repeated Range missing_ranges = 2;
+}
+
+// A contiguous range in Merkle leaf index space.
+message LeafIndexRange {
+  // First missing leaf index (inclusive).
+  uint64 start = 1;
+  // Number of consecutive missing leaf indices (>= 1).
+  //
+  // NOTE: Leaf indices are NOT byte offsets. Do not treat `start/count` as byte ranges.
+  uint64 count = 2;
+}
+
+// Missing Merkle leaf digests for a requested HashSpaceRef.
+message PartialLeafCoverageDetail {
+  // Hash-space anchor for the leaves being queried.
+  //
+  // This message represents missing Merkle leaf digests (units: leaf indices) for the given hash-space.
+  // Do not report missing leaves by overloading PartialCoverageDetail.missing_ranges.
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  // Missing ranges in leaf index space (units: leaf indices).
+  repeated LeafIndexRange missing_leaf_ranges = 2;
 }
 
 enum ArtifactBindingKind {

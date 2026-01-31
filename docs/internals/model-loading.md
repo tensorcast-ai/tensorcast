@@ -138,13 +138,13 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 - Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:
   - Coalesced VRAM: daemon allocates a single VRAM segment and exposes CUDA IPC to the SDK which writes tensor bytes directly.
-  - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by linearizing SegmentPlan (PAD=0) from leased memory.
+  - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by compiling the canonical ByteRangeMap (PAD=0) and streaming leased memory through the unified byte-range program.
 
-### LeaseSegments ↔ SegmentPlan
+### LeaseSegments ↔ ByteRangeMap
 
 - Robust protocol: each `LeasedSegment` includes `artifact_offset` (logical byte offset in the canonical artifact layout) plus a `storage_id` reference. This removes any ordering assumption when sending lease segments.
 - Daemon behavior:
-  - Builds the `SegmentPlan` from canonical index bytes.
+  - Builds the canonical `ByteRangeMap` from canonical index bytes and compiles it into a `ByteRangeProgram`.
   - Treats all `PAD` intervals as zero-filled for hashing and for any materialization copies.
   - Reads `DATA` intervals from the referenced storage windows (`StorageEntry` + `mapping_base_offset` + `storage_offset`) regardless of feed order.
 - Client behavior:

@@ -30,6 +30,7 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
   config.max_buffer_bytes = ctx.hints.max_buffer_bytes;
   if (ctx.options != nullptr) {
     config.streaming_buffer_chunks = std::max<size_t>(1, ctx.options->streaming_buffer_chunks);
+    config.byte_mapping_config = ctx.options->byte_mapping;
   }
   config.view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::nullopt;
   config.view_plan = ctx.resolved_view_plan;

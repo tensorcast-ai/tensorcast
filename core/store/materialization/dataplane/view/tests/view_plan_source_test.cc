@@ -11,6 +11,7 @@
 #include "catch2/catch_test_macros.hpp"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
+using tensorcast::store::loader::ByteRangeSegment;
 using tensorcast::store::loader::SelectionPlan;
 using tensorcast::store::loader::ViewPlanSource;
 
@@ -19,6 +20,10 @@ namespace {
 class VectorSource final : public tensorcast::store::loader::SeekableSource {
  public:
   explicit VectorSource(std::vector<uint8_t> data) : data_(std::move(data)) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     auto bytes_or = read_at(cursor_, dst, max_bytes);
@@ -55,32 +60,34 @@ class VectorSource final : public tensorcast::store::loader::SeekableSource {
   std::atomic<uint64_t> read_bytes_{0};
 };
 
-SelectionPlan::Range data_range(uint64_t src, uint64_t dst, uint64_t len) {
-  SelectionPlan::Range r;
-  r.kind = SelectionPlan::Range::Kind::kData;
-  r.src_offset = src;
-  r.dst_offset = dst;
-  r.length = len;
-  return r;
+ByteRangeSegment data_range(uint64_t src, uint64_t dst, uint64_t len) {
+  ByteRangeSegment seg;
+  seg.kind = ByteRangeSegment::Kind::kData;
+  seg.src_offset = src;
+  seg.dst_offset = dst;
+  seg.length = len;
+  seg.source_index = 0;
+  return seg;
 }
 
-SelectionPlan::Range pad_range(uint64_t dst, uint64_t len) {
-  SelectionPlan::Range r;
-  r.kind = SelectionPlan::Range::Kind::kPad;
-  r.src_offset = 0;
-  r.dst_offset = dst;
-  r.length = len;
-  return r;
+ByteRangeSegment pad_range(uint64_t dst, uint64_t len) {
+  ByteRangeSegment seg;
+  seg.kind = ByteRangeSegment::Kind::kPad;
+  seg.src_offset = 0;
+  seg.dst_offset = dst;
+  seg.length = len;
+  seg.source_index = 0;
+  return seg;
 }
 
 SelectionPlan build_sample_plan() {
   SelectionPlan plan;
-  plan.ranges.push_back(data_range(/*src=*/4, /*dst=*/0, /*len=*/4));
-  plan.ranges.push_back(data_range(/*src=*/16, /*dst=*/4, /*len=*/4));
-  plan.ranges.push_back(pad_range(/*dst=*/8, /*len=*/4));
-  plan.ranges.push_back(data_range(/*src=*/24, /*dst=*/12, /*len=*/4));
-  plan.total_bytes = 16;
-  plan.num_ranges = static_cast<uint32_t>(plan.ranges.size());
+  plan.map.segments.push_back(data_range(/*src=*/4, /*dst=*/0, /*len=*/4));
+  plan.map.segments.push_back(data_range(/*src=*/16, /*dst=*/4, /*len=*/4));
+  plan.map.segments.push_back(pad_range(/*dst=*/8, /*len=*/4));
+  plan.map.segments.push_back(data_range(/*src=*/24, /*dst=*/12, /*len=*/4));
+  plan.map.total_bytes = 16;
+  plan.map.num_sources = 1;
   plan.is_contiguous = false;
   plan.is_segment_aligned = false;
   plan.requires_materialization = false;
@@ -89,12 +96,12 @@ SelectionPlan build_sample_plan() {
 
 SelectionPlan build_strided_plan(uint64_t src_base, uint64_t row_len, uint64_t stride, uint64_t rows) {
   SelectionPlan plan;
-  plan.ranges.reserve(rows);
+  plan.map.segments.reserve(rows);
   for (uint64_t row = 0; row < rows; ++row) {
-    plan.ranges.push_back(data_range(src_base + row * stride, row * row_len, row_len));
+    plan.map.segments.push_back(data_range(src_base + row * stride, row * row_len, row_len));
   }
-  plan.total_bytes = rows * row_len;
-  plan.num_ranges = static_cast<uint32_t>(plan.ranges.size());
+  plan.map.total_bytes = rows * row_len;
+  plan.map.num_sources = 1;
   plan.is_contiguous = false;
   plan.is_segment_aligned = false;
   plan.requires_materialization = false;
@@ -164,8 +171,9 @@ TEST_CASE("ViewPlanSource reports alias eligibility from plan", "[view_plan_sour
   VectorSource base(data);
 
   SelectionPlan contiguous_plan;
-  contiguous_plan.ranges.push_back(data_range(/*src=*/8, /*dst=*/0, /*len=*/16));
-  contiguous_plan.total_bytes = 16;
+  contiguous_plan.map.segments.push_back(data_range(/*src=*/8, /*dst=*/0, /*len=*/16));
+  contiguous_plan.map.total_bytes = 16;
+  contiguous_plan.map.num_sources = 1;
   contiguous_plan.is_contiguous = true;
   contiguous_plan.is_segment_aligned = true;
   contiguous_plan.requires_materialization = false;
@@ -189,7 +197,7 @@ TEST_CASE("ViewPlanSource coalesces strided runs", "[view_plan_source]") {
   SelectionPlan plan = build_strided_plan(/*src_base=*/0, kRowLen, kStride, kRows);
   ViewPlanSource src(&base, plan);
 
-  std::vector<uint8_t> out(plan.total_bytes);
+  std::vector<uint8_t> out(plan.map.total_bytes);
   auto bytes_or = src.read_at(0, out.data(), out.size());
   REQUIRE(bytes_or.ok());
   CHECK(*bytes_or == out.size());

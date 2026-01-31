@@ -289,6 +289,9 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
   - canonical hash-space is anchored by `index_multihash`
   - view hash-space is anchored by `view_id`
 - Supports partial verification by querying specific leaf indices
+  - When requested leaf digests are missing, `GetArtifactInfoById` returns `STATUS_NOT_FOUND` and populates
+    `partial_leaf_coverage` (units: leaf indices). `partial_coverage` is reserved for missing *byte* coverage ranges
+    (units: bytes) and must not be used for leaf indices.
 
 ## Data Model
 

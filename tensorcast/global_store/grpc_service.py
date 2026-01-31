@@ -534,7 +534,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
             view_meta_msg: Optional[global_store_pb2.ViewMeta] = None
             leaves_proto: list[global_store_pb2.Leaf] = []
-            partial_details: list[global_store_pb2.PartialCoverageDetail] = []
+            # partial_coverage: missing byte ranges (units: bytes) in the requested HashSpaceRef byte stream.
+            # partial_leaf_coverage: missing Merkle leaf digests (units: leaf indices) for the requested HashSpaceRef.
+            partial_byte_details: list[global_store_pb2.PartialCoverageDetail] = []
+            partial_leaf_details: list[global_store_pb2.PartialLeafCoverageDetail] = []
             leaf_filter: Optional[list[int]] = None
             variant_missing = False
             partial_leaf_miss = False
@@ -583,20 +586,47 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     return global_store_pb2.GetArtifactInfoByIdResponse(
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
+
+                def add_missing_leaf_ranges(
+                    detail: global_store_pb2.PartialLeafCoverageDetail,
+                    leaf_indices: list[int],
+                ) -> None:
+                    """Append missing leaf indices as compact ranges."""
+                    if not leaf_indices:
+                        return
+                    sorted_unique = sorted(set(leaf_indices))
+                    start = sorted_unique[0]
+                    prev = start
+                    count = 1
+                    for idx in sorted_unique[1:]:
+                        if idx == prev + 1:
+                            count += 1
+                        else:
+                            detail.missing_leaf_ranges.append(
+                                global_store_pb2.LeafIndexRange(
+                                    start=int(start), count=int(count)
+                                )
+                            )
+                            start = idx
+                            count = 1
+                        prev = idx
+                    detail.missing_leaf_ranges.append(
+                        global_store_pb2.LeafIndexRange(
+                            start=int(start), count=int(count)
+                        )
+                    )
+
                 leaf_filter = list(request.leaf_idxs) if request.leaf_idxs else None
                 if space_kind == "V" and variant_row is None:
                     partial_leaf_miss = True
-                    detail = global_store_pb2.PartialCoverageDetail(
+                    detail = global_store_pb2.PartialLeafCoverageDetail(
                         hash_space=build_hash_space_ref(
                             space_kind="V", space_id=space_id or ""
                         ),
                     )
                     if leaf_filter:
-                        for idx in sorted(set(leaf_filter)):
-                            detail.missing_ranges.append(
-                                global_store_pb2.Range(off=int(idx), len=1)
-                            )
-                    partial_details.append(detail)
+                        add_missing_leaf_ranges(detail, leaf_filter)
+                    partial_leaf_details.append(detail)
                 else:
                     leaf_rows = self.view_state_service.get_leaves(
                         artifact_id=artifact_id,
@@ -614,7 +644,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         context.set_details(
                             "requested leaf digests not fully available"
                         )
-                        detail = global_store_pb2.PartialCoverageDetail(
+                        detail = global_store_pb2.PartialLeafCoverageDetail(
                             hash_space=build_hash_space_ref(
                                 space_kind=space_kind, space_id=space_id or ""
                             ),
@@ -623,11 +653,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         missing = sorted(
                             idx for idx in set(leaf_filter) if idx not in existing
                         )
-                        for idx in missing:
-                            detail.missing_ranges.append(
-                                global_store_pb2.Range(off=int(idx), len=1)
-                            )
-                        partial_details.append(detail)
+                        add_missing_leaf_ranges(detail, missing)
+                        partial_leaf_details.append(detail)
 
             has_payload = False
             if include_replicas and available_replicas:
@@ -682,8 +709,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 response.leaves.extend(leaves_proto)
             if view_meta_msg is not None:
                 response.view_meta.CopyFrom(view_meta_msg)
-            if partial_details:
-                response.partial_coverage.extend(partial_details)
+            if partial_byte_details:
+                response.partial_coverage.extend(partial_byte_details)
+            if partial_leaf_details:
+                response.partial_leaf_coverage.extend(partial_leaf_details)
             if descriptor_pb is not None:
                 response.descriptor.CopyFrom(descriptor_pb)
             return response

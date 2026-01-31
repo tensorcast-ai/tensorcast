@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -33,8 +33,16 @@ class RemoteKeySource : public SeekableSource {
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
 
   // Enable direct-write when RDMA is available on the engine.
-  [[nodiscard]] bool supports_direct_write() const override;
-  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override;
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return options_.total_size;
+  }
+
+  [[nodiscard]] bool supports_direct_write_at() const override;
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override;
 
  private:
   Options options_;

@@ -99,6 +99,9 @@ Content type: `application/json; charset=utf-8`. Timestamps are RFC3339 (UTC, `.
   - `include` selects `replicas`, `view`, `leaves` (default: replicas only).
   - `space=canonical|view` (when `view`, `view_id` is required).
   - `leaf_indices` is a comma‑separated, non‑negative integer list.
+  - Response may include:
+    - `partial_coverage` (missing byte ranges; units: bytes)
+    - `partial_leaf_coverage` (missing leaf digest ranges; units: leaf indices)
 
 - `GET /api/chunks?artifact_id=&chunk_indices=1,2,...`
   - Maps to `QueryChunkLocations`. Returns flattened chunk placement/state records.

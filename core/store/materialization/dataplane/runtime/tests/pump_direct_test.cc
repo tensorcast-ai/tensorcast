@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -123,11 +123,17 @@ class DirectSource : public SeekableSource {
  public:
   explicit DirectSource(std::vector<uint8_t> data) : data_(std::move(data)) {}
 
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
+
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
-    // Not used in direct path; provide simple implementation
-    size_t to_read = std::min(max_bytes, data_.size());
-    std::memcpy(dst, data_.data(), to_read);
-    return to_read;
+    auto read_or = read_at(current_offset_, dst, max_bytes);
+    if (!read_or.ok()) {
+      return read_or;
+    }
+    current_offset_ += *read_or;
+    return read_or;
   }
 
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override {
@@ -138,38 +144,45 @@ class DirectSource : public SeekableSource {
     return to_read;
   }
 
-  bool supports_direct_write() const override {
+  bool supports_direct_write_at() const override {
     return true;
   }
 
-  absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override {
     size_t total = 0;
-    uint64_t pos = dest_va_offset;
+    uint64_t src_pos = src_offset;
+    uint64_t dest_pos = dest_va_offset;
     while (total < bytes) {
       const DirectWriteGrant::Window* win = nullptr;
       for (const auto& w : grant.windows) {
-        if (pos >= w.va_offset && pos < w.va_offset + w.length) {
+        if (dest_pos >= w.va_offset && dest_pos < w.va_offset + w.length) {
           win = &w;
           break;
         }
       }
       if (!win)
         return absl::InvalidArgumentError("no segment for offset");
-      uint64_t seg_off = pos - win->va_offset;
+      uint64_t seg_off = dest_pos - win->va_offset;
       uint64_t seg_left = win->length - seg_off;
       size_t step = static_cast<size_t>(std::min<uint64_t>(seg_left, bytes - total));
-      if (pos >= data_.size())
+      if (src_pos >= data_.size())
         return absl::OutOfRangeError("source eof");
-      size_t can_copy = std::min(step, data_.size() - static_cast<size_t>(pos));
-      std::memcpy(reinterpret_cast<void*>(win->local_addr + seg_off), data_.data() + pos, can_copy);
+      size_t can_copy = std::min(step, data_.size() - static_cast<size_t>(src_pos));
+      std::memcpy(reinterpret_cast<void*>(win->local_addr + seg_off), data_.data() + src_pos, can_copy);
       total += can_copy;
-      pos += can_copy;
+      src_pos += can_copy;
+      dest_pos += can_copy;
     }
     return total;
   }
 
  private:
   std::vector<uint8_t> data_;
+  uint64_t current_offset_{0};
 };
 
 } // namespace

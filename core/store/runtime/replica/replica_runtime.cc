@@ -643,6 +643,7 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
   if (!config.memory_tier_config.has_value() && context_->options().memory_tier_config.has_value()) {
     config.memory_tier_config = context_->options().memory_tier_config;
   }
+  config.byte_mapping_config = context_->options().byte_mapping;
   config.cpu_shared_memory_enabled = context_->options().cpu_shared_memory_enabled;
 
   if (auto existing_or = registry().find(inst_key); existing_or.ok()) {

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
 
@@ -85,6 +85,9 @@ absl::StatusOr<size_t> RemoteKeySource::read(void* dst, size_t max_bytes) {
   VLOG(3) << "Read " << bytes_read << " bytes from remote. "
           << "Total read: " << total_bytes_read_ << "/" << options_.total_size;
 
+  if (bytes_read != bytes_to_read) {
+    return absl::DataLossError("RemoteKeySource short read before expected EOF");
+  }
   return bytes_read;
 }
 
@@ -178,18 +181,22 @@ absl::StatusOr<size_t> RemoteKeySource::read_at(uint64_t offset, void* dst, size
     evt_span->End();
   }
 
+  if (bytes_read != bytes_to_read) {
+    return absl::DataLossError("RemoteKeySource short read before expected EOF");
+  }
   return bytes_read;
 }
 
-bool RemoteKeySource::supports_direct_write() const {
+bool RemoteKeySource::supports_direct_write_at() const {
   return options_.comm_engine->is_rdma_enabled();
 }
 
-absl::StatusOr<size_t> RemoteKeySource::read_into(
+absl::StatusOr<size_t> RemoteKeySource::read_into_at(
+    uint64_t src_offset,
     uint64_t dest_va_offset,
     size_t bytes,
     const DirectWriteGrant& grant) {
-  if (dest_va_offset >= options_.total_size) {
+  if (src_offset >= options_.total_size) {
     return 0; // Beyond EOF
   }
 
@@ -203,9 +210,9 @@ absl::StatusOr<size_t> RemoteKeySource::read_into(
     return nullptr;
   };
 
-  size_t to_read_total = std::min<uint64_t>(bytes, options_.total_size - dest_va_offset);
+  size_t to_read_total = std::min<uint64_t>(bytes, options_.total_size - src_offset);
   size_t bytes_done = 0;
-  uint64_t src_global_offset = dest_va_offset; // assume linear global mapping
+  uint64_t src_global_offset = src_offset;
 
   while (bytes_done < to_read_total) {
     const uint64_t cur_va = dest_va_offset + bytes_done;
