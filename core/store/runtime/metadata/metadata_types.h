@@ -145,7 +145,7 @@ class RegistrationPublisher {
  public:
   virtual ~RegistrationPublisher() = default;
   virtual absl::Status publish_registration(const RegistrationPublication& publication) = 0;
-  virtual absl::Status update_variant_view(const components::VariantViewUpdate& update) = 0;
+  virtual absl::Status update_view_state(const components::ViewStateUpdate& update) = 0;
 };
 
 } // namespace tensorcast::store::runtime::metadata

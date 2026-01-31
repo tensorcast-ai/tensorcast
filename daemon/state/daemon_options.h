@@ -13,6 +13,13 @@
 namespace tensorcast::daemon {
 
 struct DaemonOptions {
+  struct PostSealPolicy {
+    bool migrate_views{false};
+    bool migrate_transpose_only{false};
+    bool reuse_views_if_safe{false};
+    bool retire_pieces{false};
+  };
+
   // Sweep/TTL configuration
   std::chrono::seconds sessions_ttl{std::chrono::seconds(60)};
   std::chrono::seconds locks_ttl{std::chrono::seconds(120)};
@@ -61,6 +68,8 @@ struct DaemonOptions {
   // ordering (artifact_id, device_id). If false (default), uses numeric
   // index tokens.
   bool use_cursor_pagination{false};
+
+  PostSealPolicy post_seal_policy{};
 };
 
 } // namespace tensorcast::daemon

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -144,6 +144,38 @@ VIEW_PARTIAL_BACKLOG_GAUGE = Gauge(
     "tc_view_partial_backlog_bytes",
     "Canonical byte backlog for partial view registrations.",
     labelnames=("artifact_id", "view_id"),
+)
+
+# Digest grids (leaves + overlap proofs) -------------------------------------
+
+DIGEST_ENTRIES_WRITTEN_COUNTER = Counter(
+    "tc_digest_entries_written_total",
+    "Total number of digest entries newly written (inserted) by the Global Store.",
+    labelnames=(
+        "grid",
+    ),  # grid=leaves|assembly_proof_commitments|piece_proof_digests|tensor_proof_commitments
+)
+
+DIGEST_CONFLICT_COUNTER = Counter(
+    "tc_digest_conflicts_total",
+    "Total number of digest conflicts (mismatched writes) rejected by the Global Store.",
+    labelnames=("grid",),
+)
+
+DIGEST_REQUEST_REJECTED_COUNTER = Counter(
+    "tc_digest_requests_rejected_total",
+    "Total number of digest write requests rejected by the Global Store.",
+    labelnames=("reason",),  # reason=too_large|conflict|invalid
+)
+
+# Retention / GC -------------------------------------------------------------
+
+GC_ROWS_DELETED_COUNTER = Counter(
+    "tc_gc_rows_deleted_total",
+    "Total number of rows deleted by Global Store retention policies.",
+    labelnames=(
+        "table",
+    ),  # table=operations|assembly_proof_commitments|piece_proof_digests
 )
 
 # Recovery / state-sync ------------------------------------------------------
@@ -297,6 +329,30 @@ def set_view_partial_backlog(
     VIEW_PARTIAL_BACKLOG_GAUGE.labels(artifact_id=artifact_id, view_id=view_id).set(
         backlog_bytes
     )
+
+
+def inc_digest_entries_written(*, grid: str, count: int) -> None:
+    if count <= 0:
+        return
+    DIGEST_ENTRIES_WRITTEN_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_conflict(*, grid: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_CONFLICT_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_request_rejected(*, reason: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_REQUEST_REJECTED_COUNTER.labels(reason=reason).inc(count)
+
+
+def inc_gc_rows_deleted(*, table: str, count: int) -> None:
+    if count <= 0:
+        return
+    GC_ROWS_DELETED_COUNTER.labels(table=table).inc(count)
 
 
 # ---------------------------------------------------------------------------

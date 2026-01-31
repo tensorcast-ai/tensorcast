@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <utility>
 
+#include "absl/log/log.h"
+
 namespace tensorcast::daemon {
 namespace {
 
@@ -43,7 +45,10 @@ DaemonServiceHarness::DaemonServiceHarness(
 
 DaemonServiceHarness::~DaemonServiceHarness() {
   const auto deadline = absl::Now() + absl::Seconds(5);
-  stop(deadline);
+  const auto st = stop(deadline);
+  if (!st.ok()) {
+    LOG(WARNING) << "DaemonServiceHarness stop failed: " << st;
+  }
 }
 
 absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::create(
@@ -74,6 +79,9 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   options.storage_path = std::move(*storage_root_or);
 
   auto kernel = std::make_unique<DaemonKernel>(engine, async_runtime, options);
+  if (global_store_client) {
+    kernel->lip_manager().set_global_store_client(global_store_client);
+  }
 
   MaterializationController::Dep mdep{
       .engine = kernel->engine(),
@@ -83,6 +91,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
+      .async_runtime = *async_runtime,
+      .identity = kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
       .handle_leases = kernel->handle_leases(),
@@ -96,6 +106,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .reg = kernel->registration_manager(),
       .lip = kernel->lip_manager(),
       .refs = kernel->ref_tracker(),
+      .identity = &kernel->worker_identity_store(),
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
       .regions = kernel->region_registry(),

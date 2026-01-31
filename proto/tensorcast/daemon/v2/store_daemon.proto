@@ -4,6 +4,7 @@ package tensorcast.daemon.v2;
 
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/operation/v1/operation.proto";
 
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
@@ -72,6 +73,12 @@ service StoreDaemonService {
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
   // Seal an assembly (cgid) into a stable mi2 identity.
   rpc SealAssembly(SealAssemblyRequest) returns (SealAssemblyResponse) {}
+  // Start sealing as a long-tail Operation.
+  rpc StartSealAssembly(StartSealAssemblyRequest) returns (StartSealAssemblyResponse) {}
+  // Query a long-tail operation by operation_id.
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  // Wait for a long-tail operation to reach a terminal state.
+  rpc WaitOperation(WaitOperationRequest) returns (WaitOperationResponse) {}
 
   // ========== Persistence ==========
   // See docs/architecture/api/policy-persistence.md for policy and task flow.
@@ -1080,6 +1087,43 @@ message SealAssemblyResponse {
   string sealed_artifact_id = 1;
   tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
   bool already_sealed = 3;
+}
+
+message SealAssemblyResult {
+  tensorcast.common.v1.ArtifactDescriptor artifact = 1;
+}
+
+message StartSealAssemblyRequest {
+  string assembly_id = 1;
+  // Optional explicit layout selection; if absent, sealing uses the current assembly layout binding (if any).
+  string layout_id = 2;
+}
+
+message StartSealAssemblyResponse {
+  tensorcast.operation.v1.OperationRef operation = 1;
+}
+
+// Immutable seal snapshot stored inside Operation.snapshot.
+message SealAssemblySnapshotView {
+  string view_id = 1;
+  // Raw 32-byte SHA-256 digest over immutable view metadata (e.g., coverage ranges + view_data_hash).
+  bytes meta_digest = 2;
+}
+
+message SealAssemblySnapshot {
+  string assembly_id = 1;
+  string layout_id = 2;
+  uint64 assembly_layout_binding_version = 3;
+  repeated SealAssemblySnapshotView views = 4;
+}
+
+message WaitOperationRequest {
+  string operation_id = 1;
+  uint64 timeout_ms = 2;
+}
+
+message WaitOperationResponse {
+  tensorcast.operation.v1.GetOperationResponse operation = 1;
 }
 
 // ========== Persistence ==========

@@ -18,6 +18,7 @@ from opentelemetry.trace import SpanKind
 
 if TYPE_CHECKING:
     from tensorcast.api._config import StorePolicy
+    from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -2167,6 +2168,76 @@ class DaemonCtl:
             descriptor=ad,
             already_sealed=bool(resp.already_sealed),
         )
+
+    def start_seal_assembly(
+        self,
+        *,
+        assembly_id: str,
+        layout_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.StartSealAssemblyResponse:
+        if not assembly_id:
+            raise ValueError("assembly_id is required")
+        req = store_daemon_pb2.StartSealAssemblyRequest(
+            assembly_id=assembly_id,
+            layout_id=str(layout_id) if layout_id else "",
+        )
+        with self._client_span("Client/StartSealAssembly") as span:
+            resp = self._unary_call(
+                self.stub.StartSealAssembly,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        return resp
+
+    def get_operation(
+        self, operation_id: str, *, timeout_s: float = 10.0
+    ) -> "operation_pb2.GetOperationResponse":
+        if not operation_id:
+            raise ValueError("operation_id is required")
+        from tensorcast.proto.operation.v1 import operation_pb2
+
+        req = operation_pb2.GetOperationRequest(operation_id=operation_id)
+        with self._client_span("Client/GetOperation") as span:
+            return self._unary_call(
+                self.stub.GetOperation,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+
+    def wait_operation(
+        self,
+        operation_id: str,
+        *,
+        timeout_ms: int,
+        timeout_s: float,
+    ) -> "operation_pb2.GetOperationResponse":
+        if not operation_id:
+            raise ValueError("operation_id is required")
+        if timeout_ms < 0:
+            raise ValueError("timeout_ms must be >= 0")
+        from tensorcast.proto.operation.v1 import operation_pb2
+
+        req = store_daemon_pb2.WaitOperationRequest(
+            operation_id=operation_id,
+            timeout_ms=int(timeout_ms),
+        )
+        with self._client_span("Client/WaitOperation") as span:
+            resp = self._unary_call(
+                self.stub.WaitOperation,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        # WaitOperationResponse wraps the canonical GetOperationResponse proto.
+        op = operation_pb2.GetOperationResponse()
+        op.CopyFrom(resp.operation)
+        return op
 
     @classmethod
     def _policy_to_proto(

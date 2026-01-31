@@ -55,13 +55,13 @@ class RecordingPublisher final : public RegistrationPublisher {
     return absl::OkStatus();
   }
 
-  absl::Status update_variant_view(const tensorcast::store::components::VariantViewUpdate&) override {
-    ++variant_updates;
+  absl::Status update_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
+    ++view_updates;
     return absl::OkStatus();
   }
 
   std::vector<RegistrationPublication> publications;
-  int variant_updates{0};
+  int view_updates{0};
 };
 
 struct RegistrationBackendHarness {
@@ -227,7 +227,7 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::StrCat("rep-", register_calls);
   }
 
-  absl::Status record_variant_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
+  absl::Status record_view_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
       override {
     return absl::OkStatus();
   }
@@ -267,12 +267,68 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
-  absl::Status update_artifact_view_state(const tensorcast::store::components::VariantViewUpdate&) override {
+  absl::Status update_artifact_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<tensorcast::store::components::VariantInfo>> list_variants(std::string_view) override {
-    return absl::UnimplementedError("list_variants not used in tests");
+  absl::StatusOr<std::vector<tensorcast::store::components::ViewInfo>> list_views(std::string_view) override {
+    return absl::UnimplementedError("list_views not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_layout_binding not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
+    return absl::UnimplementedError("get_layout_spec not used in tests");
+  }
+
+  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("attach_layout_to_artifact not used in tests");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
+    return absl::UnimplementedError("list_artifact_layouts not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
+    return absl::UnimplementedError("write_tensor_proof_commitments not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
+    return absl::UnimplementedError("check_proof_commitments_match not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_runtime_policy not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
+    return absl::UnimplementedError("acquire_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
+    return absl::UnimplementedError("keepalive_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
+    return absl::UnimplementedError("release_operation_lease not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
+      const tensorcast::operation::v1::GetOperationRequest&) override {
+    return absl::UnimplementedError("get_operation not used in tests");
+  }
+
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
+    return absl::UnimplementedError("update_operation not used in tests");
   }
 
   absl::StatusOr<tensorcast::store::components::ArtifactBinding> get_artifact_binding(std::string_view) override {

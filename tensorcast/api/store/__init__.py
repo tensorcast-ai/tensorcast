@@ -27,6 +27,7 @@ from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
 from tensorcast.api.context import CallContext
 from tensorcast.api.operation import (
+    DaemonGlobalStoreOperation,
     Operation,
     OperationError,
     OperationStatus,
@@ -72,13 +73,27 @@ from tensorcast.api.store.types import (
     TensorDict,
 )
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.daemon_ctl import get_daemon_client
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.types import (
+    ArtifactDescriptor as TypedArtifactDescriptor,
+)
 from tensorcast.types import (
     DeregisterArtifactOutcome,
     SealAssemblyResult,
     VramRegionHandle,
 )
+
+
+def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2:
+        return ArtifactIdKind.MI2
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID:
+        return ArtifactIdKind.CGID
+    inferred = infer_artifact_id_kind(artifact_id)
+    return inferred or ArtifactIdKind.MI2
 
 
 class Store:
@@ -293,12 +308,76 @@ class Store:
         assembly_id: str,
         *,
         publish_canonical: bool = True,
+        wait: bool = True,
+        layout_id: str | None = None,
         timeout_s: float = 120.0,
-    ) -> SealAssemblyResult:
-        return self._runtime.ensure_client().seal_assembly(
+        ctx: CallContext | None = None,
+    ) -> SealAssemblyResult | Operation[SealAssemblyResult]:
+        if publish_canonical is False:
+            # Legacy synchronous path (operation-based sealing always publishes canonical).
+            return self._runtime.ensure_client().seal_assembly(
+                assembly_id,
+                publish_canonical=False,
+                timeout_s=timeout_s,
+            )
+
+        op = self.seal_assembly_operation(
             assembly_id,
-            publish_canonical=publish_canonical,
-            timeout_s=timeout_s,
+            layout_id=layout_id,
+            ctx=ctx,
+        )
+        if wait:
+            return op.wait(timeout_s=timeout_s)
+        return op
+
+    def seal_assembly_operation(
+        self,
+        assembly_id: str,
+        *,
+        layout_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[SealAssemblyResult]:
+        start_resp = self._runtime.ensure_client().start_seal_assembly(
+            assembly_id=assembly_id,
+            layout_id=layout_id,
+        )
+        operation_id = start_resp.operation.operation_id
+        context: dict[str, str] = {"assembly_id": assembly_id}
+        if layout_id:
+            context["layout_id"] = str(layout_id)
+
+        def _decode(resp) -> SealAssemblyResult:
+            payload = store_daemon_pb2.SealAssemblyResult()
+            if not resp.status.result.Unpack(payload):
+                raise ArtifactError(
+                    f"Unexpected seal assembly result type (assembly_id={assembly_id})",
+                    status_code="INTERNAL",
+                    retryable=False,
+                )
+            artifact = payload.artifact
+            descriptor = TypedArtifactDescriptor(
+                artifact_id=str(artifact.artifact_id),
+                index_multihash=str(artifact.index_multihash or "") or None,
+                data_multihash=str(artifact.data_multihash or "") or None,
+                schema_version=str(artifact.schema_version or "") or None,
+                encoding=str(artifact.encoding or "") or None,
+                total_size=int(artifact.total_size),
+                id_kind=_artifact_id_kind_from_proto(
+                    artifact.id_kind, artifact.artifact_id
+                ),
+            )
+            return SealAssemblyResult(
+                sealed_artifact_id=descriptor.artifact_id,
+                descriptor=descriptor,
+                already_sealed=False,
+            )
+
+        return DaemonGlobalStoreOperation(
+            operation_id=operation_id,
+            runtime_ref=weakref.ref(self._runtime),
+            ctx=ctx,
+            context=context,
+            result_factory=_decode,
         )
 
     def _persistence_status_from_proto(
@@ -847,12 +926,18 @@ def seal_assembly(
     assembly_id: str,
     *,
     publish_canonical: bool = True,
+    wait: bool = True,
+    layout_id: str | None = None,
     timeout_s: float = 120.0,
-) -> SealAssemblyResult:
+    ctx: CallContext | None = None,
+) -> SealAssemblyResult | Operation[SealAssemblyResult]:
     return _coerce_store().seal_assembly(
         assembly_id,
         publish_canonical=publish_canonical,
+        wait=wait,
+        layout_id=layout_id,
         timeout_s=timeout_s,
+        ctx=ctx,
     )
 
 

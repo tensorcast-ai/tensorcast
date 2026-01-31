@@ -6,6 +6,8 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/wrappers.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/layout/v1/layout.proto";
+import "tensorcast/operation/v1/operation.proto";
 
 service GlobalStoreService {
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
@@ -32,8 +34,33 @@ service GlobalStoreService {
   // Upsert variant metadata and batched leaf digests
   rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
 
+  // Batch write MI2-scoped overlap proof commitments (v2).
+  rpc WriteTensorProofCommitments(WriteTensorProofCommitmentsRequest) returns (WriteTensorProofCommitmentsResponse) {}
+  // Compare assembly-scoped proof commitments against MI2-scoped commitments.
+  rpc CheckProofCommitmentsMatch(CheckProofCommitmentsMatchRequest) returns (CheckProofCommitmentsMatchResponse) {}
+
   // List variant (view) metadata for an artifact
-  rpc ListVariants(ListVariantsRequest) returns (ListVariantsResponse) {}
+  rpc ListViews(ListViewsRequest) returns (ListViewsResponse) {}
+
+  // ========== Layout v2 ==========
+  rpc PutLayoutSpec(PutLayoutSpecRequest) returns (PutLayoutSpecResponse) {}
+  rpc GetLayoutSpec(GetLayoutSpecRequest) returns (GetLayoutSpecResponse) {}
+
+  rpc GetAssemblyLayoutBinding(GetAssemblyLayoutBindingRequest) returns (GetAssemblyLayoutBindingResponse) {}
+  rpc UpdateAssemblyLayoutBinding(UpdateAssemblyLayoutBindingRequest) returns (UpdateAssemblyLayoutBindingResponse) {}
+
+  rpc AttachLayoutToArtifact(AttachLayoutToArtifactRequest) returns (AttachLayoutToArtifactResponse) {}
+  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
+
+  rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
+  rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
+
+  // ========== Unified Operations ==========
+  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest) returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
+  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest) returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
+  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest) returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  rpc UpdateOperation(tensorcast.operation.v1.UpdateOperationRequest) returns (tensorcast.operation.v1.UpdateOperationResponse) {}
 
   // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
   rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
@@ -341,20 +368,21 @@ message ViewMeta {
 
 message UpdateArtifactViewStateRequest {
   string artifact_id = 1;
-  VariantUpsert variant = 2;
+  optional ViewUpsert view = 2;
   repeated LeafWrite leaf_writes = 3;
+  repeated PieceProofDigestWrite proof_digests = 4;
 }
 
 message UpdateArtifactViewStateResponse {
   Status status = 1;
 }
 
-message ListVariantsRequest {
+message ListViewsRequest {
   string artifact_id = 1;
   tensorcast.common.v1.Pagination pagination = 2;
 }
 
-message VariantInfo {
+message ViewInfo {
   string view_id = 1;
   string view_spec_json = 2;
   uint64 view_size = 3;
@@ -364,9 +392,9 @@ message VariantInfo {
   repeated Range canonical_ranges = 7;
 }
 
-message ListVariantsResponse {
+message ListViewsResponse {
   Status status = 1;
-  repeated VariantInfo variants = 2;
+  repeated ViewInfo views = 2;
   tensorcast.common.v1.PageInfo page_info = 3;
 }
 
@@ -375,7 +403,7 @@ message CanonicalCoverage {
   uint64 covered_bytes = 2;
 }
 
-message VariantUpsert {
+message ViewUpsert {
   string view_id = 1;
   string view_spec_json = 2;
   uint64 view_size = 3;
@@ -383,6 +411,154 @@ message VariantUpsert {
   google.protobuf.Timestamp verified_at = 5;
   CanonicalCoverage canonical_coverage = 6;
   repeated Range canonical_ranges = 7;
+}
+
+message PieceProofDigestWrite {
+  // Piece view identity (content-addressed view id).
+  string view_id = 1;
+  // Tensor name from the canonical index.
+  string tensor_name = 2;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 3;
+  // Tensor-local proof chunk index.
+  uint64 proof_chunk_idx = 4;
+  // Raw 32-byte SHA-256 digest.
+  bytes digest = 5;
+}
+
+message TensorProofCommitmentWrite {
+  // Tensor name from the canonical index.
+  string tensor_name = 1;
+  // Tensor-local proof chunk index.
+  uint64 proof_chunk_idx = 2;
+  // Raw 32-byte SHA-256 digest.
+  bytes digest = 3;
+}
+
+message WriteTensorProofCommitmentsRequest {
+  string mi2_id = 1;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 2;
+  repeated TensorProofCommitmentWrite commitments = 3;
+}
+
+message WriteTensorProofCommitmentsResponse {
+  Status status = 1;
+  uint32 inserted = 2;
+}
+
+message CheckProofCommitmentsMatchRequest {
+  string assembly_id = 1;
+  string mi2_id = 2;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 3;
+  // Tensor names to compare (must be non-empty).
+  repeated string tensor_names = 4;
+}
+
+message CheckProofCommitmentsMatchResponse {
+  Status status = 1;
+  bool match = 2;
+}
+
+// ========== Layout v2 ==========
+
+message GetLayoutSpecRequest {
+  string layout_id = 1;
+}
+
+message GetLayoutSpecResponse {
+  Status status = 1;
+  tensorcast.layout.v1.LayoutSpecRecord record = 2;
+}
+
+message PutLayoutSpecRequest {
+  tensorcast.layout.v1.LayoutSpec layout = 1;
+  // Optional audit JSON form (not hashed).
+  string layout_json = 2;
+}
+
+message PutLayoutSpecResponse {
+  Status status = 1;
+  string layout_id = 2;
+}
+
+message AssemblyLayoutBinding {
+  string assembly_id = 1;
+  string layout_id = 2;
+  uint64 binding_version = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message GetAssemblyLayoutBindingRequest {
+  string assembly_id = 1;
+}
+
+message GetAssemblyLayoutBindingResponse {
+  Status status = 1;
+  AssemblyLayoutBinding binding = 2;
+}
+
+message UpdateAssemblyLayoutBindingRequest {
+  string assembly_id = 1;
+  string layout_id = 2;
+  // CAS for safe concurrent updates.
+  // - Create: expected_binding_version = 0
+  // - Update: expected_binding_version = current binding_version
+  uint64 expected_binding_version = 3;
+}
+
+message UpdateAssemblyLayoutBindingResponse {
+  Status status = 1;
+  AssemblyLayoutBinding binding = 2;
+}
+
+message AttachLayoutToArtifactRequest {
+  string mi2_id = 1;
+  string layout_id = 2;
+}
+
+message AttachLayoutToArtifactResponse {
+  Status status = 1;
+}
+
+message ListArtifactLayoutsRequest {
+  string mi2_id = 1;
+}
+
+message ListArtifactLayoutsResponse {
+  Status status = 1;
+  repeated string layout_ids = 2;
+}
+
+message AssemblyRuntimePolicy {
+  string assembly_id = 1;
+  uint64 policy_version = 2;
+  string policy_json = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message GetAssemblyRuntimePolicyRequest {
+  string assembly_id = 1;
+}
+
+message GetAssemblyRuntimePolicyResponse {
+  Status status = 1;
+  AssemblyRuntimePolicy policy = 2;
+}
+
+message UpdateAssemblyRuntimePolicyRequest {
+  string assembly_id = 1;
+  string policy_json = 2;
+  // CAS for safe concurrent updates.
+  // - Create: expected_policy_version = 0
+  // - Update: expected_policy_version = current policy_version
+  uint64 expected_policy_version = 3;
+}
+
+message UpdateAssemblyRuntimePolicyResponse {
+  Status status = 1;
+  AssemblyRuntimePolicy policy = 2;
 }
 
 message LeafWrite {

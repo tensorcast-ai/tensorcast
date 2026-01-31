@@ -59,7 +59,8 @@ struct StoreEngineOptions {
   std::string p2p_listen_host{"127.0.0.1"};
 
   // Port used by Communicator for P2P transfers.
-  uint16_t p2p_port{9090};
+  // When set to 0, the engine binds an ephemeral port chosen by the OS.
+  uint16_t p2p_port{0};
 
   // Toggle RDMA support for the Communicator. When true the communicator will
   // attempt to register RDMA transports; otherwise it operates in TCP-only

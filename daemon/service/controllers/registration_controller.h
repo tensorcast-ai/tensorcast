@@ -17,6 +17,7 @@
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/registration_manager.h"
 #include "daemon/state/session_lifecycle.h"
+#include "daemon/state/worker_identity_store.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -29,6 +30,7 @@ class RegistrationController {
     RegistrationManager& reg;
     LipManager& lip;
     RefTracker& refs;
+    gsl::not_null<WorkerIdentityStore*> identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
     IpcRegionRegistry& regions;

@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <random>
+#include <unordered_map>
 #include <utility>
 
 #include "absl/log/check.h"
@@ -33,6 +35,7 @@
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/view_utils.h"
+#include "nlohmann/json.hpp"
 #include "tensorcast/global_store/v1/global_store.pb.h"
 
 namespace tensorcast::store::runtime::metadata {
@@ -187,6 +190,158 @@ absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::s
     return absl::InvalidArgumentError("artifact_id_override must include index and data multihash components");
   }
   return std::make_pair(std::string(index_mh), std::string(data_mh));
+}
+
+constexpr uint64_t kProofChunkBytesV1 = 4ULL * 1024 * 1024;
+constexpr std::string_view kProofSchemaV1 = "v1";
+
+struct TensorInterval {
+  std::string tensor_name;
+  uint64_t offset{0};
+  uint64_t size_bytes{0};
+};
+
+absl::StatusOr<std::vector<TensorInterval>> parse_tensor_intervals(std::string_view canonical_index_json) {
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("canonical_index_json must not be empty");
+  }
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(canonical_index_json, nullptr, true);
+  } catch (const std::exception& ex) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse canonical index JSON: ", ex.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("canonical index JSON must be an object");
+  }
+
+  std::vector<TensorInterval> out;
+  out.reserve(j.size());
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    const std::string tensor_name = it.key();
+    const auto& arr = it.value();
+    if (!arr.is_array() || arr.size() < 2) {
+      continue;
+    }
+    TensorInterval interval;
+    interval.tensor_name = tensor_name;
+    interval.offset = arr[0].get<uint64_t>();
+    interval.size_bytes = arr[1].get<uint64_t>();
+    out.push_back(std::move(interval));
+  }
+
+  std::sort(
+      out.begin(), out.end(), [](const TensorInterval& a, const TensorInterval& b) { return a.offset < b.offset; });
+  return out;
+}
+
+bool ranges_cover_interval(const std::vector<CanonicalRange>& ranges, uint64_t start, uint64_t length) {
+  if (length == 0) {
+    return true;
+  }
+  uint64_t cursor = start;
+  const uint64_t end = start + length;
+  for (const auto& range : ranges) {
+    if (range.length == 0) {
+      continue;
+    }
+    const uint64_t range_start = range.offset;
+    const uint64_t range_end = range.offset + range.length;
+    if (range_end <= cursor) {
+      continue;
+    }
+    if (range_start > cursor) {
+      return false;
+    }
+    cursor = std::min(end, range_end);
+    if (cursor >= end) {
+      return true;
+    }
+  }
+  return cursor >= end;
+}
+
+absl::Status read_view_bytes(
+    common::memory::MemoryLocation location,
+    void* base_ptr,
+    int device_id,
+    uint64_t view_offset,
+    absl::Span<uint8_t> dst) {
+  if (dst.empty()) {
+    return absl::OkStatus();
+  }
+  if (base_ptr == nullptr) {
+    return absl::InvalidArgumentError("read_view_bytes requires non-null base_ptr");
+  }
+  auto* src = static_cast<uint8_t*>(base_ptr) + static_cast<std::ptrdiff_t>(view_offset);
+  switch (location) {
+    case common::memory::MemoryLocation::CPU:
+      std::memcpy(dst.data(), src, dst.size());
+      return absl::OkStatus();
+    case common::memory::MemoryLocation::GPU: {
+      if (!cuda::is_fake()) {
+        auto set_status = cuda::set_device(device_id);
+        if (!set_status.ok()) {
+          return set_status;
+        }
+      }
+      return cuda::memcpy(dst.data(), src, dst.size(), cudaMemcpyDeviceToHost);
+    }
+    default:
+      return absl::InvalidArgumentError("unsupported memory location for view reads");
+  }
+}
+
+struct CanonicalToViewSpan {
+  uint64_t canonical_offset{0};
+  uint64_t view_offset{0};
+  uint64_t length{0};
+};
+
+absl::StatusOr<std::vector<CanonicalToViewSpan>> canonical_spans_for_tensor(
+    const loader::ViewWritePlan& write_plan,
+    uint64_t tensor_offset,
+    uint64_t tensor_bytes,
+    uint64_t view_size_bytes) {
+  const uint64_t tensor_end = tensor_offset + tensor_bytes;
+  std::vector<CanonicalToViewSpan> spans;
+  spans.reserve(write_plan.chunks.size());
+
+  for (const auto& chunk : write_plan.chunks) {
+    const uint64_t chunk_end = chunk.canonical_offset + chunk.length;
+    if (chunk.length == 0 || chunk_end <= tensor_offset || chunk.canonical_offset >= tensor_end) {
+      continue;
+    }
+    const uint64_t start = std::max<uint64_t>(chunk.canonical_offset, tensor_offset);
+    const uint64_t end = std::min<uint64_t>(chunk_end, tensor_end);
+    CanonicalToViewSpan span;
+    span.canonical_offset = start;
+    span.view_offset = chunk.view_offset + (start - chunk.canonical_offset);
+    span.length = end - start;
+    if (span.view_offset > view_size_bytes || span.view_offset + span.length > view_size_bytes) {
+      return absl::OutOfRangeError("view offset out of bounds while building proof spans");
+    }
+    spans.push_back(std::move(span));
+  }
+
+  std::sort(spans.begin(), spans.end(), [](const CanonicalToViewSpan& a, const CanonicalToViewSpan& b) {
+    return a.canonical_offset < b.canonical_offset;
+  });
+
+  uint64_t cursor = tensor_offset;
+  for (const auto& span : spans) {
+    if (span.length == 0) {
+      continue;
+    }
+    if (span.canonical_offset != cursor) {
+      return absl::FailedPreconditionError("tensor canonical span coverage is not contiguous");
+    }
+    cursor = span.canonical_offset + span.length;
+  }
+  if (cursor != tensor_end) {
+    return absl::FailedPreconditionError("tensor canonical span coverage is incomplete");
+  }
+  return spans;
 }
 
 } // namespace
@@ -346,15 +501,12 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       return absl::InvalidArgumentError("view registration exceeds canonical byte space");
     }
     if (view_opts.registration_kind == ViewRegistrationKind::kPiece) {
-      if (view_plan->forward.transform.requires_materialization ||
-          view_plan->inverse_transform.requires_materialization) {
-        return absl::FailedPreconditionError("piece registration only supports selection-only views (no transpose)");
-      }
-      if (covered_bytes >= canonical_size) {
-        return absl::InvalidArgumentError("piece registration must be partial; full coverage is not allowed");
-      }
       if (reg.total_size_bytes != view_size_bytes) {
         return absl::InvalidArgumentError("piece registration total_size_bytes must equal view_size_bytes");
+      }
+      if (ranges_cover_interval(canonical_ranges, 0, canonical_size)) {
+        return absl::InvalidArgumentError(
+            "piece registration must not fully cover canonical bytes; use registration_kind=CANONICAL");
       }
     } else {
       if (covered_bytes != canonical_size) {
@@ -884,6 +1036,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   std::optional<std::string> view_data_hash;
   std::optional<std::string> view_spec_json;
   std::vector<global_store::v1::LeafWrite> leaf_writes;
+  std::vector<global_store::v1::PieceProofDigestWrite> proof_digests;
   std::vector<uint64_t> canonical_leaf_indices;
   std::optional<size_t> leaf_chunk_bytes;
   if (entry->view_state) {
@@ -938,6 +1091,169 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
         const auto& digest = digests[idx];
         leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
         leaf_writes.push_back(std::move(leaf));
+      }
+
+      if (entry->tensor_index_data.has_value() && !entry->tensor_index_data->empty()) {
+        auto intervals_or = parse_tensor_intervals(*entry->tensor_index_data);
+        if (!intervals_or.ok()) {
+          return intervals_or.status();
+        }
+        std::unordered_map<std::string, uint64_t> transpose_view_offsets;
+        std::unordered_map<std::string, loader::TensorTransformPlan> transpose_inverse_plans;
+        if (entry->view_state->plan.forward.transform.requires_materialization) {
+          for (const auto& tensor_plan : entry->view_state->plan.forward.transform.tensors) {
+            transpose_view_offsets.emplace(tensor_plan.tensor_name, tensor_plan.dst_offset);
+          }
+          for (const auto& tensor_plan : entry->view_state->plan.inverse_transform.tensors) {
+            transpose_inverse_plans.emplace(tensor_plan.tensor_name, tensor_plan);
+          }
+        }
+        for (const auto& interval : *intervals_or) {
+          if (interval.size_bytes == 0) {
+            continue;
+          }
+          if (!ranges_cover_interval(
+                  entry->view_state->options.canonical_ranges, interval.offset, interval.size_bytes)) {
+            continue;
+          }
+          const auto inverse_it = transpose_inverse_plans.find(interval.tensor_name);
+          if (inverse_it != transpose_inverse_plans.end()) {
+            const auto offset_it = transpose_view_offsets.find(interval.tensor_name);
+            if (offset_it == transpose_view_offsets.end()) {
+              return absl::FailedPreconditionError("missing transpose tensor dst_offset for proof digests");
+            }
+            const uint64_t view_offset = offset_it->second;
+            if (view_offset + interval.size_bytes > entry->view_state->view_size_bytes) {
+              return absl::OutOfRangeError("transpose tensor view range exceeds view buffer size");
+            }
+            if (interval.size_bytes > std::numeric_limits<size_t>::max()) {
+              return absl::OutOfRangeError("transpose tensor exceeds host memory limits");
+            }
+            std::vector<uint8_t> view_bytes(static_cast<size_t>(interval.size_bytes));
+            auto read_status =
+                read_view_bytes(location, base_ptr, entry->device_id, view_offset, absl::MakeSpan(view_bytes));
+            if (!read_status.ok()) {
+              return read_status;
+            }
+            std::vector<uint8_t> canonical_bytes = view_bytes;
+            loader::ViewWritePlan write_plan;
+            loader::ViewWritePlan::Chunk write_chunk;
+            write_chunk.canonical_offset = 0;
+            write_chunk.view_offset = 0;
+            write_chunk.length = interval.size_bytes;
+            write_chunk.segment_aligned = false;
+            write_plan.chunks.push_back(std::move(write_chunk));
+
+            loader::TransformPlan inverse_transform;
+            inverse_transform.requires_materialization = true;
+            loader::TensorTransformPlan tensor_transform = inverse_it->second;
+            tensor_transform.dst_offset = 0;
+            tensor_transform.canonical_offset = 0;
+            tensor_transform.storage_offset_elements = 0;
+            inverse_transform.tensors.push_back(std::move(tensor_transform));
+
+            loader::ViewIngestExecutor executor(
+                std::move(write_plan),
+                std::move(inverse_transform),
+                loader::ViewIngestExecutor::IngestTarget::kCanonical);
+            absl::Status ingest_status = executor.ingest_chunk(
+                /*view_offset=*/0,
+                absl::Span<const std::byte>(reinterpret_cast<const std::byte*>(view_bytes.data()), view_bytes.size()),
+                common::memory::MemoryLocation::CPU,
+                canonical_bytes.data(),
+                /*device_id=*/-1);
+            if (!ingest_status.ok()) {
+              return ingest_status;
+            }
+            absl::Status finalize_status =
+                executor.finalize(common::memory::MemoryLocation::CPU, canonical_bytes.data(), /*device_id=*/-1);
+            if (!finalize_status.ok()) {
+              return finalize_status;
+            }
+
+            const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
+            for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
+              const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
+              const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
+              if (local_end <= local_start) {
+                continue;
+              }
+              if (local_end > std::numeric_limits<size_t>::max()) {
+                return absl::OutOfRangeError("proof chunk exceeds host memory limits");
+              }
+              const size_t chunk_bytes = static_cast<size_t>(local_end - local_start);
+              std::vector<uint8_t> digest = common::sha256_digest_bytes(
+                  absl::Span<const uint8_t>(canonical_bytes.data() + local_start, chunk_bytes));
+              if (digest.size() != 32) {
+                return absl::InternalError("sha256 digest size mismatch");
+              }
+              global_store::v1::PieceProofDigestWrite proof;
+              proof.set_view_id(entry->view_state->options.view_id);
+              proof.set_tensor_name(interval.tensor_name);
+              proof.set_proof_schema_version(std::string(kProofSchemaV1));
+              proof.set_proof_chunk_idx(proof_chunk_idx);
+              proof.set_digest(digest.data(), static_cast<int>(digest.size()));
+              proof_digests.push_back(std::move(proof));
+            }
+            continue;
+          }
+
+          auto spans_or = canonical_spans_for_tensor(
+              entry->view_state->plan.write, interval.offset, interval.size_bytes, entry->view_state->view_size_bytes);
+          if (!spans_or.ok()) {
+            return spans_or.status();
+          }
+          std::vector<CanonicalToViewSpan> spans = std::move(*spans_or);
+          size_t span_idx = 0;
+          const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
+          for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
+            const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
+            const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
+            const uint64_t abs_start = interval.offset + local_start;
+            const uint64_t abs_end = interval.offset + local_end;
+            if (abs_end <= abs_start) {
+              continue;
+            }
+            if (abs_end - abs_start > std::numeric_limits<size_t>::max()) {
+              return absl::OutOfRangeError("proof chunk exceeds host memory limits");
+            }
+            std::vector<uint8_t> buffer(static_cast<size_t>(abs_end - abs_start));
+            uint64_t cursor = abs_start;
+            while (cursor < abs_end) {
+              while (span_idx < spans.size() && spans[span_idx].canonical_offset + spans[span_idx].length <= cursor) {
+                ++span_idx;
+              }
+              if (span_idx >= spans.size()) {
+                return absl::FailedPreconditionError("missing canonical span while computing proof digests");
+              }
+              const auto& span = spans[span_idx];
+              if (span.canonical_offset > cursor) {
+                return absl::FailedPreconditionError("canonical span gap while computing proof digests");
+              }
+              const uint64_t take_end = std::min<uint64_t>(abs_end, span.canonical_offset + span.length);
+              const size_t take = static_cast<size_t>(take_end - cursor);
+              const uint64_t src_view_offset = span.view_offset + (cursor - span.canonical_offset);
+              auto dst = absl::MakeSpan(buffer).subspan(static_cast<size_t>(cursor - abs_start), take);
+              auto st = read_view_bytes(location, base_ptr, entry->device_id, src_view_offset, dst);
+              if (!st.ok()) {
+                return st;
+              }
+              cursor = take_end;
+            }
+            std::vector<uint8_t> digest =
+                common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), buffer.size()));
+            if (digest.size() != 32) {
+              return absl::InternalError("sha256 digest size mismatch");
+            }
+            global_store::v1::PieceProofDigestWrite proof;
+            proof.set_view_id(entry->view_state->options.view_id);
+            proof.set_tensor_name(interval.tensor_name);
+            proof.set_proof_schema_version(std::string(kProofSchemaV1));
+            proof.set_proof_chunk_idx(proof_chunk_idx);
+            proof.set_digest(digest.data(), static_cast<int>(digest.size()));
+            proof_digests.push_back(std::move(proof));
+          }
+        }
       }
     } else {
       ensure_canonical_map();
@@ -1117,7 +1433,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
   }
 
   if (entry->view_state && !entry->view_state->options.view_id.empty() && publisher_) {
-    components::VariantViewUpdate update;
+    components::ViewStateUpdate update;
     update.artifact_id = entry->artifact_id;
     update.view_id = entry->view_state->options.view_id;
     update.view_spec_json = view_spec_json.value_or(view::build_view_spec_json(entry->view_state->options.spec));
@@ -1128,7 +1444,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     update.canonical_bytes_covered = covered_bytes;
     update.canonical_ranges = to_component_ranges(entry->view_state->options.canonical_ranges);
     update.leaf_writes = std::move(leaf_writes);
-    absl::Status update_status = publisher_->update_variant_view(update);
+    update.proof_digests = std::move(proof_digests);
+    absl::Status update_status = publisher_->update_view_state(update);
     if (!update_status.ok()) {
       LOG(WARNING) << "UpdateArtifactViewState failed for artifact " << entry->artifact_id
                    << " view_id=" << entry->view_state->options.view_id << ": " << update_status;

@@ -620,7 +620,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 
 - `enable_rdma`: enables RDMA transports and MR caching.
 - `transport.tcp_conn_count` / `transport.tcp_tos` / `transport.connect_timeout_sec`: MTCP fan-out, socket TOS, and control connect timeouts. The engine now honors the configured TCP fan-out during both the server listener setup and client dial; values ≤1 are automatically raised to the default multi-socket budget so staging credit math stays consistent.
-- `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT`. Leave enabled in production multi-tenant deployments; tests disable it to force deterministic single-owner control sockets when running communicator suites in parallel.
+- `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT` (default: disabled). Enable explicitly for multi-tenant deployments; keep it disabled in tests to force deterministic single-owner control sockets.
 - `stager.buffers_per_flow`: staging pipeline depth.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.
 - `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets).

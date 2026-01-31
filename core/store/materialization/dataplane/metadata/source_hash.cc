@@ -19,7 +19,8 @@ using tensorcast::common::sha256_digest_bytes;
 absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     SeekableSource& source,
     uint64_t total_size,
-    size_t leaf_chunk_bytes) {
+    size_t leaf_chunk_bytes,
+    std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)> progress_cb) {
   if (total_size == 0) {
     return absl::InvalidArgumentError("total_size must be > 0");
   }
@@ -28,10 +29,12 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
   }
 
   std::vector<std::vector<uint8_t>> leaves;
-  leaves.reserve(static_cast<size_t>((total_size + leaf_chunk_bytes - 1) / leaf_chunk_bytes));
+  const uint64_t total_leaves = (total_size + leaf_chunk_bytes - 1) / leaf_chunk_bytes;
+  leaves.reserve(static_cast<size_t>(total_leaves));
 
   std::vector<uint8_t> buffer(leaf_chunk_bytes);
   uint64_t processed = 0;
+  uint64_t hashed = 0;
   while (processed < total_size) {
     const size_t to_read = static_cast<size_t>(std::min<uint64_t>(leaf_chunk_bytes, total_size - processed));
     auto n_or = source.read_at(processed, buffer.data(), to_read);
@@ -48,6 +51,10 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
     }
     leaves.push_back(sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), got)));
     processed += got;
+    hashed += 1;
+    if (progress_cb) {
+      progress_cb(hashed, total_leaves);
+    }
   }
   std::vector<uint8_t> root = compute_tree_hash_root_sha256(leaves);
   return multibase_multihash_sha256(root);
@@ -56,9 +63,10 @@ absl::StatusOr<std::string> compute_data_multihash_from_seekable_source(
 absl::StatusOr<std::string> compute_data_multihash_from_cpu_memory(
     gsl::not_null<const void*> base_ptr,
     uint64_t total_size,
-    size_t leaf_chunk_bytes) {
+    size_t leaf_chunk_bytes,
+    std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)> progress_cb) {
   CpuMemorySource src(base_ptr, total_size);
-  return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes);
+  return compute_data_multihash_from_seekable_source(src, total_size, leaf_chunk_bytes, std::move(progress_cb));
 }
 
 absl::StatusOr<std::string> compute_data_multihash_from_gpu_memory(

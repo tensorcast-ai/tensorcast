@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-01-24
+last_updated: 2026-01-31
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -288,6 +288,43 @@ A unified interface for long-tail workflows (Phase-0: sync/blocking only):
 - persistence task wait
 - placement pin lifecycle
 - status/cancel unify across subsystems
+
+#### Operation backend selection (integration with operation.proto)
+
+`Operation[T]` is an SDK-level abstraction. The **backend protocol** can differ by workload:
+
+1. **Daemon-local replica operations**: `QueryReplicaStatus` / `WaitReplicaStatus` with `ReplicaOperationStatus`
+   (high-frequency, short-lived, daemon-local actions like prefetch/materialize).
+2. **Global Store-backed operations**: `tensorcast.operation.v1` (`Acquire/Keepalive/Release/Get/UpdateOperation`)
+   for long-tail, globally coordinated workflows.
+3. **Polling wrappers**: legacy status RPCs (e.g., persistence) wrapped into `Operation[T]` when a dedicated operation
+   backend does not exist yet.
+
+**Use `operation.proto` when ALL of the following are true:**
+
+- **Global coordination required**: multiple daemons could race, or the action must be serialized across the cluster.
+- **Lease + fencing needed**: correctness depends on a single active coordinator with a monotonic generation token.
+- **Durable progress matters**: status/progress/results must survive daemon restarts and be queryable without the
+  originating daemon.
+- **Low write rate is acceptable**: operation updates can be throttled (avoid per-chunk/per-shard high-frequency writes).
+
+**Do NOT use `operation.proto` when any of the following hold:**
+
+- **High-frequency or short-lived** actions (e.g., prefetch, replica readiness) where GS write amplification would be
+  prohibitive.
+- **Daemon-local semantics dominate**: progress is tied to local lifecycle or PID/IPC resources.
+- **Rich domain-specific status** is required (e.g., shard-level persistence details) that does not map cleanly to a
+  single `OperationStatus`.
+
+**RPC expectations when using `operation.proto`:**
+
+- The coordinator acquires a lease (`AcquireOperationLease`) and **must** include the fencing token
+  (`lease_generation`) on all updates.
+- `UpdateOperation` writes are **throttled** to bounded rates; snapshots/results are stored in `Any`.
+- Clients query via `GetOperation` / `WaitOperation` and **must not** assume daemon-local state.
+
+This split keeps the **user-facing `Operation[T]` API uniform** while avoiding unnecessary Global Store load for
+high-frequency or local-only actions.
 
 ### Plan (new orchestration IR)
 

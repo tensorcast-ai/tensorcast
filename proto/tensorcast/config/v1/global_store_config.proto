@@ -44,5 +44,47 @@ message GlobalStoreConfig {
   GlobalServer server = 2;
   WorkerPolicy worker_policy = 3;
   tensorcast.config.v1.Observability observability = 5;
+  GlobalStoreLimits limits = 6;
   tensorcast.config.v1.ConfigMeta meta = 100; // Optional metadata
+}
+
+message DigestWriteLimits {
+  // Hard bound on leaf digests per request.
+  uint32 max_leaf_writes_per_request = 1;
+  // Hard bound on proof digests per request.
+  uint32 max_proof_digests_per_request = 2;
+  // Hard bound on total digest entries per request (leaf + proof).
+  uint32 max_total_digests_per_request = 3;
+  // Hard bound on total digest payload bytes per request (sum of digest bytes).
+  uint64 max_digest_bytes_per_request = 4;
+}
+
+message OperationLeasePolicy {
+  // Default lease TTL when callers omit a TTL.
+  google.protobuf.Duration default_ttl = 1;
+  // Maximum lease TTL accepted by the server.
+  google.protobuf.Duration max_ttl = 2;
+}
+
+message OperationWriteLimits {
+  // Throttle persisted status/snapshot updates for long-tail operations.
+  // The server always accepts terminal transitions, but may skip frequent
+  // in-place RUNNING updates to bound write amplification.
+  google.protobuf.Duration min_status_update_interval = 1;
+}
+
+message RetentionPolicy {
+  // Retain terminal operations and snapshots for this duration before GC.
+  google.protobuf.Duration operations_ttl = 1;
+  // Retain assembly-scoped proof commitments before GC (post-seal cleanup).
+  google.protobuf.Duration assembly_proof_commitments_ttl = 2;
+  // Retain per-piece proof digests (audit) before GC.
+  google.protobuf.Duration piece_proof_digests_ttl = 3;
+}
+
+message GlobalStoreLimits {
+  DigestWriteLimits digest_writes = 1;
+  OperationLeasePolicy operation_leases = 2;
+  RetentionPolicy retention = 3;
+  OperationWriteLimits operation_writes = 4;
 }

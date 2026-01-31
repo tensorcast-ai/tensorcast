@@ -9,6 +9,9 @@ lint:
   ignore_only:
     PACKAGE_VERSION_SUFFIX:
       - tensorcast
+    RPC_REQUEST_RESPONSE_UNIQUE:
+      - tensorcast/global_store/v1/global_store.proto
+      - tensorcast/daemon/v2/store_daemon.proto
 breaking:
   use:
     - FILE

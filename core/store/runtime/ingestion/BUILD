@@ -69,6 +69,7 @@ sc_cc_library(
         "//core/store/runtime/metadata:metadata_gateway",
         "//core/store/runtime/replica:replica_runtime",
         "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time",

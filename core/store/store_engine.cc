@@ -564,8 +564,24 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
       target_device, target_layout, canonical_index_json, generation, hints);
 }
 
-absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(std::string_view assembly_id, bool publish_canonical) {
-  return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical);
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_view_from_assembly(
+    std::string_view assembly_id,
+    std::string_view target_artifact_id,
+    std::string_view view_id,
+    std::string_view view_spec_json,
+    const DeviceKey& target_device,
+    loading::TransformPlacement placement,
+    const std::vector<std::string>* allowed_view_ids) {
+  return ingestion_runtime_->materialize_view_from_assembly(
+      assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids);
+}
+
+absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(
+    std::string_view assembly_id,
+    bool publish_canonical,
+    runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb,
+    const std::vector<std::string>* allowed_view_ids) {
+  return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

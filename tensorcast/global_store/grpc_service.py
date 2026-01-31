@@ -10,18 +10,20 @@ import base64
 import binascii
 import hashlib
 import ipaddress
+import json
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 from uuid import UUID
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
 import grpc
-from google.protobuf import timestamp_pb2
+from google.protobuf import any_pb2, timestamp_pb2
 
 from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
+from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
 from tensorcast.global_store.exceptions import (
@@ -45,15 +47,21 @@ from tensorcast.global_store.models import (
 )
 from tensorcast.global_store.repositories import (
     ArtifactBindingRepository,
+    ArtifactLayoutAttachmentRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
+    AssemblyLayoutBindingRepository,
+    AssemblyRuntimePolicyRepository,
     ChunkDirectoryRepository,
     InstanceRepository,
+    LayoutSpecRepository,
     LeafRepository,
+    OperationRepository,
+    ProofRepository,
     ReplicaRepository,
     TransportRepository,
-    VariantCoverageRepository,
-    VariantRepository,
+    ViewCoverageRepository,
+    ViewRepository,
     WorkerRepository,
 )
 from tensorcast.global_store.repositories.artifact_index_repository import (
@@ -75,7 +83,8 @@ from tensorcast.global_store.services import (
 )
 from tensorcast.global_store.services.view_state_service import (
     LeafWritePayload,
-    VariantUpsertPayload,
+    PieceProofDigestPayload,
+    ViewUpsertPayload,
 )
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import set_span_attributes
@@ -84,6 +93,8 @@ from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
     global_store_pb2_grpc,
 )
+from tensorcast.proto.layout.v1 import layout_pb2
+from tensorcast.proto.operation.v1 import operation_pb2
 
 logger = init_logger(__name__)
 
@@ -167,8 +178,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
-        self.variant_repository = VariantRepository(self.connection)
-        self.variant_coverage_repository = VariantCoverageRepository(self.connection)
+        self.view_repository = ViewRepository(self.connection)
+        self.view_coverage_repository = ViewCoverageRepository(self.connection)
         self.leaf_repository = LeafRepository(self.connection)
         self.binding_repository = ArtifactBindingRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
@@ -176,6 +187,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.persistence_status_repository = ArtifactPersistenceStatusRepository(
             self.connection
         )
+        self.layout_spec_repository = LayoutSpecRepository(self.connection)
+        self.assembly_layout_binding_repository = AssemblyLayoutBindingRepository(
+            self.connection
+        )
+        self.artifact_layout_attachment_repository = ArtifactLayoutAttachmentRepository(
+            self.connection
+        )
+        self.assembly_runtime_policy_repository = AssemblyRuntimePolicyRepository(
+            self.connection
+        )
+        self.proof_repository = ProofRepository(self.connection)
+        self.operation_repository = OperationRepository(self.connection)
 
         # Initialize services
         self.artifact_service = ArtifactService(self.replica_repository)
@@ -190,9 +213,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         )
         self.chunk_service = ChunkService(self.chunk_directory_repository)
         self.view_state_service = ViewStateService(
-            self.variant_repository,
+            self.view_repository,
             self.leaf_repository,
-            self.variant_coverage_repository,
+            self.view_coverage_repository,
+            self.layout_spec_repository,
+            self.assembly_layout_binding_repository,
+            self.proof_repository,
         )
         self.placement_service = PlacementService(
             self.worker_repository,
@@ -319,6 +345,46 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             return None
         return cls._sha256_digest_to_multibase(digest)
 
+    def _get_tensor_intervals_for_artifact_id(
+        self, *, artifact_id: str
+    ) -> dict[str, tuple[int, int]]:
+        row = self.artifacts_repo.get(artifact_id)
+        if not row:
+            raise ValidationError("artifact_id not found for canonical index lookup")
+        index_multihash = row.get("index_multihash")
+        if not index_multihash:
+            raise ValidationError("canonical index not recorded for artifact_id")
+        index_key = self._multibase_sha256_to_hex(str(index_multihash))
+        if not index_key:
+            raise ValidationError("invalid index_multihash stored for artifact_id")
+        data = self.artifact_indices.get(index_key)
+        if data is None:
+            raise ValidationError("canonical index bytes missing for artifact_id")
+        try:
+            decoded = json.loads(bytes(data).decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError("failed to decode canonical index bytes") from exc
+        if not isinstance(decoded, dict):
+            raise ValidationError("canonical index must be a JSON object")
+
+        intervals: dict[str, tuple[int, int]] = {}
+        for name, entry in decoded.items():
+            if not isinstance(name, str):
+                continue
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            try:
+                tensor_off = int(entry[0])
+                tensor_bytes = int(entry[1])
+            except Exception:
+                continue
+            if tensor_off < 0 or tensor_bytes < 0:
+                continue
+            intervals[name] = (tensor_off, tensor_bytes)
+        if not intervals:
+            raise ValidationError("canonical index missing tensor entries")
+        return intervals
+
     @classmethod
     def _policy_from_proto(cls, value: global_store_pb2.PlacementPolicy) -> str:
         try:
@@ -412,6 +478,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         except Exception:
                             logger.exception("Error cleaning up expired transports")
 
+                    # -------- Retention / GC (v2) --------
+                    try:
+                        self._run_retention_gc()
+                    except Exception:
+                        logger.exception("Error applying retention / GC policies")
+
                     # -------- Periodic database optimization --------
                     if time.time() - last_optimize_ts >= optimize_interval_sec:
                         try:
@@ -429,6 +501,84 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
         self.cleanup_thread = threading.Thread(target=maintenance_loop, daemon=True)
         self.cleanup_thread.start()
+
+    def _run_retention_gc(self) -> None:
+        retention = self.config.limits.retention
+        now = datetime.now(timezone.utc)
+
+        # Terminal operations and snapshots
+        if retention.operations_ttl_ms > 0:
+            cutoff = now - timedelta(milliseconds=int(retention.operations_ttl_ms))
+            row = self.connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM operations
+                WHERE state IN ('success','failed','cancelled','degraded')
+                  AND updated_at < ?
+                """,
+                [cutoff],
+            ).fetchone()
+            count = int(row[0]) if row else 0
+            if count > 0:
+                self.connection.execute(
+                    """
+                    DELETE FROM operations
+                    WHERE state IN ('success','failed','cancelled','degraded')
+                      AND updated_at < ?
+                    """,
+                    [cutoff],
+                )
+                gs_metrics.inc_gc_rows_deleted(table="operations", count=count)
+
+        # Assembly-scoped proof commitments (post-seal cleanup / bounded retention)
+        if retention.assembly_proof_commitments_ttl_ms > 0:
+            cutoff = now - timedelta(
+                milliseconds=int(retention.assembly_proof_commitments_ttl_ms)
+            )
+            row = self.connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM assembly_proof_commitments
+                WHERE created_at < ?
+                """,
+                [cutoff],
+            ).fetchone()
+            count = int(row[0]) if row else 0
+            if count > 0:
+                self.connection.execute(
+                    """
+                    DELETE FROM assembly_proof_commitments
+                    WHERE created_at < ?
+                    """,
+                    [cutoff],
+                )
+                gs_metrics.inc_gc_rows_deleted(
+                    table="assembly_proof_commitments", count=count
+                )
+
+        # Per-piece proof digests (audit/debug)
+        if retention.piece_proof_digests_ttl_ms > 0:
+            cutoff = now - timedelta(
+                milliseconds=int(retention.piece_proof_digests_ttl_ms)
+            )
+            row = self.connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM piece_proof_digests
+                WHERE created_at < ?
+                """,
+                [cutoff],
+            ).fetchone()
+            count = int(row[0]) if row else 0
+            if count > 0:
+                self.connection.execute(
+                    """
+                    DELETE FROM piece_proof_digests
+                    WHERE created_at < ?
+                    """,
+                    [cutoff],
+                )
+                gs_metrics.inc_gc_rows_deleted(table="piece_proof_digests", count=count)
 
     # ========== Artifact Replica Methods ==========
 
@@ -539,40 +689,38 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             partial_byte_details: list[global_store_pb2.PartialCoverageDetail] = []
             partial_leaf_details: list[global_store_pb2.PartialLeafCoverageDetail] = []
             leaf_filter: Optional[list[int]] = None
-            variant_missing = False
+            view_missing = False
             partial_leaf_miss = False
 
-            variant_row: Optional[dict[str, object]] = None
+            view_row: Optional[dict[str, object]] = None
             if space_kind == "V" and (include_leaves or include_view_meta):
-                variant_row = self.view_state_service.get_variant(
+                view_row = self.view_state_service.get_view(
                     artifact_id=artifact_id, view_id=space_id or ""
                 )
-                if variant_row is None:
-                    variant_missing = True
+                if view_row is None:
+                    view_missing = True
                     context.set_code(grpc.StatusCode.NOT_FOUND)
-                    context.set_details("variant metadata not found")
+                    context.set_details("view metadata not found")
 
             if include_view_meta:
                 if space_kind != "V":
                     context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
                     context.set_details(
-                        "view metadata is only available for variant space"
+                        "view metadata is only available for view byte space"
                     )
                     return global_store_pb2.GetArtifactInfoByIdResponse(
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
-                if variant_row is not None:
-                    view_size_value = cast(int, variant_row["view_size"])
+                if view_row is not None:
+                    view_size_value = cast(int, view_row["view_size"])
                     view_meta_msg = global_store_pb2.ViewMeta(
-                        view_spec_json=str(variant_row["view_spec_json"]),
+                        view_spec_json=str(view_row["view_spec_json"]),
                         view_size=int(view_size_value),
                     )
-                    view_data_hash = variant_row.get("view_data_hash")
+                    view_data_hash = view_row.get("view_data_hash")
                     if view_data_hash:
                         view_meta_msg.view_data_hash = str(view_data_hash)
-                    verified_at = self._coerce_db_datetime(
-                        variant_row.get("verified_at")
-                    )
+                    verified_at = self._coerce_db_datetime(view_row.get("verified_at"))
                     proto_ts = self._datetime_to_timestamp(verified_at)
                     if proto_ts is not None:
                         view_meta_msg.verified_at.CopyFrom(proto_ts)
@@ -617,7 +765,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     )
 
                 leaf_filter = list(request.leaf_idxs) if request.leaf_idxs else None
-                if space_kind == "V" and variant_row is None:
+                if space_kind == "V" and view_row is None:
                     partial_leaf_miss = True
                     detail = global_store_pb2.PartialLeafCoverageDetail(
                         hash_space=build_hash_space_ref(
@@ -665,7 +813,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 has_payload = True
 
             need_not_found = (
-                variant_missing
+                view_missing
                 or partial_leaf_miss
                 or (
                     not has_payload
@@ -730,7 +878,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.UpdateArtifactViewStateRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpdateArtifactViewStateResponse:
-        """Upsert variant metadata and leaf digests."""
+        """Upsert view metadata, leaf digests, and proof digests."""
         artifact_id = request.artifact_id
         if not artifact_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
@@ -739,37 +887,65 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
+        leaf_count = len(request.leaf_writes)
+        proof_count = len(request.proof_digests)
+        has_digest_write = (leaf_count + proof_count) > 0
+
+        if has_digest_write:
+            limits = self.config.limits.digest_writes
+            digest_bytes = sum(len(leaf.digest) for leaf in request.leaf_writes) + sum(
+                len(d.digest) for d in request.proof_digests
+            )
+            total = leaf_count + proof_count
+            too_large = (
+                leaf_count > limits.max_leaf_writes_per_request
+                or proof_count > limits.max_proof_digests_per_request
+                or total > limits.max_total_digests_per_request
+                or digest_bytes > limits.max_digest_bytes_per_request
+            )
+            if too_large:
+                gs_metrics.inc_digest_request_rejected(reason="too_large")
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+                context.set_details(
+                    "digest write request exceeds configured limits "
+                    f"(leaf_writes={leaf_count}, proof_digests={proof_count}, total_digests={total}, "
+                    f"digest_bytes={digest_bytes})"
+                )
+                return global_store_pb2.UpdateArtifactViewStateResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
         try:
-            variant_payload: Optional[VariantUpsertPayload] = None
-            if request.HasField("variant"):
-                variant = request.variant
-                if not variant.view_id:
-                    raise ValidationError("variant.view_id is required")
-                if not variant.view_spec_json:
-                    raise ValidationError("variant.view_spec_json is required")
-                if variant.view_size <= 0:
-                    raise ValidationError("variant.view_size must be positive")
+            view_payload: Optional[ViewUpsertPayload] = None
+            if request.HasField("view"):
+                view = request.view
+                if not view.view_id:
+                    raise ValidationError("view.view_id is required")
+                if not view.view_spec_json:
+                    raise ValidationError("view.view_spec_json is required")
+                if view.view_size <= 0:
+                    raise ValidationError("view.view_size must be positive")
                 verified_at = (
-                    self._timestamp_to_datetime(variant.verified_at)
-                    if variant.HasField("verified_at")
+                    self._timestamp_to_datetime(view.verified_at)
+                    if view.HasField("verified_at")
                     else None
                 )
-                view_data_hash = variant.view_data_hash or None
+                view_data_hash = view.view_data_hash or None
                 canonical_size: Optional[int] = None
                 canonical_covered: Optional[int] = None
                 canonical_ranges: list[tuple[int, int]] = []
-                if variant.HasField("canonical_coverage"):
-                    canonical_size = int(variant.canonical_coverage.total_bytes)
-                    canonical_covered = int(variant.canonical_coverage.covered_bytes)
-                if variant.canonical_ranges:
+                if view.HasField("canonical_coverage"):
+                    canonical_size = int(view.canonical_coverage.total_bytes)
+                    canonical_covered = int(view.canonical_coverage.covered_bytes)
+                if view.canonical_ranges:
                     canonical_ranges = [
-                        (int(r.off), int(r.len)) for r in variant.canonical_ranges
+                        (int(r.off), int(r.len)) for r in view.canonical_ranges
                     ]
-                variant_payload = VariantUpsertPayload(
+                view_payload = ViewUpsertPayload(
                     artifact_id=artifact_id,
-                    view_id=variant.view_id,
-                    view_spec_json=variant.view_spec_json,
-                    view_size=variant.view_size,
+                    view_id=view.view_id,
+                    view_spec_json=view.view_spec_json,
+                    view_size=view.view_size,
                     view_data_hash=view_data_hash,
                     verified_at=verified_at,
                     canonical_size_bytes=canonical_size,
@@ -781,6 +957,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             for leaf in request.leaf_writes:
                 if not leaf.digest:
                     raise ValidationError("leaf.digest is required")
+                if len(leaf.digest) != 32:
+                    raise ValidationError("leaf.digest must be 32 bytes (raw sha256)")
 
                 if not leaf.HasField("hash_space"):
                     raise ValidationError("leaf.hash_space must be set")
@@ -818,14 +996,51 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     )
                 )
 
+            proof_payloads: list[PieceProofDigestPayload] = []
+            for digest in request.proof_digests:
+                if not digest.view_id:
+                    raise ValidationError("proof_digests.view_id is required")
+                if not digest.tensor_name:
+                    raise ValidationError("proof_digests.tensor_name is required")
+                if not digest.proof_schema_version:
+                    raise ValidationError(
+                        "proof_digests.proof_schema_version is required"
+                    )
+                if not digest.digest:
+                    raise ValidationError("proof_digests.digest is required")
+                proof_payloads.append(
+                    PieceProofDigestPayload(
+                        artifact_id=artifact_id,
+                        view_id=digest.view_id,
+                        tensor_name=digest.tensor_name,
+                        proof_schema_version=digest.proof_schema_version,
+                        proof_chunk_idx=int(digest.proof_chunk_idx),
+                        digest=bytes(digest.digest),
+                    )
+                )
+
+            tensor_intervals: dict[str, tuple[int, int]] | None = None
+            if (
+                view_payload is not None
+                and artifact_id.startswith("cgid:")
+                and view_payload.canonical_ranges
+            ):
+                tensor_intervals = self._get_tensor_intervals_for_artifact_id(
+                    artifact_id=artifact_id
+                )
+
             self.view_state_service.update_view_state(
-                variant=variant_payload,
+                view=view_payload,
                 leaf_writes=leaf_payloads,
+                proof_digests=proof_payloads,
+                tensor_intervals=tensor_intervals,
             )
             return global_store_pb2.UpdateArtifactViewStateResponse(
                 status=global_store_pb2.Status.STATUS_OK
             )
         except ValidationError as exc:
+            if has_digest_write:
+                gs_metrics.inc_digest_request_rejected(reason="invalid")
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details(str(exc))
             return global_store_pb2.UpdateArtifactViewStateResponse(
@@ -833,6 +1048,21 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             )
         except ValueError as exc:
             message = str(exc)
+            if has_digest_write:
+                if "conflict" in message:
+                    gs_metrics.inc_digest_request_rejected(reason="conflict")
+                    grid = "unknown"
+                    if "leaves conflict" in message:
+                        grid = "leaves"
+                    elif "piece_proof_digests conflict" in message:
+                        grid = "piece_proof_digests"
+                    elif "assembly_proof_commitments conflict" in message:
+                        grid = "assembly_proof_commitments"
+                    elif "tensor_proof_commitments conflict" in message:
+                        grid = "tensor_proof_commitments"
+                    gs_metrics.inc_digest_conflict(grid=grid)
+                else:
+                    gs_metrics.inc_digest_request_rejected(reason="invalid")
             if any(
                 key in message
                 for key in (
@@ -840,6 +1070,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     "overlapping canonical coverage",
                     "canonical range mismatch",
                     "view_data_hash conflict",
+                    "conflict",
+                    "proof",
                 )
             ):
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -851,6 +1083,21 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             )
         except DatabaseError as exc:
             message = str(exc)
+            if has_digest_write:
+                if "conflict" in message:
+                    gs_metrics.inc_digest_request_rejected(reason="conflict")
+                    grid = "unknown"
+                    if "leaves conflict" in message:
+                        grid = "leaves"
+                    elif "piece_proof_digests conflict" in message:
+                        grid = "piece_proof_digests"
+                    elif "assembly_proof_commitments conflict" in message:
+                        grid = "assembly_proof_commitments"
+                    elif "tensor_proof_commitments conflict" in message:
+                        grid = "tensor_proof_commitments"
+                    gs_metrics.inc_digest_conflict(grid=grid)
+                else:
+                    gs_metrics.inc_digest_request_rejected(reason="invalid")
             if any(
                 key in message
                 for key in (
@@ -858,6 +1105,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     "overlapping canonical coverage",
                     "canonical range mismatch",
                     "view_data_hash conflict",
+                    "conflict",
+                    "proof",
                 )
             ):
                 context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
@@ -877,17 +1126,262 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
-    def ListVariants(
+    def WriteTensorProofCommitments(
         self,
-        request: global_store_pb2.ListVariantsRequest,
+        request: global_store_pb2.WriteTensorProofCommitmentsRequest,
         context: grpc.ServicerContext,
-    ) -> global_store_pb2.ListVariantsResponse:
-        """List variant metadata for an artifact."""
+    ) -> global_store_pb2.WriteTensorProofCommitmentsResponse:
+        mi2_id = request.mi2_id
+        set_span_attributes({"tc.artifact.id": mi2_id})
+
+        if not mi2_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id is required")
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not mi2_id.startswith("mi2:"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id must be a content-addressed mi2 id")
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not request.proof_schema_version:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("proof_schema_version is required")
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        artifact_row = self.artifacts_repo.get(mi2_id)
+        if artifact_row is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details("artifact not found")
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+
+        proof_count = len(request.commitments)
+        has_digest_write = proof_count > 0
+        if has_digest_write:
+            limits = self.config.limits.digest_writes
+            digest_bytes = sum(len(c.digest) for c in request.commitments)
+            too_large = (
+                proof_count > limits.max_proof_digests_per_request
+                or proof_count > limits.max_total_digests_per_request
+                or digest_bytes > limits.max_digest_bytes_per_request
+            )
+            if too_large:
+                gs_metrics.inc_digest_request_rejected(reason="too_large")
+                context.set_code(grpc.StatusCode.RESOURCE_EXHAUSTED)
+                context.set_details(
+                    "digest write request exceeds configured limits "
+                    f"(commitments={proof_count}, digest_bytes={digest_bytes})"
+                )
+                return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+
+        try:
+            inserted = 0
+            with self.proof_repository.transaction() as cursor:
+                for entry in request.commitments:
+                    if not entry.tensor_name:
+                        raise ValidationError("commitments.tensor_name is required")
+                    if not entry.digest:
+                        raise ValidationError("commitments.digest is required")
+                    if len(entry.digest) != 32:
+                        raise ValidationError(
+                            "commitments.digest must be 32 bytes (raw sha256)"
+                        )
+                    if self.proof_repository.upsert_tensor_proof_commitment(
+                        mi2_id=mi2_id,
+                        tensor_name=entry.tensor_name,
+                        proof_schema_version=request.proof_schema_version,
+                        proof_chunk_idx=int(entry.proof_chunk_idx),
+                        digest=bytes(entry.digest),
+                        cursor=cursor,
+                    ):
+                        inserted += 1
+
+            gs_metrics.inc_digest_entries_written(
+                grid="tensor_proof_commitments", count=inserted
+            )
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_OK, inserted=int(inserted)
+            )
+        except ValidationError as exc:
+            if has_digest_write:
+                gs_metrics.inc_digest_request_rejected(reason="invalid")
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if has_digest_write:
+                if "conflict" in message:
+                    gs_metrics.inc_digest_request_rejected(reason="conflict")
+                    grid = (
+                        "tensor_proof_commitments"
+                        if "tensor_proof_commitments conflict" in message
+                        else "unknown"
+                    )
+                    gs_metrics.inc_digest_conflict(grid=grid)
+                else:
+                    gs_metrics.inc_digest_request_rejected(reason="invalid")
+            if "conflict" in message:
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            else:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(message)
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except DatabaseError as exc:
+            message = str(exc)
+            if has_digest_write:
+                if "conflict" in message:
+                    gs_metrics.inc_digest_request_rejected(reason="conflict")
+                    grid = (
+                        "tensor_proof_commitments"
+                        if "tensor_proof_commitments conflict" in message
+                        else "unknown"
+                    )
+                    gs_metrics.inc_digest_conflict(grid=grid)
+                else:
+                    gs_metrics.inc_digest_request_rejected(reason="invalid")
+            if "conflict" in message:
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("WriteTensorProofCommitments failed for mi2_id=%s", mi2_id)
+            if has_digest_write:
+                gs_metrics.inc_digest_request_rejected(reason="internal")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.WriteTensorProofCommitmentsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def CheckProofCommitmentsMatch(
+        self,
+        request: global_store_pb2.CheckProofCommitmentsMatchRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.CheckProofCommitmentsMatchResponse:
+        assembly_id = request.assembly_id
+        mi2_id = request.mi2_id
+        set_span_attributes(
+            {"tc.artifact.id": mi2_id, "tc.artifact.assembly_id": assembly_id}
+        )
+
+        if not assembly_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id is required")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not mi2_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id is required")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not assembly_id.startswith("cgid:"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id must be a cgid id")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not mi2_id.startswith("mi2:"):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id must be a content-addressed mi2 id")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not request.proof_schema_version:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("proof_schema_version is required")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        if not request.tensor_names:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("tensor_names is required")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        if self.artifacts_repo.get(assembly_id) is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details("assembly not found")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+        if self.artifacts_repo.get(mi2_id) is None:
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details("artifact not found")
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+
+        try:
+            match = self.proof_repository.commitments_match(
+                assembly_id=assembly_id,
+                mi2_id=mi2_id,
+                proof_schema_version=request.proof_schema_version,
+                tensor_names=list(request.tensor_names),
+            )
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_OK, match=match
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except DatabaseError as exc:
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "CheckProofCommitmentsMatch failed for assembly_id=%s mi2_id=%s",
+                assembly_id,
+                mi2_id,
+            )
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.CheckProofCommitmentsMatchResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ListViews(
+        self,
+        request: global_store_pb2.ListViewsRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ListViewsResponse:
+        """List view metadata for an artifact."""
         artifact_id = request.artifact_id
         if not artifact_id:
             context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
             context.set_details("artifact_id is required")
-            return global_store_pb2.ListVariantsResponse(
+            return global_store_pb2.ListViewsResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
         try:
@@ -900,23 +1394,23 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     page_token = request.pagination.page_token
             offset = int(page_token) if page_token else 0
 
-            rows, total = self.variant_repository.list_by_artifact(
+            rows, total = self.view_repository.list_by_artifact(
                 artifact_id=artifact_id, limit=page_size, offset=offset
             )
 
-            variants: list[global_store_pb2.VariantInfo] = []
+            views: list[global_store_pb2.ViewInfo] = []
             for row in rows:
-                variant = global_store_pb2.VariantInfo(
+                item = global_store_pb2.ViewInfo(
                     view_id=str(row["view_id"]),
                     view_spec_json=str(row["view_spec_json"]),
                     view_size=int(row["view_size"]),
                 )
                 if row.get("view_data_hash"):
-                    variant.view_data_hash = str(row["view_data_hash"])
+                    item.view_data_hash = str(row["view_data_hash"])
                 if row.get("verified_at"):
                     ts = self._datetime_to_timestamp(row["verified_at"])
                     if ts is not None:
-                        variant.verified_at.CopyFrom(ts)
+                        item.verified_at.CopyFrom(ts)
                 if (
                     row.get("canonical_size_bytes") is not None
                     or row.get("canonical_bytes_covered") is not None
@@ -926,15 +1420,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         coverage.total_bytes = int(row["canonical_size_bytes"])
                     if row.get("canonical_bytes_covered") is not None:
                         coverage.covered_bytes = int(row["canonical_bytes_covered"])
-                    variant.canonical_coverage.CopyFrom(coverage)
+                    item.canonical_coverage.CopyFrom(coverage)
 
-                ranges = self.variant_coverage_repository.get_ranges(
+                ranges = self.view_coverage_repository.get_ranges(
                     artifact_id=artifact_id, view_id=str(row["view_id"])
                 )
                 for off, length in ranges:
-                    variant.canonical_ranges.add(off=off, len=length)
+                    item.canonical_ranges.add(off=off, len=length)
 
-                variants.append(variant)
+                views.append(item)
 
             next_token = ""
             if offset + page_size < total:
@@ -943,18 +1437,784 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 next_page_token=next_token, total_size=total
             )
 
-            return global_store_pb2.ListVariantsResponse(
+            return global_store_pb2.ListViewsResponse(
                 status=global_store_pb2.Status.STATUS_OK,
-                variants=variants,
+                views=views,
                 page_info=page_info,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to list variants for %s", artifact_id)
+            logger.exception("Failed to list views for %s", artifact_id)
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(exc))
-            return global_store_pb2.ListVariantsResponse(
+            return global_store_pb2.ListViewsResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
+
+    # ========== Layout v2 ==========
+
+    def _tensor_names_for_index_multihash(self, *, index_multihash: str) -> set[str]:
+        index_key = self._multibase_sha256_to_hex(index_multihash)
+        if not index_key:
+            raise ValidationError("invalid index_multihash")
+        data = self.artifact_indices.get(index_key)
+        if data is None:
+            raise ValidationError("canonical index bytes missing for index_multihash")
+        try:
+            decoded = json.loads(bytes(data).decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            raise ValidationError("failed to decode canonical index bytes") from exc
+        if not isinstance(decoded, dict):
+            raise ValidationError("canonical index must be a JSON object")
+        return {name for name in decoded if isinstance(name, str)}
+
+    def _canonicalize_layout_spec(
+        self, *, layout: layout_pb2.LayoutSpec, tensor_names: set[str]
+    ) -> layout_pb2.LayoutSpec:
+        if int(layout.layout_schema_version) != 1:
+            raise ValidationError("layout_schema_version must be 1")
+        if not layout.index_multihash:
+            raise ValidationError("layout.index_multihash is required")
+
+        out = layout_pb2.LayoutSpec()
+        out.CopyFrom(layout)
+
+        # Canonicalize expected_view_ids.
+        deduped = sorted(set(out.expected_view_ids))
+        del out.expected_view_ids[:]
+        out.expected_view_ids.extend(deduped)
+
+        # Validate tensor keys and normalize policy defaults.
+        has_replicated = False
+        for tensor_name, policy in out.tensors.items():
+            if tensor_name not in tensor_names:
+                raise ValidationError("layout references unknown tensor_name")
+            if policy.overlap_mode == layout_pb2.OVERLAP_MODE_UNSPECIFIED:
+                policy.overlap_mode = layout_pb2.OVERLAP_MODE_DISJOINT
+            if policy.overlap_mode == layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL:
+                has_replicated = True
+
+        if has_replicated:
+            if not out.proof_schema_version:
+                raise ValidationError(
+                    "layout.proof_schema_version is required when using REPLICATE_EQUAL"
+                )
+        else:
+            if out.proof_schema_version:
+                raise ValidationError(
+                    "layout.proof_schema_version must be empty unless REPLICATE_EQUAL is used"
+                )
+        return out
+
+    def PutLayoutSpec(
+        self,
+        request: global_store_pb2.PutLayoutSpecRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.PutLayoutSpecResponse:
+        try:
+            if not request.HasField("layout"):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("layout is required")
+                return global_store_pb2.PutLayoutSpecResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            tensor_names = self._tensor_names_for_index_multihash(
+                index_multihash=request.layout.index_multihash
+            )
+            canonical = self._canonicalize_layout_spec(
+                layout=request.layout, tensor_names=tensor_names
+            )
+            payload = canonical.SerializeToString(deterministic=True)
+            digest = hashlib.sha256(payload).digest()
+            layout_id = self._sha256_digest_to_multibase(digest)
+            if not layout_id:
+                raise ValidationError("failed to compute layout_id")
+
+            with self.layout_spec_repository.transaction() as cursor:
+                self.layout_spec_repository.put(
+                    layout_id=layout_id,
+                    index_multihash=canonical.index_multihash,
+                    layout_proto=payload,
+                    layout_json=(request.layout_json or None),
+                    cursor=cursor,
+                )
+
+            return global_store_pb2.PutLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                layout_id=layout_id,
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.PutLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except (ValueError, DatabaseError) as exc:
+            message = str(exc)
+            if "layout_id collision" in message:
+                context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+            return global_store_pb2.PutLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("PutLayoutSpec failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.PutLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def GetLayoutSpec(
+        self,
+        request: global_store_pb2.GetLayoutSpecRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetLayoutSpecResponse:
+        layout_id = request.layout_id
+        if not layout_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("layout_id is required")
+            return global_store_pb2.GetLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            row = self.layout_spec_repository.get(layout_id=layout_id)
+            if row is None:
+                return global_store_pb2.GetLayoutSpecResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            layout = layout_pb2.LayoutSpec()
+            layout.ParseFromString(row["layout_proto"])
+            record = layout_pb2.LayoutSpecRecord(layout_id=layout_id, layout=layout)
+            if row.get("layout_json"):
+                record.layout_json = str(row["layout_json"])
+            return global_store_pb2.GetLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                record=record,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("GetLayoutSpec failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.GetLayoutSpecResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def GetAssemblyLayoutBinding(
+        self,
+        request: global_store_pb2.GetAssemblyLayoutBindingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetAssemblyLayoutBindingResponse:
+        assembly_id = request.assembly_id
+        if not assembly_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id is required")
+            return global_store_pb2.GetAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            row = self.assembly_layout_binding_repository.get(assembly_id=assembly_id)
+            if row is None:
+                return global_store_pb2.GetAssemblyLayoutBindingResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            binding = global_store_pb2.AssemblyLayoutBinding(
+                assembly_id=str(row["assembly_id"]),
+                layout_id=str(row["layout_id"]),
+                binding_version=int(row["binding_version"]),
+            )
+            ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(row.get("updated_at"))
+            )
+            if ts is not None:
+                binding.updated_at.CopyFrom(ts)
+            return global_store_pb2.GetAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                binding=binding,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("GetAssemblyLayoutBinding failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.GetAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def _assembly_has_any_cross_view_overlap(self, *, assembly_id: str) -> bool:
+        rows = self.connection.execute(
+            """
+            SELECT view_id, range_offset, range_length
+            FROM view_coverage_ranges
+            WHERE artifact_id = ?
+            ORDER BY range_offset ASC
+            """,
+            [assembly_id],
+        ).fetchall()
+        max_end = -1
+        max_view: str | None = None
+        for row in rows:
+            view_id = str(row[0])
+            start = int(row[1])
+            end = start + int(row[2])
+            if start < max_end and max_view is not None and view_id != max_view:
+                return True
+            if end > max_end:
+                max_end = end
+                max_view = view_id
+        return False
+
+    def UpdateAssemblyLayoutBinding(
+        self,
+        request: global_store_pb2.UpdateAssemblyLayoutBindingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpdateAssemblyLayoutBindingResponse:
+        assembly_id = request.assembly_id
+        layout_id = request.layout_id
+        if not assembly_id or not layout_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id and layout_id are required")
+            return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+        try:
+            expected_version = int(request.expected_binding_version)
+            layout_row = self.layout_spec_repository.get(layout_id=layout_id)
+            if layout_row is None:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("layout_id not found")
+                return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+
+            artifact_row = self.artifacts_repo.get(assembly_id)
+            if expected_version == 0 and (
+                not artifact_row or not artifact_row.get("index_multihash")
+            ):
+                # Allow first-time binding creation to establish the assembly's immutable
+                # index_multihash (without requiring prior replica registration).
+                self.connection.execute(
+                    """
+                    INSERT INTO artifacts (
+                        artifact_id,
+                        index_multihash,
+                        data_multihash,
+                        schema_version,
+                        encoding,
+                        hash_params_json,
+                        id_kind
+                    ) VALUES (?, ?, NULL, 'v3', 'json', NULL, 'CGID')
+                    ON CONFLICT (artifact_id) DO NOTHING
+                    """,
+                    [assembly_id, str(layout_row.get("index_multihash"))],
+                )
+                artifact_row = self.artifacts_repo.get(assembly_id)
+            if not artifact_row or not artifact_row.get("index_multihash"):
+                raise ValidationError("canonical index not recorded for assembly_id")
+            if str(artifact_row.get("index_multihash")) != str(
+                layout_row.get("index_multihash")
+            ):
+                raise ValidationError(
+                    "layout.index_multihash does not match assembly index_multihash"
+                )
+
+            # Safety rule: REPLICATE_EQUAL -> DISJOINT tightening is allowed only when no overlaps exist.
+            existing = self.assembly_layout_binding_repository.get(
+                assembly_id=assembly_id
+            )
+            if existing is not None:
+                old_layout_row = self.layout_spec_repository.get(
+                    layout_id=str(existing["layout_id"])
+                )
+                old_has_rep = False
+                new_has_rep = False
+                if old_layout_row is not None:
+                    old_spec = layout_pb2.LayoutSpec()
+                    old_spec.ParseFromString(old_layout_row["layout_proto"])
+                    old_has_rep = any(
+                        p.overlap_mode == layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL
+                        for p in old_spec.tensors.values()
+                    )
+                new_spec = layout_pb2.LayoutSpec()
+                new_spec.ParseFromString(layout_row["layout_proto"])
+                new_has_rep = any(
+                    p.overlap_mode == layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL
+                    for p in new_spec.tensors.values()
+                )
+                if (
+                    old_has_rep
+                    and not new_has_rep
+                    and self._assembly_has_any_cross_view_overlap(
+                        assembly_id=assembly_id
+                    )
+                ):
+                    raise ValueError("cannot tighten to DISJOINT while overlaps exist")
+
+            with self.assembly_layout_binding_repository.transaction() as cursor:
+                updated = self.assembly_layout_binding_repository.update(
+                    assembly_id=assembly_id,
+                    layout_id=layout_id,
+                    expected_binding_version=expected_version,
+                    cursor=cursor,
+                )
+
+            binding = global_store_pb2.AssemblyLayoutBinding(
+                assembly_id=str(updated["assembly_id"]),
+                layout_id=str(updated["layout_id"]),
+                binding_version=int(updated["binding_version"]),
+            )
+            ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(updated.get("updated_at"))
+            )
+            if ts is not None:
+                binding.updated_at.CopyFrom(ts)
+            return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                binding=binding,
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except (ValueError, DatabaseError) as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("UpdateAssemblyLayoutBinding failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateAssemblyLayoutBindingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def AttachLayoutToArtifact(
+        self,
+        request: global_store_pb2.AttachLayoutToArtifactRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.AttachLayoutToArtifactResponse:
+        mi2_id = request.mi2_id
+        layout_id = request.layout_id
+        if not mi2_id or not layout_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id and layout_id are required")
+            return global_store_pb2.AttachLayoutToArtifactResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            artifact_row = self.artifacts_repo.get(mi2_id)
+            if not artifact_row or not artifact_row.get("index_multihash"):
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("artifact not found")
+                return global_store_pb2.AttachLayoutToArtifactResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            layout_row = self.layout_spec_repository.get(layout_id=layout_id)
+            if layout_row is None:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("layout not found")
+                return global_store_pb2.AttachLayoutToArtifactResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            if str(layout_row.get("index_multihash")) != str(
+                artifact_row.get("index_multihash")
+            ):
+                raise ValidationError(
+                    "layout.index_multihash does not match artifact index_multihash"
+                )
+            with self.artifact_layout_attachment_repository.transaction() as cursor:
+                self.artifact_layout_attachment_repository.attach(
+                    mi2_id=mi2_id, layout_id=layout_id, cursor=cursor
+                )
+            return global_store_pb2.AttachLayoutToArtifactResponse(
+                status=global_store_pb2.Status.STATUS_OK
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.AttachLayoutToArtifactResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("AttachLayoutToArtifact failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.AttachLayoutToArtifactResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ListArtifactLayouts(
+        self,
+        request: global_store_pb2.ListArtifactLayoutsRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ListArtifactLayoutsResponse:
+        mi2_id = request.mi2_id
+        if not mi2_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("mi2_id is required")
+            return global_store_pb2.ListArtifactLayoutsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            layout_ids = self.artifact_layout_attachment_repository.list_by_artifact(
+                mi2_id=mi2_id
+            )
+            return global_store_pb2.ListArtifactLayoutsResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                layout_ids=layout_ids,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ListArtifactLayouts failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.ListArtifactLayoutsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def GetAssemblyRuntimePolicy(
+        self,
+        request: global_store_pb2.GetAssemblyRuntimePolicyRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetAssemblyRuntimePolicyResponse:
+        assembly_id = request.assembly_id
+        if not assembly_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id is required")
+            return global_store_pb2.GetAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            row = self.assembly_runtime_policy_repository.get(assembly_id=assembly_id)
+            if row is None:
+                return global_store_pb2.GetAssemblyRuntimePolicyResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND
+                )
+            policy = global_store_pb2.AssemblyRuntimePolicy(
+                assembly_id=str(row["assembly_id"]),
+                policy_version=int(row["policy_version"]),
+                policy_json=str(row["policy_json"]),
+            )
+            ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(row.get("updated_at"))
+            )
+            if ts is not None:
+                policy.updated_at.CopyFrom(ts)
+            return global_store_pb2.GetAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                policy=policy,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("GetAssemblyRuntimePolicy failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.GetAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def UpdateAssemblyRuntimePolicy(
+        self,
+        request: global_store_pb2.UpdateAssemblyRuntimePolicyRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpdateAssemblyRuntimePolicyResponse:
+        assembly_id = request.assembly_id
+        if not assembly_id or not request.policy_json:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("assembly_id and policy_json are required")
+            return global_store_pb2.UpdateAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        try:
+            expected = int(request.expected_policy_version)
+            with self.assembly_runtime_policy_repository.transaction() as cursor:
+                row = self.assembly_runtime_policy_repository.update(
+                    assembly_id=assembly_id,
+                    policy_json=str(request.policy_json),
+                    expected_policy_version=expected,
+                    cursor=cursor,
+                )
+            policy = global_store_pb2.AssemblyRuntimePolicy(
+                assembly_id=str(row["assembly_id"]),
+                policy_version=int(row["policy_version"]),
+                policy_json=str(row["policy_json"]),
+            )
+            ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(row.get("updated_at"))
+            )
+            if ts is not None:
+                policy.updated_at.CopyFrom(ts)
+            return global_store_pb2.UpdateAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                policy=policy,
+            )
+        except (ValueError, DatabaseError) as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("UpdateAssemblyRuntimePolicy failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.UpdateAssemblyRuntimePolicyResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    # ========== Unified Operations ==========
+
+    _OP_STATE_TO_DB: dict[int, str] = {
+        operation_pb2.OPERATION_STATE_PENDING: "pending",
+        operation_pb2.OPERATION_STATE_RUNNING: "running",
+        operation_pb2.OPERATION_STATE_SUCCESS: "success",
+        operation_pb2.OPERATION_STATE_FAILED: "failed",
+        operation_pb2.OPERATION_STATE_CANCELLED: "cancelled",
+        operation_pb2.OPERATION_STATE_DEGRADED: "degraded",
+    }
+
+    def _op_state_to_db(self, state: int) -> str:
+        if state not in self._OP_STATE_TO_DB:
+            raise ValidationError("operation state must be set")
+        return self._OP_STATE_TO_DB[state]
+
+    def AcquireOperationLease(
+        self,
+        request: operation_pb2.AcquireOperationLeaseRequest,
+        context: grpc.ServicerContext,
+    ) -> operation_pb2.AcquireOperationLeaseResponse:
+        if (
+            not request.operation_id
+            or not request.kind
+            or not request.target_artifact_id
+        ):
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(
+                "operation_id, kind, and target_artifact_id are required"
+            )
+            return operation_pb2.AcquireOperationLeaseResponse()
+        if not request.owner_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("owner_id is required")
+            return operation_pb2.AcquireOperationLeaseResponse()
+        try:
+            ttl_ms = int(request.ttl_ms)
+            if ttl_ms <= 0:
+                ttl_ms = int(self.config.limits.operation_leases.default_ttl_ms)
+            ttl_ms = min(ttl_ms, int(self.config.limits.operation_leases.max_ttl_ms))
+
+            now = datetime.now(timezone.utc)
+            ts = timestamp_pb2.Timestamp()
+            ts.FromDatetime(now)
+            initial_status = operation_pb2.OperationStatus(
+                state=operation_pb2.OPERATION_STATE_PENDING,
+                message="",
+                progress=0.0,
+                as_of=ts,
+            )
+            initial_proto = initial_status.SerializeToString(deterministic=True)
+            initial_state = self._op_state_to_db(initial_status.state)
+
+            with self.operation_repository.transaction() as cursor:
+                acquired, lease = self.operation_repository.acquire_lease(
+                    operation_id=str(request.operation_id),
+                    kind=str(request.kind),
+                    target_artifact_id=str(request.target_artifact_id),
+                    owner_id=str(request.owner_id),
+                    ttl_ms=ttl_ms,
+                    initial_state=initial_state,
+                    initial_status_proto=initial_proto,
+                    cursor=cursor,
+                )
+
+            lease_msg = operation_pb2.OperationLease(
+                operation_id=str(lease["operation_id"]),
+                lease_token=str(lease["lease_token"]),
+                owner_id=str(lease["owner_id"]),
+                lease_generation=int(lease["lease_generation"]),
+            )
+            expires_ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(lease.get("expires_at"))
+            )
+            if expires_ts is not None:
+                lease_msg.expires_at.CopyFrom(expires_ts)
+
+            if not acquired:
+                context.set_code(grpc.StatusCode.ALREADY_EXISTS)
+                context.set_details("operation lease held by another owner")
+            return operation_pb2.AcquireOperationLeaseResponse(
+                acquired=bool(acquired),
+                lease=lease_msg,
+            )
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return operation_pb2.AcquireOperationLeaseResponse()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("AcquireOperationLease failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return operation_pb2.AcquireOperationLeaseResponse()
+
+    def KeepaliveOperationLease(
+        self,
+        request: operation_pb2.KeepaliveOperationLeaseRequest,
+        context: grpc.ServicerContext,
+    ) -> operation_pb2.KeepaliveOperationLeaseResponse:
+        if not request.lease_token:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("lease_token is required")
+            return operation_pb2.KeepaliveOperationLeaseResponse()
+        try:
+            ttl_ms = int(request.ttl_ms)
+            if ttl_ms <= 0:
+                ttl_ms = int(self.config.limits.operation_leases.default_ttl_ms)
+            ttl_ms = min(ttl_ms, int(self.config.limits.operation_leases.max_ttl_ms))
+
+            with self.operation_repository.transaction() as cursor:
+                lease = self.operation_repository.keepalive_lease(
+                    lease_token=str(request.lease_token),
+                    ttl_ms=ttl_ms,
+                    cursor=cursor,
+                )
+            lease_msg = operation_pb2.OperationLease(
+                operation_id=str(lease["operation_id"]),
+                lease_token=str(lease["lease_token"]),
+                owner_id=str(lease["owner_id"]),
+                lease_generation=int(lease["lease_generation"]),
+            )
+            expires_ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(lease.get("expires_at"))
+            )
+            if expires_ts is not None:
+                lease_msg.expires_at.CopyFrom(expires_ts)
+            return operation_pb2.KeepaliveOperationLeaseResponse(lease=lease_msg)
+        except (ValueError, DatabaseError) as exc:
+            message = str(exc)
+            if "lease_token not found" in message:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+            else:
+                context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(message)
+            return operation_pb2.KeepaliveOperationLeaseResponse()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("KeepaliveOperationLease failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return operation_pb2.KeepaliveOperationLeaseResponse()
+
+    def ReleaseOperationLease(
+        self,
+        request: operation_pb2.ReleaseOperationLeaseRequest,
+        context: grpc.ServicerContext,
+    ) -> operation_pb2.ReleaseOperationLeaseResponse:
+        if not request.lease_token:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("lease_token is required")
+            return operation_pb2.ReleaseOperationLeaseResponse(released=False)
+        try:
+            with self.operation_repository.transaction() as cursor:
+                released = self.operation_repository.release_lease(
+                    lease_token=str(request.lease_token), cursor=cursor
+                )
+            return operation_pb2.ReleaseOperationLeaseResponse(released=bool(released))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("ReleaseOperationLease failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return operation_pb2.ReleaseOperationLeaseResponse(released=False)
+
+    def GetOperation(
+        self,
+        request: operation_pb2.GetOperationRequest,
+        context: grpc.ServicerContext,
+    ) -> operation_pb2.GetOperationResponse:
+        if not request.operation_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("operation_id is required")
+            return operation_pb2.GetOperationResponse()
+        try:
+            row = self.operation_repository.get(operation_id=str(request.operation_id))
+            if row is None:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("operation not found")
+                return operation_pb2.GetOperationResponse()
+            status = operation_pb2.OperationStatus()
+            status.ParseFromString(row["status_proto"])
+            snapshot = any_pb2.Any()
+            if row.get("snapshot_proto"):
+                snapshot.ParseFromString(cast(bytes, row["snapshot_proto"]))
+            resp = operation_pb2.GetOperationResponse(
+                ref=operation_pb2.OperationRef(
+                    operation_id=str(row["operation_id"]),
+                    kind=str(row["kind"]),
+                    target_artifact_id=str(row["target_artifact_id"]),
+                ),
+                status=status,
+                lease_generation=int(row["lease_generation"]),
+                lease_owner=str(row["lease_owner"] or ""),
+            )
+            expires_ts = self._datetime_to_timestamp(
+                self._coerce_db_datetime(row.get("lease_expires_at"))
+            )
+            if expires_ts is not None:
+                resp.lease_expires_at.CopyFrom(expires_ts)
+            if row.get("snapshot_proto"):
+                resp.snapshot.CopyFrom(snapshot)
+            return resp
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("GetOperation failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return operation_pb2.GetOperationResponse()
+
+    def UpdateOperation(
+        self,
+        request: operation_pb2.UpdateOperationRequest,
+        context: grpc.ServicerContext,
+    ) -> operation_pb2.UpdateOperationResponse:
+        if not request.operation_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("operation_id is required")
+            return operation_pb2.UpdateOperationResponse()
+        try:
+            state = self._op_state_to_db(int(request.status.state))
+            status_proto = request.status.SerializeToString(deterministic=True)
+            snapshot_proto: bytes | None = None
+            if request.HasField("snapshot") and (
+                request.snapshot.type_url or request.snapshot.value
+            ):
+                snapshot_proto = request.snapshot.SerializeToString(deterministic=True)
+
+            with self.operation_repository.transaction() as cursor:
+                self.operation_repository.update_operation(
+                    operation_id=str(request.operation_id),
+                    lease_generation=int(request.lease_generation),
+                    state=state,
+                    status_proto=status_proto,
+                    snapshot_proto=snapshot_proto,
+                    min_status_update_interval_ms=int(
+                        self.config.limits.operation_writes.min_status_update_interval_ms
+                    ),
+                    cursor=cursor,
+                )
+            return operation_pb2.UpdateOperationResponse()
+        except ValidationError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return operation_pb2.UpdateOperationResponse()
+        except (ValueError, DatabaseError) as exc:
+            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
+            context.set_details(str(exc))
+            return operation_pb2.UpdateOperationResponse()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("UpdateOperation failed")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return operation_pb2.UpdateOperationResponse()
 
     def GetArtifactBinding(
         self,

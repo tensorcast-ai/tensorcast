@@ -1,6 +1,6 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-"""Repository for variant canonical coverage ranges."""
+"""Repository for view canonical coverage ranges."""
 
 from __future__ import annotations
 
@@ -9,8 +9,8 @@ from typing import Iterable, Sequence
 from tensorcast.global_store.repositories.base import BaseRepository
 
 
-class VariantCoverageRepository(BaseRepository):
-    """Data access layer for `variant_coverage_ranges`."""
+class ViewCoverageRepository(BaseRepository):
+    """Data access layer for `view_coverage_ranges`."""
 
     def get_ranges(
         self,
@@ -23,7 +23,7 @@ class VariantCoverageRepository(BaseRepository):
         rows = target.execute(
             """
             SELECT range_offset, range_length
-            FROM variant_coverage_ranges
+            FROM view_coverage_ranges
             WHERE artifact_id = ? AND view_id = ?
             ORDER BY range_offset ASC
             """,
@@ -42,7 +42,7 @@ class VariantCoverageRepository(BaseRepository):
         target = cursor if cursor is not None else self.get_cursor()
         target.execute(
             """
-            DELETE FROM variant_coverage_ranges
+            DELETE FROM view_coverage_ranges
             WHERE artifact_id = ? AND view_id = ?
             """,
             [artifact_id, view_id],
@@ -56,7 +56,7 @@ class VariantCoverageRepository(BaseRepository):
             return
         target.executemany(
             """
-            INSERT INTO variant_coverage_ranges (
+            INSERT INTO view_coverage_ranges (
                 artifact_id,
                 view_id,
                 range_offset,
@@ -85,7 +85,7 @@ class VariantCoverageRepository(BaseRepository):
             rows = target.execute(
                 """
                 SELECT view_id, range_offset, range_length
-                FROM variant_coverage_ranges
+                FROM view_coverage_ranges
                 WHERE artifact_id = ?
                   AND view_id != ?
                   AND range_offset < ?
@@ -99,3 +99,32 @@ class VariantCoverageRepository(BaseRepository):
                 if len(overlaps) >= 5:
                     return overlaps
         return overlaps
+
+    def find_any_overlap_in_interval(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str,
+        start: int,
+        end: int,
+        cursor=None,
+    ) -> tuple[str, int, int] | None:
+        """Return one overlap within [start, end) or None."""
+        if end <= start:
+            return None
+        target = cursor if cursor is not None else self.get_cursor()
+        row = target.execute(
+            """
+            SELECT view_id, range_offset, range_length
+            FROM view_coverage_ranges
+            WHERE artifact_id = ?
+              AND view_id != ?
+              AND range_offset < ?
+              AND (range_offset + range_length) > ?
+            LIMIT 1
+            """,
+            [artifact_id, view_id, int(end), int(start)],
+        ).fetchone()
+        if not row:
+            return None
+        return (str(row[0]), int(row[1]), int(row[2]))

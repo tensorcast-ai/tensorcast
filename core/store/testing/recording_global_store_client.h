@@ -28,9 +28,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
   std::vector<std::string> registered_replicas;
-  std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_variants;
-  std::vector<components::VariantViewUpdate> view_updates;
-  std::vector<components::VariantInfo> variant_infos;
+  std::vector<std::tuple<std::string, std::string, uint64_t>> recorded_views;
+  std::vector<components::ViewStateUpdate> view_updates;
+  std::vector<components::ViewInfo> view_infos;
   std::optional<components::ArtifactBinding> artifact_binding;
   std::vector<components::MemoryTierStatusPayload> memory_tier_statuses;
   std::vector<components::MemoryTierLeaseDescriptor> memory_tier_leases;
@@ -109,12 +109,12 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return std::string("replica-0");
   }
 
-  absl::Status record_variant_residency(
+  absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
       std::optional<std::string_view>) override {
-    recorded_variants.emplace_back(std::string(canonical_artifact_id), std::string(view_id), view_size_bytes);
+    recorded_views.emplace_back(std::string(canonical_artifact_id), std::string(view_id), view_size_bytes);
     return absl::OkStatus();
   }
 
@@ -161,14 +161,70 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
   }
 
-  absl::Status update_artifact_view_state(const components::VariantViewUpdate& update) override {
+  absl::Status update_artifact_view_state(const components::ViewStateUpdate& update) override {
     view_requests.emplace_back(update.view_id);
     view_updates.push_back(update);
     return absl::OkStatus();
   }
 
-  absl::StatusOr<std::vector<components::VariantInfo>> list_variants(std::string_view) override {
-    return variant_infos;
+  absl::StatusOr<std::vector<components::ViewInfo>> list_views(std::string_view) override {
+    return view_infos;
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_layout_binding not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
+    return absl::UnimplementedError("get_layout_spec not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("attach_layout_to_artifact not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
+    return absl::UnimplementedError("list_artifact_layouts not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
+    return absl::UnimplementedError("write_tensor_proof_commitments not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
+    return absl::UnimplementedError("check_proof_commitments_match not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_runtime_policy not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
+    return absl::UnimplementedError("acquire_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
+    return absl::UnimplementedError("keepalive_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
+    return absl::UnimplementedError("release_operation_lease not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
+      const tensorcast::operation::v1::GetOperationRequest&) override {
+    return absl::UnimplementedError("get_operation not supported in RecordingGlobalStoreClient");
+  }
+
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
+    return absl::UnimplementedError("update_operation not supported in RecordingGlobalStoreClient");
   }
 
   absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {

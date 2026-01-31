@@ -195,18 +195,18 @@ Notes:
 - MTCP staging waits for credit up to `staging_wait_timeout` and fails with `ResourceExhausted` when the deadline is exceeded.
 - `do_channel_gc_loop` reaps stale `StageLease` entries when ACKs are missing (`ack_ttl_ms`).
 
-## Variant-aware routing and verification
+## View-aware routing and verification
 
 - `request_view_transport` is invoked when `view_id` is present. The client falls back to canonical routing when the server is view-unaware.
 - `MetadataStage` fetches the canonical index from Global Store when a view needs planning.
 - `VerificationStage` validates P2P transfers using `verification_json` (key-point verification) and computes optional view hashes.
 
-## Variant View Registration Telemetry
+## View Registration Telemetry
 
 - View registrations are handled by `RegistrationController` and `RegistrationBackend`, which build a bidirectional view plan and stream view writes into the target replica (`core/store/runtime/metadata/registration_backend.cc`).
-- On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
+- On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `ViewStateUpdate` via `RegistrationPublisher::update_view_state`.
 - `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
-- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_variant_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
+- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_view_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
 
 ## Observability
 

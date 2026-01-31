@@ -137,9 +137,9 @@ canonical artifact. Key behaviours:
   requiring prior Global Store state.
 
 The API returns a `RegisteredArtifact` whose `registration_result` carries the
-view identifier, canonical coverage ranges, and variant hash for downstream
+view identifier, canonical coverage ranges, and view hash for downstream
 automation.
-See the [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) guide for the full daemon ↔ Global Store ↔ SDK flow.
+See the [View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#view-registration-telemetry) guide for the full daemon ↔ Global Store ↔ SDK flow.
 
 ## Tensor Storage Graph Helper
 
