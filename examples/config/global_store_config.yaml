@@ -72,6 +72,37 @@ worker_policy:
     # Publish interval hint for daemons; lower improves freshness but adds write load.
     publish_interval: 5s
 
+# v2 limits and retention policies.
+limits:
+  # Batching limits for DigestGrid writes (TreeHash leaves and overlap proofs).
+  digest_writes:
+    # Hard bound on leaf digests per request.
+    max_leaf_writes_per_request: 16384
+    # Hard bound on proof digests per request.
+    max_proof_digests_per_request: 16384
+    # Hard bound on total digest entries per request (leaf + proof).
+    max_total_digests_per_request: 32768
+    # Hard bound on total digest payload bytes per request (sum of digest bytes).
+    max_digest_bytes_per_request: 2097152
+  # Coordinator lease policy for Operation[T] workflows (e.g., seal_assembly).
+  operation_leases:
+    # Default lease TTL when callers omit a TTL.
+    default_ttl: 30s
+    # Maximum lease TTL accepted by the server.
+    max_ttl: 300s
+  # Throttling limits for persisted operation status/snapshot updates.
+  operation_writes:
+    # Minimum interval between persisted status updates for a given operation.
+    min_status_update_interval: 1s
+  # Retention policies for v2 tables.
+  retention:
+    # Retain terminal operations and snapshots for this duration before GC.
+    operations_ttl: 86400s
+    # Retain assembly-scoped proof commitments before GC (post-seal cleanup).
+    assembly_proof_commitments_ttl: 86400s
+    # Retain per-piece proof digests (audit) before GC.
+    piece_proof_digests_ttl: 86400s
+
 # Observability settings.
 observability:
   # Logging output and verbosity controls.

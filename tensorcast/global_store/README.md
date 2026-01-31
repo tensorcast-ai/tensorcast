@@ -91,8 +91,8 @@ Global Store now treats replicas as ByteSpace-scoped:
 
 - Replicas are keyed by `(artifact_id, view_id)` via `MemoryInfo.byte_space` so
   canonical and view pieces route independently.
-- Variant metadata persists canonical coverage ranges and `view_data_hash` so
-  daemons can assemble and seal from pieces (`ListVariants` returns ranges).
+- View metadata persists canonical coverage ranges and `view_data_hash` so
+  daemons can assemble and seal from pieces (`ListViews` returns ranges).
 - `artifact_bindings` records `assembly_id → mi2_id` after sealing so reads can
   resolve to the sealed identity while preserving view routing semantics.
 - Assembly CGIDs that provide `tensor_index_data` (or an `ArtifactDescriptor`
@@ -281,10 +281,12 @@ optionally a `worker_id`) to bridge engine processes with the node’s store dae
 
 ### ViewStateService
 
-**Purpose:** Manage variant metadata and leaf digests for integrity verification.
+**Purpose:** Manage view metadata, TreeHash leaves, and overlap proof digests (v2).
 
 **Key behaviors:**
-- Persists variant view specifications (transformed views of canonical artifacts)
+- Persists view specifications (transformed views of canonical artifacts) and canonical coverage ranges for pieces.
+- Exposes `CheckProofCommitmentsMatch` to compare assembly-scoped and MI2-scoped proof commitments for specified
+  tensors (used by post-seal view reuse policies).
 - Stores Merkle leaf digests keyed by **HashSpaceRef**:
   - canonical hash-space is anchored by `index_multihash`
   - view hash-space is anchored by `view_id`
@@ -314,8 +316,17 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `key_mappings` | Human-friendly key → artifact_id lookup | Cold |
 | `memory_tier_snapshots` | UMA telemetry time-series | Warm |
 | `memory_tier_leases` | Preemptible memory lease lifecycle | Warm |
-| `variants` | View metadata for transformed artifacts | Cold |
+| `views` | View metadata for transformed artifacts | Cold |
+| `view_coverage_ranges` | Canonical coverage ranges for views (pieces) | Cold |
 | `leaves` | Merkle leaf digests for integrity verification | Cold |
+| `layout_specs` | Immutable, content-addressed layout declarations (v2) | Cold |
+| `assembly_layout_bindings` | Versioned `assembly_id → layout_id` pointer (v2) | Warm |
+| `artifact_layout_attachments` | Immutable `mi2_id → layout_id` attachments (v2) | Cold |
+| `assembly_runtime_policies` | Mutable per-assembly operational knobs (v2) | Warm |
+| `operations` | Unified operation status + coordinator leases (v2) | Warm |
+| `assembly_proof_commitments` | Assembly-scoped proof commitments (v2) | Warm |
+| `tensor_proof_commitments` | MI2-scoped proof commitments (v2) | Cold |
+| `piece_proof_digests` | Per-piece proof digests (v2) | Warm |
 
 **Why separate `replica_counters` from `artifact_replicas`?**
 

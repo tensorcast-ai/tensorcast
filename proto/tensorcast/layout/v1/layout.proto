@@ -1,0 +1,48 @@
+syntax = "proto3";
+
+package tensorcast.layout.v1;
+
+// Overlap semantics are declared by the active LayoutSpec.
+//
+// IMPORTANT: v2 supports only tensor-level replicated overlaps (REPLICATE_EQUAL).
+enum OverlapMode {
+  OVERLAP_MODE_UNSPECIFIED = 0;
+  OVERLAP_MODE_DISJOINT = 1;
+  OVERLAP_MODE_REPLICATE_EQUAL = 2;
+}
+
+message TensorLayoutPolicy {
+  // Default is DISJOINT when omitted.
+  OverlapMode overlap_mode = 1;
+}
+
+// LayoutSpec is immutable and content-addressed:
+// layout_id = MH(DETERMINISTIC_PROTO(LayoutSpec)).
+//
+// Any JSON form is audit-only and MUST NOT be used as canonical identity input.
+message LayoutSpec {
+  // Layout schema version. Must be 1 for this design.
+  uint32 layout_schema_version = 1;
+
+  // Canonical index binding for this layout (design-0016).
+  string index_multihash = 2;
+
+  // Optional expected view ids. Must be sorted and de-duplicated by the writer
+  // before hashing.
+  repeated string expected_view_ids = 3;
+
+  // Per-tensor layout policy keyed by tensor name (from the canonical index).
+  map<string, TensorLayoutPolicy> tensors = 4;
+
+  // Required if any tensor uses REPLICATE_EQUAL.
+  string proof_schema_version = 5;
+}
+
+message LayoutSpecRecord {
+  // Convenience echo; derived from payload.
+  string layout_id = 1;
+  LayoutSpec layout = 2;
+  // Optional audit JSON form (not hashed).
+  string layout_json = 3;
+}
+

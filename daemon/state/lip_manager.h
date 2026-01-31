@@ -24,8 +24,18 @@ namespace tensorcast::daemon {
 
 class LipManager {
  public:
+  struct RoutableLeaseResult {
+    ArtifactDeviceKey key;
+    std::vector<std::string> remote_memory_keys;
+    std::vector<uint64_t> buffer_sizes;
+  };
+
   LipManager(std::shared_ptr<store::StoreEngine> engine, IpcRegionRegistry* regions)
       : engine_(std::move(engine)), region_registry_(regions) {}
+
+  void set_global_store_client(std::shared_ptr<store::components::IGlobalStoreClient> client) {
+    global_store_client_ = std::move(client);
+  }
 
   // Copy from LIP segments on source GPU(s) into a freshly allocated
   // coalesced destination buffer on target_device_id. Returns CUDA IPC handle bytes.
@@ -105,12 +115,35 @@ class LipManager {
       std::vector<RegisterStorageMeta>&& storages,
       std::vector<RegisterTensorAliasMeta>&& aliases);
 
+  // Commit a view-scoped routable LIP lease (used for piece registrations).
+  // This registers long-lived communicator keys over the leased view ByteSpace
+  // and stores lease state for keepalive/revoke/TTL.
+  [[nodiscard]] absl::StatusOr<RoutableLeaseResult> commit_routable_view_lease_in_place(
+      const std::string& registration_id,
+      std::string_view artifact_id,
+      std::string_view view_id,
+      int device_id,
+      int owner_pid,
+      uint32_t ttl_ms,
+      uint64_t epoch,
+      uint64_t total_size,
+      std::vector<LeaseSegMeta>&& segments,
+      std::vector<RegisterStorageMeta>&& storages);
+
+  // Attach a Global Store replica_id to a committed LIP lease for best-effort cleanup.
+  void attach_replica_id(const std::string& registration_id, std::string replica_id);
+
  private:
   std::shared_ptr<store::StoreEngine> engine_;
   IpcRegionRegistry* region_registry_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
 
   absl::Mutex exp_mu_;
   absl::flat_hash_map<std::string, LipExportRecord> exports_ ABSL_GUARDED_BY(exp_mu_);
+
+  absl::Mutex routable_mu_;
+  absl::flat_hash_map<ArtifactDeviceKey, LipExportRecord> routable_exports_ ABSL_GUARDED_BY(routable_mu_);
+  absl::flat_hash_map<ArtifactDeviceKey, std::string> routable_replica_ids_ ABSL_GUARDED_BY(routable_mu_);
 
   // Internal LIP lease registry
   mutable absl::Mutex mu_;

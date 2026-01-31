@@ -520,6 +520,30 @@ Status StoreDaemonServiceImpl::SealAssembly(
   return materialization_controller_->seal_assembly(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::StartSealAssembly(
+    grpc::ServerContext* ctx,
+    const v2::StartSealAssemblyRequest* req,
+    v2::StartSealAssemblyResponse* resp) {
+  RpcContext rctx{"StartSealAssembly", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->start_seal_assembly(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::GetOperation(
+    grpc::ServerContext* ctx,
+    const tensorcast::operation::v1::GetOperationRequest* req,
+    tensorcast::operation::v1::GetOperationResponse* resp) {
+  RpcContext rctx{"GetOperation", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->get_operation(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::WaitOperation(
+    grpc::ServerContext* ctx,
+    const v2::WaitOperationRequest* req,
+    v2::WaitOperationResponse* resp) {
+  RpcContext rctx{"WaitOperation", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->wait_operation(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::StartPersistence(
     grpc::ServerContext* ctx,
     const v2::StartPersistenceRequest* req,

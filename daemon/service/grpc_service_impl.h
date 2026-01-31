@@ -197,6 +197,21 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::SealAssemblyRequest* req,
       v2::SealAssemblyResponse* resp) override;
 
+  grpc::Status StartSealAssembly(
+      grpc::ServerContext* ctx,
+      const v2::StartSealAssemblyRequest* req,
+      v2::StartSealAssemblyResponse* resp) override;
+
+  grpc::Status GetOperation(
+      grpc::ServerContext* ctx,
+      const tensorcast::operation::v1::GetOperationRequest* req,
+      tensorcast::operation::v1::GetOperationResponse* resp) override;
+
+  grpc::Status WaitOperation(
+      grpc::ServerContext* ctx,
+      const v2::WaitOperationRequest* req,
+      v2::WaitOperationResponse* resp) override;
+
   grpc::Status StartPersistence(
       grpc::ServerContext* ctx,
       const v2::StartPersistenceRequest* req,

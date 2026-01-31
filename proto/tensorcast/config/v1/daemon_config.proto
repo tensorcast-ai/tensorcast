@@ -178,6 +178,18 @@ message DaemonConfig {
   reserved "checkpoint";
   PinnedMemory pinned_memory = 20;
 
+  message PostSealPolicy {
+    // When true, migrate selected assembly views under the sealed mi2_id.
+    bool migrate_views = 1;
+    // When true, only migrate views that require transforms (e.g., transpose).
+    bool migrate_transpose_only = 2;
+    // When true, allow safe reuse of CGID-scoped view replicas after sealing.
+    bool reuse_views_if_safe = 3;
+    // When true, retire CGID-scoped piece replicas after sealing.
+    bool retire_pieces = 4;
+  }
+  PostSealPolicy post_seal = 21;
+
   message Debug {
     message Cuda {
       bool enable_same_process_ipc_fallback = 1;

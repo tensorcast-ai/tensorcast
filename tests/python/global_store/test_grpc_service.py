@@ -730,7 +730,7 @@ class TestGRPCService:
 
         update_request = global_store_pb2.UpdateArtifactViewStateRequest(
             artifact_id=artifact_id,
-            variant=global_store_pb2.VariantUpsert(
+            view=global_store_pb2.ViewUpsert(
                 view_id="view-1",
                 view_spec_json="{}",
                 view_size=4096,
@@ -826,10 +826,122 @@ class TestGRPCService:
         assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
+    def test_write_tensor_proof_commitments_roundtrip(self, servicer, test_context):
+        artifact_id = "mi2:index_hash:data_hash"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index_hash",
+            data_multihash="data_hash",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        req = global_store_pb2.WriteTensorProofCommitmentsRequest(
+            mi2_id=artifact_id,
+            proof_schema_version="v1",
+            commitments=[
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=0,
+                    digest=b"\x01" * 32,
+                ),
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=1,
+                    digest=b"\x02" * 32,
+                ),
+            ],
+        )
+
+        resp = servicer.WriteTensorProofCommitments(req, test_context)
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.inserted == 2
+        assert test_context.code is None
+
+        test_context.code = None
+        resp2 = servicer.WriteTensorProofCommitments(req, test_context)
+        assert resp2.status == global_store_pb2.Status.STATUS_OK
+        assert resp2.inserted == 0
+        assert test_context.code is None
+
+        test_context.code = None
+        conflict = global_store_pb2.WriteTensorProofCommitmentsRequest(
+            mi2_id=artifact_id,
+            proof_schema_version="v1",
+            commitments=[
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=0,
+                    digest=b"\x03" * 32,
+                ),
+            ],
+        )
+        conflict_resp = servicer.WriteTensorProofCommitments(conflict, test_context)
+        assert conflict_resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+
+    def test_check_proof_commitments_match(self, servicer, test_context):
+        assembly_id = "cgid:assembly-proof"
+        mi2_id = "mi2:index:proof"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=assembly_id,
+            index_multihash="index",
+            data_multihash="data",
+            schema_version="v3",
+            encoding="json",
+        )
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=mi2_id,
+            index_multihash="index",
+            data_multihash="proof",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        servicer.proof_repository.upsert_assembly_proof_commitment(
+            assembly_id=assembly_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=0,
+            digest=b"\x01" * 32,
+        )
+        servicer.proof_repository.upsert_tensor_proof_commitment(
+            mi2_id=mi2_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=0,
+            digest=b"\x01" * 32,
+        )
+
+        req = global_store_pb2.CheckProofCommitmentsMatchRequest(
+            assembly_id=assembly_id,
+            mi2_id=mi2_id,
+            proof_schema_version="v1",
+            tensor_names=["weights"],
+        )
+        test_context.code = None
+        resp = servicer.CheckProofCommitmentsMatch(req, test_context)
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.match is True
+        assert test_context.code is None
+
+        servicer.proof_repository.upsert_assembly_proof_commitment(
+            assembly_id=assembly_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=1,
+            digest=b"\x02" * 32,
+        )
+        test_context.code = None
+        resp2 = servicer.CheckProofCommitmentsMatch(req, test_context)
+        assert resp2.status == global_store_pb2.Status.STATUS_OK
+        assert resp2.match is False
+        assert test_context.code is None
+
     def test_get_artifact_view_info_not_found(
         self, servicer, test_context, memory_info, registered_worker
     ):
-        """Missing variant should respond with NOT_FOUND."""
+        """Missing view should respond with NOT_FOUND."""
         artifact_id = "mi2:index:data"
         servicer.artifacts_repo.upsert_artifact(
             artifact_id=artifact_id,

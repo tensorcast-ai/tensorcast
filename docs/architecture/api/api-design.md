@@ -259,7 +259,8 @@ View inputs:
   - If the daemon rejects `"SERVER"` placement for a view, the SDK surfaces a
     `FAILED_PRECONDITION` with guidance to retry `"CLIENT"`.
 - `registration_kind`: `"canonical"` (default) or `"piece"`. Piece registration is
-  selection-only, rejects transpose, and requires server placement.
+  selection-only, rejects transpose, requires server placement, and must be
+  partial coverage (full canonical coverage should use `"canonical"`).
 - `canonical_index_bytes`: optional bootstrap path for new assemblies; required to
   register the first piece without prior Global Store state.
 - `allow_partial`: deprecated compatibility flag mapped to `registration_kind="piece"`.
@@ -284,8 +285,10 @@ Signature: `tensorcast.register_piece(tensors, *, assembly_id, key=None, slices=
 
 `register_piece` uploads dense view bytes under an assembly id (`cgid:`) and
 records canonical coverage ranges. Pieces are selection-only (narrow only),
-reject transpose, and require server placement. Provide `canonical_index_bytes`
-to bootstrap the first piece when the assembly does not exist yet.
+reject transpose, require server placement, and must not fully cover the
+canonical byte space (use `register_view`/`registration_kind="canonical"` for
+full coverage). Provide `canonical_index_bytes` to bootstrap the first piece
+when the assembly does not exist yet.
 
 ### Store.seal_assembly (seal an assembly to MI2)
 

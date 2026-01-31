@@ -68,9 +68,9 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("register_replica not supported in GlobalStoreClientStub");
   }
 
-  absl::Status record_variant_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
+  absl::Status record_view_residency(std::string_view, std::string_view, uint64_t, std::optional<std::string_view>)
       override {
-    return absl::UnimplementedError("record_variant_residency not supported in GlobalStoreClientStub");
+    return absl::UnimplementedError("record_view_residency not supported in GlobalStoreClientStub");
   }
 
   absl::StatusOr<std::string> register_memory_replica(
@@ -189,12 +189,68 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
 
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
 
-  absl::Status update_artifact_view_state(const components::VariantViewUpdate&) override {
+  absl::Status update_artifact_view_state(const components::ViewStateUpdate&) override {
     return absl::UnimplementedError("update_artifact_view_state not supported in GlobalStoreClientStub");
   }
 
-  absl::StatusOr<std::vector<components::VariantInfo>> list_variants(std::string_view) override {
-    return absl::UnimplementedError("list_variants not supported in GlobalStoreClientStub");
+  absl::StatusOr<std::vector<components::ViewInfo>> list_views(std::string_view) override {
+    return absl::UnimplementedError("list_views not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_layout_binding not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::layout::v1::LayoutSpecRecord> get_layout_spec(std::string_view) override {
+    return absl::UnimplementedError("get_layout_spec not supported in GlobalStoreClientStub");
+  }
+
+  absl::Status attach_layout_to_artifact(std::string_view, std::string_view) override {
+    return absl::UnimplementedError("attach_layout_to_artifact not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view) override {
+    return absl::UnimplementedError("list_artifact_layouts not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const tensorcast::global_store::v1::WriteTensorProofCommitmentsRequest&) override {
+    return absl::UnimplementedError("write_tensor_proof_commitments not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest&) override {
+    return absl::UnimplementedError("check_proof_commitments_match not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::global_store::v1::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view) override {
+    return absl::UnimplementedError("get_assembly_runtime_policy not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const tensorcast::operation::v1::AcquireOperationLeaseRequest&) override {
+    return absl::UnimplementedError("acquire_operation_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const tensorcast::operation::v1::KeepaliveOperationLeaseRequest&) override {
+    return absl::UnimplementedError("keepalive_operation_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::ReleaseOperationLeaseResponse> release_operation_lease(
+      const tensorcast::operation::v1::ReleaseOperationLeaseRequest&) override {
+    return absl::UnimplementedError("release_operation_lease not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<tensorcast::operation::v1::GetOperationResponse> get_operation(
+      const tensorcast::operation::v1::GetOperationRequest&) override {
+    return absl::UnimplementedError("get_operation not supported in GlobalStoreClientStub");
+  }
+
+  absl::Status update_operation(const tensorcast::operation::v1::UpdateOperationRequest&) override {
+    return absl::UnimplementedError("update_operation not supported in GlobalStoreClientStub");
   }
 
   absl::StatusOr<components::ArtifactBinding> get_artifact_binding(std::string_view) override {

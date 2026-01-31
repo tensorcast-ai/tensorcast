@@ -85,7 +85,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
     return absl::OkStatus();
   }
 
-  absl::Status update_variant_view(const components::VariantViewUpdate& update) override {
+  absl::Status update_view_state(const components::ViewStateUpdate& update) override {
     auto client_or = get_connected_client();
     if (!client_or.ok()) {
       return client_or.status();
@@ -192,8 +192,8 @@ absl::Status MetadataGateway::register_replica(
   auto client = std::move(*client_or);
 
   if (key.view_id.has_value()) {
-    VLOG(1) << "MetadataGateway registering variant view_id=" << *key.view_id
-            << " (canonical_artifact_id=" << key.artifact_id << ")";
+    VLOG(1) << "MetadataGateway registering view_id=" << *key.view_id << " (canonical_artifact_id=" << key.artifact_id
+            << ")";
   }
 
   auto size_or = replica_runtime_->get_replica_size(key);
@@ -223,12 +223,12 @@ absl::Status MetadataGateway::register_replica(
   }
 
   if (key.view_id.has_value()) {
-    auto variant_status = client->record_variant_residency(key.artifact_id, *key.view_id, *size_or);
-    if (!variant_status.ok()) {
-      if (absl::IsUnimplemented(variant_status)) {
-        VLOG(1) << "Global Store does not yet accept variant residency updates: " << variant_status.message();
+    auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
+    if (!view_status.ok()) {
+      if (absl::IsUnimplemented(view_status)) {
+        VLOG(1) << "Global Store does not yet accept view residency updates: " << view_status.message();
       } else {
-        LOG(WARNING) << "record_variant_residency failed for view_id=" << *key.view_id << ": " << variant_status;
+        LOG(WARNING) << "record_view_residency failed for view_id=" << *key.view_id << ": " << view_status;
       }
     }
   }

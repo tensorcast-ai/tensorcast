@@ -86,6 +86,8 @@ struct ResolveFixture {
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
+  tensorcast::common::AsyncRuntime async_runtime;
+  tensorcast::daemon::WorkerIdentityStore identity;
   MaterializationController controller;
 
   explicit ResolveFixture(std::filesystem::path storage_root = test_tmpdir())
@@ -107,6 +109,8 @@ struct ResolveFixture {
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,
+                .async_runtime = async_runtime,
+                .identity = identity,
                 .global_store_client = nullptr,
                 .lifecycle = nullptr,
                 .storage_path = ensure_dir(std::move(storage_root)),

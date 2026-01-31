@@ -2,6 +2,8 @@
 
 """Tests for Global Store service layer."""
 
+import base64
+import hashlib
 from datetime import datetime, timezone
 
 import pytest
@@ -16,8 +18,11 @@ from tensorcast.global_store.exceptions import (
 from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.services.view_state_service import (
     LeafWritePayload,
-    VariantUpsertPayload,
+    PieceProofDigestPayload,
+    PROOF_SCHEMA_V1,
+    ViewUpsertPayload,
 )
+from tensorcast.proto.layout.v1 import layout_pb2
 
 
 class TestServices:
@@ -676,10 +681,10 @@ class TestServices:
         assert selected.current_requests == 3  # Incremented from 2 to 3
 
     def test_view_state_service_update_and_fetch(self, services):
-        """Persist variant metadata and leaves atomically."""
+        """Persist view metadata and leaves atomically."""
         view_state_service = services["view_state"]
         now = datetime.now(timezone.utc)
-        variant_payload = VariantUpsertPayload(
+        view_payload = ViewUpsertPayload(
             artifact_id="mi2:index:data",
             view_id="view-1",
             view_spec_json="{}",
@@ -707,16 +712,18 @@ class TestServices:
         ]
 
         view_state_service.update_view_state(
-            variant=variant_payload,
+            view=view_payload,
             leaf_writes=leaf_payloads,
+            proof_digests=(),
+            tensor_intervals=None,
         )
 
-        stored_variant = view_state_service.get_variant(
+        stored_view = view_state_service.get_view(
             artifact_id="mi2:index:data", view_id="view-1"
         )
-        assert stored_variant is not None
-        assert stored_variant["view_size"] == 128
-        assert stored_variant["view_spec_json"] == "{}"
+        assert stored_view is not None
+        assert stored_view["view_size"] == 128
+        assert stored_view["view_spec_json"] == "{}"
 
         leaves = list(
             view_state_service.get_leaves(
@@ -729,8 +736,8 @@ class TestServices:
         assert leaves[0][0] == 0
         assert leaves[0][1] == b"\x01" * 32
 
-    def test_view_state_service_record_variant_registration(self, services):
-        """record_variant_registration delegates to update_view_state."""
+    def test_view_state_service_record_view_registration(self, services):
+        """record_view_registration delegates to update_view_state."""
         view_state_service = services["view_state"]
         now = datetime.now(timezone.utc)
         leaf_payloads = [
@@ -743,7 +750,7 @@ class TestServices:
             )
         ]
 
-        view_state_service.record_variant_registration(
+        view_state_service.record_view_registration(
             artifact_id="mi2:index:data",
             view_id="view-2",
             view_spec_json='{"tensor":"weights"}',
@@ -755,13 +762,13 @@ class TestServices:
             leaf_writes=leaf_payloads,
         )
 
-        stored_variant = view_state_service.get_variant(
+        stored_view = view_state_service.get_view(
             artifact_id="mi2:index:data",
             view_id="view-2",
         )
-        assert stored_variant is not None
-        assert stored_variant["view_size"] == 512
-        assert stored_variant["view_data_hash"] == "mhash-2"
+        assert stored_view is not None
+        assert stored_view["view_size"] == 512
+        assert stored_view["view_data_hash"] == "mhash-2"
 
         leaves = list(
             view_state_service.get_leaves(
@@ -782,7 +789,7 @@ class TestServices:
         baseline_complete = complete_counter._value.get()
         baseline_partial = partial_counter._value.get()
 
-        view_state_service.record_variant_registration(
+        view_state_service.record_view_registration(
             artifact_id="mi2:index:metrics",
             view_id="view-metrics",
             view_spec_json="{}",
@@ -800,7 +807,7 @@ class TestServices:
         assert backlog_value == 512
         assert partial_counter._value.get() == baseline_partial + 1
 
-        view_state_service.record_variant_registration(
+        view_state_service.record_view_registration(
             artifact_id="mi2:index:metrics",
             view_id="view-metrics",
             view_spec_json="{}",
@@ -822,7 +829,7 @@ class TestServices:
         view_state_service = services["view_state"]
         with pytest.raises(ValueError, match="artifact_id mismatch"):
             view_state_service.update_view_state(
-                variant=None,
+                view=None,
                 leaf_writes=[
                     LeafWritePayload(
                         artifact_id="mi2:index:data",
@@ -839,12 +846,14 @@ class TestServices:
                         digest=b"\x01" * 32,
                     ),
                 ],
+                proof_digests=(),
+                tensor_intervals=None,
             )
 
     def test_view_state_service_requires_coverage_metadata_for_partial(self, services):
         view_state_service = services["view_state"]
         with pytest.raises(DatabaseError, match="coverage metadata missing"):
-            view_state_service.record_variant_registration(
+            view_state_service.record_view_registration(
                 artifact_id="mi2:index:partial",
                 view_id="view-partial",
                 view_spec_json="{}",
@@ -858,8 +867,9 @@ class TestServices:
 
     def test_view_state_service_rejects_overlapping_ranges(self, services):
         view_state_service = services["view_state"]
-        view_state_service.record_variant_registration(
-            artifact_id="mi2:index:overlap",
+        tensor_intervals = {"weights": (0, 256)}
+        view_state_service.record_view_registration(
+            artifact_id="cgid:overlap",
             view_id="view-a",
             view_spec_json="{}",
             view_size=64,
@@ -868,11 +878,12 @@ class TestServices:
             canonical_size_bytes=256,
             canonical_bytes_covered=64,
             canonical_ranges=[(0, 64)],
+            tensor_intervals=tensor_intervals,
         )
 
         with pytest.raises(DatabaseError, match="overlapping canonical coverage"):
-            view_state_service.record_variant_registration(
-                artifact_id="mi2:index:overlap",
+            view_state_service.record_view_registration(
+                artifact_id="cgid:overlap",
                 view_id="view-b",
                 view_spec_json="{}",
                 view_size=64,
@@ -881,11 +892,137 @@ class TestServices:
                 canonical_size_bytes=256,
                 canonical_bytes_covered=64,
                 canonical_ranges=[(32, 64)],
+                tensor_intervals=tensor_intervals,
+            )
+
+    def test_view_state_service_allows_replicate_equal_overlaps_with_proofs(
+        self, services, repositories
+    ):
+        view_state_service = services["view_state"]
+        assembly_id = "cgid:replicate_equal"
+
+        def _multibase_multihash_sha256(digest: bytes) -> str:
+            if len(digest) != 32:
+                raise ValueError("SHA256 digest must be 32 bytes")
+            mh = b"\x12\x20" + digest
+            encoded = base64.b32encode(mh).decode("ascii").lower().rstrip("=")
+            return f"b{encoded}"
+
+        canonical_index_bytes = (
+            b'{"weights":[0,32,[8],[1],"torch.float32",0],"bias":[32,32,[8],[1],"torch.float32",0]}'
+        )
+        index_multihash = _multibase_multihash_sha256(
+            hashlib.sha256(canonical_index_bytes).digest()
+        )
+
+        layout = layout_pb2.LayoutSpec(
+            layout_schema_version=1,
+            index_multihash=index_multihash,
+            proof_schema_version=PROOF_SCHEMA_V1,
+        )
+        layout.tensors["weights"].overlap_mode = (
+            layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL
+        )
+        payload = layout.SerializeToString(deterministic=True)
+        layout_id = _multibase_multihash_sha256(hashlib.sha256(payload).digest())
+        repositories["layout_spec"].put(
+            layout_id=layout_id,
+            index_multihash=index_multihash,
+            layout_proto=payload,
+            layout_json=None,
+        )
+        repositories["assembly_layout_binding"].update(
+            assembly_id=assembly_id,
+            layout_id=layout_id,
+            expected_binding_version=0,
+        )
+
+        tensor_intervals = {"weights": (0, 32), "bias": (32, 32)}
+        weights_digest = hashlib.sha256(b"\x01" * 32).digest()
+        bias_digest = hashlib.sha256(b"\x02" * 32).digest()
+
+        view_state_service.record_view_registration(
+            artifact_id=assembly_id,
+            view_id="view-a",
+            view_spec_json="{}",
+            view_size=32,
+            view_data_hash="vh-a",
+            verified_at=None,
+            canonical_size_bytes=64,
+            canonical_bytes_covered=32,
+            canonical_ranges=[(0, 32)],
+            proof_digests=[
+                PieceProofDigestPayload(
+                    artifact_id=assembly_id,
+                    view_id="view-a",
+                    tensor_name="weights",
+                    proof_schema_version=PROOF_SCHEMA_V1,
+                    proof_chunk_idx=0,
+                    digest=weights_digest,
+                ),
+                # Non-participating tensor digests are allowed (ignored by v2 policy).
+                PieceProofDigestPayload(
+                    artifact_id=assembly_id,
+                    view_id="view-a",
+                    tensor_name="bias",
+                    proof_schema_version=PROOF_SCHEMA_V1,
+                    proof_chunk_idx=0,
+                    digest=bias_digest,
+                ),
+            ],
+            tensor_intervals=tensor_intervals,
+        )
+
+        view_state_service.record_view_registration(
+            artifact_id=assembly_id,
+            view_id="view-b",
+            view_spec_json="{}",
+            view_size=32,
+            view_data_hash="vh-b",
+            verified_at=None,
+            canonical_size_bytes=64,
+            canonical_bytes_covered=32,
+            canonical_ranges=[(0, 32)],
+            proof_digests=[
+                PieceProofDigestPayload(
+                    artifact_id=assembly_id,
+                    view_id="view-b",
+                    tensor_name="weights",
+                    proof_schema_version=PROOF_SCHEMA_V1,
+                    proof_chunk_idx=0,
+                    digest=weights_digest,
+                )
+            ],
+            tensor_intervals=tensor_intervals,
+        )
+
+        with pytest.raises(DatabaseError, match="assembly_proof_commitments conflict"):
+            view_state_service.record_view_registration(
+                artifact_id=assembly_id,
+                view_id="view-c",
+                view_spec_json="{}",
+                view_size=32,
+                view_data_hash="vh-c",
+                verified_at=None,
+                canonical_size_bytes=64,
+                canonical_bytes_covered=32,
+                canonical_ranges=[(0, 32)],
+                proof_digests=[
+                    PieceProofDigestPayload(
+                        artifact_id=assembly_id,
+                        view_id="view-c",
+                        tensor_name="weights",
+                        proof_schema_version=PROOF_SCHEMA_V1,
+                        proof_chunk_idx=0,
+                        digest=hashlib.sha256(b"\x03" * 32).digest(),
+                    )
+                ],
+                tensor_intervals=tensor_intervals,
             )
 
     def test_view_state_service_rejects_view_data_hash_conflict(self, services):
         view_state_service = services["view_state"]
-        view_state_service.record_variant_registration(
+        view_state_service.record_view_registration(
             artifact_id="mi2:index:hash",
             view_id="view-hash",
             view_spec_json="{}",
@@ -898,7 +1035,7 @@ class TestServices:
         )
 
         with pytest.raises(DatabaseError, match="view_data_hash conflict"):
-            view_state_service.record_variant_registration(
+            view_state_service.record_view_registration(
                 artifact_id="mi2:index:hash",
                 view_id="view-hash",
                 view_spec_json="{}",

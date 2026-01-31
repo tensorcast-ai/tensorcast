@@ -115,6 +115,9 @@ graph TB
 
 - Materialization (multi-device):
   - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
+  - `absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids)`
+    assembles a view replica under a sealed `mi2` identity from CGID-scoped pieces; validates index multihash for `mi2`
+    targets and requires a GPU destination.
   - Modes:
     - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. P2P is gated by `hints.allow_p2p`; disk fallback happens only when `hints.allow_disk` is true and `hints.disk_path` is populated. `PREFER_DISK` flips ordering to disk‑first, while `PREFER_P2P` keeps P2P‑first ordering and still requires a canonical `artifact_id`. When `disk_path` is empty the orchestrator returns the transport status directly (no implicit fallback). Global Store routing is eventually consistent and may briefly reference evicted local replicas; when that happens, the route is treated as stale: disk fallback is used when allowed and available, otherwise a retryable error is returned.
     - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
@@ -122,7 +125,7 @@ graph TB
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_signal, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
     `cuda_ipc_handle` uses the shared `cuda::IpcHandleBytes` abstraction from `core/cuda`.
-  - Variant-aware hints: populate `MaterializeHints::variant` (canonical id, optional view id/spec, placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and variant replicas on the same device.
+  - View-aware hints: populate `MaterializeHints::variant` (legacy field name; view id/spec + placement) to request a view. The resulting `ReplicaKey` includes `view_id` so the registry differentiates canonical and view replicas on the same device.
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
 - Region-backed materialization (external targets):
@@ -156,25 +159,28 @@ graph TB
 
 - View registration (v1.5):
   - `begin_register_artifact` accepts optional `ViewRegistration` payloads and requests a `BidirectionalViewPlan` from `core/store/materialization/dataplane/view::ViewPlanner`.
-  - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + variant hashes and canonical coverage.
+  - `ingest_view_registration_chunk` streams view bytes (SERVER placement) into canonical memory using `ViewIngestExecutor`; `commit_registered_artifact` publishes canonical + view hashes and canonical coverage.
   - When the runtime Fake CUDA backend is active (`TENSORCAST_CUDA_BACKEND=fake` in tests), view ingestion/transform runs on CPU tensors even for GPU placement and tolerates missing device ids.
-  - See [Variant View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
-- View registration now requires `registration_kind`: `CANONICAL` keeps full-coverage semantics, while `PIECE` stores dense view bytes (no canonical zero-fill), enforces selection-only views, computes `view_data_hash` plus canonical coverage ranges, and fails commit if the piece hash cannot be computed.
+  - See [View Registration Telemetry](../../docs/architecture/p2p-transfer-strategies.md#view-registration-telemetry) for the end-to-end flow across daemon and Global Store.
+- View registration now requires `registration_kind`: `CANONICAL` keeps full-coverage semantics, while `PIECE` stores dense view bytes (no canonical zero-fill), enforces selection-only views, requires partial canonical coverage (full coverage must use `CANONICAL`), computes `view_data_hash` plus canonical coverage ranges, and fails commit if the piece hash cannot be computed.
 - Piece registrations now treat Global Store view-metadata update failures (for example, `view_data_hash` conflicts) as commit failures so immutability violations surface to callers.
 
 - Assembly sealing (v1):
   - `StoreEngine::seal_assembly(assembly_id, publish_canonical)` assembles canonical bytes from pieces, computes `data_multihash`, persists the `assembly_id → mi2_id` binding, and optionally materializes/publishes a canonical replica for durability.
+  - Post-seal view migration uses `materialize_view_from_assembly(...)` under daemon-controlled policy to re-home cached
+    views under the sealed identity.
 
 - Remote access and registration helpers:
   - `enable_remote_replica_access/disable_remote_replica_access`
   - `register_replica_with_global_store(ReplicaKey[, canonical_mi2_override])`
 
-### Variant-Aware Views (v1)
+### View-Aware Views (v1)
 
 - `StoreEngine::compute_view_plan(canonical_index_json, ViewSpec)` constructs a deterministic `ViewPlan` by delegating to the loader `ViewPlanner`. v1 supports single-dimension `narrow` (slice) operations.
 - When `tensor_names`/subset selection is provided, `ViewPlanner` packs tensors in the provided order (including full-name subsets) so `view_index_json` offsets match client-declared ordering for `MaterializeIntoTarget`.
 - `StoreEngine::view_plan_allows_alias(const ViewPlan&)` exposes the loader selection analysis so callers can short-circuit to zero-copy aliasing when (and only when) the selection is contiguous, segment-aligned, and no transforms are required.
-- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the variant `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
+- `StoreEngine::compute_view_data_hash_from_source(SeekableSource&, ViewPlan, leaf_bytes)` delegates to the shared `ViewHashComputer`, which streams the canonical byte space, applies transforms when required, and computes the view `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
+  - This computes the view `view_data_hash` using the standard TreeHash pipeline used by ingestion and registration flows.
 
 These helpers intentionally operate on generic `SeekableSource` instances; the daemon wraps GPU or disk sources in a compiled `ByteRangeMappedSource` so hashing and verification share one execution pipeline across transports.
 
@@ -385,6 +391,7 @@ IO helpers (`write_at`, `map_file_segments`).
 
 - CommunicationManager
   - Wraps `Communicator`; registers memory for P2P and provides shared engine to loaders
+  - `StoreEngineOptions.p2p_port=0` (default) binds an ephemeral P2P port chosen by the OS; set an explicit port for stable endpoints
 
 ## Content-Addressed Identity and Verification (RFC-0007)
 
@@ -427,12 +434,12 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - Pinned pool utilization and CPU available bytes
 - Replica counts and sizes
 - GPU metrics (free/total) via `DeviceManager`
-- Operation latencies (disk/P2P) and P2P byte counters (exposed via `tc_artifact_load_seconds` with `view_scope`, `view_id_prefix` labels so canonical vs variant loads can be distinguished)
+- Operation latencies (disk/P2P) and P2P byte counters (exposed via `tc_artifact_load_seconds` with `view_scope`, `view_id_prefix` labels so canonical vs view loads can be distinguished)
 
 ## Key Types and Contracts
 
 - `DeviceKey` (core/store/device_types.h): logical device id `{type, ordinal, uuid}` used across APIs.
-- `ReplicaKey` (core/store/materialization/contracts/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional variant byte-space residency.
+- `ReplicaKey` (core/store/materialization/contracts/loading_spec.h): `{artifact_id, view_id?, device, replica}` uniquely identifies an instance; `view_id` captures optional view byte-space residency.
 - `MemoryLocation` (core/common/memory/memory_location.h): `GPU`, `CPU`, `DISK`, `REMOTE`.
 - `ReplicaHandle` (loading_spec.h): conveys instance key, states, CUDA IPC handle, optional view metadata, and a `ready_signal`.
 
@@ -449,10 +456,10 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 - Content-addressed `mi2:...` artifact IDs require Global Store routing; disk fallback must specify `hints.disk_path`.
 - Per-GPU transfer concurrency is limited to 1 active session by design to reduce VRAM fragmentation and pressure.
 - Canonical tensor indices are expected in schema version `"v3"`; the engine emits v3 descriptors and rejects older schemas on write paths.
-- Variant replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_variant_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.
+- View replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_view_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.
 
 For broader architectural context, see docs/architecture.md and docs/state-management.md.
-- Verification metadata: canonical replicas reuse `verification.json`. Variant views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a variant. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; the backend `ingest_from_p2p()` path now flows through the runtime pipeline, which performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
+- Verification metadata: canonical replicas reuse `verification.json`. Views persist per-view metadata under `verification.view_<sanitized_view_id>.json`; each record carries the `byte_space_id` so canonical metadata is never reused for a view. Every persisted payload now embeds a `metadata_signature` (canonical SHA-256 of the serialized payload). The loader re-reads the on-disk JSON on every materialization, validates the signature, and compares the payload fingerprint against any cached entry before reuse. Tampered or truncated files trigger `DataLoss` (cache is invalidated) and force regeneration, while cached entries are only reused when the file is absent and a fresh persistence will rewrite it. P2P senders may still provide inline `verification_json`; the backend `ingest_from_p2p()` path now flows through the runtime pipeline, which performs fast KEY_POINTS verification of the loaded replica (CPU/GPU). Verification failure returns a `DataLoss` error and aborts materialization. All metadata reads/writes are serialized through `VerificationMetadataGuard`, persisted via an atomic write helper (`open` → `write` → `fsync` → `rename` + directory `fsync`), and accompanied by structured `verification_metadata_write_{succeeded,failed}` logs that surface artifact, byte-space, guard wait, and write durations.
 - Debug visibility: enabling `--v=1` (or higher) now emits the key-point triplet and artifact size whenever verification metadata is regenerated or reused. These logs include the active CUDA device id so stale metadata vs. stale GPU residency issues can be distinguished quickly when diagnosing DataLoss failures.
 - Fake CUDA IPC now backs all device allocations with shared POSIX `shm`, so CUDA IPC handles expose the live buffer across processes instead of a static snapshot. Writes after export are immediately visible to consumers, matching real CUDA semantics.
 ## Granularity Terminology and Invariants

@@ -109,7 +109,7 @@ void normalize_defaults(tc::CommunicatorConfig* cfg) {
   if (tr->connect_timeout_sec() <= 0)
     tr->set_connect_timeout_sec(10);
   if (!tr->has_so_reuseport())
-    tr->set_so_reuseport(true);
+    tr->set_so_reuseport(false);
 
   // Affinity defaults
   cfg->mutable_affinity();

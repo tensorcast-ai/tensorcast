@@ -42,6 +42,7 @@ class RegistrationManager {
     bool view_registration{false};
     store::StoreEngine::ViewPlacement view_placement{store::StoreEngine::ViewPlacement::kUnspecified};
     std::string view_id;
+    std::string view_spec_json;
     store::StoreEngine::ViewRegistrationKind view_registration_kind{
         store::StoreEngine::ViewRegistrationKind::kUnspecified};
     uint64_t view_canonical_size_bytes{0};

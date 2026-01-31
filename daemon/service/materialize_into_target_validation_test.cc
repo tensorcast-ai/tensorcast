@@ -118,6 +118,8 @@ struct ValidationFixture {
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
+  tensorcast::common::AsyncRuntime async_runtime;
+  tensorcast::daemon::WorkerIdentityStore identity;
   std::filesystem::path storage_root;
   MaterializationController controller;
 
@@ -142,6 +144,8 @@ struct ValidationFixture {
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,
+                .async_runtime = async_runtime,
+                .identity = identity,
                 .global_store_client = global_store_client,
                 .lifecycle = nullptr,
                 .external_target_verification_enabled = external_target_verification_enabled,

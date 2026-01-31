@@ -545,7 +545,10 @@ int main(int argc, char** argv) {
   // Async runtime shared by daemon + embedded store.
   auto async_runtime = std::make_shared<common::AsyncRuntime>(common::AsyncRuntime::Options{
       .cpu_threads = static_cast<size_t>(std::max<int>(1, opts.num_thread)),
-      .blocking_threads = static_cast<size_t>(std::max<int>(2, opts.num_thread)),
+      // blocking_executor() may schedule nested fan-out (e.g., pump producers) while the
+      // parent task blocks waiting for completion. Keep a small headroom to avoid
+      // thread-pool starvation deadlocks for low thread-count configurations.
+      .blocking_threads = static_cast<size_t>(std::max<int>(4, opts.num_thread)),
       .thread_name_prefix = "tensorcast",
   });
   opts.async_runtime = async_runtime;
@@ -592,6 +595,11 @@ int main(int argc, char** argv) {
   daemon_opts.handle_lease_max_mints_per_second = cfg.lifecycle().handle_leases().max_mints_per_second();
   daemon_opts.cpu_shared_memory_enabled = opts.cpu_shared_memory_enabled;
   daemon_opts.external_target_verification_enabled = cfg.engine().enable_external_target_verification();
+  const auto& post_seal = cfg.post_seal();
+  daemon_opts.post_seal_policy.migrate_views = post_seal.migrate_views();
+  daemon_opts.post_seal_policy.migrate_transpose_only = post_seal.migrate_transpose_only();
+  daemon_opts.post_seal_policy.reuse_views_if_safe = post_seal.reuse_views_if_safe();
+  daemon_opts.post_seal_policy.retire_pieces = post_seal.retire_pieces();
   if (cfg.daemon_id().empty()) {
     LOG(ERROR) << "DaemonConfig.daemon_id is required for Global Store registration.";
     return 1;

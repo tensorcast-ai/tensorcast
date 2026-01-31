@@ -363,7 +363,7 @@ void MetricsCollector::record_artifact_load(
   attrs.emplace("source", opentelemetry::common::AttributeValue(source));
   attrs.emplace("device", opentelemetry::common::AttributeValue(device));
   attrs.emplace("phase", opentelemetry::common::AttributeValue(phase));
-  attrs.emplace("view_scope", opentelemetry::common::AttributeValue(view_id.has_value() ? "variant" : "canonical"));
+  attrs.emplace("view_scope", opentelemetry::common::AttributeValue(view_id.has_value() ? "view" : "canonical"));
   if (view_id.has_value() && !view_id->empty()) {
     std::string truncated{*view_id};
     constexpr size_t kMaxLen = 24;

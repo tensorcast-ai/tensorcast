@@ -1,0 +1,104 @@
+syntax = "proto3";
+
+package tensorcast.operation.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+message OperationRef {
+  string operation_id = 1;
+  string kind = 2;
+  string target_artifact_id = 3;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCESS = 3;
+  OPERATION_STATE_FAILED = 4;
+  OPERATION_STATE_CANCELLED = 5;
+  OPERATION_STATE_DEGRADED = 6;
+}
+
+message OperationError {
+  // gRPC canonical code name (e.g. DEADLINE_EXCEEDED).
+  string status_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message OperationStatus {
+  OperationState state = 1;
+  string message = 2;
+  double progress = 3;
+  google.protobuf.Timestamp as_of = 4;
+  optional OperationError error = 5;
+  google.protobuf.Any result = 6;
+}
+
+message AcquireOperationLeaseRequest {
+  // Deterministic operation id (e.g. MH("seal_assembly:<assembly_id>")).
+  string operation_id = 1;
+  // Operation kind (e.g. "seal_assembly").
+  string kind = 2;
+  // Operation target (e.g. assembly_id).
+  string target_artifact_id = 3;
+  // Stable caller identity for debugging (e.g. daemon_id).
+  string owner_id = 4;
+  // Requested lease TTL.
+  uint64 ttl_ms = 5;
+}
+
+message OperationLease {
+  string operation_id = 1;
+  string lease_token = 2;
+  string owner_id = 3;
+  uint64 lease_generation = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message AcquireOperationLeaseResponse {
+  bool acquired = 1;
+  OperationLease lease = 2;
+}
+
+message KeepaliveOperationLeaseRequest {
+  string lease_token = 1;
+  uint64 ttl_ms = 2;
+}
+
+message KeepaliveOperationLeaseResponse {
+  OperationLease lease = 1;
+}
+
+message ReleaseOperationLeaseRequest {
+  string lease_token = 1;
+}
+
+message ReleaseOperationLeaseResponse {
+  bool released = 1;
+}
+
+message GetOperationRequest {
+  string operation_id = 1;
+}
+
+message GetOperationResponse {
+  OperationRef ref = 1;
+  OperationStatus status = 2;
+  uint64 lease_generation = 3;
+  string lease_owner = 4;
+  google.protobuf.Timestamp lease_expires_at = 5;
+  google.protobuf.Any snapshot = 6;
+}
+
+message UpdateOperationRequest {
+  string operation_id = 1;
+  uint64 lease_generation = 2;
+  OperationStatus status = 3;
+  google.protobuf.Any snapshot = 4;
+}
+
+message UpdateOperationResponse {}
+

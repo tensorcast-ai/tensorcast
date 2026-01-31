@@ -87,7 +87,20 @@ class StoreEngine {
       uint64_t generation,
       const loading::MaterializeHints& hints = {});
 
-  absl::StatusOr<SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
+      std::string_view assembly_id,
+      std::string_view target_artifact_id,
+      std::string_view view_id,
+      std::string_view view_spec_json,
+      const DeviceKey& target_device,
+      loading::TransformPlacement placement,
+      const std::vector<std::string>* allowed_view_ids = nullptr);
+
+  absl::StatusOr<SealAssemblyResult> seal_assembly(
+      std::string_view assembly_id,
+      bool publish_canonical,
+      runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb = {},
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,

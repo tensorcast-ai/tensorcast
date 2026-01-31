@@ -98,6 +98,17 @@ pinned_memory:
       pool_bytes: 1GB
       rdma_preregister: true
 
+# Post-seal policies for assembly -> mi2 alias resolution.
+post_seal:
+  # When true, migrate selected assembly views under the sealed mi2_id.
+  migrate_views: false
+  # When true, only migrate views that require transforms (e.g., transpose).
+  migrate_transpose_only: false
+  # When true, allow safe reuse of CGID-scoped view replicas after sealing.
+  reuse_views_if_safe: false
+  # When true, retire CGID-scoped piece replicas after sealing.
+  retire_pieces: false
+
 # Global Store registration and heartbeat coordination.
 high_availability:
   # When true, the daemon registers with Global Store and emits heartbeats/sync; requires p2p_listen.port.

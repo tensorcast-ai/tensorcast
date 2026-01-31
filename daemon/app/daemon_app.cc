@@ -63,6 +63,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   if (app->options_.global_store_client && app->kernel_->persistence_manager()) {
     app->kernel_->persistence_manager()->set_global_store_client(app->options_.global_store_client.get());
   }
+  if (app->options_.global_store_client) {
+    app->kernel_->lip_manager().set_global_store_client(app->options_.global_store_client);
+  }
 
   MaterializationController::Dep mdep{
       .engine = app->kernel_->engine(),
@@ -72,12 +75,15 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .async_runtime = app->kernel_->async_runtime(),
+      .identity = app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
       .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
+      .post_seal_policy = app->options_.daemon_options.post_seal_policy,
   };
   app->materialization_controller_ = std::make_unique<MaterializationController>(mdep);
 
@@ -86,6 +92,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .reg = app->kernel_->registration_manager(),
       .lip = app->kernel_->lip_manager(),
       .refs = app->kernel_->ref_tracker(),
+      .identity = &app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .regions = app->kernel_->region_registry(),

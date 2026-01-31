@@ -65,6 +65,18 @@ absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_from_p2p(
       artifact_identifier, source, target, hints, /*publish_to_global_store=*/true);
 }
 
+absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::materialize_view_from_assembly(
+    std::string_view assembly_id,
+    std::string_view target_artifact_id,
+    std::string_view view_id,
+    std::string_view view_spec_json,
+    const DeviceKey& target_device,
+    loading::TransformPlacement placement,
+    const std::vector<std::string>* allowed_view_ids) {
+  return materialization_facade_->materialize_view_from_assembly(
+      assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids);
+}
+
 absl::Status IngestionRuntime::register_replica_with_global_store(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override) {
@@ -73,8 +85,11 @@ absl::Status IngestionRuntime::register_replica_with_global_store(
 
 absl::StatusOr<SealAssemblyResult> IngestionRuntime::seal_assembly(
     std::string_view assembly_id,
-    bool publish_canonical) {
-  return materialization_facade_->seal_assembly(assembly_id, publish_canonical);
+    bool publish_canonical,
+    ingestion::MaterializationFacade::SealProgressCallback progress_cb,
+    const std::vector<std::string>* allowed_view_ids) {
+  return materialization_facade_->seal_assembly(
+      assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
 }
 
 } // namespace tensorcast::store::runtime

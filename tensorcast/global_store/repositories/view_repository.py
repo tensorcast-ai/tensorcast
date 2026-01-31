@@ -1,6 +1,6 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-"""Repository for variant metadata anchored to canonical artifacts."""
+"""Repository for view metadata anchored to artifacts."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from tensorcast.logger import init_logger
 logger = init_logger(__name__)
 
 
-class VariantRepository(BaseRepository):
-    """Data access helper for the `variants` table."""
+class ViewRepository(BaseRepository):
+    """Data access helper for the `views` table."""
 
     def upsert(
         self,
@@ -29,7 +29,7 @@ class VariantRepository(BaseRepository):
         canonical_bytes_covered: Optional[int] = None,
         cursor=None,
     ) -> None:
-        """Insert or update a variant row."""
+        """Insert or update a view row."""
         params = [
             artifact_id,
             view_id,
@@ -45,7 +45,7 @@ class VariantRepository(BaseRepository):
             target = cursor if cursor is not None else self.get_cursor()
             target.execute(
                 """
-                INSERT INTO variants (
+                INSERT INTO views (
                     artifact_id,
                     view_id,
                     view_spec_json,
@@ -67,16 +67,14 @@ class VariantRepository(BaseRepository):
             )
         except Exception:  # noqa: BLE001
             logger.exception(
-                "Variant upsert failed for artifact_id=%s view_id=%s",
-                artifact_id,
-                view_id,
+                "View upsert failed for artifact_id=%s view_id=%s", artifact_id, view_id
             )
             raise
 
     def get(
         self, *, artifact_id: str, view_id: str, cursor=None
     ) -> Optional[dict[str, Any]]:
-        """Fetch a variant view by composite primary key."""
+        """Fetch view metadata by composite primary key."""
         target = cursor if cursor is not None else self.get_cursor()
         row = target.execute(
             """
@@ -89,7 +87,7 @@ class VariantRepository(BaseRepository):
                    canonical_size_bytes,
                    canonical_bytes_covered,
                    created_at
-            FROM variants
+            FROM views
             WHERE artifact_id = ? AND view_id = ?
             """,
             [artifact_id, view_id],
@@ -116,10 +114,10 @@ class VariantRepository(BaseRepository):
         offset: int = 0,
         cursor=None,
     ) -> tuple[list[dict[str, Any]], int]:
-        """List variants for an artifact with optional pagination."""
+        """List views for an artifact with optional pagination."""
         target = cursor if cursor is not None else self.get_cursor()
         total_row = target.execute(
-            "SELECT COUNT(*) FROM variants WHERE artifact_id = ?",
+            "SELECT COUNT(*) FROM views WHERE artifact_id = ?",
             [artifact_id],
         ).fetchone()
         total_size = int(total_row[0]) if total_row else 0
@@ -134,7 +132,7 @@ class VariantRepository(BaseRepository):
                    canonical_size_bytes,
                    canonical_bytes_covered,
                    created_at
-            FROM variants
+            FROM views
             WHERE artifact_id = ?
             ORDER BY created_at ASC
         """

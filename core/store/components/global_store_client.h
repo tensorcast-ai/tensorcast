@@ -21,11 +21,15 @@
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/global_store/v1/global_store.grpc.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
+#include "tensorcast/layout/v1/layout.pb.h"
 #include "tensorcast/memory_tier/v1/memory_tier.grpc.pb.h"
+#include "tensorcast/operation/v1/operation.pb.h"
 
 namespace tensorcast::store::components {
 
 namespace global_store = tensorcast::global_store::v1;
+namespace layout = tensorcast::layout::v1;
+namespace operation = tensorcast::operation::v1;
 
 // Configuration for Global Store Client
 struct GlobalStoreClientConfig {
@@ -121,7 +125,7 @@ struct CanonicalRange {
   uint64_t length{0};
 };
 
-struct VariantViewUpdate {
+struct ViewStateUpdate {
   std::string artifact_id;
   std::string view_id;
   std::string view_spec_json;
@@ -132,9 +136,10 @@ struct VariantViewUpdate {
   uint64_t canonical_bytes_covered{0};
   std::vector<CanonicalRange> canonical_ranges;
   std::vector<global_store::LeafWrite> leaf_writes;
+  std::vector<global_store::PieceProofDigestWrite> proof_digests;
 };
 
-struct VariantInfo {
+struct ViewInfo {
   std::string view_id;
   std::string view_spec_json;
   uint64_t view_size_bytes{0};
@@ -305,7 +310,7 @@ class IGlobalStoreClient {
       uint32_t max_concurrency = 1,
       std::optional<std::string_view> view_id = std::nullopt) = 0;
 
-  virtual absl::Status record_variant_residency(
+  virtual absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
@@ -424,9 +429,34 @@ class IGlobalStoreClient {
       uint32_t grpc_port,
       uint32_t p2p_port) = 0;
 
-  virtual absl::Status update_artifact_view_state(const VariantViewUpdate& update) = 0;
+  virtual absl::Status update_artifact_view_state(const ViewStateUpdate& update) = 0;
 
-  virtual absl::StatusOr<std::vector<VariantInfo>> list_variants(std::string_view artifact_id) = 0;
+  virtual absl::StatusOr<std::vector<ViewInfo>> list_views(std::string_view artifact_id) = 0;
+
+  // ========== Layout v2 ==========
+  virtual absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view assembly_id) = 0;
+  virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
+  virtual absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) = 0;
+  virtual absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) = 0;
+  virtual absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const global_store::WriteTensorProofCommitmentsRequest& request) = 0;
+  virtual absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const global_store::CheckProofCommitmentsMatchRequest& request) = 0;
+
+  virtual absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view assembly_id) = 0;
+
+  // ========== Unified Operations ==========
+  virtual absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const operation::AcquireOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const operation::KeepaliveOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::ReleaseOperationLeaseResponse> release_operation_lease(
+      const operation::ReleaseOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::GetOperationResponse> get_operation(
+      const operation::GetOperationRequest& request) = 0;
+  virtual absl::Status update_operation(const operation::UpdateOperationRequest& request) = 0;
 
   virtual absl::StatusOr<ArtifactBinding> get_artifact_binding(std::string_view artifact_id) = 0;
 
@@ -516,9 +546,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint32_t max_concurrency = 1,
       std::optional<std::string_view> view_id = std::nullopt) override;
 
-  // Record metadata for a variant (view) replica while keeping canonical routing unchanged.
-  // For v1, this is a placeholder that will be backed by Global Store plan 0016-c.
-  absl::Status record_variant_residency(
+  // Record metadata for a view replica while keeping canonical routing unchanged.
+  // This is a placeholder that will be backed by a dedicated Global Store RPC.
+  absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
@@ -620,9 +650,30 @@ class GlobalStoreClient : public IGlobalStoreClient {
   void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
       override;
 
-  absl::Status update_artifact_view_state(const VariantViewUpdate& update) override;
+  absl::Status update_artifact_view_state(const ViewStateUpdate& update) override;
 
-  absl::StatusOr<std::vector<VariantInfo>> list_variants(std::string_view artifact_id) override;
+  absl::StatusOr<std::vector<ViewInfo>> list_views(std::string_view artifact_id) override;
+
+  absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view assembly_id) override;
+  absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) override;
+  absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) override;
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) override;
+  absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const global_store::WriteTensorProofCommitmentsRequest& request) override;
+  absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const global_store::CheckProofCommitmentsMatchRequest& request) override;
+  absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view assembly_id) override;
+
+  absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const operation::AcquireOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const operation::KeepaliveOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::ReleaseOperationLeaseResponse> release_operation_lease(
+      const operation::ReleaseOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::GetOperationResponse> get_operation(const operation::GetOperationRequest& request) override;
+  absl::Status update_operation(const operation::UpdateOperationRequest& request) override;
 
   absl::StatusOr<ArtifactBinding> get_artifact_binding(std::string_view artifact_id) override;
 

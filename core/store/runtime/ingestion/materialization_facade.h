@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
@@ -70,6 +71,8 @@ namespace store = tensorcast::store;
 
 class MaterializationFacade : public materialization::control::MaterializationBackend {
  public:
+  using SealProgressCallback = std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)>;
+
   struct Config {
     gsl::not_null<RuntimeContext*> runtime_context;
     gsl::not_null<ReplicaRuntime*> replica_runtime;
@@ -112,6 +115,15 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints) override;
 
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
+      std::string_view assembly_id,
+      std::string_view target_artifact_id,
+      std::string_view view_id,
+      std::string_view view_spec_json,
+      const DeviceKey& target_device,
+      loading::TransformPlacement placement,
+      const std::vector<std::string>* allowed_view_ids = nullptr);
+
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override,
@@ -131,7 +143,11 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       const loading::MaterializeHints& hints,
       bool publish_to_global_store);
 
-  absl::StatusOr<store::SealAssemblyResult> seal_assembly(std::string_view assembly_id, bool publish_canonical);
+  absl::StatusOr<store::SealAssemblyResult> seal_assembly(
+      std::string_view assembly_id,
+      bool publish_canonical,
+      SealProgressCallback progress_cb = {},
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);

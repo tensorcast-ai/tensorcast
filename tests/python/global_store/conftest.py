@@ -17,12 +17,15 @@ from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.global_store.models import Replica, Worker, Transport, MemoryType
 from tensorcast.global_store.repositories import (
+    AssemblyLayoutBindingRepository,
     InstanceRepository,
     LeafRepository,
+    LayoutSpecRepository,
+    ProofRepository,
     ReplicaRepository,
     TransportRepository,
-    VariantCoverageRepository,
-    VariantRepository,
+    ViewCoverageRepository,
+    ViewRepository,
     WorkerRepository,
 )
 from tensorcast.global_store.services import (
@@ -187,11 +190,14 @@ def repositories(db_connection):
     return {
         "replica": ReplicaRepository(db_connection),
         "transport": TransportRepository(db_connection),
-        "variant": VariantRepository(db_connection),
-        "coverage": VariantCoverageRepository(db_connection),
+        "view": ViewRepository(db_connection),
+        "coverage": ViewCoverageRepository(db_connection),
         "leaf": LeafRepository(db_connection),
         "worker": WorkerRepository(db_connection),
         "instance": InstanceRepository(db_connection),
+        "layout_spec": LayoutSpecRepository(db_connection),
+        "assembly_layout_binding": AssemblyLayoutBindingRepository(db_connection),
+        "proof": ProofRepository(db_connection),
     }
 
 
@@ -230,9 +236,12 @@ observability:
         "worker": WorkerService(repositories["worker"], repositories["replica"]),
         "instance": InstanceService(repositories["instance"], repositories["worker"]),
         "view_state": ViewStateService(
-            repositories["variant"],
+            repositories["view"],
             repositories["leaf"],
             repositories["coverage"],
+            repositories["layout_spec"],
+            repositories["assembly_layout_binding"],
+            repositories["proof"],
         ),
     }
 
