@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import threading
 import time
@@ -45,12 +44,17 @@ from tensorcast.api.store.types import (
     RetryPolicy,
     SpanAttributeValue,
 )
-from tensorcast.api.store.view_composer import compute_view_id, compute_view_subset_hash
+from tensorcast.api.store.view_composer import compute_view_id
 from tensorcast.api.store.views import (
     ResolvedViewInputs,
     TransformPlacement,
     ViewOrchestrator,
 )
+from tensorcast.common.selection_identity import (
+    compute_logical_layout_hash,
+    compute_view_subset_hash,
+)
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 logger = logging.getLogger(__name__)
@@ -231,7 +235,7 @@ class MaterializationPipeline:
         tensor_names: Sequence[str] | None,
         canonical_index_hint: bytes | None = None,
         disk_path_hint: str | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -389,7 +393,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -476,7 +480,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None = None,
         options: GetArtifactOptions | None = None,
         tensor_names: Sequence[str] | None = None,
-        view_spec: store_daemon_pb2.ViewSpec | None = None,
+        view_spec: common_pb2.ViewSpec | None = None,
         view_data_hash: str | None = None,
         view_index_hint: bytes | None = None,
         replica_uuid: str | None = None,
@@ -876,7 +880,7 @@ class MaterializationPipeline:
         target: Mapping[str, torch.Tensor],
         device_id: int,
         tensor_names: Sequence[str] | None,
-        view_spec: store_daemon_pb2.ViewSpec | None,
+        view_spec: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         selection_order: Sequence[str] | None = None,
@@ -1205,10 +1209,10 @@ class MaterializationPipeline:
             )
         layout.offsets.extend(offsets)
 
-        digest = hashlib.sha256()
-        digest.update(index_bytes)
-        digest.update(b"|view" if needs_view_index else b"|canonical")
-        layout.logical_layout_hash = digest.digest()
+        layout.logical_layout_hash = compute_logical_layout_hash(
+            index_bytes=index_bytes,
+            needs_view_index=needs_view_index,
+        )
         view_subset_hash = compute_view_subset_hash(selection_names)
         return _RegionBackedLayout(
             layout=layout,
@@ -1229,7 +1233,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
-        view: store_daemon_pb2.ViewSpec | None,
+        view: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
@@ -1353,7 +1357,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         options: GetArtifactOptions,
         tensor_names: Sequence[str] | None,
-        view: store_daemon_pb2.ViewSpec | None,
+        view: common_pb2.ViewSpec | None,
         view_id: str | None,
         view_index_hint: bytes | None,
         span=None,
@@ -1425,7 +1429,7 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
@@ -1470,7 +1474,7 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
@@ -1800,7 +1804,7 @@ class MaterializationPipeline:
         fallback: FallbackOptions | None,
         cancel_event: threading.Event | None,
         options_override: GetArtifactOptions | None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,
@@ -2069,7 +2073,7 @@ class MaterializationPipeline:
         timeout_s: float | None,
         lease_mode: store_daemon_pb2.LeaseMode,
         span=None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: TransformPlacement | None = None,
         canonical_index_hint: bytes | None = None,

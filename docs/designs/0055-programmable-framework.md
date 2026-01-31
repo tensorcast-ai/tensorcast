@@ -23,6 +23,7 @@ related_code:
   - daemon/service/controllers/materialization_controller.cc
   - daemon/state/replica_session_manager.h
   - daemon/state/session_lifecycle.h
+  - proto/tensorcast/common/v1/common.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/global_store/v1/global_store.proto
   - proto/tensorcast/plan/v1/plan.proto
@@ -1372,7 +1373,8 @@ Node-local execution is provided by:
 
 ### PlanSpec (Phase-4; implemented)
 
-`PlanSpec` is defined in `proto/tensorcast/plan/v1/plan.proto`. It includes:
+`PlanSpec` is defined in `proto/tensorcast/plan/v1/plan.proto` and embeds
+`tensorcast.common.v1.ArtifactSelection` from `proto/tensorcast/common/v1/common.proto`. It includes:
 
 - `CallContext` metadata (deadline, idempotency, tags)
 - `ArtifactSelection` fingerprints (`logical_layout_hash`, `selection_hash`) plus optional `tensor_names` for subset execution

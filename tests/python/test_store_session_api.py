@@ -33,6 +33,7 @@ from tensorcast.api.store import (
 )
 from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.common.identity import ArtifactIdKind
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ArtifactDescriptor, ServerConfig
 
@@ -279,7 +280,7 @@ class FakeEnvironment:
         artifact_id: str | None,
         key: str | None,
         options: GetArtifactOptions | None = None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: int | None = None,
         canonical_index_hint: bytes | None = None,

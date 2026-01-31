@@ -33,6 +33,7 @@
 
 #include "core/common/artifact_hash.h"
 #include "core/common/artifact_identity.h"
+#include "core/common/selection_identity.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
@@ -582,13 +583,13 @@ uint64_t compute_generation_from_index(std::string_view canonical_index_json) {
   return value;
 }
 
-absl::StatusOr<ViewSpec> convert_view_spec(const v2::ViewSpec& proto) {
+absl::StatusOr<ViewSpec> convert_view_spec(const tensorcast::common::v1::ViewSpec& proto) {
   ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : proto.tensors()) {
     store::loader::TensorViewOps ops;
     for (const auto& op_proto : ops_proto.ops()) {
       switch (op_proto.kind_case()) {
-        case v2::Op::kNarrow: {
+        case tensorcast::common::v1::Op::kNarrow: {
           const auto& narrow = op_proto.narrow();
           store::loader::NarrowOp op{
               .dim = static_cast<int32_t>(narrow.dim()),
@@ -598,7 +599,7 @@ absl::StatusOr<ViewSpec> convert_view_spec(const v2::ViewSpec& proto) {
           ops.ops.push_back(ViewOp::Narrow(op));
           break;
         }
-        case v2::Op::kTranspose: {
+        case tensorcast::common::v1::Op::kTranspose: {
           const auto& transpose = op_proto.transpose();
           store::loader::TransposeOp op{
               .dim0 = static_cast<int32_t>(transpose.dim0()),
@@ -607,7 +608,7 @@ absl::StatusOr<ViewSpec> convert_view_spec(const v2::ViewSpec& proto) {
           ops.ops.push_back(ViewOp::Transpose(op));
           break;
         }
-        case v2::Op::KIND_NOT_SET:
+        case tensorcast::common::v1::Op::KIND_NOT_SET:
           return absl::InvalidArgumentError("view op kind not set");
       }
     }
@@ -633,7 +634,7 @@ absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf
 }
 
 absl::StatusOr<std::string> compute_view_id_from_spec(
-    const v2::ViewSpec& view_spec,
+    const tensorcast::common::v1::ViewSpec& view_spec,
     std::string_view canonical_index_json) {
   auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
   if (!index_mh_or.ok()) {
@@ -651,8 +652,8 @@ absl::StatusOr<std::string> compute_view_id_from_spec(
   return common::multibase_multihash_sha256(digest);
 }
 
-v2::ViewSpec build_view_spec_proto(const ViewSpec& spec) {
-  v2::ViewSpec proto;
+tensorcast::common::v1::ViewSpec build_view_spec_proto(const ViewSpec& spec) {
+  tensorcast::common::v1::ViewSpec proto;
   auto* tensors = proto.mutable_tensors();
   for (const auto& [tensor_name, ops] : spec.tensors) {
     auto& container = (*tensors)[tensor_name];
@@ -683,29 +684,6 @@ bool spec_includes_transpose(const ViewSpec& spec) {
     }
   }
   return false;
-}
-
-absl::StatusOr<std::string> compute_view_subset_hash_bytes(absl::Span<const std::string> names) {
-  if (names.empty()) {
-    return std::string();
-  }
-  absl::flat_hash_set<std::string> seen;
-  std::vector<std::string> unique;
-  unique.reserve(names.size());
-  for (const auto& name : names) {
-    if (seen.insert(name).second) {
-      unique.push_back(name);
-    }
-  }
-  std::sort(unique.begin(), unique.end());
-  nlohmann::json arr = nlohmann::json::array();
-  for (const auto& name : unique) {
-    arr.push_back(name);
-  }
-  const std::string payload = arr.dump(-1, ' ', true);
-  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
-      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size()));
-  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
 }
 
 store::loading::TransformPlacement resolve_placement(
@@ -2055,7 +2033,7 @@ grpc::Status MaterializationController::materialize_into_target(
   }
 
   std::optional<ViewSpec> view_spec;
-  std::optional<v2::ViewSpec> view_spec_proto;
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
   std::optional<std::string> request_view_id;
   std::optional<std::string> view_data_hash;
   bool view_id_requested = false;
@@ -2351,13 +2329,7 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  auto subset_hash_or = compute_view_subset_hash_bytes(absl::MakeSpan(layout_names));
-  if (!subset_hash_or.ok()) {
-    record_materialize_into_target(
-        "error", "subset_hash_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(subset_hash_or.status());
-  }
-  const std::string view_subset_hash = *subset_hash_or;
+  const std::string view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(layout_names));
   if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
     record_materialize_into_target(
         "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);

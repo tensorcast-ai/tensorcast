@@ -200,7 +200,7 @@ absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf
 }
 
 absl::StatusOr<std::string> compute_view_id_from_spec(
-    const v2::ViewSpec& view_spec,
+    const tensorcast::common::v1::ViewSpec& view_spec,
     std::string_view canonical_index_json) {
   auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
   if (!index_mh_or.ok()) {
@@ -218,7 +218,7 @@ absl::StatusOr<std::string> compute_view_id_from_spec(
   return common::multibase_multihash_sha256(digest);
 }
 
-absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const v2::ViewSpec& spec_proto) {
+absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const tensorcast::common::v1::ViewSpec& spec_proto) {
   store::loader::ViewSpec spec;
   for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
     store::loader::TensorViewOps tensor_ops;

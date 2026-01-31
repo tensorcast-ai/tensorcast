@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping, Sequence, Union
 
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.proto.common.v1 import common_pb2
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ TensorViewOp = Union[NarrowOp, TransposeOp]
 class ViewSpecBuildResult:
     """Structured result from view spec construction."""
 
-    proto: store_daemon_pb2.ViewSpec | None
+    proto: common_pb2.ViewSpec | None
     tensor_ops: Mapping[str, Sequence[TensorViewOp]]
 
     def __post_init__(self) -> None:
@@ -121,7 +121,7 @@ class ResolvedViewInputs:
         return "build" if self.build_result is not None else "id"
 
     @property
-    def view_spec(self) -> store_daemon_pb2.ViewSpec | None:
+    def view_spec(self) -> common_pb2.ViewSpec | None:
         return self.build_result.proto if self.build_result else None
 
     @property
@@ -347,7 +347,7 @@ def build_view_spec(
         return ViewSpecBuildResult.identity()
 
     ordered_ops = {name: tensor_ops[name] for name in sorted(tensor_ops.keys())}
-    view_spec_proto = store_daemon_pb2.ViewSpec()
+    view_spec_proto = common_pb2.ViewSpec()
     for name, view_ops in ordered_ops.items():
         op_container = view_spec_proto.tensors[name]
         for view_op in view_ops:

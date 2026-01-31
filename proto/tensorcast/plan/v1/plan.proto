@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package tensorcast.plan.v1;
 
+import "tensorcast/common/v1/common.proto";
 import "tensorcast/daemon/v2/store_daemon.proto";
 
 message CallContext {
@@ -30,23 +31,13 @@ message TargetRef {
   string target_id = 2;
 }
 
-message ArtifactSelection {
-  string artifact_id = 1;
-  string view_id = 2;
-  bytes logical_layout_hash = 3;
-  bytes selection_hash = 4;
-  bytes view_subset_hash = 5;
-  tensorcast.daemon.v2.ViewSpec view_spec = 6;
-  repeated string tensor_names = 7;
-}
-
 message PrefetchAction {
-  ArtifactSelection selection = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   int32 device_id = 2;
 }
 
 message PinDeviceResidencyAction {
-  ArtifactSelection selection = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   int32 device_id = 2;
   optional uint64 ttl_ms = 3;
 }
@@ -80,13 +71,13 @@ message TargetSpec {
 }
 
 message TransformIntoAction {
-  ArtifactSelection selection = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   TransformSpec spec = 2;
   TargetSpec target = 3;
 }
 
 message TransformRegisterAction {
-  ArtifactSelection selection = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   TransformSpec spec = 2;
   string out_key = 3;
   tensorcast.daemon.v2.StorePolicy policy = 4;

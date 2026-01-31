@@ -35,9 +35,9 @@ tensorcast::store::StoreEngineOptions make_opts() {
   return opts;
 }
 
-tensorcast::daemon::v2::ViewSpec make_narrow_view_spec(int start, int length) {
-  tensorcast::daemon::v2::ViewSpec spec;
-  tensorcast::daemon::v2::TensorViewOps ops;
+tensorcast::common::v1::ViewSpec make_narrow_view_spec(int start, int length) {
+  tensorcast::common::v1::ViewSpec spec;
+  tensorcast::common::v1::TensorViewOps ops;
   auto* narrow = ops.add_ops()->mutable_narrow();
   narrow->set_dim(0);
   narrow->set_start(start);

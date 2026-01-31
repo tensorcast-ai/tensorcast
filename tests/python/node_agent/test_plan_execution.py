@@ -6,6 +6,7 @@ import torch
 
 from tensorcast.engine_adapter import EngineAdapter
 from tensorcast.node_agent.executor import NodeAgentExecutor
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
 
@@ -32,8 +33,8 @@ class _DaemonStub:
         return _Resp()
 
 
-def _selection() -> plan_pb2.ArtifactSelection:
-    return plan_pb2.ArtifactSelection(
+def _selection() -> common_pb2.ArtifactSelection:
+    return common_pb2.ArtifactSelection(
         artifact_id="mi2:test",
         logical_layout_hash=b"logical",
         selection_hash=b"selection",

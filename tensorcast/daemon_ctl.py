@@ -23,6 +23,7 @@ from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
 # Use v2 daemon proto path
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
@@ -416,7 +417,7 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
@@ -524,7 +525,7 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
         tensor_names: Sequence[str] | None = None,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         view_subset_hash: bytes | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
@@ -761,7 +762,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
@@ -785,7 +786,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[False],
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
@@ -809,7 +810,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[True] = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
@@ -831,7 +832,7 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,

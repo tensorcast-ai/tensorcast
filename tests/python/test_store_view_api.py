@@ -31,6 +31,7 @@ from tensorcast.api.store import materialization as materialization_mod
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import map_registration_error
 from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
@@ -237,7 +238,7 @@ def test_build_view_spec_rejects_non_mapping_inputs() -> None:
 
 def test_get_view_invokes_perform_with_spec(monkeypatch: pytest.MonkeyPatch) -> None:
     store = _fresh_store()
-    fake_spec = store_daemon_pb2.ViewSpec()
+    fake_spec = common_pb2.ViewSpec()
     fake_spec.tensors["weights"].ops.add().narrow.dim = 0
     fake_spec.tensors["weights"].ops[-1].narrow.start = 0
     fake_spec.tensors["weights"].ops[-1].narrow.length = 16
@@ -399,7 +400,7 @@ def test_register_view_client_placement_builds_canonical(monkeypatch: pytest.Mon
     store = _fresh_store()
 
     canonical_index = b'{"weights":[0,16,[4],[1],"torch.float32",0]}'
-    view_spec = store_daemon_pb2.ViewSpec()
+    view_spec = common_pb2.ViewSpec()
     narrow = view_spec.tensors["weights"].ops.add().narrow
     narrow.dim = 0
     narrow.start = 1

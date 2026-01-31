@@ -63,7 +63,7 @@ bool write_file(const std::filesystem::path& path, std::string_view payload) {
 }
 
 absl::StatusOr<std::string> compute_view_id(
-    const tensorcast::daemon::v2::ViewSpec& view_spec,
+    const tensorcast::common::v1::ViewSpec& view_spec,
     std::string_view canonical_index_json) {
   auto index_mh_or =
       tensorcast::common::compute_index_multihash(std::optional<std::string>(std::string(canonical_index_json)), "");
@@ -270,7 +270,7 @@ TEST_CASE("MaterializeIntoTarget accepts view spec subset", "[daemon][materializ
   req.set_pid(123);
   req.add_tensor_names("a");
 
-  tensorcast::daemon::v2::ViewSpec view_spec;
+  tensorcast::common::v1::ViewSpec view_spec;
   auto* ops = (*view_spec.mutable_tensors())["a"].add_ops();
   ops->mutable_narrow()->set_dim(0);
   ops->mutable_narrow()->set_start(0);

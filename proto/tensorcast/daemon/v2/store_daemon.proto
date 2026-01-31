@@ -236,32 +236,6 @@ message CpuMemfdHandle {
   uint64 offset_bytes = 2;
 }
 
-message NarrowOp {
-  uint32 dim = 1;
-  int64 start = 2;
-  uint64 length = 3;
-}
-
-message TransposeOp {
-  uint32 dim0 = 1;
-  uint32 dim1 = 2;
-}
-
-message Op {
-  oneof kind {
-    NarrowOp narrow = 1;
-    TransposeOp transpose = 2;
-  }
-}
-
-message TensorViewOps {
-  repeated Op ops = 1;
-}
-
-message ViewSpec {
-  map<string, TensorViewOps> tensors = 1;
-}
-
 message CanonicalRange {
   uint64 offset = 1;
   uint64 length = 2;
@@ -286,7 +260,7 @@ message StorePolicy {
 
 message ViewRegistrationOptions {
   string view_id = 1;
-  ViewSpec spec = 2;
+  tensorcast.common.v1.ViewSpec spec = 2;
   TransformPlacement placement = 3;
   uint64 canonical_size_bytes = 4;
   repeated CanonicalRange ranges = 5;
@@ -412,7 +386,7 @@ message MaterializeReplicaRequest {
   optional string disk_path = 13;
 
   oneof view_identity {
-    ViewSpec view = 1001;
+    tensorcast.common.v1.ViewSpec view = 1001;
     string view_id = 1002;
   }
 
@@ -464,7 +438,7 @@ message MaterializeIntoTargetRequest {
   bytes view_subset_hash = 9;
 
   oneof view_identity {
-    ViewSpec view = 1001;
+    tensorcast.common.v1.ViewSpec view = 1001;
     string view_id = 1002;
   }
 

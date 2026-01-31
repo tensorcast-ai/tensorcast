@@ -29,8 +29,13 @@ from tensorcast.api.store.artifact import (
     PrefetchedReplica,
     _decode_capability_token,
 )
-from tensorcast.api.store.view_composer import compute_view_id, compute_view_subset_hash
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.api.store.view_composer import compute_view_id
+from tensorcast.common.selection_identity import (
+    compute_logical_layout_hash,
+    compute_selection_hash,
+    compute_view_subset_hash,
+)
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
 if TYPE_CHECKING:
@@ -102,7 +107,7 @@ class _ArtifactSelection:
     logical_layout_hash: bytes
     selection_hash: bytes
     view_subset_hash: bytes | None
-    view_spec: store_daemon_pb2.ViewSpec | None
+    view_spec: common_pb2.ViewSpec | None
     tensor_names: tuple[str, ...] | None
 
 
@@ -155,26 +160,6 @@ class _PlanStep:
     target: Worker | Instance
     action: _PlanAction
     depends_on: tuple[str, ...]
-
-
-def _compute_logical_layout_hash(
-    *, index_bytes: bytes, needs_view_index: bool
-) -> bytes:
-    digest = hashlib.sha256()
-    digest.update(index_bytes)
-    digest.update(b"|view" if needs_view_index else b"|canonical")
-    return digest.digest()
-
-
-def _compute_selection_hash(*, view_id: str, view_subset_hash: bytes | None) -> bytes:
-    digest = hashlib.sha256()
-    digest.update(view_id.encode("utf-8"))
-    if view_subset_hash is not None:
-        digest.update(view_subset_hash)
-    else:
-        digest.update(b"|all")
-    digest.update(b"|v1")
-    return digest.digest()
 
 
 def _derive_action_idempotency_key(
@@ -235,7 +220,7 @@ def _ensure_index_bytes(artifact: Artifact) -> bytes:
 
 def _resolve_view_id(
     *, artifact: Artifact, canonical_index_bytes: bytes
-) -> tuple[str, store_daemon_pb2.ViewSpec | None]:
+) -> tuple[str, common_pb2.ViewSpec | None]:
     if artifact._view_metadata is not None:
         return str(artifact._view_metadata.view_id), None
     if artifact._view_spec is None or artifact._view_spec.is_identity:
@@ -260,7 +245,7 @@ def _resolve_view_id(
 def _resolve_view_index_bytes(
     *,
     artifact: Artifact,
-    view_proto: store_daemon_pb2.ViewSpec | None,
+    view_proto: common_pb2.ViewSpec | None,
     canonical_index_bytes: bytes,
 ) -> bytes:
     if artifact._view_metadata is not None and artifact._view_metadata.view_index_bytes:
@@ -314,11 +299,11 @@ def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
             view_proto=view_proto,
             canonical_index_bytes=canonical_index_bytes,
         )
-        logical_layout_hash = _compute_logical_layout_hash(
+        logical_layout_hash = compute_logical_layout_hash(
             index_bytes=view_index_bytes, needs_view_index=True
         )
     else:
-        logical_layout_hash = _compute_logical_layout_hash(
+        logical_layout_hash = compute_logical_layout_hash(
             index_bytes=canonical_index_bytes, needs_view_index=False
         )
 
@@ -328,7 +313,7 @@ def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
         tensor_names = tuple(artifact._view_metadata.tensor_names)
         view_subset_hash = compute_view_subset_hash(tensor_names)
 
-    selection_hash = _compute_selection_hash(
+    selection_hash = compute_selection_hash(
         view_id=view_id, view_subset_hash=view_subset_hash
     )
 
@@ -949,7 +934,7 @@ class Plan:
 
 
 def _fill_selection_proto(
-    selection: _ArtifactSelection, target: plan_pb2.ArtifactSelection
+    selection: _ArtifactSelection, target: common_pb2.ArtifactSelection
 ) -> None:
     target.artifact_id = selection.artifact_id
     target.view_id = selection.view_id

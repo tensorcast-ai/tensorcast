@@ -684,6 +684,7 @@ sc_cc_library(
         ":shutdown_signal_hdr",
         ":status_utils",
         ":worker_identity_store_lib",
+        "//core/common:selection_identity_lib",
         "//core/cuda:cuda_api_lib",
         "//core/cuda:cuda_ipc_lib",
         "//core/store:store_engine",

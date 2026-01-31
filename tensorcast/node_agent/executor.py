@@ -20,6 +20,7 @@ from tensorcast.api.plan.transforms import TransformSpec
 from tensorcast.api.store import Artifact, Store
 from tensorcast.daemon_ctl import DaemonCtl, get_daemon_client
 from tensorcast.engine_adapter import EngineAdapter
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
@@ -67,7 +68,7 @@ def _derive_action_idempotency_key(
     base_key: str,
     action: str,
     target_id: str,
-    selection: plan_pb2.ArtifactSelection,
+    selection: common_pb2.ArtifactSelection,
     device_id: int | None,
     ttl_ms: int | None,
     extra: str | None = None,
@@ -115,7 +116,7 @@ def _ctx_timeout_s(ctx: CallContext) -> float | None:
 
 
 def _view_spec_from_proto(
-    view_spec: store_daemon_pb2.ViewSpec,
+    view_spec: common_pb2.ViewSpec,
 ) -> ViewSpecBuildResult | None:
     if view_spec is None or not view_spec.tensors:
         return None
@@ -468,7 +469,7 @@ class NodeAgentExecutor:
         plan: plan_pb2.PlanSpec,
         action: str,
         target_id: str,
-        selection: plan_pb2.ArtifactSelection,
+        selection: common_pb2.ArtifactSelection,
         extra: str | None,
         call_ctx: CallContext,
     ) -> CallContext:
@@ -492,7 +493,7 @@ class NodeAgentExecutor:
         )
 
     def _artifact_from_selection(
-        self, selection: plan_pb2.ArtifactSelection
+        self, selection: common_pb2.ArtifactSelection
     ) -> tuple[Artifact, tuple[str, ...] | None]:
         view_spec = None
         if selection.HasField("view_spec"):

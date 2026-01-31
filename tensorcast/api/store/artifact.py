@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import threading
 import time
 import uuid
@@ -45,6 +44,10 @@ from tensorcast.api.store.view_composer import (
     ViewMetadataCache,
     ViewSpecComposer,
     compute_view_id,
+)
+from tensorcast.common.selection_identity import (
+    compute_selection_hash,
+    compute_view_subset_hash,
 )
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
@@ -609,9 +612,14 @@ class Artifact:
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
         view_id = self._control_plane_view_id(runtime)
-        selection_hash = hashlib.sha256(
-            f"{artifact_id}|{view_id}".encode("utf-8")
-        ).hexdigest()
+        view_subset_hash: bytes | None = None
+        if self._view_metadata is not None and self._view_metadata.tensor_names:
+            view_subset_hash = compute_view_subset_hash(
+                self._view_metadata.tensor_names
+            )
+        selection_hash = compute_selection_hash(
+            view_id=view_id, view_subset_hash=view_subset_hash
+        ).hex()
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:

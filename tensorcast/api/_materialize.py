@@ -29,6 +29,7 @@ from tensorcast.api._utils import new_uuid
 from tensorcast.api.context import CallContext
 from tensorcast.daemon_ctl import DaemonCtl
 from tensorcast.observability.otel import ensure_client_otel
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import ServerConfig
 
@@ -169,7 +170,7 @@ def materialize_artifact_v2(
     artifact_id: str | None,
     key: str | None,
     options: GetArtifactOptions | None = None,
-    view: store_daemon_pb2.ViewSpec | None = None,
+    view: common_pb2.ViewSpec | None = None,
     view_id: str | None = None,
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,

@@ -98,3 +98,39 @@ message ReplicaInfo {
   MemoryInfo memory_info = 2;
   ReplicaStats stats = 3;
 }
+
+message NarrowOp {
+  uint32 dim = 1;
+  int64 start = 2;
+  uint64 length = 3;
+}
+
+message TransposeOp {
+  uint32 dim0 = 1;
+  uint32 dim1 = 2;
+}
+
+message Op {
+  oneof kind {
+    NarrowOp narrow = 1;
+    TransposeOp transpose = 2;
+  }
+}
+
+message TensorViewOps {
+  repeated Op ops = 1;
+}
+
+message ViewSpec {
+  map<string, TensorViewOps> tensors = 1;
+}
+
+message ArtifactSelection {
+  string artifact_id = 1;
+  string view_id = 2;
+  bytes logical_layout_hash = 3;
+  bytes selection_hash = 4;
+  bytes view_subset_hash = 5;
+  ViewSpec view_spec = 6;
+  repeated string tensor_names = 7;
+}

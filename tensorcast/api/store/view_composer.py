@@ -23,7 +23,8 @@ from tensorcast.api.store.types import (
     CanonicalIndex,
     CanonicalIndexEntry,
 )
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
+from tensorcast.common.selection_identity import compute_view_subset_hash  # noqa: F401
+from tensorcast.proto.common.v1 import common_pb2
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,7 +64,7 @@ def compute_index_multihash(index_bytes: bytes) -> str:
 
 
 def compute_view_id(
-    view_spec: store_daemon_pb2.ViewSpec,
+    view_spec: common_pb2.ViewSpec,
     canonical_index_bytes: bytes,
 ) -> str:
     if view_spec is None or not view_spec.tensors:
@@ -72,14 +73,6 @@ def compute_view_id(
     index_mh = compute_index_multihash(canonical_index_bytes)
     digest = hashlib.sha256(spec_bytes + index_mh.encode("utf-8")).digest()
     return _multibase_multihash_sha256(digest)
-
-
-def compute_view_subset_hash(tensor_names: Sequence[str]) -> bytes:
-    names = sorted({str(name) for name in tensor_names})
-    payload = json.dumps(names, separators=(",", ":"), ensure_ascii=True).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(payload).digest()
 
 
 def _compose_narrow(

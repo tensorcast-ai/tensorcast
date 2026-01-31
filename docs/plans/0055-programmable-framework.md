@@ -73,6 +73,7 @@ Implement the programmable, artifact-first control-plane primitives defined in `
 # Work Breakdown by Area
 
 - **Protos**
+  - Common: `proto/tensorcast/common/v1/common.proto`
   - Daemon: `proto/tensorcast/daemon/v2/store_daemon.proto`
   - Global Store: `proto/tensorcast/global_store/v1/global_store.proto`
   - PlanSpec: `proto/tensorcast/plan/v1/plan.proto`

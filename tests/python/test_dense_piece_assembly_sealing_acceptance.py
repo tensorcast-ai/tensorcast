@@ -252,16 +252,16 @@ def _make_index_bytes() -> bytes:
     return json.dumps(index, separators=(",", ":")).encode("utf-8")
 
 
-def _make_view_spec(*, bias_start: int, bias_length: int) -> store_daemon_pb2.ViewSpec:
-    spec = store_daemon_pb2.ViewSpec()
-    weights_ops = store_daemon_pb2.TensorViewOps()
+def _make_view_spec(*, bias_start: int, bias_length: int) -> common_pb2.ViewSpec:
+    spec = common_pb2.ViewSpec()
+    weights_ops = common_pb2.TensorViewOps()
     weights_narrow = weights_ops.ops.add().narrow
     weights_narrow.dim = 0
     weights_narrow.start = 0
     weights_narrow.length = 8
     spec.tensors["weights"].CopyFrom(weights_ops)
 
-    bias_ops = store_daemon_pb2.TensorViewOps()
+    bias_ops = common_pb2.TensorViewOps()
     bias_narrow = bias_ops.ops.add().narrow
     bias_narrow.dim = 0
     bias_narrow.start = bias_start
@@ -276,7 +276,7 @@ def _register_piece(
     assembly_id: str,
     canonical_index_bytes: bytes,
     canonical_size_bytes: int,
-    view_spec: store_daemon_pb2.ViewSpec,
+    view_spec: common_pb2.ViewSpec,
     view_bytes: bytes,
 ) -> store_daemon_pb2.CommitRegisteredArtifactResponse:
     req = store_daemon_pb2.BeginRegisterArtifactRequest(

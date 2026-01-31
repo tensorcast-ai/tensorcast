@@ -93,6 +93,9 @@ managing clients manually.
   `op.wait(...)`) to block and `op.cancel()` to best-effort release the operation record. Prefetch defaults to
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
   GPU-only; CPU targets are rejected because they require PID-bound handle leases.
+- Prefetch idempotency fingerprints derive `selection_hash` via
+  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan/Queue selection
+  identity semantics.
 - `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
   (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
   supports `renew()` / `release()`.

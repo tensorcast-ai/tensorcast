@@ -70,6 +70,19 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "selection_identity_lib",
+    srcs = ["selection_identity.cc"],
+    hdrs = ["selection_identity.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":artifact_hash_lib",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",
