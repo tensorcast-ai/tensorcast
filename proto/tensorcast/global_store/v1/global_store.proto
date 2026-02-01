@@ -186,7 +186,7 @@ message WorkerHeartbeatRequest {
   int64 last_successful_sync = 7; // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
   optional string daemon_id = 9; // Optional for sanity-check logging
-  uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
+  optional uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
 }
 
 message WorkerHeartbeatResponse {
@@ -257,7 +257,7 @@ message RegisterInstanceResponse {
 message InstanceHeartbeatRequest {
   string instance_id = 1;
   optional string worker_id = 2;
-  uint64 capability_flags = 3; // Bitset of InstanceCapabilityFlag values
+  optional uint64 capability_flags = 3; // Bitset of InstanceCapabilityFlag values
 }
 
 message InstanceHeartbeatResponse {

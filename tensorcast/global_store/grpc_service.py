@@ -3241,7 +3241,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         """Handle enhanced heartbeat with state synchronization."""
         try:
             capability_flags: int | None = None
-            if request.capability_flags != 0 or request.HasField("daemon_id"):
+            if request.HasField("capability_flags"):
                 capability_flags = int(request.capability_flags)
             # Process basic heartbeat first
             success = self.worker_service.heartbeat(
@@ -3471,15 +3471,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         try:
             worker_id = request.worker_id if request.HasField("worker_id") else None
             capability_flags: int | None = None
-            if request.capability_flags != 0:
+            if request.HasField("capability_flags"):
                 capability_flags = int(request.capability_flags)
-            else:
-                try:
-                    existing = self.instance_repository.find_by_id(request.instance_id)
-                except Exception:
-                    existing = None
-                if existing is not None and int(existing.capability_flags) == 0:
-                    capability_flags = 0
             success = self.instance_service.heartbeat(
                 request.instance_id,
                 worker_id=worker_id,

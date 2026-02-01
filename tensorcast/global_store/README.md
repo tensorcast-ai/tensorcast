@@ -194,8 +194,8 @@ The worker/instance registries also act as a low-frequency **capability director
 
 - Each worker/instance persists a bounded `capability_flags` bitset (see `global_store.proto`) advertising control-plane
   capabilities (queue broker, retention handles, capability-token envelope, execution signals, node agent).
-- Writes are **update-on-change**: heartbeats update `capability_flags` only when the value changes to avoid write
-  amplification.
+- Writes are **update-on-change**: heartbeats update `capability_flags` only when the field is present and the value
+  changes. Omitting the field leaves the stored flags untouched; sending an explicit `0` clears capabilities.
 - `ListActiveWorkers` / `ListActiveInstances` accept `required_capability_flags` for server-side filtering; responses
   always include the active `capability_flags`.
 - Clients should cache directory results with bounded staleness; this is **advisory discovery**, not a hot path.

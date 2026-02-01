@@ -4,10 +4,10 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 
 #include "absl/log/log.h"
 #include "absl/strings/escaping.h"
-#include "absl/strings/str_format.h"
 #include "absl/time/clock.h"
 #include "core/store/device_types.h"
 #include "core/store/store_engine.h"
@@ -330,17 +330,14 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
     return target_or.status();
   }
   const auto target = *target_or;
-  auto admit_or = backend_->admit(target, stable_policy);
-  if (!admit_or.ok()) {
-    return admit_or.status();
-  }
 
   std::string handle_id;
   {
     absl::MutexLock lock(&mu_);
     auto id_or = mint_handle_id_();
     if (!id_or.ok()) {
-      return id_or.status();
+      return absl::Status(
+          id_or.status().code(), std::format("retention: failed to mint handle id: {}", id_or.status().message()));
     }
     handle_id = *id_or;
   }
@@ -351,17 +348,25 @@ absl::StatusOr<RetentionRegistry::Handle> RetentionRegistry::acquire(
           [this, handle_id]() -> absl::Status { return this->expire_handle_(handle_id); },
       });
   if (!lease_or.ok()) {
-    auto downgrade = backend_->update_policy(target, best_effort_policy(), std::nullopt);
-    if (!downgrade.ok()) {
-      LOG(WARNING) << "retention: failed to downgrade after lease creation failure: " << downgrade;
-    }
-    return lease_or.status();
+    return absl::Status(
+        lease_or.status().code(),
+        std::format("retention: failed to create retention lease: {}", lease_or.status().message()));
   }
 
   auto token_or = mint_token_(handle_id, expires_at);
   if (!token_or.ok()) {
     lifecycle_->release_lease(*lease_or);
-    return token_or.status();
+    return absl::Status(
+        token_or.status().code(),
+        std::format("retention: failed to mint capability token: {}", token_or.status().message()));
+  }
+
+  auto admit_or = backend_->admit(target, stable_policy);
+  if (!admit_or.ok()) {
+    lifecycle_->release_lease(*lease_or);
+    return absl::Status(
+        admit_or.status().code(),
+        std::format("retention: stable cache admission failed: {}", admit_or.status().message()));
   }
 
   SelectionKey selection_key{

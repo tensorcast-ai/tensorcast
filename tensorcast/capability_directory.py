@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Callable, Generic, TypeVar
 
 import grpc
 
@@ -104,40 +104,45 @@ class CapabilityDirectoryClient:
         state: _CacheState[global_store_pb2.ListActiveWorkersResponse.WorkerInfo],
         include_unavailable: bool,
     ) -> None:
-        now = time.monotonic()
-        stale = state.last_refresh is None or (
-            now - state.last_refresh > self._options.max_staleness_s
+        self._maybe_refresh(
+            state,
+            include_unavailable,
+            lambda include: list(
+                self._stub.ListActiveWorkers(
+                    global_store_pb2.ListActiveWorkersRequest(
+                        include_unavailable=include
+                    ),
+                    timeout=self._options.rpc_timeout_s,
+                ).workers
+            ),
+            "Capability directory worker cache is stale",
         )
-        if not stale and now < state.next_refresh_at:
-            return
-        if now < state.next_refresh_at and state.last_refresh is not None:
-            return
-        try:
-            response = self._stub.ListActiveWorkers(
-                global_store_pb2.ListActiveWorkersRequest(
-                    include_unavailable=include_unavailable
-                ),
-                timeout=self._options.rpc_timeout_s,
-            )
-            state.entries = list(response.workers)
-            state.last_refresh = now
-            state.backoff_s = self._options.min_refresh_interval_s
-            state.next_refresh_at = now + self._options.min_refresh_interval_s
-            return
-        except grpc.RpcError as e:
-            state.backoff_s = (
-                self._options.min_refresh_interval_s
-                if state.backoff_s <= 0
-                else min(state.backoff_s * 2.0, self._options.max_backoff_s)
-            )
-            state.next_refresh_at = now + state.backoff_s
-            if stale:
-                raise RuntimeError("Capability directory worker cache is stale") from e
 
     def _maybe_refresh_instances(
         self,
         state: _CacheState[global_store_pb2.ListActiveInstancesResponse.InstanceInfo],
         include_unavailable: bool,
+    ) -> None:
+        self._maybe_refresh(
+            state,
+            include_unavailable,
+            lambda include: list(
+                self._stub.ListActiveInstances(
+                    global_store_pb2.ListActiveInstancesRequest(
+                        include_unavailable=include
+                    ),
+                    timeout=self._options.rpc_timeout_s,
+                ).instances
+            ),
+            "Capability directory instance cache is stale",
+        )
+
+    def _maybe_refresh(
+        self,
+        state: _CacheState[_T],
+        include_unavailable: bool,
+        fetch: Callable[[bool], list[_T]],
+        stale_error: str,
     ) -> None:
         now = time.monotonic()
         stale = state.last_refresh is None or (
@@ -148,13 +153,7 @@ class CapabilityDirectoryClient:
         if now < state.next_refresh_at and state.last_refresh is not None:
             return
         try:
-            response = self._stub.ListActiveInstances(
-                global_store_pb2.ListActiveInstancesRequest(
-                    include_unavailable=include_unavailable
-                ),
-                timeout=self._options.rpc_timeout_s,
-            )
-            state.entries = list(response.instances)
+            state.entries = fetch(include_unavailable)
             state.last_refresh = now
             state.backoff_s = self._options.min_refresh_interval_s
             state.next_refresh_at = now + self._options.min_refresh_interval_s
@@ -167,9 +166,7 @@ class CapabilityDirectoryClient:
             )
             state.next_refresh_at = now + state.backoff_s
             if stale:
-                raise RuntimeError(
-                    "Capability directory instance cache is stale"
-                ) from e
+                raise RuntimeError(stale_error) from e
 
 
 __all__ = [
