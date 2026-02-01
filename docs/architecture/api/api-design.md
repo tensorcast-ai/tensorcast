@@ -17,6 +17,7 @@ This page intentionally prioritizes **What/Why** (semantics and rationale) over
 - [Policy & Persistence](./policy-persistence.md)
 - [Region-Backed](./region-backed.md)
 - [Error, Retry, Observability](./error-retry-observability.md)
+- [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 
 ## Navigation
 

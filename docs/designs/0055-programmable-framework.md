@@ -43,9 +43,9 @@ related_docs:
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0004-unified-runtime-config.md
   - docs/designs/0011-unified-session-lifecycle-leases.md
-  - docs/designs/0016-artifact-view-v1.md
+  - docs/architecture/artifact-views-and-retrieval.md
   - docs/designs/0039-artifact-first-sdk.md
-  - docs/designs/0042-region-backed-tensor-dict-into.md
+  - docs/architecture/api/region-backed.md
 links:
   plan: ../plans/0055-programmable-framework.md
   predecessors:
@@ -204,7 +204,7 @@ A view is a derived artifact shape/layout (subset, slice, transpose, etc.) whose
 
 **Programmability requirement**
 
-- Any non-identity view MUST resolve to a stable `view_id` (`docs/designs/0016-artifact-view-v1.md`).
+- Any non-identity view MUST resolve to a stable `view_id` (`docs/architecture/artifact-views-and-retrieval.md`).
 - Any view that changes bytes MUST participate in cache identity (`view_id`), `ReplicaKey`, and the selection identity
   used for idempotent operations.
 
@@ -218,7 +218,7 @@ identity must be used consistently across:
 - plan step fingerprinting (controller/agent)
 - validation/debug (detect mismatched joins)
 
-We standardize two hashes (see `docs/designs/0042-region-backed-tensor-dict-into.md` for canonical definitions):
+We standardize two hashes (see `docs/architecture/api/region-backed.md` for canonical definitions):
 
 1) **`logical_layout_hash`** (base ByteSpace identity)  
    Identity of the base logical byte space: canonical/view index bytes + index kind. Excludes any physical binding
@@ -1419,7 +1419,7 @@ message CapabilityTokenEnvelope {
 }
 
 message QueueEpochFencing {
-  string queue_operation_id = 1;  // e.g. "queue:v1:<queue_name>"
+  string queue_operation_id = 1;  // canonical queue principal; see `docs/designs/0060-tensor-work-queue.md`
   uint64 queue_epoch = 2;         // Global Store operation lease_generation
 }
 ```

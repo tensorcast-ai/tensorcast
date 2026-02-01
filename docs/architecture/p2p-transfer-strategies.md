@@ -8,6 +8,10 @@ sidebar_position: 5
 
 This document explains how P2P transfers work in Global Store mode. It is code-derived and focuses on control flow, data flow, memory and VRAM movement, and the thread model that drives transfers.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/view-replicas-and-assembly.md`
+
 ## Scope and terminology
 
 - P2P transfer happens between Store Daemons; Global Store only coordinates.

@@ -132,10 +132,9 @@ None. No persistent schema or proto schema changes are required; reuse existing 
 # References
 
 - [api-design](../architecture/api/api-design.md)
-- 0016-artifact-view-v1.md
+- [artifact-views-and-retrieval](../architecture/artifact-views-and-retrieval.md)
 - [region-backed](../architecture/api/region-backed.md)
-- 0036-02-artifact-handle-core.md
-- 0036-03-lazy-artifact-handle.md
-- 0036-04-disk-artifact-variant.md
+- [materialization-flow](../architecture/api/materialization-flow.md)
+- [api-design](../architecture/api/api-design.md)
 - 0037-store-py-refactor.md
 - `tensorcast/api/store/__init__.py`, `tensorcast/api/store/artifact.py`, `tensorcast/startup.py`

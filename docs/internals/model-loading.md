@@ -8,6 +8,11 @@ sidebar_position: 1
 
 This diagram shows the complete artifact loading workflow in TensorCast, including the interaction between different components.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/api/materialization-flow.md`
+- `docs/internals/byte-range-mapping-and-execution.md`
+
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT

@@ -14,19 +14,20 @@ Related docs:
 - Public surface and fallbacks: [API Design](./api-design.md)
 - Region-backed lifecycles and teardown: [Region-Backed](./region-backed.md)
 - Error/retry semantics: [Error, Retry, Observability](./error-retry-observability.md)
+- View semantics: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 
 ## Definitions and Payloads
 
 - **Canonical index**: JSON mapping `tensor_name -> [logical_offset, logical_length, shape, stride, dtype, storage_offset]`.
   It defines the logical layout and is used to build payload descriptors. See
   `core/store/materialization/dataplane/metadata/canonical_index.h` for the stable format.
-- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/designs/0016-artifact-view-v1.md`).
+- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/architecture/artifact-views-and-retrieval.md`).
   Non-identity views must have a resolved `view_id` so `ReplicaKey` disambiguation and variant verification apply.
 - **View data hash (`view_data_hash`)**: Integrity hash of the realized view byte stream (post-transform). It is distinct
   from `view_id` and is not used as a subset identifier.
 - **View subset hash (`view_subset_hash` / `ViewSubset.subset_hash`)**: Opaque raw digest bytes identifying a selection
   (e.g., sorted+unique `tensor_names`). These bytes must not be UTF-8/hex-string bytes; see
-  `docs/designs/0036-01-materialization-pipeline-v2.md` and `docs/designs/0042-region-backed-tensor-dict-into.md`.
+  `docs/architecture/artifact-views-and-retrieval.md` and `docs/architecture/api/region-backed.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
   into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
 - **Materialization**: Resolving an artifact reference (artifact_id/key/disk path)
@@ -162,6 +163,8 @@ Materialization ingestion uses a structured pipeline in
    - Build `ReplicaHandle`, attach CUDA IPC handle and view index JSON if present.
 
 ## Data Plane: Loaders, Pump, and Sinks
+
+Byte-range mapping and execution semantics are documented in `docs/internals/byte-range-mapping-and-execution.md`.
 
 ### Sources
 

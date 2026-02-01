@@ -6,7 +6,7 @@ areas: ["core", "daemon", "global_store", "sdk"]
 
 # Canonical Index Deep Dive
 
-This note consolidates everything in-tree about the canonical index (Index v2) that TensorCast relies on to make artifact identity, storage deduplication, and transport reproducibility work. It ties together the existing design docs (`docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`), the API design docs (`docs/architecture/api/api-design.md`), the core implementation in `core/store/materialization/dataplane`, and the SDK/daemon call paths that consume it today.
+This note consolidates everything in-tree about the canonical index (Index v2) that TensorCast relies on to make artifact identity, storage deduplication, and transport reproducibility work. It ties together the existing design docs (`docs/designs/0003-unified-memory-registration-avbs-lip.md`, `docs/designs/0007-content-addressed-artifact-id.md`), the API design docs (`docs/architecture/api/api-design.md`), the view semantics in `docs/architecture/artifact-views-and-retrieval.md`, the byte-range executor in `docs/internals/byte-range-mapping-and-execution.md`, the core implementation in `core/store/materialization/dataplane`, and the SDK/daemon call paths that consume it today.
 
 ```mermaid
 flowchart LR

@@ -152,6 +152,8 @@ These conventions improve observability while keeping best‑effort paths fast a
 ## Key Links
 
 - Architecture overview: `../docs/architecture/architecture-overview.md`
+- Artifact views and retrieval: `../docs/architecture/artifact-views-and-retrieval.md`
+- View replicas and assembly: `../docs/architecture/view-replicas-and-assembly.md`
 - Model loading internals: `../docs/internals/model-loading.md`
 - P2P transfer strategies: `../docs/architecture/p2p-transfer-strategies.md`
 - Store Engine internals: `../core/store/README.md`

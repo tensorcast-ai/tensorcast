@@ -13,6 +13,7 @@ Related docs:
 - Public surface: [API Design](./api-design.md#region-apis)
 - LIP registration internals: [Registration Flow](./registration-flow.md#lease-in-place-path)
 - Region-backed `get_into` (different mechanism, same motivation): [Materialization Flow](./materialization-flow.md#region-backed-get_into-materializeintotarget-v2)
+- View semantics and identity: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure semantics: [Error, Retry, Observability](./error-retry-observability.md)
 
 ## What is a “VRAM region”?

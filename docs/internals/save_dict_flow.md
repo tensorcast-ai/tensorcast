@@ -11,6 +11,10 @@ This document explains how **tensorcast** persists a PyTorch `state_dict` using 
 Registration into the distributed Store is handled by the daemon APIs (surfaced as
 `tensorcast.put` / `tensorcast.register`); production flows should not rely on local disk helpers.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/internals/canonical-index.md`
+
 ---
 
 ## 1. High-level Overview

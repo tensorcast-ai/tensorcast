@@ -16,7 +16,7 @@ links:
   plan: ../plans/0043-unified-pinned-memory-authority.md
   predecessors:
     - ./0004-unified-runtime-config.md
-    - ./0038-daemon-only-disk-materialization.md
+    - ../architecture/api/materialization-flow.md
 ---
 
 # Summary
@@ -352,11 +352,11 @@ Local disk save/load utilities are intentionally **test-only** and are not part 
 - Test API surface: `tensorcast.testing.io_disk.save_dict()` / `tensorcast.testing.io_disk.load_dict_from_disk()`.
 - Internal implementation: `tensorcast.api._io_disk` functions are guarded and require an internal escape hatch to call.
 
-This keeps daemon pinned ownership unambiguous: production persistence and materialization are daemon-routed (see `docs/designs/0038-daemon-only-disk-materialization.md`).
+This keeps daemon pinned ownership unambiguous: production persistence and materialization are daemon-routed (see `docs/architecture/api/materialization-flow.md`).
 
 # References
 
 - `docs/designs/0004-unified-runtime-config.md`
-- `docs/designs/0038-daemon-only-disk-materialization.md`
+- `docs/architecture/api/materialization-flow.md`
 - `core/store/README.md`
 - `core/communicator/README.md`

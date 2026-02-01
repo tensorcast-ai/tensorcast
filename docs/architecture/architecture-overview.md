@@ -8,6 +8,10 @@ sidebar_position: 1
 
 This document provides a high-level overview of the distributed artifact storage system's architecture. For detailed information about specific components, please refer to the dedicated guides.
 
+Related architecture docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/view-replicas-and-assembly.md`
+
 ## System Architecture
 
 The system comprises a control plane (Global Store), a data plane (Store Daemons), and clients (User Process Workers) working together to provide efficient artifact storage and serving across a cluster:

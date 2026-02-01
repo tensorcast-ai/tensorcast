@@ -5,7 +5,7 @@ areas: ["core","daemon","global_store","sdk","proto"]
 links:
   prior_design: ./0007-content-addressed-artifact-id.md
   session_api: ../architecture/api/api-design.md#store-and-entry-points
-  views: ./0016-artifact-view-v1.md
+  views: ../architecture/artifact-views-and-retrieval.md
 related_code:
   - core/store/**
   - daemon/**
@@ -33,7 +33,7 @@ Goals
 Non‑Goals
 - Do not remove or weaken mi2. Persistent, verifiable artifacts continue to use `mi2:`; CGID is additive.
 - Do not change P2P/IPC mechanics or memory plans (LIP/coalesced) beyond identity handling.
-- Do not introduce view planning, partial registration, or variant ByteSpaces here (see 0016). This document only establishes identity semantics.
+- Do not introduce view planning, partial registration, or variant ByteSpaces here (see `docs/architecture/artifact-views-and-retrieval.md`). This document only establishes identity semantics.
 
 # Architecture & Interfaces
 
@@ -178,7 +178,7 @@ Risks & mitigations
 
 - Identity (mi2): [0007 Content‑Addressed Artifact ID](./0007-content-addressed-artifact-id.md)
 - Session API: [api-design](../architecture/api/api-design.md#store-and-entry-points)
-- Views: [0016 Variant‑Aware Artifact Views](./0016-artifact-view-v1.md)
+- Views: [Artifact Views and Retrieval](../architecture/artifact-views-and-retrieval.md)
 
 - Key code locations for the implementation:
   - `tensorcast/common/identity.py` and `core/common/artifact_identity.cc` — shared validation helpers and identity kind enum.

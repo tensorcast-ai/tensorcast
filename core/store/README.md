@@ -35,6 +35,11 @@ Key files:
 - Components: core/store/components/*
 - Types: core/store/materialization/contracts/loading_spec.h, core/store/device_types.h, core/store/communication_types.h
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/view-replicas-and-assembly.md`
+- `docs/internals/byte-range-mapping-and-execution.md`
+
 ## High-level Architecture
 
 ```mermaid

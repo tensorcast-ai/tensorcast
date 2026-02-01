@@ -5,7 +5,7 @@ sidebar_position: 6
 ---
 
 # Summary
-TensorCast’s core bet is that any model state can be treated as a rigorously described `dict[str, torch.Tensor]`. This note connects the high-level rationale from the design set (0007, 0016, API design, checkpoint data format) with the concrete code that keeps the abstraction true. It also surfaces the main trade-offs: while a uniform tensor view enables zero-copy routing and verifiable views, it obligates us to encode tensor semantics when scheduling resources, hashing bytes, or caching replicas.
+TensorCast’s core bet is that any model state can be treated as a rigorously described `dict[str, torch.Tensor]`. This note connects the high-level rationale from the design set (0007, artifact views, API design, checkpoint data format) with the concrete code that keeps the abstraction true. It also surfaces the main trade-offs: while a uniform tensor view enables zero-copy routing and verifiable views, it obligates us to encode tensor semantics when scheduling resources, hashing bytes, or caching replicas.
 
 Note: the public SDK surface is now handle-first (`tensorcast.artifact(...).tensor*`); legacy
 module-level `get/get_into` helpers have been removed in favor of the `Artifact` handle while
@@ -13,7 +13,7 @@ reusing the same materialization pipeline described below.
 
 ## Related design threads
 - [0007-content-addressed-artifact-id](../designs/0007-content-addressed-artifact-id.md): canonical identity (`mi2:index:data`), hashing policy, Global Store schema.
-- [0016-artifact-view-v1](../designs/0016-artifact-view-v1.md): variant-aware retrieval/registration via `ViewSpec`, shared planners, leaf digests.
+- [artifact-views-and-retrieval](../architecture/artifact-views-and-retrieval.md): variant-aware retrieval/registration via `ViewSpec`, shared planners, view identities, and ByteSpace semantics.
 - [api-design](../architecture/api/api-design.md): Store-centric SDK session that owns daemon policy, retries, and tensor validation.
 - [core/checkpoint/data-format](../../core/checkpoint/docs/data-format.md): file/partition layout, canonical tensor index v2→v3, and PAD semantics.
 
@@ -71,7 +71,7 @@ RFC‑0007 introduced `artifact_id = "mi2:" + index_multihash + ":" + data_multi
 Together, these pieces guarantee that “artifact = tensor dict” is not just a convention—it is a verifiable contract tied to deterministic bytes.
 
 ## 3. Variant-aware views
-RFC‑0016 adds `ViewSpec` so callers can work with slices or transposes without materializing the entire canonical artifact. The heavy lifting happens in three places:
+RFC‑0016 adds `ViewSpec` so callers can work with slices or transposes without materializing the entire canonical artifact. See `docs/architecture/artifact-views-and-retrieval.md` for the canonical view semantics. The heavy lifting happens in three places:
 
 1. **Planning (`core/store/materialization/dataplane/view/view_planner.cc`)**  
    Validates that every tensor uses at most one `narrow` or `transpose`, computes selection metadata (ranges, padding, alignment), and emits both forward (`SelectionPlan`, `TransformPlan`) and inverse (`ViewWritePlan`) structures. This keeps canonical↔variant math identical for load and ingest.

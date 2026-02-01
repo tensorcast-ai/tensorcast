@@ -8,7 +8,11 @@ areas: ["sdk", "daemon", "core"]
 
 This document describes how `tensor_dict_into` / `tensor_into` / `get_into` populate
 caller-owned tensors. It covers the legacy daemon-owned replica path and the
-region-backed path introduced in Design 0042.
+region-backed path described in `docs/architecture/api/region-backed.md`.
+
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/api/region-backed.md`
 
 ## Legacy path (daemon-owned replica)
 
