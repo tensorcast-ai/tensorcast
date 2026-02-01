@@ -206,6 +206,40 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
   return created_id;
 }
 
+absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create_retention_lease(
+    absl::Duration ttl,
+    std::vector<std::function<absl::Status()>> finalizers) {
+  if (ttl <= absl::ZeroDuration()) {
+    return absl::InvalidArgumentError("ttl must be > 0");
+  }
+  LeaseId created_id = 0;
+  std::optional<absl::Time> notify_when;
+  {
+    absl::MutexLock lock(&mu_);
+    LeaseRec r;
+    r.id = next_id_++;
+    r.kind = LeaseKind::kRetention;
+    r.subj = ReplicaSubject{};
+    r.pid = -1;
+    GuardRec g;
+    g.id = next_guard_id_++;
+    g.kind = GuardKind::kDeadline;
+    g.lease = r.id;
+    g.generation = 1;
+    g.deadline = absl::Now() + ttl;
+    guard_by_id_.emplace(g.id, g);
+    r.guards.push_back(g.id);
+    notify_when = push_deadline_(g.id, g.deadline, g.generation);
+    for (auto& f : finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    created_id = r.id;
+    by_id_[r.id] = std::move(r);
+  }
+  notify_schedule_if_earlier_(notify_when);
+  return created_id;
+}
+
 absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create_commit_lease(
     const CommitSubject& subj,
     pid_t pid) {
@@ -338,6 +372,10 @@ absl::Status SessionLifecycleManager::renew_placement(LeaseId id, absl::Duration
   }
   notify_schedule_if_earlier_(notify_when);
   return absl::OkStatus();
+}
+
+absl::Status SessionLifecycleManager::renew_retention(LeaseId id, absl::Duration ttl) {
+  return renew_placement(id, ttl);
 }
 
 void SessionLifecycleManager::release_lease(LeaseId id) {
@@ -621,15 +659,19 @@ void SessionLifecycleManager::retire_lease_(LeaseId id, const char* /*reason*/) 
     // Move finalizers out; call them after unlock
     finalizers = std::move(it->second.finalizers);
     // Update counters once
-    if (it->second.kind == LeaseKind::kUse)
+    if (it->second.kind == LeaseKind::kUse) {
       dec_use_(it->second.subj);
-    if (it->second.kind == LeaseKind::kPlacement)
+    }
+    if (it->second.kind == LeaseKind::kPlacement) {
       dec_pin_(it->second.subj);
-    // If this was the last protection for the subject, capture subject for eviction notify
-    if (subj_opt.has_value()) {
-      auto cit = counters_.find(*subj_opt);
-      if (cit != counters_.end() && cit->second.use_count == 0 && cit->second.placement_pins == 0) {
-        subj_to_notify = *subj_opt;
+    }
+    if (it->second.kind == LeaseKind::kUse || it->second.kind == LeaseKind::kPlacement) {
+      // If this was the last protection for the subject, capture subject for eviction notify
+      if (subj_opt.has_value()) {
+        auto cit = counters_.find(*subj_opt);
+        if (cit != counters_.end() && cit->second.use_count == 0 && cit->second.placement_pins == 0) {
+          subj_to_notify = *subj_opt;
+        }
       }
     }
     // Cleanup guard indices

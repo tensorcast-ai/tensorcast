@@ -111,6 +111,157 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_worker_capability_flags_filtering(self, servicer, test_context):
+        flags = (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="cap_worker",
+            node_address="192.168.2.10",
+            grpc_port=8010,
+            p2p_port=8011,
+            mem_pool_total_size=1000000000,
+            mem_pool_available_size=900000000,
+            daemon_id="daemon_cap_worker",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert any(
+            w.worker_id == register_response.worker_id for w in list_response.workers
+        )
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert all(
+            w.worker_id != register_response.worker_id for w in list_response.workers
+        )
+
+    def test_instance_capability_flags_filtering(self, servicer, test_context):
+        flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+        register_request = global_store_pb2.RegisterInstanceRequest(
+            instance_id="instance-cap-1",
+            daemon_id="daemon-cap-instance",
+            engine="test",
+            signals_endpoint="ipc://signals",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterInstance(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert any(
+            inst.instance_id == register_request.instance_id
+            for inst in list_response.instances
+        )
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert all(
+            inst.instance_id != register_request.instance_id
+            for inst in list_response.instances
+        )
+
+    def test_worker_capability_flags_clear_on_heartbeat(
+        self, servicer, test_context
+    ):
+        flags = (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="cap_worker_clear",
+            node_address="192.168.2.20",
+            grpc_port=8020,
+            p2p_port=8021,
+            mem_pool_total_size=1000000000,
+            mem_pool_available_size=900000000,
+            daemon_id="daemon_cap_worker_clear",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=register_response.worker_id,
+                mem_pool_available_size=900000000,
+                accepting_new_requests=True,
+                state_version=1,
+                capability_flags=0,
+            ),
+            test_context,
+        )
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert all(
+            worker.worker_id != register_response.worker_id
+            for worker in list_response.workers
+        )
+
+    def test_instance_capability_flags_clear_on_heartbeat(
+        self, servicer, test_context
+    ):
+        flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+        register_request = global_store_pb2.RegisterInstanceRequest(
+            instance_id="instance-cap-clear-1",
+            daemon_id="daemon-cap-instance-clear",
+            engine="test",
+            signals_endpoint="ipc://signals",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterInstance(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        servicer.InstanceHeartbeat(
+            global_store_pb2.InstanceHeartbeatRequest(
+                instance_id=register_request.instance_id,
+                capability_flags=0,
+            ),
+            test_context,
+        )
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert all(
+            inst.instance_id != register_request.instance_id
+            for inst in list_response.instances
+        )
+
     def test_list_replicas(
         self, servicer, test_context, memory_info, registered_worker
     ):

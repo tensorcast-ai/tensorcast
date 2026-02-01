@@ -6,10 +6,12 @@
 #include <cstdlib>
 #include <filesystem>
 
+#include "core/common/capability_token.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "grpcpp/server_context.h"
+#include "tensorcast/common/v1/capability_token.pb.h"
 
 namespace {
 
@@ -124,4 +126,79 @@ TEST_CASE("Placement lease RPCs require capability tokens", "[daemon][grpc][plac
     const auto st = svc.RenewPlacementLease(&ctx, &req, &resp);
     REQUIRE(st.error_code() == grpc::StatusCode::NOT_FOUND);
   }
+}
+
+TEST_CASE("Placement lease tokens use capability envelope when configured", "[daemon][grpc][placement_lease]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = test_tmpdir();
+  daemon_opts.daemon_id = "daemon-test";
+  daemon_opts.capability_tokens.active.version = 1;
+  daemon_opts.capability_tokens.active.secret = "secret_v1";
+  std::filesystem::create_directories(daemon_opts.storage_path);
+
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  const std::string artifact_id = "mi2:test:pin_v2";
+  const int device_id = 0;
+
+  std::string token;
+  uint64_t lease_id = 0;
+
+  {
+    grpc::ServerContext ctx;
+    tensorcast::daemon::v2::CreatePlacementLeaseRequest req;
+    req.set_artifact_id(artifact_id);
+    req.set_device_id(device_id);
+    req.set_ttl_ms(1000);
+    tensorcast::daemon::v2::CreatePlacementLeaseResponse resp;
+    const auto st = svc.CreatePlacementLease(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    lease_id = resp.lease_id();
+    token = resp.lease_token();
+    REQUIRE_FALSE(token.empty());
+  }
+
+  tensorcast::common::CapabilityTokenManager mgr(
+      tensorcast::common::CapabilityTokenConfig{
+          .active = tensorcast::common::CapabilityTokenKey{.version = 1, .secret = "secret_v1"},
+          .previous = {},
+      });
+  REQUIRE(mgr.configured());
+
+  auto env_or = mgr.verify(
+      token,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
+      "daemon-test",
+      absl::Now(),
+      /*require_not_expired=*/true);
+  REQUIRE(env_or.ok());
+  tensorcast::common::v1::PlacementLeaseScope scope;
+  REQUIRE(scope.ParseFromString(env_or->scope()));
+  REQUIRE(scope.lease_id() == lease_id);
+
+  std::string token2;
+  {
+    grpc::ServerContext ctx;
+    tensorcast::daemon::v2::RenewPlacementLeaseRequest req;
+    req.set_lease_token(token);
+    req.set_ttl_ms(2000);
+    tensorcast::daemon::v2::RenewPlacementLeaseResponse resp;
+    const auto st = svc.RenewPlacementLease(&ctx, &req, &resp);
+    REQUIRE(st.ok());
+    token2 = resp.lease_token();
+    REQUIRE_FALSE(token2.empty());
+  }
+
+  auto env_or2 = mgr.verify(
+      token2,
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
+      "daemon-test",
+      absl::Now(),
+      /*require_not_expired=*/true);
+  REQUIRE(env_or2.ok());
 }

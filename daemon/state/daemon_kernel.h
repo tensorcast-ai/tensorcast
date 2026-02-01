@@ -9,6 +9,7 @@
 #include "absl/status/status.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
+#include "core/common/capability_token.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/background_scheduler.h"
@@ -23,6 +24,7 @@
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/registration_manager.h"
 #include "daemon/state/replica_session_manager.h"
+#include "daemon/state/retention_registry.h"
 #include "daemon/state/retire_gates.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -128,6 +130,14 @@ class DaemonKernel {
     return *placement_lease_tokens_;
   }
 
+  [[nodiscard]] common::CapabilityTokenManager* capability_tokens() const {
+    return capability_tokens_.get();
+  }
+
+  [[nodiscard]] RetentionRegistry* retention_registry() const {
+    return retention_registry_.get();
+  }
+
   [[nodiscard]] ShutdownSignal& shutdown_signal() {
     return shutdown_signal_;
   }
@@ -163,6 +173,8 @@ class DaemonKernel {
   std::unique_ptr<RegistrationManager> reg_mgr_;
   std::unique_ptr<HandleLeaseRegistry> handle_leases_;
   std::unique_ptr<PlacementLeaseTokens> placement_lease_tokens_;
+  std::unique_ptr<common::CapabilityTokenManager> capability_tokens_;
+  std::unique_ptr<RetentionRegistry> retention_registry_;
 
   std::unique_ptr<SessionsService> sessions_svc_;
   std::unique_ptr<LipBridge> lip_bridge_;

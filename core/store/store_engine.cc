@@ -229,6 +229,20 @@ absl::StatusOr<StoreEngine::StableCacheAdmissionResult> StoreEngine::admit_stabl
   return result;
 }
 
+absl::Status StoreEngine::update_stable_cache_policy(
+    const loading::ReplicaKey& key,
+    const components::StableDramCachePolicy& policy,
+    std::optional<absl::Time> retention_deadline) {
+  if (key.device.type != DeviceType::CPU) {
+    return absl::FailedPreconditionError("stable cache policy update requires CPU ReplicaKey");
+  }
+  auto cache_manager = runtime_env_->runtime_context().stable_cache_manager();
+  if (!cache_manager) {
+    return absl::FailedPreconditionError("stable cache manager unavailable");
+  }
+  return cache_manager->update_policy(key, policy, retention_deadline);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Status Queries
 // ═══════════════════════════════════════════════════════════════════════════

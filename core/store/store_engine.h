@@ -230,6 +230,11 @@ class StoreEngine {
       const loading::ReplicaKey& key,
       const components::StableDramCachePolicy& policy);
 
+  [[nodiscard]] absl::Status update_stable_cache_policy(
+      const loading::ReplicaKey& key,
+      const components::StableDramCachePolicy& policy,
+      std::optional<absl::Time> retention_deadline = std::nullopt);
+
   /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
    */

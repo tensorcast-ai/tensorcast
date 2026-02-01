@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-01-31
+last_updated: 2026-02-01
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -23,7 +23,11 @@ related_code:
   - daemon/service/controllers/materialization_controller.cc
   - daemon/state/replica_session_manager.h
   - daemon/state/session_lifecycle.h
+  - core/common/capability_token.h
+  - core/common/capability_token.cc
+  - tensorcast/common/capability_token.py
   - proto/tensorcast/common/v1/common.proto
+  - proto/tensorcast/common/v1/capability_token.proto
   - proto/tensorcast/daemon/v2/store_daemon.proto
   - proto/tensorcast/global_store/v1/global_store.proto
   - proto/tensorcast/plan/v1/plan.proto
@@ -1363,6 +1367,77 @@ operation-scoped wait/cancel, placement pins, and stable daemon identity).
 - map to daemon’s existing `placement_pins` semantics (`SessionLifecycleManager::create_placement_lease`)
 - MUST return and require a `lease_token` capability for renew/release (daemon-scoped, time-bounded, unforgeable). The Python SDK should surface this as a generic `capability_token` to avoid overloading “lease” terminology.
 
+6) **Unified capability token envelope (implemented)**
+
+Several subsystems require daemon-issued capability tokens (placement pins, retention handles, and future broker-issued
+tokens like queue work leases). To prevent token-shape drift and token-type confusion, daemon-issued capabilities use a
+single versioned envelope with issuer binding, audience binding, and expiry.
+
+Authoritative proto: `proto/tensorcast/common/v1/capability_token.proto` (package `tensorcast.common.v1`).
+
+Verification model (normative, v1):
+
+- Tokens MUST be validated by the issuing daemon (issuer-only validation).
+- Tokens MUST embed `issuer_daemon_id`, and the issuer MUST reject tokens whose issuer does not match `self.daemon_id`.
+- SDKs SHOULD treat tokens as opaque `bytes` and never parse them.
+
+Token requirements (normative):
+
+- **Unforgeable**: authenticated (MAC/signature) with a key loaded from unified runtime config
+  (`docs/designs/0004-unified-runtime-config.md`); no ad-hoc env vars.
+- **Versioned**: tokens MUST carry a `token_version` (key id / format version) to support rotation.
+- **Audience binding**: include an `audience` field to prevent token type confusion.
+- **Scope binding**: bind tightly to an audience-specific scope payload. `scope` MUST be the deterministic Protobuf
+  serialization of an audience-specific scope message so the issuer can parse/validate consistently across languages.
+- **Expiry**: include absolute `expires_at_ms`; issuer MUST validate expiry.
+- **Optional fencing**: when a token authorizes writes to volatile control-plane state, embed a fencing principal +
+  epoch so stale tokens fail fast after leader changes.
+
+Schema (excerpt; see proto for full details):
+
+```proto
+// Audiences prevent token type confusion.
+enum CapabilityAudience {
+  CAPABILITY_AUDIENCE_UNSPECIFIED = 0;
+  CAPABILITY_AUDIENCE_PLACEMENT_LEASE = 1;
+  CAPABILITY_AUDIENCE_RETENTION_HANDLE = 2;
+  CAPABILITY_AUDIENCE_QUEUE_WORK_LEASE = 3;
+}
+
+message CapabilityTokenEnvelope {
+  uint32 token_version = 1;        // key id / format version
+  string issuer_daemon_id = 2;     // stable identity (not address)
+  CapabilityAudience audience = 3; // prevents token type confusion
+  bytes scope = 4;                // deterministic audience-specific payload
+  uint64 expires_at_ms = 5;        // absolute expiry
+
+  oneof fencing {
+    QueueEpochFencing queue_epoch = 10;
+  }
+
+  bytes auth_tag = 100;           // MAC/signature over fields above
+}
+
+message QueueEpochFencing {
+  string queue_operation_id = 1;  // e.g. "queue:v1:<queue_name>"
+  uint64 queue_epoch = 2;         // Global Store operation lease_generation
+}
+```
+
+Key rotation (required):
+
+- Issuers MUST support bounded-overlap rotation: accept the active key and a bounded set of previous keys for
+  verification; `token_version` selects which key to use.
+- Keys are configured in `DaemonConfig.capability_tokens` (active + bounded previous).
+
+Migration/compatibility (required):
+
+- Placement lease tokens support dual-format verification during migration (legacy token format vs the envelope), and
+  issuers SHOULD keep this window bounded. The token format MUST be unambiguously detectable by the issuer so clients
+  can roll independently.
+- Retention handles require the unified envelope (issuer must be configured with capability token keys); they do not
+  have a legacy token format.
+
 ### Node Agent / Engine Adapter RPCs (Phase-4; implemented)
 
 Node-local execution is provided by:
@@ -1392,6 +1467,16 @@ Node-local execution is provided by:
   across HA re-registrations.
 - Instance registry exposes `RegisterInstance`, `InstanceHeartbeat`, and `ListActiveInstances` for stable
   `instance_id` discovery.
+- Capability directory (low-frequency): worker/instance discovery includes a bounded capability bitset (routing hints
+  only, not correctness) in `proto/tensorcast/global_store/v1/global_store.proto`, for example:
+  - workers: `WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED`, `WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED`,
+    `WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED`
+  - instances: `INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED`, `INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED`
+  - listing supports filters (`required_capability_flags`) so clients/controllers can find broker-enabled endpoints
+  - daemons publish worker capability flags when `DaemonConfig.capability_directory.enabled=true`
+  - writes SHOULD be update-on-change (do not rewrite identical flags every heartbeat)
+  - clients MUST cache results and MUST NOT query Global Store per control-plane action; refresh is bounded by explicit
+    staleness budgets and backoff
 - (Phase-2+, separate design) **Movable alias service** for weights:
   - linearizable `ResolveAlias(alias) -> artifact_id`
   - `CompareAndSwapAlias(alias, expected_artifact_id, new_artifact_id)` (CAS)

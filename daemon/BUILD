@@ -65,6 +65,7 @@ sc_cc_library(
         ":registration_controller_lib",
         ":registration_manager_lib",
         ":replica_listing_hdr",
+        ":retention_registry_lib",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":session_manager_hdr",
@@ -79,6 +80,7 @@ sc_cc_library(
         ":types_hdr",
         ":verification_tracker_hdr",
         "//core/common:artifact_hash_lib",
+        "//core/common:capability_token_lib",
         "//core/common:otel_grpc_propagation_lib",
         "//core/store:device_registry",
         "//core/store:global_store_client",
@@ -176,6 +178,29 @@ sc_cc_library(
         "@abseil-cpp//absl/random:random",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
+    name = "retention_registry_lib",
+    srcs = ["state/retention_registry.cc"],
+    hdrs = ["state/retention_registry.h"],
+    deps = [
+        ":session_lifecycle_lib",
+        ":store_policy_resolver_lib",
+        "//core/common:capability_token_lib",
+        "//core/store:device_types",
+        "//core/store:stable_dram_cache_policy",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/common/v1:common_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/random:random",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
@@ -523,6 +548,7 @@ sc_header_only_library(
     name = "daemon_options_hdr",
     hdrs = ["state/daemon_options.h"],
     deps = [
+        "//core/common:capability_token_lib",
         "@abseil-cpp//absl/time",
     ],
 )
@@ -571,6 +597,7 @@ sc_cc_library(
         ":placement_lease_tokens_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
+        ":retention_registry_lib",
         ":retire_gates_lib",
         ":session_lifecycle_lib",
         ":session_manager_hdr",
@@ -581,6 +608,7 @@ sc_cc_library(
         ":verification_tracker_hdr",
         ":worker_identity_store_lib",
         "//core/common:async_runtime_lib",
+        "//core/common:capability_token_lib",
         "//core/store:device_registry",
         "//core/store:store_engine",
         "@abseil-cpp//absl/time",
@@ -1138,9 +1166,30 @@ cc_test(
     deps = [
         ":daemon_service_harness_lib",
         ":grpc_service_impl",
+        "//core/common:capability_token_lib",
         "//core/store:device_registry",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "retention_registry_test",
+    srcs = ["state/retention_registry_test.cc"],
+    deps = [
+        ":ipc_region_registry_lib",
+        ":lip_manager_lib",
+        ":ref_tracker_hdr",
+        ":retention_registry_lib",
+        ":session_lifecycle_lib",
+        ":session_manager_hdr",
+        "//core/common:capability_token_lib",
+        "//core/store:device_types",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],

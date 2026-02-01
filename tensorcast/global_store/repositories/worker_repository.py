@@ -26,6 +26,7 @@ _WORKER_SELECT = """
         workers.mem_pool_total_size,
         workers.mem_pool_available_size,
         workers.accepting_new_requests,
+        workers.capability_flags,
         workers.registered_at,
         workers.last_heartbeat,
         workers.inactive_at,
@@ -120,8 +121,8 @@ class WorkerRepository(BaseRepository):
                 INSERT INTO workers (
                     worker_id, daemon_id, node_id, node_address, grpc_port, p2p_port,
                     mem_pool_total_size, mem_pool_available_size,
-                    accepting_new_requests, state_version, state_checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    accepting_new_requests, capability_flags, state_version, state_checksum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     worker.worker_id,
@@ -133,6 +134,7 @@ class WorkerRepository(BaseRepository):
                     worker.mem_pool_total_size,
                     worker.mem_pool_available_size,
                     worker.accepting_new_requests,
+                    int(worker.capability_flags),
                     worker.state_version,
                     worker.state_checksum,
                 ],
@@ -164,6 +166,7 @@ class WorkerRepository(BaseRepository):
                 SET daemon_id = ?, node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
                     mem_pool_total_size = ?, mem_pool_available_size = ?,
                     accepting_new_requests = ?,
+                    capability_flags = ?,
                     last_heartbeat = CURRENT_TIMESTAMP,
                     inactive_at = NULL
                     {reset_clause}
@@ -179,6 +182,7 @@ class WorkerRepository(BaseRepository):
                     worker.mem_pool_total_size,
                     worker.mem_pool_available_size,
                     worker.accepting_new_requests,
+                    int(worker.capability_flags),
                     worker.worker_id,
                 ],
             )
@@ -208,6 +212,24 @@ class WorkerRepository(BaseRepository):
             )
 
         return result.fetchone() is not None
+
+    def update_capability_flags(self, worker_id: str, capability_flags: int) -> bool:
+        """Update capability flags only when changed."""
+        with self._write_lock:
+            cursor = self.get_cursor()
+            cursor.execute(
+                """
+                UPDATE workers
+                SET capability_flags = ?
+                WHERE worker_id = ?
+                  AND inactive_at IS NULL
+                  AND capability_flags != ?
+                RETURNING worker_id
+                """,
+                [int(capability_flags), worker_id, int(capability_flags)],
+            )
+            row = cursor.fetchone()
+        return bool(row)
 
     def batch_update_heartbeats(self, updates: list[tuple[str, int, bool]]) -> int:
         """
@@ -558,17 +580,17 @@ class WorkerRepository(BaseRepository):
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""
         memory_tier_state = None
-        if row[14] is not None:
+        if row[15] is not None:
             memory_tier_state = WorkerMemoryTierState(
-                stable_total_bytes=row[14],
-                stable_used_bytes=row[15],
-                preemptible_total_bytes=row[16],
-                preemptible_marked_bytes=row[17],
-                faults_per_sec=row[18] or 0.0,
-                rehydrate_p99_ns=row[19] or 0,
-                enable_preemptible=bool(row[20]),
-                memory_tier_config_json=row[21] or "{}",
-                snapshot_epoch_ns=row[22] or 0,
+                stable_total_bytes=row[15],
+                stable_used_bytes=row[16],
+                preemptible_total_bytes=row[17],
+                preemptible_marked_bytes=row[18],
+                faults_per_sec=row[19] or 0.0,
+                rehydrate_p99_ns=row[20] or 0,
+                enable_preemptible=bool(row[21]),
+                memory_tier_config_json=row[22] or "{}",
+                snapshot_epoch_ns=row[23] or 0,
             )
 
         return Worker(
@@ -581,11 +603,12 @@ class WorkerRepository(BaseRepository):
             mem_pool_total_size=row[6],
             mem_pool_available_size=row[7],
             accepting_new_requests=row[8],
-            registered_at=row[9],
-            last_heartbeat=row[10],
-            inactive_at=row[11],
-            state_version=row[12],
-            state_checksum=row[13] or "",
+            capability_flags=row[9] or 0,
+            registered_at=row[10],
+            last_heartbeat=row[11],
+            inactive_at=row[12],
+            state_version=row[13],
+            state_checksum=row[14] or "",
             memory_tier_state=memory_tier_state,
         )
 

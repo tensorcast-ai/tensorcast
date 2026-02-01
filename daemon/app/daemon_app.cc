@@ -128,6 +128,9 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .sessions_service = app->kernel_->sessions_service(),
       .lifecycle_manager = app->kernel_->lifecycle_manager(),
       .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
+      .capability_tokens = app->kernel_->capability_tokens(),
+      .retention_registry = app->kernel_->retention_registry(),
+      .daemon_id = app->options_.daemon_options.daemon_id,
       .shutdown_signal = app->kernel_->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

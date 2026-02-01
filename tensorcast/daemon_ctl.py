@@ -753,6 +753,92 @@ class DaemonCtl:
                 raise
         return response
 
+    def acquire_retention_handle(
+        self,
+        *,
+        selection: common_pb2.ArtifactSelection,
+        policy: store_daemon_pb2.StorePolicy | None = None,
+        ttl_ms: int | None = None,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.AcquireRetentionHandleResponse:
+        with self._client_span("Client/AcquireRetentionHandle") as span:
+            request = store_daemon_pb2.AcquireRetentionHandleRequest(
+                selection=selection,
+            )
+            if policy is not None:
+                request.policy.CopyFrom(policy)
+            if ttl_ms is not None:
+                request.ttl_ms = int(ttl_ms)
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.AcquireRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.AcquireRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def renew_retention_handle(
+        self,
+        *,
+        handle_token: bytes,
+        extend_ttl_ms: int,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.RenewRetentionHandleResponse:
+        with self._client_span("Client/RenewRetentionHandle") as span:
+            request = store_daemon_pb2.RenewRetentionHandleRequest(
+                handle_token=bytes(handle_token),
+                extend_ttl_ms=int(extend_ttl_ms),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.RenewRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.RenewRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def release_retention_handle(
+        self,
+        *,
+        handle_token: bytes,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.ReleaseRetentionHandleResponse:
+        with self._client_span("Client/ReleaseRetentionHandle") as span:
+            request = store_daemon_pb2.ReleaseRetentionHandleRequest(
+                handle_token=bytes(handle_token),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.ReleaseRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.ReleaseRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     @overload
     def materialize_by_artifact_id_v2(
         self,

@@ -56,12 +56,21 @@ def _register_instance(
     daemon_id: str,
     worker_id: str | None,
 ) -> None:
+    capability_flags = 0
+    capability_flags |= (
+        1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
+    )
+    if config.signals_endpoint:
+        capability_flags |= (
+            1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+        )
     req = global_store_pb2.RegisterInstanceRequest(
         instance_id=config.instance_id,
         daemon_id=daemon_id,
         engine=config.engine,
         signals_endpoint=config.signals_endpoint or "",
         labels=dict(config.labels),
+        capability_flags=capability_flags,
     )
     if worker_id:
         req.worker_id = worker_id
@@ -79,7 +88,18 @@ def _heartbeat_loop(
 ) -> None:
     while not stop_event.is_set():
         worker_id = config.worker_id or _resolve_worker_id(stub, daemon_id)
-        req = global_store_pb2.InstanceHeartbeatRequest(instance_id=config.instance_id)
+        capability_flags = 0
+        capability_flags |= (
+            1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
+        )
+        if config.signals_endpoint:
+            capability_flags |= (
+                1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+            )
+        req = global_store_pb2.InstanceHeartbeatRequest(
+            instance_id=config.instance_id,
+            capability_flags=capability_flags,
+        )
         if worker_id:
             req.worker_id = worker_id
         stub.InstanceHeartbeat(req)

@@ -19,6 +19,7 @@ _INSTANCE_SELECT = """
         engine,
         signals_endpoint,
         labels_json,
+        capability_flags,
         registered_at,
         last_heartbeat,
         inactive_at
@@ -74,8 +75,9 @@ class InstanceRepository(BaseRepository):
                     worker_id,
                     engine,
                     signals_endpoint,
-                    labels_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    labels_json,
+                    capability_flags
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     instance.instance_id,
@@ -84,6 +86,7 @@ class InstanceRepository(BaseRepository):
                     instance.engine,
                     instance.signals_endpoint,
                     json.dumps(dict(instance.labels or {})),
+                    int(instance.capability_flags),
                 ],
             )
         return instance
@@ -99,6 +102,7 @@ class InstanceRepository(BaseRepository):
                     engine = ?,
                     signals_endpoint = ?,
                     labels_json = ?,
+                    capability_flags = ?,
                     last_heartbeat = CURRENT_TIMESTAMP,
                     inactive_at = NULL
                 WHERE instance_id = ?
@@ -109,6 +113,7 @@ class InstanceRepository(BaseRepository):
                     instance.engine,
                     instance.signals_endpoint,
                     json.dumps(dict(instance.labels or {})),
+                    int(instance.capability_flags),
                     instance.instance_id,
                 ],
             )
@@ -126,6 +131,23 @@ class InstanceRepository(BaseRepository):
                 RETURNING instance_id
                 """,
                 [worker_id, instance_id],
+            )
+            row = cursor.fetchone()
+        return bool(row)
+
+    def update_capability_flags(self, instance_id: str, capability_flags: int) -> bool:
+        with self._write_lock:
+            cursor = self.get_cursor()
+            cursor.execute(
+                """
+                UPDATE instances
+                SET capability_flags = ?
+                WHERE instance_id = ?
+                  AND inactive_at IS NULL
+                  AND capability_flags != ?
+                RETURNING instance_id
+                """,
+                [int(capability_flags), instance_id, int(capability_flags)],
             )
             row = cursor.fetchone()
         return bool(row)
@@ -182,9 +204,10 @@ class InstanceRepository(BaseRepository):
             engine=row[3],
             signals_endpoint=row[4] or None,
             labels=labels if isinstance(labels, dict) else {},
-            registered_at=row[6],
-            last_heartbeat=row[7],
-            inactive_at=row[8],
+            capability_flags=row[6] or 0,
+            registered_at=row[7],
+            last_heartbeat=row[8],
+            inactive_at=row[9],
         )
 
 

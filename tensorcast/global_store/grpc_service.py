@@ -3023,6 +3023,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 p2p_port=request.p2p_port,
                 mem_pool_total_size=request.mem_pool_total_size,
                 mem_pool_available_size=request.mem_pool_available_size,
+                capability_flags=int(request.capability_flags),
             )
 
             # Span attributes with worker metadata
@@ -3036,6 +3037,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     "tc.mem_pool.total_bytes": int(worker.mem_pool_total_size),
                     "tc.mem_pool.available_bytes": int(worker.mem_pool_available_size),
                     "tc.worker.is_recovery": bool(request.is_recovery_registration),
+                    "tc.worker.capability_flags": int(worker.capability_flags),
                 }
             )
 
@@ -3205,6 +3207,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         request.accepting_new_requests
                     ),
                     "tc.worker.state_version": int(request.state_version),
+                    "tc.worker.capability_flags": int(request.capability_flags),
                 }
             )
             if request.state_version <= 0:
@@ -3237,11 +3240,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     ) -> global_store_pb2.WorkerHeartbeatResponse:
         """Handle enhanced heartbeat with state synchronization."""
         try:
+            capability_flags: int | None = None
+            if request.HasField("capability_flags"):
+                capability_flags = int(request.capability_flags)
             # Process basic heartbeat first
             success = self.worker_service.heartbeat(
                 worker_id=request.worker_id,
                 mem_pool_available_size=request.mem_pool_available_size,
                 accepting_new_requests=request.accepting_new_requests,
+                capability_flags=capability_flags,
             )
 
             if not success:
@@ -3369,6 +3376,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             workers = self.worker_service.list_active_workers(
                 include_unavailable=request.include_unavailable
             )
+            gs_metrics.set_capability_counts(scope="worker", entries=workers)
+            required_flags = int(getattr(request, "required_capability_flags", 0))
+            if required_flags:
+                workers = [
+                    worker
+                    for worker in workers
+                    if (int(worker.capability_flags) & required_flags) == required_flags
+                ]
 
             # Convert to proto format
             worker_infos = []
@@ -3390,6 +3405,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     mem_pool_total_size=worker.mem_pool_total_size,
                     mem_pool_available_size=worker.mem_pool_available_size,
                     accepting_new_requests=worker.accepting_new_requests,
+                    capability_flags=int(worker.capability_flags),
                     last_heartbeat_ts=last_ts,
                     state_version=self.recovery_service.get_worker_state_version(
                         worker.worker_id
@@ -3424,6 +3440,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 engine=request.engine,
                 signals_endpoint=request.signals_endpoint or None,
                 labels=dict(request.labels) if request.labels else {},
+                capability_flags=int(request.capability_flags),
             )
             registered = self.instance_service.register_instance(instance)
             return global_store_pb2.RegisterInstanceResponse(
@@ -3453,8 +3470,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         """Process instance heartbeat."""
         try:
             worker_id = request.worker_id if request.HasField("worker_id") else None
+            capability_flags: int | None = None
+            if request.HasField("capability_flags"):
+                capability_flags = int(request.capability_flags)
             success = self.instance_service.heartbeat(
-                request.instance_id, worker_id=worker_id
+                request.instance_id,
+                worker_id=worker_id,
+                capability_flags=capability_flags,
             )
             return global_store_pb2.InstanceHeartbeatResponse(
                 status=global_store_pb2.Status.STATUS_OK
@@ -3512,6 +3534,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             instances = self.instance_service.list_active_instances(
                 include_unavailable=request.include_unavailable
             )
+            gs_metrics.set_capability_counts(scope="instance", entries=instances)
+            required_flags = int(getattr(request, "required_capability_flags", 0))
+            if required_flags:
+                instances = [
+                    inst
+                    for inst in instances
+                    if (int(inst.capability_flags) & required_flags) == required_flags
+                ]
             infos: list[global_store_pb2.ListActiveInstancesResponse.InstanceInfo] = []
             for inst in instances:
                 last_ts = timestamp_pb2.Timestamp()
@@ -3528,6 +3558,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                         signals_endpoint=inst.signals_endpoint or "",
                         last_heartbeat_ts=last_ts,
                         labels=dict(inst.labels) if inst.labels else {},
+                        capability_flags=int(inst.capability_flags),
                         status=self._determine_instance_status(inst),
                     )
                 )

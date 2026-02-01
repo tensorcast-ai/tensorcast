@@ -62,6 +62,24 @@ DaemonKernel::DaemonKernel(
 
   placement_lease_tokens_ = std::make_unique<PlacementLeaseTokens>(PlacementLeaseTokens::Options{});
 
+  if (options_.capability_tokens.active.version != 0 && !options_.capability_tokens.active.secret.empty()) {
+    capability_tokens_ = std::make_unique<common::CapabilityTokenManager>(options_.capability_tokens);
+  }
+
+  if (options_.retention_handles.enabled) {
+    RetentionRegistry::Options retention_opts;
+    retention_opts.enabled = options_.retention_handles.enabled;
+    retention_opts.default_ttl =
+        absl::Milliseconds(static_cast<int64_t>(options_.retention_handles.default_ttl.count()));
+    retention_opts.max_ttl = absl::Milliseconds(static_cast<int64_t>(options_.retention_handles.max_ttl.count()));
+    retention_registry_ = std::make_unique<RetentionRegistry>(
+        retention_opts,
+        make_store_engine_retention_backend(*engine_),
+        *lifecycle_mgr_,
+        capability_tokens_.get(),
+        options_.daemon_id);
+  }
+
   persistence_mgr_ = std::make_unique<PersistenceManager>(
       scheduler_.get(),
       lip_mgr_.get(),

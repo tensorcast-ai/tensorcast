@@ -49,6 +49,8 @@ class WorkerLifecycleManager {
     std::string cluster_token;
     // Optional shared Global Store client to reuse across the daemon.
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
+    // Capability directory bitset for Global Store registration/heartbeats.
+    uint64_t capability_flags{0};
   };
 
   WorkerLifecycleManager(

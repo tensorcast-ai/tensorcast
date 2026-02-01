@@ -448,6 +448,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "capability_token_lib",
+    srcs = ["capability_token.cc"],
+    hdrs = ["capability_token.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//proto/tensorcast/common/v1:common_cc",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@boringssl//:crypto",
+        "@protobuf",
+    ],
+)
+
+sc_cc_library(
     name = "system_capabilities_lib",
     srcs = ["system_capabilities.cc"],
     hdrs = ["system_capabilities.h"],
@@ -480,6 +494,17 @@ cc_test(
     deps = [
         ":daemon_config_io_lib",
         "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "capability_token_test",
+    size = "small",
+    srcs = ["capability_token_test.cc"],
+    deps = [
+        ":capability_token_lib",
+        "@abseil-cpp//absl/time",
         "@catch2//:catch2_main",
     ],
 )

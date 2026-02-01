@@ -47,11 +47,12 @@ On startup the Global Store runs a guarded recovery pass; state stays marked sta
 
 Heartbeats are always enhanced and must include a non-zero `state_version` so the Global Store can detect drift. Legacy heartbeats (`state_version == 0`) are rejected.
 
-- Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids (publishable + resident only), last successful sync timestamp, and the daemon→Global Store connection status.
+- Request payload: worker id, available memory, acceptance flag, current `state_version`, computed `state_checksum`, the set of registered artifact ids (publishable + resident only), last successful sync timestamp, daemon→Global Store connection status, and `capability_flags` (bitset) when capability directory publishing is enabled.
 - Global Store handling (`grpc_service._handle_enhanced_heartbeat`):
   - Compares the sent version with the persisted `state_version` and compares the worker checksum with the cached global checksum (recomputed only when missing).
   - Marks `state_sync_required` when versions or checksums diverge, or when obsolete replicas are detected.
   - Returns the server timestamp, the expected version, and the list of obsolete replicas (diagnostic only; daemons use it to request a sync, not to unload directly).
+  - Updates `capability_flags` only when the value changes to avoid per-heartbeat writes.
 - Registration initializes each worker’s `state_version` to 1; the daemon seeds its local `state_version` from `RegisterWorkerResponse.expected_state_version` and treats missing/zero versions as an error.
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
   - Collects publishable, resident replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
