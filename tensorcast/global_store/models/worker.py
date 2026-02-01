@@ -43,6 +43,9 @@ class Worker:
     # Status
     accepting_new_requests: bool = True
 
+    # Capabilities (bitset)
+    capability_flags: int = 0
+
     # Timestamps
     registered_at: Optional[datetime] = None
     last_heartbeat: Optional[datetime] = None

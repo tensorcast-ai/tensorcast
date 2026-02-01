@@ -303,6 +303,14 @@ void normalize_duration_fields(nlohmann::json& root) {
         to_duration(ha[f]);
     }
   }
+
+  if (root.contains("retention_handles") && root["retention_handles"].is_object()) {
+    auto& rh = root["retention_handles"];
+    if (rh.contains("default_ttl"))
+      to_duration(rh["default_ttl"]);
+    if (rh.contains("max_ttl"))
+      to_duration(rh["max_ttl"]);
+  }
 }
 
 } // namespace
@@ -376,6 +384,19 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   auto* log = obs->mutable_logging();
   if (log->level() == tcfg::Observability::LOG_LEVEL_UNSPECIFIED)
     log->set_level(tcfg::Observability::LOG_LEVEL_INFO);
+
+  // Retention handle defaults (durations)
+  auto* rh = cfg->mutable_retention_handles();
+  if (!rh->has_default_ttl()) {
+    auto* d = rh->mutable_default_ttl();
+    d->set_seconds(600);
+    d->set_nanos(0);
+  }
+  if (!rh->has_max_ttl()) {
+    auto* d = rh->mutable_max_ttl();
+    d->set_seconds(24 * 60 * 60);
+    d->set_nanos(0);
+  }
 
   // Communicator defaults via existing helper
   tensorcast::communicator::normalize_defaults(cfg->mutable_communicator());

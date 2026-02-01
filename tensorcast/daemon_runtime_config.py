@@ -202,6 +202,14 @@ def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
     if bm.strided_block_max_bytes == 0:
         bm.strided_block_max_bytes = 64 * 1024 * 1024
 
+    retention_handles = msg.retention_handles
+    if not retention_handles.HasField("default_ttl"):
+        retention_handles.default_ttl.seconds = 600
+        retention_handles.default_ttl.nanos = 0
+    if not retention_handles.HasField("max_ttl"):
+        retention_handles.max_ttl.seconds = 24 * 60 * 60
+        retention_handles.max_ttl.nanos = 0
+
 
 def _parse_override_value(value: str) -> Any:
     if value == "":

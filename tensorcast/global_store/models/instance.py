@@ -17,6 +17,7 @@ class Instance:
     engine: str = ""
     signals_endpoint: str | None = None
     labels: Mapping[str, str] = field(default_factory=dict)
+    capability_flags: int = 0
     registered_at: datetime | None = None
     last_heartbeat: datetime | None = None
     inactive_at: datetime | None = None

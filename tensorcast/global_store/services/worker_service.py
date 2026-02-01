@@ -5,6 +5,7 @@
 import threading
 import time
 import uuid
+from contextlib import suppress
 
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.exceptions import ValidationError
@@ -93,6 +94,7 @@ class WorkerService:
             existing.mem_pool_total_size = worker.mem_pool_total_size
             existing.mem_pool_available_size = worker.mem_pool_available_size
             existing.accepting_new_requests = True
+            existing.capability_flags = worker.capability_flags
             return self.worker_repository.update(
                 existing, reset_state_tracking=reset_state_tracking
             )
@@ -114,6 +116,7 @@ class WorkerService:
             by_addr.mem_pool_total_size = worker.mem_pool_total_size
             by_addr.mem_pool_available_size = worker.mem_pool_available_size
             by_addr.accepting_new_requests = True
+            by_addr.capability_flags = worker.capability_flags
             return self.worker_repository.update(
                 by_addr, reset_state_tracking=reset_state_tracking
             )
@@ -147,6 +150,7 @@ class WorkerService:
         worker_id: str,
         mem_pool_available_size: int,
         accepting_new_requests: bool,
+        capability_flags: int | None = None,
     ) -> bool:
         """
         Process worker heartbeat.
@@ -164,6 +168,13 @@ class WorkerService:
         if not existing:
             logger.warning(f"Worker {worker_id} not found for heartbeat")
             return False
+        if capability_flags is not None and int(capability_flags) != int(
+            existing.capability_flags
+        ):
+            with suppress(Exception):
+                self.worker_repository.update_capability_flags(
+                    worker_id, int(capability_flags)
+                )
         with self._heartbeat_lock:
             self._heartbeat_buffer.append(
                 (worker_id, mem_pool_available_size, accepting_new_requests)

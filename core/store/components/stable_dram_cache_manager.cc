@@ -280,6 +280,34 @@ absl::StatusOr<StableDramCacheManager::AdmissionResult> StableDramCacheManager::
   return result;
 }
 
+absl::Status StableDramCacheManager::update_policy(
+    const loading::ReplicaKey& key,
+    const StableDramCachePolicy& policy,
+    std::optional<absl::Time> retention_deadline) {
+  if (!is_cpu_key(key)) {
+    return absl::FailedPreconditionError("stable cache policy update requires CPU replica");
+  }
+  absl::MutexLock lock(&mu_);
+  auto it = entries_.find(key);
+  if (it == entries_.end()) {
+    return absl::NotFoundError("stable cache entry not found");
+  }
+  it->second.policy = policy;
+  if (policy.retention_policy == StableRetentionPolicy::kTtl) {
+    if (retention_deadline.has_value()) {
+      it->second.retention_deadline = retention_deadline;
+    } else if (policy.retention_ttl.has_value()) {
+      it->second.retention_deadline = absl::Now() + absl::FromChrono(*policy.retention_ttl);
+    } else {
+      it->second.retention_deadline = std::nullopt;
+    }
+  } else {
+    it->second.policy.retention_ttl = std::nullopt;
+    it->second.retention_deadline = std::nullopt;
+  }
+  return absl::OkStatus();
+}
+
 bool StableDramCacheManager::is_evictable(const loading::ReplicaKey& key, absl::Time now) const {
   if (!is_cpu_key(key)) {
     return true;

@@ -188,6 +188,21 @@ Engine instances (user processes) register with the Global Store and send period
 Instances are keyed by a stable `instance_id` and associated with a `daemon_id` (and
 optionally a `worker_id`) to bridge engine processes with the node’s store daemon.
 
+### Capability Directory (Discovery)
+
+The worker/instance registries also act as a low-frequency **capability directory**:
+
+- Each worker/instance persists a bounded `capability_flags` bitset (see `global_store.proto`) advertising control-plane
+  capabilities (queue broker, retention handles, capability-token envelope, execution signals, node agent).
+- Writes are **update-on-change**: heartbeats update `capability_flags` only when the value changes to avoid write
+  amplification.
+- `ListActiveWorkers` / `ListActiveInstances` accept `required_capability_flags` for server-side filtering; responses
+  always include the active `capability_flags`.
+- Clients should cache directory results with bounded staleness; this is **advisory discovery**, not a hot path.
+
+**Metrics:** `tc_capability_directory_entries{scope="worker|instance", capability="..."}` tracks active capability
+counts by scope and capability.
+
 ## Service Responsibilities
 
 ### WorkerService

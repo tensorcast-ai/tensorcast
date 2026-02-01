@@ -383,7 +383,8 @@ absl::Status WorkerLifecycleManager::start() {
       engine_->get_available_memory(),
       /*is_recovery_registration=*/false,
       /*previous_worker_id=*/"",
-      /*daemon_id=*/daemon_id_);
+      /*daemon_id=*/daemon_id_,
+      /*capability_flags=*/opts_.capability_flags);
   if (!reg_or.ok())
     return reg_or.status();
   {
@@ -643,7 +644,8 @@ void WorkerLifecycleManager::heartbeat_loop() {
           last_sync_success_ts,
           global_store::CONNECTION_STATUS_CONNECTED,
           build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
-          daemon_id_);
+          daemon_id_,
+          opts_.capability_flags);
       if (stop_.load() || hb_epoch_.load() != epoch) {
         break;
       }
@@ -1074,7 +1076,8 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
       engine_->get_available_memory(),
       /*is_recovery_registration=*/recovery,
       /*previous_worker_id=*/recovery ? std::string_view(previous_worker_id) : std::string_view{},
-      /*daemon_id=*/daemon_id_);
+      /*daemon_id=*/daemon_id_,
+      /*capability_flags=*/opts_.capability_flags);
   if (!reg_or.ok())
     return reg_or.status();
   const std::string& new_worker_id = reg_or->worker_id;

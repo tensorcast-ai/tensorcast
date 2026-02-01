@@ -109,6 +109,28 @@ post_seal:
   # When true, retire CGID-scoped piece replicas after sealing.
   retire_pieces: false
 
+# Capability token keys (daemon-issued capability envelope).
+capability_tokens:
+  active:
+    # Token version id; rotate by incrementing version and moving old key to previous.
+    version: 1
+    # Secret bytes (base64-encoded in YAML/JSON).
+    secret: ""
+  previous: []
+
+# Retention handle settings (control-plane only; requires capability_tokens).
+retention_handles:
+  # When true, daemon issues retention handles for local stable DRAM.
+  enabled: false
+  # Default TTL when caller does not specify ttl_ms.
+  default_ttl: 10m
+  # Maximum allowed TTL for any handle (issuer clamp).
+  max_ttl: 24h
+
+# Capability directory publishing (Global Store capability flags).
+capability_directory:
+  enabled: true
+
 # Global Store registration and heartbeat coordination.
 high_availability:
   # When true, the daemon registers with Global Store and emits heartbeats/sync; requires p2p_listen.port.

@@ -130,6 +130,21 @@ enum ConnectionStatus {
   CONNECTION_STATUS_CONNECTED = 3;
 }
 
+// Worker/daemon capability flags (bit positions in capability_flags).
+enum WorkerCapabilityFlag {
+  WORKER_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED = 1;
+  WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED = 2;
+  WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED = 3;
+}
+
+// Instance capability flags (bit positions in capability_flags).
+enum InstanceCapabilityFlag {
+  INSTANCE_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED = 1;
+  INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED = 2;
+}
+
 // ========== Worker管理相关消息 ==========
 
 // Worker注册请求
@@ -145,6 +160,7 @@ message RegisterWorkerRequest {
   bool is_recovery_registration = 7; // 是否为恢复注册
   string previous_worker_id = 8; // 上一个 Worker ID (用于恢复)
   string daemon_id = 9; // Required stable daemon identity (from daemon config)
+  uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
 }
 
 message RegisterWorkerResponse {
@@ -170,6 +186,7 @@ message WorkerHeartbeatRequest {
   int64 last_successful_sync = 7; // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
   optional string daemon_id = 9; // Optional for sanity-check logging
+  uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
 }
 
 message WorkerHeartbeatResponse {
@@ -195,6 +212,7 @@ message UnregisterWorkerResponse {
 // 查询活跃Worker
 message ListActiveWorkersRequest {
   bool include_unavailable = 1; // 是否包含不接受新请求的 Worker
+  uint64 required_capability_flags = 2; // Bitset of WorkerCapabilityFlag values
 }
 
 message ListActiveWorkersResponse {
@@ -213,6 +231,7 @@ message ListActiveWorkersResponse {
     uint64 state_version = 10; // 当前状态版本
     ConnectionStatus status = 11; // 连接状态
     string daemon_id = 12; // Stable daemon identity
+    uint64 capability_flags = 13; // Bitset of WorkerCapabilityFlag values
   }
   repeated WorkerInfo workers = 1;
 }
@@ -226,6 +245,7 @@ message RegisterInstanceRequest {
   optional string worker_id = 4;
   string signals_endpoint = 5;
   map<string, string> labels = 6;
+  uint64 capability_flags = 7; // Bitset of InstanceCapabilityFlag values
 }
 
 message RegisterInstanceResponse {
@@ -237,6 +257,7 @@ message RegisterInstanceResponse {
 message InstanceHeartbeatRequest {
   string instance_id = 1;
   optional string worker_id = 2;
+  uint64 capability_flags = 3; // Bitset of InstanceCapabilityFlag values
 }
 
 message InstanceHeartbeatResponse {
@@ -254,6 +275,7 @@ message UnregisterInstanceResponse {
 
 message ListActiveInstancesRequest {
   bool include_unavailable = 1;
+  uint64 required_capability_flags = 2; // Bitset of InstanceCapabilityFlag values
 }
 
 message ListActiveInstancesResponse {
@@ -266,6 +288,7 @@ message ListActiveInstancesResponse {
     google.protobuf.Timestamp last_heartbeat_ts = 6;
     map<string, string> labels = 7;
     ConnectionStatus status = 8;
+    uint64 capability_flags = 9; // Bitset of InstanceCapabilityFlag values
   }
   repeated InstanceInfo instances = 1;
 }

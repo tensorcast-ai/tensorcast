@@ -66,6 +66,9 @@ service StoreDaemonService {
   rpc CreatePlacementLease(CreatePlacementLeaseRequest) returns (CreatePlacementLeaseResponse) {}
   rpc RenewPlacementLease(RenewPlacementLeaseRequest) returns (RenewPlacementLeaseResponse) {}
   rpc ReleasePlacementLease(ReleasePlacementLeaseRequest) returns (ReleasePlacementLeaseResponse) {}
+  rpc AcquireRetentionHandle(AcquireRetentionHandleRequest) returns (AcquireRetentionHandleResponse) {}
+  rpc RenewRetentionHandle(RenewRetentionHandleRequest) returns (RenewRetentionHandleResponse) {}
+  rpc ReleaseRetentionHandle(ReleaseRetentionHandleRequest) returns (ReleaseRetentionHandleResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
@@ -1013,6 +1016,7 @@ message RenewPlacementLeaseRequest {
 message RenewPlacementLeaseResponse {
   uint64 lease_id = 1;
   optional google.protobuf.Timestamp expires_at = 2;
+  bytes lease_token = 3;
 }
 
 message ReleasePlacementLeaseRequest {
@@ -1020,6 +1024,42 @@ message ReleasePlacementLeaseRequest {
 }
 
 message ReleasePlacementLeaseResponse {
+  bool released = 1;
+}
+
+// ========== Retention handles ==========
+message RetentionHandle {
+  string handle_id = 1;
+  uint64 expires_at_ms = 2;
+  bytes capability_token = 3;
+  uint64 charged_bytes = 4;
+  string diagnostics = 5;
+}
+
+message AcquireRetentionHandleRequest {
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  StorePolicy policy = 2;
+  uint64 ttl_ms = 3;
+}
+
+message AcquireRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message RenewRetentionHandleRequest {
+  bytes handle_token = 1;
+  uint64 extend_ttl_ms = 2;
+}
+
+message RenewRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message ReleaseRetentionHandleRequest {
+  bytes handle_token = 1;
+}
+
+message ReleaseRetentionHandleResponse {
   bool released = 1;
 }
 

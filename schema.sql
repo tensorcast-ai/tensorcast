@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS workers (
     mem_pool_total_size BIGINT NOT NULL,
     mem_pool_available_size BIGINT NOT NULL,
     accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
+    capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE,
@@ -55,6 +56,7 @@ CREATE TABLE IF NOT EXISTS instances (
     engine TEXT NOT NULL,
     signals_endpoint TEXT,
     labels_json TEXT NOT NULL DEFAULT '{}',
+    capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE

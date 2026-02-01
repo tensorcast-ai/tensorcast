@@ -26,6 +26,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "core/common/async_runtime.h"
+#include "core/common/capability_token.h"
 #include "core/common/config/daemon_config_io.h"
 #include "core/common/logging_init.h"
 #include "core/common/memory/pinned_memory_authority.h"
@@ -41,6 +42,7 @@
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
 #include "gsl/pointers"
+#include "tensorcast/global_store/v1/global_store.pb.h"
 
 #include <pthread.h>
 #include <csignal>
@@ -605,6 +607,47 @@ int main(int argc, char** argv) {
     return 1;
   }
   daemon_opts.daemon_id = cfg.daemon_id();
+
+  if (cfg.has_capability_tokens() && cfg.capability_tokens().has_active()) {
+    const auto& active = cfg.capability_tokens().active();
+    if (active.version() != 0 && !active.secret().empty()) {
+      daemon_opts.capability_tokens.active.version = active.version();
+      daemon_opts.capability_tokens.active.secret = active.secret();
+      for (const auto& prev : cfg.capability_tokens().previous()) {
+        if (prev.version() == 0 || prev.secret().empty()) {
+          continue;
+        }
+        if (prev.version() == daemon_opts.capability_tokens.active.version) {
+          continue;
+        }
+        daemon_opts.capability_tokens.previous.push_back(
+            common::CapabilityTokenKey{.version = prev.version(), .secret = prev.secret()});
+      }
+    }
+  }
+  if (cfg.has_retention_handles()) {
+    const auto& retention_cfg = cfg.retention_handles();
+    daemon_opts.retention_handles.enabled = retention_cfg.enabled();
+    if (retention_cfg.has_default_ttl()) {
+      daemon_opts.retention_handles.default_ttl = duration_to_millis(retention_cfg.default_ttl());
+    }
+    if (retention_cfg.has_max_ttl()) {
+      daemon_opts.retention_handles.max_ttl = duration_to_millis(retention_cfg.max_ttl());
+    }
+  }
+
+  uint64_t capability_flags = 0;
+  const bool cap_dir_enabled = cfg.has_capability_directory() && cfg.capability_directory().enabled();
+  const bool tokens_configured =
+      daemon_opts.capability_tokens.active.version != 0 && !daemon_opts.capability_tokens.active.secret.empty();
+  if (cap_dir_enabled) {
+    if (tokens_configured) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED);
+    }
+    if (daemon_opts.retention_handles.enabled && tokens_configured) {
+      capability_flags |= (1ULL << tensorcast::global_store::v1::WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED);
+    }
+  }
   // Observability high-cardinality attributes: default off (config hook TBD)
   daemon_opts.allow_high_card_attrs = false;
   // Feature flags (override via flags for now)
@@ -681,6 +724,7 @@ int main(int argc, char** argv) {
       const auto& d = cfg.high_availability().heartbeat_rpc_timeout();
       lopts.heartbeat_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
     }
+    lopts.capability_flags = capability_flags;
     if (cfg.high_availability().has_heartbeat_rpc_max_retries()) {
       lopts.heartbeat_rpc_max_retries = cfg.high_availability().heartbeat_rpc_max_retries();
     }

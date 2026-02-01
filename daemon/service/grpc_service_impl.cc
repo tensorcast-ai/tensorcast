@@ -28,6 +28,7 @@
 #include "folly/futures/Future.h"
 #include "google/protobuf/util/time_util.h"
 #include "opentelemetry/metrics/provider.h"
+#include "tensorcast/common/v1/capability_token.pb.h"
 
 namespace tensorcast::daemon {
 
@@ -36,6 +37,8 @@ using ::grpc::StatusCode;
 using status_utils::to_grpc_status;
 
 namespace {
+
+constexpr absl::Duration kPlacementLeaseDefaultTokenTtl = absl::Hours(24 * 30);
 
 std::string status_code_name(grpc::StatusCode code) {
   switch (code) {
@@ -128,6 +131,76 @@ void fill_degraded_timeout_status(v2::ReplicaOperationStatus& out, std::string_v
   err->set_retryable(true);
 }
 
+absl::StatusOr<uint64_t> placement_lease_id_from_scope(
+    const tensorcast::common::v1::CapabilityTokenEnvelope& envelope) {
+  tensorcast::common::v1::PlacementLeaseScope scope;
+  if (!scope.ParseFromString(envelope.scope())) {
+    return absl::InvalidArgumentError("invalid placement lease scope");
+  }
+  if (scope.lease_id() == 0) {
+    return absl::InvalidArgumentError("placement lease scope missing lease_id");
+  }
+  return scope.lease_id();
+}
+
+grpc::Status retention_acquire_status(const absl::Status& st) {
+  if (absl::IsResourceExhausted(st)) {
+    return {StatusCode::RESOURCE_EXHAUSTED, std::string(st.message())};
+  }
+  if (absl::IsUnavailable(st)) {
+    return {StatusCode::UNAVAILABLE, std::string(st.message())};
+  }
+  if (absl::IsDeadlineExceeded(st)) {
+    return {StatusCode::DEADLINE_EXCEEDED, std::string(st.message())};
+  }
+  if (absl::IsInvalidArgument(st) || absl::IsFailedPrecondition(st) || absl::IsNotFound(st) ||
+      absl::IsPermissionDenied(st)) {
+    return {StatusCode::FAILED_PRECONDITION, std::string(st.message())};
+  }
+  return to_grpc_status(st);
+}
+
+grpc::Status retention_renew_status(const absl::Status& st) {
+  if (absl::IsUnavailable(st)) {
+    return {StatusCode::UNAVAILABLE, std::string(st.message())};
+  }
+  if (absl::IsDeadlineExceeded(st)) {
+    return {StatusCode::DEADLINE_EXCEEDED, std::string(st.message())};
+  }
+  if (absl::IsResourceExhausted(st)) {
+    return {StatusCode::RESOURCE_EXHAUSTED, std::string(st.message())};
+  }
+  if (absl::IsInvalidArgument(st) || absl::IsFailedPrecondition(st) || absl::IsNotFound(st) ||
+      absl::IsPermissionDenied(st)) {
+    return {StatusCode::FAILED_PRECONDITION, std::string(st.message())};
+  }
+  return to_grpc_status(st);
+}
+
+grpc::Status retention_release_status(const absl::Status& st) {
+  if (absl::IsUnavailable(st)) {
+    return {StatusCode::UNAVAILABLE, std::string(st.message())};
+  }
+  if (absl::IsDeadlineExceeded(st)) {
+    return {StatusCode::DEADLINE_EXCEEDED, std::string(st.message())};
+  }
+  if (absl::IsInvalidArgument(st) || absl::IsFailedPrecondition(st) || absl::IsNotFound(st) ||
+      absl::IsPermissionDenied(st)) {
+    return {StatusCode::FAILED_PRECONDITION, std::string(st.message())};
+  }
+  return to_grpc_status(st);
+}
+
+void fill_retention_handle(const RetentionRegistry::Handle& handle, v2::RetentionHandle* out) {
+  out->set_handle_id(handle.handle_id);
+  out->set_expires_at_ms(handle.expires_at_ms);
+  out->set_capability_token(handle.capability_token);
+  out->set_charged_bytes(handle.charged_bytes);
+  if (!handle.diagnostics.empty()) {
+    out->set_diagnostics(handle.diagnostics);
+  }
+}
+
 } // namespace
 
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
@@ -142,6 +215,9 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       sessions_service_(&deps.sessions_service),
       lifecycle_manager_(&deps.lifecycle_manager),
       placement_lease_tokens_(&deps.placement_lease_tokens),
+      capability_tokens_(deps.capability_tokens),
+      retention_registry_(deps.retention_registry),
+      daemon_id_(std::move(deps.daemon_id)),
       shutdown_signal_(&deps.shutdown_signal),
       opts_(std::move(opts)) {}
 
@@ -364,14 +440,35 @@ Status StoreDaemonServiceImpl::CreatePlacementLease(
   if (!lease_or.ok()) {
     return to_grpc_status(lease_or.status());
   }
-  const auto token_or = placement_lease_tokens_->mint(*lease_or, ttl);
-  if (!token_or.ok()) {
-    lifecycle_manager_->release_lease(*lease_or);
-    return to_grpc_status(token_or.status());
+  const absl::Duration token_ttl = ttl > absl::ZeroDuration() ? ttl : kPlacementLeaseDefaultTokenTtl;
+  const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + token_ttl));
+  std::string lease_token;
+  if (capability_tokens_ && capability_tokens_->configured()) {
+    tensorcast::common::v1::PlacementLeaseScope scope;
+    scope.set_lease_id(*lease_or);
+    auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+    if (!scope_or.ok()) {
+      lifecycle_manager_->release_lease(*lease_or);
+      return to_grpc_status(scope_or.status());
+    }
+    auto token_or = capability_tokens_->mint(
+        daemon_id_, tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE, *scope_or, expires_at_ms);
+    if (!token_or.ok()) {
+      lifecycle_manager_->release_lease(*lease_or);
+      return to_grpc_status(token_or.status());
+    }
+    lease_token = *token_or;
+  } else {
+    const auto token_or = placement_lease_tokens_->mint(*lease_or, ttl);
+    if (!token_or.ok()) {
+      lifecycle_manager_->release_lease(*lease_or);
+      return to_grpc_status(token_or.status());
+    }
+    lease_token = *token_or;
   }
 
   resp->set_lease_id(*lease_or);
-  resp->set_lease_token(*token_or);
+  resp->set_lease_token(lease_token);
   if (ttl > absl::ZeroDuration()) {
     const absl::Time expires_at = absl::Now() + ttl;
     google::protobuf::Timestamp ts;
@@ -395,19 +492,61 @@ Status StoreDaemonServiceImpl::RenewPlacementLease(
     return {StatusCode::INVALID_ARGUMENT, "ttl_ms is required"};
   }
   const absl::Duration ttl = absl::Milliseconds(static_cast<int64_t>(req->ttl_ms()));
-  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-  if (!lease_or.ok()) {
-    return to_grpc_status(lease_or.status());
+  std::optional<uint64_t> lease_id;
+  bool envelope_token = false;
+  if (capability_tokens_ && capability_tokens_->configured() &&
+      tensorcast::common::CapabilityTokenManager::looks_like_envelope(req->lease_token())) {
+    envelope_token = true;
+    auto env_or = capability_tokens_->verify(
+        req->lease_token(),
+        tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
+        daemon_id_,
+        absl::Now(),
+        /*require_not_expired=*/true);
+    if (!env_or.ok()) {
+      return to_grpc_status(env_or.status());
+    }
+    auto scope_or = placement_lease_id_from_scope(*env_or);
+    if (!scope_or.ok()) {
+      return to_grpc_status(scope_or.status());
+    }
+    lease_id = *scope_or;
+  } else {
+    auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
+    if (!lease_or.ok()) {
+      return to_grpc_status(lease_or.status());
+    }
+    lease_id = *lease_or;
   }
-  auto st = lifecycle_manager_->renew_placement(*lease_or, ttl);
+
+  auto st = lifecycle_manager_->renew_placement(*lease_id, ttl);
   if (!st.ok()) {
     return to_grpc_status(st);
   }
-  st = placement_lease_tokens_->refresh(req->lease_token(), ttl);
-  if (!st.ok()) {
-    return to_grpc_status(st);
+
+  if (envelope_token) {
+    tensorcast::common::v1::PlacementLeaseScope scope;
+    scope.set_lease_id(*lease_id);
+    auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+    if (!scope_or.ok()) {
+      return to_grpc_status(scope_or.status());
+    }
+    const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now() + ttl));
+    auto token_or = capability_tokens_->mint(
+        daemon_id_, tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE, *scope_or, expires_at_ms);
+    if (!token_or.ok()) {
+      return to_grpc_status(token_or.status());
+    }
+    resp->set_lease_token(*token_or);
+  } else {
+    st = placement_lease_tokens_->refresh(req->lease_token(), ttl);
+    if (!st.ok()) {
+      return to_grpc_status(st);
+    }
+    resp->set_lease_token(req->lease_token());
   }
-  resp->set_lease_id(*lease_or);
+
+  resp->set_lease_id(*lease_id);
   const absl::Time expires_at = absl::Now() + ttl;
   google::protobuf::Timestamp ts;
   ts.set_seconds(absl::ToUnixSeconds(expires_at));
@@ -425,13 +564,97 @@ Status StoreDaemonServiceImpl::ReleasePlacementLease(
   if (req->lease_token().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
   }
-  auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-  if (!lease_or.ok()) {
-    return to_grpc_status(lease_or.status());
+  bool envelope_token = false;
+  std::optional<uint64_t> lease_id;
+  if (capability_tokens_ && capability_tokens_->configured() &&
+      tensorcast::common::CapabilityTokenManager::looks_like_envelope(req->lease_token())) {
+    envelope_token = true;
+    auto env_or = capability_tokens_->verify(
+        req->lease_token(),
+        tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
+        daemon_id_,
+        absl::Now(),
+        /*require_not_expired=*/false);
+    if (!env_or.ok()) {
+      return to_grpc_status(env_or.status());
+    }
+    auto scope_or = placement_lease_id_from_scope(*env_or);
+    if (!scope_or.ok()) {
+      return to_grpc_status(scope_or.status());
+    }
+    lease_id = *scope_or;
+  } else {
+    auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
+    if (!lease_or.ok()) {
+      return to_grpc_status(lease_or.status());
+    }
+    lease_id = *lease_or;
   }
-  lifecycle_manager_->release_lease(*lease_or);
-  const bool erased = placement_lease_tokens_->erase(req->lease_token());
+
+  lifecycle_manager_->release_lease(*lease_id);
+  const bool erased = envelope_token ? true : placement_lease_tokens_->erase(req->lease_token());
   resp->set_released(erased);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::AcquireRetentionHandle(
+    grpc::ServerContext* ctx,
+    const v2::AcquireRetentionHandleRequest* req,
+    v2::AcquireRetentionHandleResponse* resp) {
+  RpcContext rctx{"AcquireRetentionHandle", *ctx, opts_.allow_high_card_attrs};
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (retention_registry_ == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "retention handles are disabled"};
+  }
+  auto handle_or =
+      retention_registry_->acquire(req->selection(), req->has_policy() ? &req->policy() : nullptr, req->ttl_ms());
+  if (!handle_or.ok()) {
+    return retention_acquire_status(handle_or.status());
+  }
+  fill_retention_handle(*handle_or, resp->mutable_handle());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::RenewRetentionHandle(
+    grpc::ServerContext* ctx,
+    const v2::RenewRetentionHandleRequest* req,
+    v2::RenewRetentionHandleResponse* resp) {
+  RpcContext rctx{"RenewRetentionHandle", *ctx, opts_.allow_high_card_attrs};
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (retention_registry_ == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "retention handles are disabled"};
+  }
+  auto handle_or = retention_registry_->renew(req->handle_token(), req->extend_ttl_ms());
+  if (!handle_or.ok()) {
+    return retention_renew_status(handle_or.status());
+  }
+  fill_retention_handle(*handle_or, resp->mutable_handle());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+Status StoreDaemonServiceImpl::ReleaseRetentionHandle(
+    grpc::ServerContext* ctx,
+    const v2::ReleaseRetentionHandleRequest* req,
+    v2::ReleaseRetentionHandleResponse* resp) {
+  RpcContext rctx{"ReleaseRetentionHandle", *ctx, opts_.allow_high_card_attrs};
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (retention_registry_ == nullptr) {
+    return {StatusCode::FAILED_PRECONDITION, "retention handles are disabled"};
+  }
+  auto released_or = retention_registry_->release(req->handle_token());
+  if (!released_or.ok()) {
+    return retention_release_status(released_or.status());
+  }
+  resp->set_released(*released_or);
   rctx.mark_success();
   return Status::OK;
 }

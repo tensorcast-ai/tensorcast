@@ -140,6 +140,9 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .sessions_service = kernel->sessions_service(),
       .lifecycle_manager = kernel->lifecycle_manager(),
       .placement_lease_tokens = kernel->placement_lease_tokens(),
+      .capability_tokens = kernel->capability_tokens(),
+      .retention_registry = kernel->retention_registry(),
+      .daemon_id = options.daemon_id,
       .shutdown_signal = kernel->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

@@ -57,6 +57,10 @@ class StableDramCacheManager {
   explicit StableDramCacheManager(Config config);
 
   absl::StatusOr<AdmissionResult> admit(const AdmissionRequest& request);
+  absl::Status update_policy(
+      const loading::ReplicaKey& key,
+      const StableDramCachePolicy& policy,
+      std::optional<absl::Time> retention_deadline = std::nullopt);
 
   // Export-preemption hook: reclaim stable tier bytes by evicting cache entries so
   // correctness-critical exports (e.g., CPU memfd handles) can acquire UMA stable leases.

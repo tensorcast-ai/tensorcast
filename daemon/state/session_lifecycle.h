@@ -48,7 +48,7 @@ class SessionLifecycleManager {
     int device_id{-1};
   };
 
-  enum class LeaseKind : uint8_t { kPlacement, kUse, kCommit };
+  enum class LeaseKind : uint8_t { kPlacement, kUse, kCommit, kRetention };
   enum class GuardKind : uint8_t { kHeartbeatTtl, kDeadline, kPidLiveness, kManual };
   enum class LeaseState : uint8_t { kActive, kRetiring, kRetired };
 
@@ -116,6 +116,10 @@ class SessionLifecycleManager {
   absl::StatusOr<LeaseId> create_placement_lease(const ReplicaSubject& subj, /*spec*/ absl::Duration ttl)
       ABSL_LOCKS_EXCLUDED(mu_);
 
+  [[nodiscard]] absl::StatusOr<LeaseId> create_retention_lease(
+      absl::Duration ttl,
+      std::vector<std::function<absl::Status()>> finalizers) ABSL_LOCKS_EXCLUDED(mu_);
+
   [[nodiscard]] absl::StatusOr<LeaseId> create_commit_lease(const CommitSubject& subj, pid_t pid)
       ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -130,6 +134,8 @@ class SessionLifecycleManager {
   [[nodiscard]] absl::Status keepalive_session(std::string sid, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_);
 
   [[nodiscard]] absl::Status renew_placement(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_);
+
+  [[nodiscard]] absl::Status renew_retention(LeaseId id, absl::Duration ttl) ABSL_LOCKS_EXCLUDED(mu_);
 
   void release_lease(LeaseId id) ABSL_LOCKS_EXCLUDED(mu_);
 

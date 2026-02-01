@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import contextmanager
 from time import monotonic
 from typing import Callable, Iterator
 
 import grpc
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 """Prometheus metrics for the Global Store service.
 
@@ -132,6 +135,37 @@ ACTIVE_TRANSPORTS_GAUGE = Gauge(
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
+# Capability directory -------------------------------------------------------
+
+CAPABILITY_DIRECTORY_GAUGE = Gauge(
+    "tc_capability_directory_entries",
+    "Active capability directory entries by scope and capability.",
+    labelnames=("scope", "capability"),
+)
+
+
+def _normalize_capability_name(raw: str) -> str:
+    for prefix in (
+        "WORKER_CAPABILITY_FLAG_",
+        "INSTANCE_CAPABILITY_FLAG_",
+    ):
+        if raw.startswith(prefix):
+            return raw[len(prefix) :].lower()
+    return raw.lower()
+
+
+_WORKER_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.WorkerCapabilityFlag.items()
+    if value != 0
+]
+
+_INSTANCE_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.InstanceCapabilityFlag.items()
+    if value != 0
+]
+
 # View registration ----------------------------------------------------------
 
 VIEW_REGISTRATION_COUNTER = Counter(
@@ -250,6 +284,27 @@ def set_total_replicas(count: int) -> None:
     """Set the total replicas gauge to *count*."""
 
     ARTIFACT_REPLICAS_GAUGE.set(count)
+
+
+def set_capability_counts(*, scope: str, entries: Sequence[object]) -> None:
+    """Set capability directory gauges for the given entries."""
+
+    if scope == "worker":
+        capabilities = _WORKER_CAPABILITIES
+    elif scope == "instance":
+        capabilities = _INSTANCE_CAPABILITIES
+    else:
+        return
+
+    counts = {name: 0 for _, name in capabilities}
+    for entry in entries:
+        flags = int(getattr(entry, "capability_flags", 0))
+        for bit, name in capabilities:
+            if flags & (1 << int(bit)):
+                counts[name] += 1
+
+    for name, count in counts.items():
+        CAPABILITY_DIRECTORY_GAUGE.labels(scope=scope, capability=name).set(count)
 
 
 def observe_memory_tier_snapshot(

@@ -9,6 +9,7 @@
 #include <string>
 
 #include "absl/time/time.h"
+#include "core/common/capability_token.h"
 
 namespace tensorcast::daemon {
 
@@ -49,6 +50,17 @@ struct DaemonOptions {
 
   // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
   std::string daemon_id;
+
+  // Capability token key material (v2 envelopes).
+  common::CapabilityTokenConfig capability_tokens{};
+
+  struct RetentionHandles {
+    bool enabled{false};
+    std::chrono::milliseconds default_ttl{std::chrono::seconds(600)};
+    std::chrono::milliseconds max_ttl{std::chrono::hours(24)};
+  };
+
+  RetentionHandles retention_handles{};
 
   // Local handle plane (UDS) for FD handoff + lease release.
   std::string local_handle_socket_path;

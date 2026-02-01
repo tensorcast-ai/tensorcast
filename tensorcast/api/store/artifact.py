@@ -145,6 +145,9 @@ class PlacementPin:
                 timeout_s=timeout_s,
             )
         )
+        new_token = self.capability_token
+        if hasattr(resp, "lease_token") and resp.lease_token:
+            new_token = _encode_capability_token(bytes(resp.lease_token))
         expires_at_ms: int | None = None
         if resp.HasField("expires_at"):
             try:
@@ -155,7 +158,7 @@ class PlacementPin:
                 expires_at_ms = None
         return PlacementPin(
             pin_id=int(resp.lease_id),
-            capability_token=self.capability_token,
+            capability_token=new_token,
             daemon_id=self.daemon_id,
             artifact_id=self.artifact_id,
             view_id=self.view_id,
