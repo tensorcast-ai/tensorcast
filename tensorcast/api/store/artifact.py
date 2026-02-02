@@ -31,7 +31,10 @@ from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.deferred_loader import DeferredLoader
 from tensorcast.api.store.materialization import MaterializationPipeline
-from tensorcast.api.store.retry import map_materialization_error
+from tensorcast.api.store.retry import (
+    map_materialization_error,
+    raise_mapped_materialization_error,
+)
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
@@ -978,7 +981,13 @@ class Artifact:
                     )
                 )
             except Exception as exc:  # noqa: BLE001
-                raise map_materialization_error(exc) from exc
+                raise_mapped_materialization_error(exc)
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "Canonical index bytes missing while resolving view_id",
+                status_code="INTERNAL",
+                retryable=False,
+            )
         try:
             return compute_view_id(view_proto, canonical_index_bytes)
         except Exception as exc:  # noqa: BLE001
@@ -1036,7 +1045,7 @@ class Artifact:
                         verify_checksums=verify_checksums,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    raise map_materialization_error(exc) from exc
+                    raise_mapped_materialization_error(exc)
                 artifact_id = getattr(resolved, "artifact_id", "") or None
                 if not artifact_id:
                     raise ArtifactError(
@@ -1103,7 +1112,7 @@ class Artifact:
                 verify_checksums=verify_checksums,
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_materialization_error(exc) from exc
+            raise_mapped_materialization_error(exc)
 
         resolved_artifact_id = (
             getattr(resolved, "artifact_id", "") or self._artifact_id or None
@@ -1216,7 +1225,7 @@ class Artifact:
                 artifact_id
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_materialization_error(exc) from exc
+            raise_mapped_materialization_error(exc)
         canonical_index = canonical_index_from_bytes(canonical_index_bytes)
         with self._lock:
             if (

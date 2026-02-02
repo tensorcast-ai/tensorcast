@@ -50,6 +50,24 @@ std::filesystem::path ensure_dir(std::filesystem::path path) {
   return path;
 }
 
+void create_safetensors_file(const std::filesystem::path& path, const std::string& tensor_name, uint64_t size_bytes) {
+  const std::string header_json =
+      nlohmann::json({{tensor_name, {{"dtype", "U8"}, {"shape", {size_bytes}}, {"data_offsets", {0, size_bytes}}}}})
+          .dump();
+  std::ofstream out(path, std::ios::binary | std::ios::trunc);
+  REQUIRE(out.is_open());
+  const uint64_t header_size = header_json.size();
+  for (int i = 0; i < 8; ++i) {
+    const unsigned char byte = static_cast<unsigned char>((header_size >> (8 * i)) & 0xFF);
+    out.put(static_cast<char>(byte));
+  }
+  out.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
+  std::vector<char> payload(static_cast<size_t>(size_bytes), '\0');
+  if (!payload.empty()) {
+    out.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+  }
+}
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
@@ -165,6 +183,30 @@ TEST_CASE("ResolveArtifactFromDisk enforces shared root and missing paths", "[da
   auto missing_status = ok_fix.controller.resolve_artifact_from_disk(ok_rctx, req, missing_resp);
   REQUIRE_FALSE(missing_status.ok());
   REQUIRE(missing_status.error_code() == grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE(
+    "ResolveArtifactFromDisk resolves safetensors directories without tensor_index.json",
+    "[daemon][disk][resolve]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_safetensors";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  create_safetensors_file(artifact_dir / "part0.safetensors", "weights", /*size_bytes=*/32);
+
+  ResolveFixture fix;
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest req;
+  req.set_disk_path(artifact_dir.string());
+  req.set_verify_checksums(true);
+  ResolveArtifactFromDiskResponse resp;
+  auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE(resp.artifact_id() == artifact_dir.string());
+  REQUIRE_FALSE(resp.canonical_index_bytes().empty());
+  nlohmann::json parsed = nlohmann::json::parse(resp.canonical_index_bytes());
+  REQUIRE(parsed.contains("weights"));
 }
 
 TEST_CASE("ResolveArtifactFromDisk fails checksum validation when descriptor mismatches", "[daemon][disk][resolve]") {

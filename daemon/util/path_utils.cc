@@ -26,17 +26,19 @@ bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::p
 absl::StatusOr<std::filesystem::path> normalize_disk_path(
     std::string_view disk_path,
     const std::filesystem::path& storage_root) {
-  if (storage_root.empty()) {
-    return absl::InvalidArgumentError("storage_path is required for disk materialization");
-  }
   std::error_code ec;
   std::filesystem::path candidate(disk_path);
-  if (!candidate.is_absolute()) {
+  const bool has_storage_root = !storage_root.empty();
+  const bool is_absolute = candidate.is_absolute();
+  if (!has_storage_root && !is_absolute) {
+    return absl::InvalidArgumentError("storage_path is empty; disk_path must be absolute");
+  }
+  if (has_storage_root && !is_absolute) {
     candidate = storage_root / candidate;
   }
   auto normalized = std::filesystem::weakly_canonical(candidate, ec);
   if (!ec) {
-    if (!path_has_prefix(normalized, storage_root)) {
+    if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
       return absl::InvalidArgumentError(
           absl::StrCat(
               "disk_path must resolve under storage_path: ",
@@ -51,7 +53,7 @@ absl::StatusOr<std::filesystem::path> normalize_disk_path(
   if (normalized.empty()) {
     return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
   }
-  if (!path_has_prefix(normalized, storage_root)) {
+  if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
     return absl::InvalidArgumentError(
         absl::StrCat(
             "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));

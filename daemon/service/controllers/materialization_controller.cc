@@ -157,10 +157,77 @@ absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_d
     return absl::ErrnoToStatus(ec.value(), absl::StrCat("Failed to stat tensor_index.cbor at ", cbor_path.string()));
   }
   if (!has_json && !has_cbor) {
-    return absl::NotFoundError(
-        absl::StrCat("tensor index not found under ", artifact_dir.string(), " (expected tensor_index.json or .cbor)"));
+    bool has_safetensors = false;
+    std::filesystem::directory_iterator iter(artifact_dir, ec);
+    if (ec) {
+      return absl::ErrnoToStatus(
+          ec.value(), absl::StrCat("Failed to enumerate artifact directory '", artifact_dir.string(), "'"));
+    }
+    for (const auto& entry : iter) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const std::string name = entry.path().filename().string();
+      if (name.ends_with(".safetensors")) {
+        has_safetensors = true;
+        break;
+      }
+    }
+    if (!has_safetensors) {
+      return absl::NotFoundError(
+          absl::StrCat(
+              "tensor index not found under ",
+              artifact_dir.string(),
+              " (expected tensor_index.json, tensor_index.cbor, or .safetensors files)"));
+    }
   }
   return absl::OkStatus();
+}
+
+void maybe_backfill_tensor_index(const std::filesystem::path& artifact_dir, std::string_view canonical_index_json) {
+  if (canonical_index_json.empty()) {
+    return;
+  }
+  std::error_code ec;
+  const auto json_path = artifact_dir / "tensor_index.json";
+  const auto cbor_path = artifact_dir / "tensor_index.cbor";
+  const bool has_json = std::filesystem::exists(json_path, ec);
+  if (ec) {
+    LOG(WARNING) << "Failed to stat tensor_index.json at " << json_path.string() << ": " << ec.message();
+    return;
+  }
+  const bool has_cbor = std::filesystem::exists(cbor_path, ec);
+  if (ec) {
+    LOG(WARNING) << "Failed to stat tensor_index.cbor at " << cbor_path.string() << ": " << ec.message();
+    return;
+  }
+  if (has_json && has_cbor) {
+    return;
+  }
+
+  if (!has_json) {
+    std::ofstream out(json_path, std::ios::trunc);
+    if (!out.is_open()) {
+      PLOG(WARNING) << "Failed to write tensor_index.json at " << json_path.string();
+      return;
+    }
+    out << canonical_index_json;
+  }
+
+  if (!has_cbor) {
+    try {
+      nlohmann::json j = nlohmann::json::parse(canonical_index_json, nullptr, true);
+      const std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(j);
+      std::ofstream out(cbor_path, std::ios::binary | std::ios::trunc);
+      if (!out.is_open()) {
+        PLOG(WARNING) << "Failed to write tensor_index.cbor at " << cbor_path.string();
+        return;
+      }
+      out.write(reinterpret_cast<const char*>(cbor.data()), static_cast<std::streamsize>(cbor.size()));
+    } catch (const std::exception& ex) {
+      LOG(WARNING) << "Failed to backfill tensor_index.cbor at " << cbor_path.string() << ": " << ex.what();
+    }
+  }
 }
 
 void record_disk_resolution_outcome(std::string_view outcome) {
@@ -1089,9 +1156,6 @@ grpc::Status MaterializationController::materialize_replica(
   auto& span = rctx.span();
   const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
   ResolvedSourcePolicy effective_policy = policy;
-  if (storage_path_.empty()) {
-    effective_policy.allow_disk = false;
-  }
   const bool prefer_disk = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
   const bool prefer_p2p = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
   bool verify_checksums = true;
@@ -1652,9 +1716,6 @@ grpc::Status MaterializationController::materialize_by_key(
   span->SetAttribute("tc.device.type", static_cast<int64_t>(requested_type));
   const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
   ResolvedSourcePolicy effective_policy = policy;
-  if (storage_path_.empty()) {
-    effective_policy.allow_disk = false;
-  }
   span->SetAttribute("tc.store.preference", static_cast<int64_t>(effective_policy.preference));
   span->SetAttribute("tc.store.allow_p2p", effective_policy.allow_p2p);
   span->SetAttribute("tc.store.allow_disk", effective_policy.allow_disk);
@@ -1926,9 +1987,6 @@ grpc::Status MaterializationController::materialize_into_target(
 
   const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
   ResolvedSourcePolicy effective_policy = policy;
-  if (storage_path_.empty()) {
-    effective_policy.allow_disk = false;
-  }
   absl::Status policy_status = validate_source_policy(effective_policy);
   if (!policy_status.ok()) {
     record_materialize_into_target(
@@ -3046,10 +3104,17 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     return to_grpc_status(index_or.status());
   }
 
-  auto validation_status = validate_descriptor_against_index(descriptor, *index_or, verify_checksums);
-  if (!validation_status.ok()) {
-    record_disk_resolution_outcome("checksum_failed");
-    return to_grpc_status(validation_status);
+  const bool has_descriptor = descriptor.found;
+  const bool is_safetensors = index_or->is_safetensors;
+  if (verify_checksums && !has_descriptor && is_safetensors) {
+    LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing for safetensors at "
+                 << normalized.string() << "; skipping descriptor validation";
+  } else {
+    auto validation_status = validate_descriptor_against_index(descriptor, *index_or, verify_checksums);
+    if (!validation_status.ok()) {
+      record_disk_resolution_outcome("checksum_failed");
+      return to_grpc_status(validation_status);
+    }
   }
 
   if (!resp.artifact_id().empty() && descriptor.artifact_id.has_value() &&
@@ -3065,6 +3130,18 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     if (rctx.allow_high_card_attrs()) {
       span->SetAttribute("tc.artifact.id", artifact_id);
     }
+  }
+
+  if (resp.artifact_id().empty()) {
+    const std::string artifact_id = normalized.string();
+    resp.set_artifact_id(artifact_id);
+    if (rctx.allow_high_card_attrs()) {
+      span->SetAttribute("tc.artifact.id", artifact_id);
+    }
+  }
+
+  if (verify_checksums && has_descriptor && is_safetensors) {
+    maybe_backfill_tensor_index(normalized, index_or->canonical_index_json);
   }
 
   resp.set_canonical_index_bytes(index_or->canonical_index_json);

@@ -33,6 +33,7 @@ from tensorcast.api.store.common import (
 from tensorcast.api.store.retry import (
     compute_retry_delay,
     map_materialization_error,
+    raise_mapped_materialization_error,
     remaining_budget,
     should_retry,
 )
@@ -1630,7 +1631,7 @@ class MaterializationPipeline:
                     self._runtime.cache_artifact_index(cache_entry)
             except Exception as exc:  # noqa: BLE001
                 if not allow_p2p:
-                    raise map_materialization_error(exc) from exc
+                    raise_mapped_materialization_error(exc)
                 logger.info(
                     "store.materialize.disk.resolve_failed",
                     extra={
@@ -2132,7 +2133,7 @@ class MaterializationPipeline:
                 lease_mode=lease_mode,
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_materialization_error(exc) from exc
+            raise_mapped_materialization_error(exc)
         return materialized, device_id
 
     def _release_materialized(
