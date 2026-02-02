@@ -152,6 +152,34 @@ class ReplicaRepository(BaseRepository):
             return self._row_to_model(row, columns)
         return None
 
+    def find_by_replica_id(self, replica_id: UUID) -> Replica | None:
+        """Find a replica by ID (artifact_id not required)."""
+        cursor = self.get_cursor()
+        sql = self._replica_select_sql("LEFT JOIN") + " WHERE mr.replica_id = ?"
+        query = cursor.execute(sql, [str(replica_id)])
+        row = query.fetchone()
+        if row:
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
+        return None
+
+    def get_current_requests(self, replica_id: UUID) -> int | None:
+        """Return current_requests for a replica, or None if not found."""
+        cursor = self.get_cursor()
+        row = cursor.execute(
+            """
+            SELECT COALESCE(rc.current_requests, 0) AS current_requests
+            FROM artifact_replicas mr
+            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
+            WHERE mr.replica_id = ?
+            """,
+            [str(replica_id)],
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row[0] or 0)
+
     def find_existing(
         self,
         artifact_id: str,

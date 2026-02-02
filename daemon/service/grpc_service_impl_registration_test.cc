@@ -221,7 +221,7 @@ TEST_CASE(
   view->set_registration_kind(tensorcast::daemon::v2::VIEW_REGISTRATION_KIND_CANONICAL);
   view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
   auto& tensors = *view->mutable_spec()->mutable_tensors();
-  tensorcast::daemon::v2::TensorViewOps ops;
+  tensorcast::common::v1::TensorViewOps ops;
   auto* transpose = ops.add_ops()->mutable_transpose();
   transpose->set_dim0(0);
   transpose->set_dim1(1);
@@ -289,7 +289,7 @@ TEST_CASE("BeginRegisterArtifact rejects allow_partial legacy flag", "[daemon][r
   REQUIRE(status.error_message().find("allow_partial") != std::string::npos);
 }
 
-TEST_CASE("BeginRegisterArtifact rejects piece transpose", "[daemon][registration][view]") {
+TEST_CASE("BeginRegisterArtifact rejects full coverage transpose piece", "[daemon][registration][view]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   auto harness = make_harness(engine);
   auto& service = harness->service();
@@ -308,7 +308,7 @@ TEST_CASE("BeginRegisterArtifact rejects piece transpose", "[daemon][registratio
   view->set_canonical_size_bytes(32);
   view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
   view->set_registration_kind(tensorcast::daemon::v2::VIEW_REGISTRATION_KIND_PIECE);
-  tensorcast::daemon::v2::TensorViewOps ops;
+  tensorcast::common::v1::TensorViewOps ops;
   auto* transpose = ops.add_ops()->mutable_transpose();
   transpose->set_dim0(0);
   transpose->set_dim1(1);
@@ -317,10 +317,11 @@ TEST_CASE("BeginRegisterArtifact rejects piece transpose", "[daemon][registratio
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
-  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("must not fully cover canonical bytes") != std::string::npos);
 }
 
-TEST_CASE("BeginRegisterArtifact rejects piece lease-in-place", "[daemon][registration][view]") {
+TEST_CASE("BeginRegisterArtifact accepts piece lease-in-place", "[daemon][registration][view]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   auto harness = make_harness(engine);
   auto& service = harness->service();
@@ -347,7 +348,9 @@ TEST_CASE("BeginRegisterArtifact rejects piece lease-in-place", "[daemon][regist
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
   auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
-  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.ok());
+  REQUIRE(!bresp.registration_id().empty());
+  REQUIRE(bresp.has_lease());
 }
 
 TEST_CASE("BeginRegisterArtifact rejects full coverage piece", "[daemon][registration][view]") {

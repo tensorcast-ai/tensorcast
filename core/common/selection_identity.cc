@@ -53,9 +53,10 @@ std::string compute_view_subset_hash_bytes(absl::Span<const std::string> names) 
 
 std::string compute_selection_hash_bytes(std::string_view view_id, std::optional<std::string_view> view_subset_hash) {
   std::string buffer;
-  buffer.reserve(view_id.size() + 12 + (view_subset_hash ? view_subset_hash->size() : 4));
+  const bool has_subset = view_subset_hash.has_value() && !view_subset_hash->empty();
+  buffer.reserve(view_id.size() + 12 + (has_subset ? view_subset_hash->size() : 4));
   buffer.append(view_id.data(), view_id.size());
-  if (view_subset_hash.has_value()) {
+  if (has_subset) {
     buffer.append(view_subset_hash->data(), view_subset_hash->size());
   } else {
     buffer.append("|all");

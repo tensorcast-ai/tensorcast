@@ -21,6 +21,11 @@ service GlobalStoreService {
   // and optionally device or memory type to disambiguate.
   rpc UnregisterReplicaByWorker(UnregisterReplicaByWorkerRequest) returns (UnregisterReplicaByWorkerResponse) {}
 
+  // Mark a single replica unavailable (idempotent).
+  rpc MarkReplicaUnavailable(MarkReplicaUnavailableRequest) returns (MarkReplicaUnavailableResponse) {}
+  // Wait for in-flight transports to drain for a replica.
+  rpc WaitReplicaDrain(WaitReplicaDrainRequest) returns (WaitReplicaDrainResponse) {}
+
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
 
   rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
@@ -741,6 +746,31 @@ message UnregisterReplicaByWorkerRequest {
 
 message UnregisterReplicaByWorkerResponse {
   Status status = 1;
+}
+
+message MarkReplicaUnavailableRequest {
+  string artifact_id = 1;
+  string replica_id = 2;
+  optional string reason = 3;
+  optional string operation_id = 4;
+}
+
+message MarkReplicaUnavailableResponse {
+  Status status = 1;
+  bool updated = 2;
+}
+
+message WaitReplicaDrainRequest {
+  string replica_id = 1;
+  uint32 timeout_ms = 2;
+  optional string operation_id = 3;
+}
+
+message WaitReplicaDrainResponse {
+  Status status = 1;
+  bool drained = 2;
+  uint32 current_requests = 3;
+  optional uint64 oldest_transport_age_ms = 4;
 }
 
 // MemoryInfo moved to common

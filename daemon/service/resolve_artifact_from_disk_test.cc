@@ -54,7 +54,7 @@ tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
   std::filesystem::create_directories(opts.storage_path);
-  opts.p2p_port = 47015;
+  opts.p2p_port = 0; // Let the OS pick an available port for test isolation.
   opts.memory_pool_size = 32ULL << 20;
   opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
@@ -106,6 +106,7 @@ struct ResolveFixture {
                 .refs = refs,
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
+                .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,

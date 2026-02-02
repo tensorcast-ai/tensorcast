@@ -55,6 +55,8 @@ service StoreDaemonService {
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
+  rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
 
   // ========== Key-based materialization and publish ==========
   // See docs/architecture/api/materialization-flow.md for semantics.
@@ -439,6 +441,7 @@ message MaterializeIntoTargetRequest {
 
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
+  optional string operation_id = 10;
 
   oneof view_identity {
     tensorcast.common.v1.ViewSpec view = 1001;
@@ -456,6 +459,7 @@ message MaterializeIntoTargetResponse {
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
+  bytes target_write_token = 8;
 }
 
 message ConfirmReplicaRequest {
@@ -908,6 +912,8 @@ message DeregisterArtifactRequest {
   optional int32 device_id = 7;
   // When true, release region references once deregistration completes.
   optional bool release_regions = 8;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 9;
+  optional string operation_id = 10;
 }
 
 message DeregisterArtifactResponse {
@@ -915,6 +921,36 @@ message DeregisterArtifactResponse {
   bool removed = 2;
   repeated string released_region_ids = 3;
   optional string message = 4;
+}
+
+message PublishTargetReplicaRequest {
+  bytes target_write_token = 1;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 2;
+  optional uint32 ttl_ms = 3;
+  optional int32 owner_pid = 4;
+  optional string operation_id = 5;
+}
+
+message PublishTargetReplicaResponse {
+  string lease_id = 1;
+  string replica_id = 2;
+}
+
+message RetirePublishedReplicaRequest {
+  optional string lease_id = 1;
+  string artifact_id = 2;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 3;
+  optional int32 owner_pid = 4;
+  optional int32 device_id = 5;
+  bool wait_for_drain = 6;
+  optional uint32 drain_timeout_ms = 7;
+  optional string operation_id = 8;
+}
+
+message RetirePublishedReplicaResponse {
+  bool drained = 1;
+  bool removed = 2;
+  optional string message = 3;
 }
 
 // Key-based materialization request.

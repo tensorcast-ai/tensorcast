@@ -15,6 +15,7 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/store/store_engine.h"
 #include "daemon/state/ipc_region_registry.h"
@@ -67,6 +68,12 @@ class LipManager {
   std::optional<LipLeaseEntry> find_active_by_artifact_id(
       std::string_view artifact_id,
       std::optional<std::string_view> view_id = std::nullopt) const;
+  std::optional<LipLeaseEntry> find_active_by_key(const ArtifactDeviceKey& key) const;
+  std::vector<LipLeaseEntry> list_active_by_artifact_id(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
+  std::optional<ArtifactDeviceKey> find_key_by_registration_id(std::string_view registration_id) const;
+  std::optional<std::string> find_replica_id(const ArtifactDeviceKey& key) const;
   bool has_active_on_device(
       std::string_view artifact_id,
       int device_id,
@@ -89,12 +96,12 @@ class LipManager {
       uint32_t extend_ttl_ms,
       std::optional<std::string_view> view_id = std::nullopt);
 
-  // Quiesce a LIP artifact to block new staged exports.
-  void quiesce_artifact(const std::string& artifact_id);
+  // Quiesce a LIP lease to block new staged exports.
+  void quiesce_lease(const ArtifactDeviceKey& key);
 
-  // Wait for staged exports to drain for a given artifact until deadline.
+  // Wait for staged exports to drain for a given lease until deadline.
   // Returns true if drained, false on timeout.
-  bool wait_exports_drained(const std::string& artifact_id, absl::Time deadline);
+  bool wait_exports_drained(const ArtifactDeviceKey& key, absl::Time deadline);
 
   // Commit a LIP (lease in-place) registration into a persistent lease entry,
   // computing the artifact descriptor using index/data multihashes streamed
@@ -141,7 +148,7 @@ class LipManager {
   absl::Mutex exp_mu_;
   absl::flat_hash_map<std::string, LipExportRecord> exports_ ABSL_GUARDED_BY(exp_mu_);
 
-  absl::Mutex routable_mu_;
+  mutable absl::Mutex routable_mu_;
   absl::flat_hash_map<ArtifactDeviceKey, LipExportRecord> routable_exports_ ABSL_GUARDED_BY(routable_mu_);
   absl::flat_hash_map<ArtifactDeviceKey, std::string> routable_replica_ids_ ABSL_GUARDED_BY(routable_mu_);
 
@@ -149,7 +156,7 @@ class LipManager {
   mutable absl::Mutex mu_;
   absl::flat_hash_map<ArtifactDeviceKey, LipLeaseEntry> leases_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, ArtifactDeviceKey> reg_to_key_ ABSL_GUARDED_BY(mu_);
-  absl::flat_hash_set<std::string> quiesced_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_set<ArtifactDeviceKey> quiesced_ ABSL_GUARDED_BY(mu_);
 };
 
 } // namespace tensorcast::daemon

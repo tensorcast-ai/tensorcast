@@ -914,8 +914,25 @@ class MaterializationPipeline:
                 retryable=False,
             )
 
+        full_selection = target_names == canonical_names
+
+        selection_names: tuple[str, ...] = ()
         if selection_order is not None:
             selection_names = tuple(str(name) for name in selection_order)
+        elif tensor_names is not None:
+            selection_names = tuple(str(name) for name in tensor_names)
+        elif not full_selection:
+            selection_names = tuple(
+                entry.name
+                for entry in canonical_index.entries
+                if entry.name in target_names
+            )
+
+        if (
+            selection_order is not None
+            or tensor_names is not None
+            or not full_selection
+        ):
             if not selection_names:
                 raise ArtifactError(
                     "selection_order must not be empty when provided",
@@ -934,9 +951,6 @@ class MaterializationPipeline:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-        else:
-            selection_names = tuple(sorted(target_names))
-        full_selection = target_names == canonical_names
 
         normalized_ops: dict[str, list[dict[str, int | str]]] = {}
         if view_spec is not None and view_spec.tensors:
@@ -975,7 +989,7 @@ class MaterializationPipeline:
             resolved_view_id = view_id
 
         needs_view_index = (
-            bool(normalized_ops) or not full_selection or selection_order is not None
+            bool(normalized_ops) or not full_selection or bool(selection_names)
         )
         view_index_bytes: bytes | None = None
         if needs_view_index:
@@ -983,7 +997,7 @@ class MaterializationPipeline:
                 view_index_bytes = view_index_hint
             else:
                 subset_payload = None
-                if selection_order is not None or not full_selection:
+                if selection_names:
                     subset_payload = list(selection_names)
                 view_payload = compute_view_index_bytes(
                     canonical_index_bytes, normalized_ops, subset_payload
@@ -1213,7 +1227,9 @@ class MaterializationPipeline:
             index_bytes=index_bytes,
             needs_view_index=needs_view_index,
         )
-        view_subset_hash = compute_view_subset_hash(selection_names)
+        view_subset_hash = (
+            b"" if full_selection else compute_view_subset_hash(selection_names)
+        )
         return _RegionBackedLayout(
             layout=layout,
             region_ids=tuple(region_ids),

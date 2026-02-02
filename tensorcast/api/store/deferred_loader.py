@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import contextlib
+import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Mapping, Sequence
 
 import torch
 
+from tensorcast._c_ext import compute_view_index_bytes
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._view_ops import (
@@ -16,6 +18,8 @@ from tensorcast.api._view_ops import (
     build_view_spec,
     validate_narrow,
 )
+from tensorcast.api.store.common import canonical_index_from_bytes
+from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.materialization import _build_source_policy
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
@@ -23,7 +27,6 @@ from tensorcast.api.store.view_composer import ViewSpecComposer
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
-    from tensorcast.api._config import RegisterArtifactOptions
     from tensorcast.api.store import Store
     from tensorcast.api.store.artifact import Artifact
     from tensorcast.api.store.handles import RegisteredArtifact
@@ -109,9 +112,9 @@ class DeferredLoader:
         self._device_id = resolve_device(device_obj, allow_cpu=False)
 
         mode = str(packing).strip().lower()
-        if mode not in {"append", "plan"}:
+        if mode not in {"append", "plan", "byte_space"}:
             raise ArtifactError(
-                "packing must be 'append' or 'plan'",
+                "packing must be 'append', 'plan', or 'byte_space'",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
@@ -119,9 +122,27 @@ class DeferredLoader:
 
         base_index = artifact._effective_index()
         self._base_index: CanonicalIndex = base_index
+        canonical_index = artifact._canonical_index
+        self._canonical_index_bytes = artifact._canonical_index_bytes
+        if canonical_index is None:
+            raise ArtifactError(
+                "Missing canonical index for deferred materialization",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        self._canonical_index: CanonicalIndex = canonical_index
         self._entries_by_name: dict[str, CanonicalIndexEntry] = {
             entry.name: entry for entry in base_index.entries
         }
+        self._canonical_entries_by_name: dict[str, CanonicalIndexEntry] = {
+            entry.name: entry for entry in canonical_index.entries
+        }
+        if self._canonical_index_bytes is None:
+            raise ArtifactError(
+                "Missing canonical index bytes for deferred materialization",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         if not self._entries_by_name:
             raise ArtifactError(
                 "Artifact canonical index is empty",
@@ -138,10 +159,30 @@ class DeferredLoader:
             )
         self._base_view_spec = base_spec
         self._base_view_depth = artifact._view_depth
+        self._slice_specs: dict[str, SliceSpec] = {}
+
+        self._byte_space_entries: dict[str, CanonicalIndexEntry] = {}
+        self._byte_space_logical_size: int | None = None
+        self._byte_space_order: list[str] = []
+        self._byte_space_full_selection: bool | None = None
+        view_metadata = artifact._view_metadata
+        self._view_index_hint: bytes | None = (
+            bytes(view_metadata.view_index_bytes)
+            if view_metadata is not None and view_metadata.view_index_bytes
+            else None
+        )
 
         if capacity_bytes is None:
-            padding = max(0, len(base_index.entries) - 1) * (_ALIGNMENT_BYTES - 1)
-            capacity = int(base_index.total_size_bytes) + int(padding)
+            if self._packing == "byte_space":
+                self._resolve_byte_space_index()
+                capacity = int(
+                    self._byte_space_logical_size
+                    if self._byte_space_logical_size is not None
+                    else base_index.total_size_bytes
+                )
+            else:
+                padding = max(0, len(base_index.entries) - 1) * (_ALIGNMENT_BYTES - 1)
+                capacity = int(base_index.total_size_bytes) + int(padding)
         else:
             capacity = int(capacity_bytes)
         if capacity <= 0:
@@ -157,7 +198,6 @@ class DeferredLoader:
         self._offsets: dict[str, int] = {}
         self._specs: dict[str, _TensorSpec] = {}
         self._tensors: dict[str, torch.Tensor] = {}
-        self._slice_specs: dict[str, SliceSpec] = {}
         self._element_size_cache: dict[torch.dtype, int] = {}
 
         self._arena: torch.Tensor | None = None
@@ -246,7 +286,7 @@ class DeferredLoader:
         cursor = 0
         offsets: dict[str, int] = {}
         specs: dict[str, _TensorSpec] = {}
-        for name in sorted(ordered):
+        for name in ordered:
             spec = self._build_tensor_spec(name, self._slice_specs.get(name))
             offset = _align_bytes(cursor, _ALIGNMENT_BYTES)
             if offset % self._element_size(spec.dtype) != 0:
@@ -272,7 +312,7 @@ class DeferredLoader:
                 retryable=False,
             )
 
-        self._order = sorted(ordered)
+        self._order = list(ordered)
         self._offsets = offsets
         self._specs = specs
         self._cursor_bytes = cursor
@@ -315,6 +355,12 @@ class DeferredLoader:
             )
 
         if slice is not None:
+            if self._packing == "byte_space":
+                raise ArtifactError(
+                    "packing='byte_space' does not support per-tensor slices; use Artifact.view instead",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
             if self._packing == "plan" and self._planned:
                 planned = self._slice_specs.get(tensor_name)
                 if planned is None or planned != slice:
@@ -335,7 +381,31 @@ class DeferredLoader:
 
         offset = 0
         end = 0
-        if self._packing == "append":
+        if self._packing == "byte_space":
+            self._resolve_byte_space_index()
+            entry = self._byte_space_entries.get(tensor_name)
+            if entry is None:
+                raise ArtifactError(
+                    f"Tensor '{tensor_name}' is not part of the byte_space layout",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            offset = int(entry.segment_offset)
+            end = offset + spec.size_bytes
+            if end > self._capacity_bytes:
+                raise ArtifactError(
+                    "DeferredLoader arena exhausted; increase capacity_bytes",
+                    status_code="RESOURCE_EXHAUSTED",
+                    retryable=False,
+                )
+            spec = _TensorSpec(
+                shape=spec.shape,
+                stride=spec.stride,
+                dtype=spec.dtype,
+                size_bytes=spec.size_bytes,
+                offset_bytes=offset,
+            )
+        elif self._packing == "append":
             offset = _align_bytes(self._cursor_bytes, _ALIGNMENT_BYTES)
             if offset % self._element_size(spec.dtype) != 0:
                 raise ArtifactError(
@@ -373,14 +443,13 @@ class DeferredLoader:
             self._order.append(tensor_name)
             self._offsets[tensor_name] = offset
             self._specs[tensor_name] = spec
+        elif self._packing == "byte_space":
+            self._offsets[tensor_name] = offset
+            self._specs[tensor_name] = spec
         self._tensors[tensor_name] = tensor
         return tensor
 
-    def commit(
-        self,
-        *,
-        publish: bool | RegisterArtifactOptions | None = None,
-    ) -> DeferredCommitResult:
+    def commit(self) -> InplaceSlot:
         self._ensure_open()
         if self._committed:
             raise ArtifactError(
@@ -402,6 +471,15 @@ class DeferredLoader:
                     status_code="FAILED_PRECONDITION",
                     retryable=False,
                 )
+        if self._packing == "byte_space":
+            self._resolve_byte_space_index()
+            expected = set(self._byte_space_entries)
+            if expected and expected != set(self._tensors):
+                raise ArtifactError(
+                    "packing='byte_space' requires requesting every tensor in the layout",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
 
         composed_spec = self._compose_view_spec()
         view_spec_proto = composed_spec.proto if composed_spec else None
@@ -417,7 +495,15 @@ class DeferredLoader:
                 retryable=False,
             )
 
-        selection_order = tuple(self._order)
+        selection_order: tuple[str, ...] | None
+        if self._packing == "byte_space":
+            self._resolve_byte_space_index()
+            if self._byte_space_full_selection:
+                selection_order = None
+            else:
+                selection_order = tuple(self._byte_space_order)
+        else:
+            selection_order = tuple(self._order)
         region_layout = self._pipeline._build_region_backed_layout(
             canonical_index=canonical_index,
             canonical_index_bytes=canonical_index_bytes,
@@ -462,6 +548,7 @@ class DeferredLoader:
         )
 
         client = self._runtime.ensure_client()
+        operation_id = uuid.uuid4().hex
         try:
             response = client.materialize_into_target_v2(
                 artifact_id=artifact_id,
@@ -474,6 +561,7 @@ class DeferredLoader:
                 view=view_spec_proto,
                 view_id=region_layout.view_id if view_spec_proto is None else None,
                 view_subset_hash=region_layout.view_subset_hash,
+                operation_id=operation_id,
             )
         except Exception as exc:  # noqa: BLE001
             error = map_materialization_error(exc)
@@ -499,33 +587,37 @@ class DeferredLoader:
             self._runtime.daemon_endpoint
         )
 
-        published_artifact: RegisteredArtifact | None = None
-        if publish:
-            from tensorcast.api._config import PlanType, RegisterArtifactOptions
-
-            options: RegisterArtifactOptions
-            if isinstance(publish, RegisterArtifactOptions):
-                options = publish
-            else:
-                options = RegisterArtifactOptions(plan=PlanType.VRAM_LEASED)
-            if options.plan is not PlanType.VRAM_LEASED or not options.lease_in_place:
-                options = options.model_copy(
-                    update={"plan": PlanType.VRAM_LEASED, "lease_in_place": True}
-                )
-            published_artifact = self._store.register(target, options=options)
-
         self._committed = True
         storage_ids = tuple(
             storage.storage_id for storage in region_layout.layout.storages
         )
-        return DeferredCommitResult(
+        commit_result = DeferredCommitResult(
             tensor_names=region_layout.selection_names,
             view_id=region_layout.view_id,
             view_subset_hash=region_layout.view_subset_hash,
             storage_ids=storage_ids,
             logical_size_bytes=region_layout.logical_total_size,
-            published_artifact=published_artifact,
+            published_artifact=None,
         )
+        target_write_token = getattr(response, "target_write_token", None)
+        slot = InplaceSlot(
+            store=self._store,
+            runtime=self._runtime,
+            pipeline=self._pipeline,
+            tensors=target,
+            device=self._device,
+            device_id=self._device_id,
+            region_id=self._region_id,
+            region_layout=region_layout,
+            view_spec=view_spec_proto,
+            fallback=self._fallback,
+            commit_result=commit_result,
+            artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            target_write_token=target_write_token or None,
+        )
+        self._region_id = None
+        return slot
 
     def close(self) -> None:
         if self._closed:
@@ -580,6 +672,69 @@ class DeferredLoader:
         self._region_id = None
         with contextlib.suppress(Exception):
             self._store.unregister_vram_region(region_id)
+
+    def _resolve_byte_space_index(self) -> None:
+        if self._packing != "byte_space":
+            return
+        if self._byte_space_entries:
+            return
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "Missing canonical index bytes for byte_space layout",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        composed_spec = self._compose_view_spec()
+        view_spec_proto = composed_spec.proto if composed_spec else None
+        index_bytes: bytes
+        if self._view_index_hint is not None:
+            index_bytes = self._view_index_hint
+        elif view_spec_proto is None or not view_spec_proto.tensors:
+            index_bytes = canonical_index_bytes
+        else:
+            normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+            for name, ops in view_spec_proto.tensors.items():
+                op_list: list[dict[str, int | str]] = []
+                for op in ops.ops:
+                    if op.HasField("narrow"):
+                        op_list.append(
+                            {
+                                "type": "narrow",
+                                "dim": int(op.narrow.dim),
+                                "start": int(op.narrow.start),
+                                "length": int(op.narrow.length),
+                            }
+                        )
+                    elif op.HasField("transpose"):
+                        op_list.append(
+                            {
+                                "type": "transpose",
+                                "dim0": int(op.transpose.dim0),
+                                "dim1": int(op.transpose.dim1),
+                            }
+                        )
+                if op_list:
+                    normalized_ops[str(name)] = op_list
+            view_payload = compute_view_index_bytes(
+                canonical_index_bytes, normalized_ops, None
+            )
+            index_bytes = bytes(view_payload["view_index_bytes"])
+        view_index = canonical_index_from_bytes(index_bytes)
+        self._byte_space_entries = {entry.name: entry for entry in view_index.entries}
+        self._byte_space_order = [entry.name for entry in view_index.entries]
+        logical_size = 0
+        for entry in view_index.entries:
+            logical_size = max(
+                logical_size, int(entry.segment_offset) + int(entry.size_bytes)
+            )
+        self._byte_space_logical_size = logical_size
+        canonical_names = set(self._canonical_entries_by_name)
+        self._byte_space_full_selection = (
+            set(self._byte_space_entries) == canonical_names
+            if canonical_names
+            else False
+        )
 
     def _element_size(self, dtype: torch.dtype) -> int:
         cached = self._element_size_cache.get(dtype)

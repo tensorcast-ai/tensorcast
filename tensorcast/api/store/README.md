@@ -8,7 +8,10 @@ managing clients manually.
 ## Artifact Handles
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
-  bound to the process `Store`. Handles support metadata accessors
+  bound to the process `Store`. `tc.artifact("my-key")` is shorthand for
+  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`/`disk:`) map to
+  explicit identifier kinds.
+  Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
 - `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
@@ -66,15 +69,20 @@ managing clients manually.
 
 ## Deferred Slice Materialization (vLLM)
 
-- `artifact.deferred_loader(device=..., packing="append", capacity_bytes=...)` returns
-  a `DeferredLoader` that issues no I/O until `commit()`.
+- `artifact.deferred_loader(device=..., packing="byte_space"|"append"|"plan", capacity_bytes=...)`
+  returns a `DeferredLoader` that issues no I/O until `commit()`.
 - `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
   client-owned arena; contents are undefined until `commit()` completes.
+- `packing="byte_space"` places tensors at their logical offsets in the selected
+  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
+  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
+  local-only in Phase 1.
 - `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
-  first to precompute a deterministic layout before calling `tensor(...)`.
-- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena;
-  `publish=True` optionally registers the packed slice artifact via
-  `VRAM_LEASED` (LIP).
+  first to precompute a deterministic layout before calling `tensor(...)`. Both
+  modes are local-only layouts (not publishable).
+- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
+  returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
+  replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
 - `capacity_bytes` bounds the arena size (defaults to the base canonical/view
   total size); exceeding it raises `RESOURCE_EXHAUSTED`.
 

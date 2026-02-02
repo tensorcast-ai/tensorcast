@@ -530,6 +530,7 @@ class DaemonCtl:
         view_subset_hash: bytes | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
+        operation_id: str | None = None,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         if not artifact_id:
@@ -574,6 +575,8 @@ class DaemonCtl:
                 request.view_id = str(view_id)
             if placement is not None:
                 request.placement = placement
+            if operation_id:
+                request.operation_id = str(operation_id)
             try:
                 response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
@@ -1872,7 +1875,7 @@ class DaemonCtl:
 
         expires_at = None
         if resp.HasField("expires_at"):
-            expires_at = resp.expires_at.ToDatetime(tz=timezone.utc)
+            expires_at = resp.expires_at.ToDatetime(tzinfo=timezone.utc)
         return VramRegionHandle(
             region_id=str(resp.region_id),
             ttl_ms=int(resp.ttl_ms),
@@ -1933,7 +1936,9 @@ class DaemonCtl:
         extend_ttl_ms: int | None = None,
         owner_pid: int | None = None,
         device_id: int | None = None,
+        byte_space: common_pb2.ByteSpaceRef | None = None,
         release_regions: bool | None = None,
+        operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> DeregisterArtifactOutcome:
         if not artifact_id:
@@ -1953,8 +1958,12 @@ class DaemonCtl:
             req.extend_ttl_ms = int(extend_ttl_ms)
         if device_id is not None:
             req.device_id = int(device_id)
+        if byte_space is not None:
+            req.byte_space.CopyFrom(byte_space)
         if release_regions is not None:
             req.release_regions = bool(release_regions)
+        if operation_id:
+            req.operation_id = str(operation_id)
 
         with self._client_span("Client/DeregisterArtifact") as span:
             set_span_attributes(
@@ -1999,6 +2008,108 @@ class DaemonCtl:
             released_region_ids=tuple(resp.released_region_ids),
             message=resp.message or None,
         )
+
+    def publish_target_replica(
+        self,
+        *,
+        target_write_token: bytes,
+        byte_space: common_pb2.ByteSpaceRef,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 60.0,
+    ) -> store_daemon_pb2.PublishTargetReplicaResponse:
+        if not target_write_token:
+            raise ValueError("target_write_token is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.PublishTargetReplicaRequest(
+            target_write_token=bytes(target_write_token),
+            byte_space=byte_space,
+        )
+        if ttl_ms is not None:
+            req.ttl_ms = int(ttl_ms)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/PublishTargetReplica") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub_v2.PublishTargetReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(f"PublishTargetReplica failed: {e}") from e
+        return resp
+
+    def retire_published_replica(
+        self,
+        *,
+        artifact_id: str,
+        byte_space: common_pb2.ByteSpaceRef,
+        lease_id: str | None = None,
+        owner_pid: int | None = None,
+        device_id: int | None = None,
+        wait_for_drain: bool = True,
+        drain_timeout_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 60.0,
+    ) -> store_daemon_pb2.RetirePublishedReplicaResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.RetirePublishedReplicaRequest(
+            artifact_id=artifact_id,
+            byte_space=byte_space,
+            wait_for_drain=bool(wait_for_drain),
+        )
+        if lease_id:
+            req.lease_id = str(lease_id)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if device_id is not None:
+            req.device_id = int(device_id)
+        if drain_timeout_ms is not None:
+            req.drain_timeout_ms = int(drain_timeout_ms)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/RetirePublishedReplica") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub_v2.RetirePublishedReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    return store_daemon_pb2.RetirePublishedReplicaResponse(
+                        drained=True, removed=False
+                    )
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"RetirePublishedReplica failed: {e}") from e
+        return resp
 
     def feed_register_artifact_view_chunks(
         self,

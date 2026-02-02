@@ -88,6 +88,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .refs = kernel->ref_tracker(),
       .sessions = kernel->sessions_service(),
       .lip = kernel->lip_bridge(),
+      .lip_manager = kernel->lip_manager(),
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
@@ -96,6 +97,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .global_store_client = global_store_client,
       .lifecycle = &kernel->lifecycle_manager(),
       .handle_leases = kernel->handle_leases(),
+      .capability_tokens = kernel->capability_tokens(),
       .cpu_shared_memory_enabled = options.cpu_shared_memory_enabled,
       .storage_path = options.storage_path,
   };
@@ -136,6 +138,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .status_controller = *status_controller,
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
+      .global_store_client = global_store_client,
       .persistence_manager = kernel->persistence_manager(),
       .sessions_service = kernel->sessions_service(),
       .lifecycle_manager = kernel->lifecycle_manager(),

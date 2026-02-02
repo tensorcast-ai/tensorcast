@@ -48,6 +48,7 @@ from tensorcast.api.store.batch_context import (
 )
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import (
@@ -94,6 +95,30 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
         return ArtifactIdKind.CGID
     inferred = infer_artifact_id_kind(artifact_id)
     return inferred or ArtifactIdKind.MI2
+
+
+def _parse_artifact_ref(
+    ref: str | None,
+    *,
+    artifact_id: str | None,
+    key: str | None,
+    disk_path: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    if ref is None:
+        return artifact_id, key, disk_path
+    if artifact_id or key or disk_path:
+        raise ValueError("ref cannot be combined with artifact_id, key, or disk_path")
+    ref_value = str(ref)
+    if not ref_value:
+        raise ValueError("ref must be non-empty")
+    if ref_value.startswith(("mi2:", "cgid:")):
+        return ref_value, None, None
+    if ref_value.startswith("disk:"):
+        disk_value = ref_value[len("disk:") :]
+        if not disk_value:
+            raise ValueError("disk: ref must include a path")
+        return None, None, disk_value
+    return None, ref_value, None
 
 
 class Store:
@@ -530,12 +555,19 @@ class Store:
     # ------------------------------------------------------------------
     def artifact(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
+        artifact_id, key, disk_path = _parse_artifact_ref(
+            ref,
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+        )
         effective_fallback = FallbackOptions.parse(fallback)
         if disk_path and effective_fallback is None:
             effective_fallback = FallbackOptions.for_disk(str(disk_path))
@@ -549,6 +581,7 @@ class Store:
 
     async def artifact_async(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
@@ -556,6 +589,7 @@ class Store:
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
+            ref,
             artifact_id=artifact_id,
             key=key,
             disk_path=disk_path,
@@ -620,6 +654,8 @@ class Store:
         drain_timeout_s: float | None = None,
         extend_ttl_ms: int | None = None,
         device_id: int | None = None,
+        byte_space: common_pb2.ByteSpaceRef | None = None,
+        operation_id: str | None = None,
     ) -> DeregisterArtifactOutcome:
         client = self._runtime.ensure_client()
         drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
@@ -629,6 +665,8 @@ class Store:
             drain_timeout_ms=drain_ms,
             extend_ttl_ms=extend_ttl_ms,
             device_id=device_id,
+            byte_space=byte_space,
+            operation_id=operation_id,
         )
         self._runtime.invalidate_artifact(artifact_id, key=None, reason="deregister")
         return outcome
@@ -866,6 +904,8 @@ def deregister_artifact(
     drain_timeout_s: float | None = None,
     extend_ttl_ms: int | None = None,
     device_id: int | None = None,
+    byte_space: common_pb2.ByteSpaceRef | None = None,
+    operation_id: str | None = None,
 ) -> DeregisterArtifactOutcome:
     return _coerce_store().deregister_artifact(
         artifact_id,
@@ -873,6 +913,8 @@ def deregister_artifact(
         drain_timeout_s=drain_timeout_s,
         extend_ttl_ms=extend_ttl_ms,
         device_id=device_id,
+        byte_space=byte_space,
+        operation_id=operation_id,
     )
 
 
@@ -942,13 +984,23 @@ def seal_assembly(
 
 
 def artifact(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return _coerce_store().artifact(
+    store = _coerce_store()
+    if ref is None:
+        return store.artifact(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return store.artifact(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
@@ -957,13 +1009,23 @@ def artifact(
 
 
 async def artifact_async(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return await _coerce_store().artifact_async(
+    store = _coerce_store()
+    if ref is None:
+        return await store.artifact_async(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return await store.artifact_async(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
@@ -985,6 +1047,7 @@ __all__ = [
     "CanonicalIndexEntry",
     "DeferredCommitResult",
     "DeferredLoader",
+    "InplaceSlot",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",

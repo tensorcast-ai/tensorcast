@@ -193,6 +193,7 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 - Owner mismatch returns `PERMISSION_DENIED`.
 - Expired regions behave as missing and return `NOT_FOUND`.
 - Drain timeouts return `DEADLINE_EXCEEDED` and leave the artifact quiesced.
+- The drain timeout bounds both Global Store drain waits and local export drain; total wait does not exceed the requested budget.
 
 ## Code Map
 

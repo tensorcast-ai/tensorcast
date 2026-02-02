@@ -46,6 +46,10 @@ class DaemonServiceHarness {
     return *kernel_;
   }
 
+  MaterializationController& materialization_controller() const {
+    return *materialization_controller_;
+  }
+
   std::shared_ptr<common::AsyncRuntime> async_runtime_shared() const {
     return async_runtime_;
   }
