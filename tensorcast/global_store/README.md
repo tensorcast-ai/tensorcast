@@ -158,7 +158,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
   [replicas marked unavailable]
 ```
 
-Workers must provide a stable `daemon_id` (from daemon config). Registration treats `daemon_id` as the
+Workers must provide a stable `daemon_id` (auto-generated and persisted when omitted, or explicitly configured). Registration treats `daemon_id` as the
 primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
 identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
 

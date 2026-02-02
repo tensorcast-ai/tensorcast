@@ -16,6 +16,10 @@ Design 0037 refactored `tensorcast.api.store` into a structured subpackage:
 
 Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a process-scoped `Store`. If you close that store (or invoke `shutdown_process_store()`), the next helper invocation transparently reinitializes a fresh instance instead of reusing the closed handle.
 
+## Error Verbosity (SDK)
+
+By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC debug noise. For full RPC error chains and debug strings, set `TENSORCAST_DEBUG_ERRORS=1`.
+
 ## Store Policy, Local Stable Tier, and Persistence
 
 - `Store.register`/`register_async` and `Store.put`/`put_async` accept a first-class `policy: StorePolicy | str | None`; `RegisterArtifactOptions(policy=...)` remains as an advanced escape hatch. See `../../docs/architecture/api/policy-persistence.md`.
@@ -102,8 +106,11 @@ materialization (`engine.cpu_shared_memory.enabled=true`). If
 auto-selects `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs
 (daemon_state_dir defaults to `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session`
 or `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery
-relies on `TENSORCAST_INSTANCE`); set it
-explicitly when daemon and client SDK run in different pods.
+relies on `TENSORCAST_INSTANCE`; when `TENSORCAST_INSTANCE` is not set, the daemon
+falls back to `$TENSORCAST_HOME/hosts/<host_id>/runtime/daemons/<daemon_id>/local_handle.sock`).
+If the selected socket path exceeds AF_UNIX limits, the daemon falls back to
+`$TENSORCAST_HOME/uds/lh-<hash>.sock`. Set it explicitly when daemon and client SDK
+run in different pods.
 When connecting to the current local session and the daemon does not advertise
 the socket path, the SDK falls back to the same daemon_state_dir location.
 Otherwise the API raises `ArtifactError("CUDA device required for retrieval")`

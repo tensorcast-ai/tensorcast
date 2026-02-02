@@ -46,7 +46,7 @@ from tensorcast.api.store.common import (
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.retry import (
     compute_retry_delay,
-    map_registration_error,
+    raise_mapped_registration_error,
     remaining_budget,
     should_retry,
 )
@@ -639,7 +639,7 @@ class RegistrationPipeline:
                 view=view_registration,
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
         task_id = self._maybe_start_persistence(options, registration_result)
         return self._registration_to_artifact(
             registration_result, persistence_task_id=task_id
@@ -656,9 +656,9 @@ class RegistrationPipeline:
         except grpc.RpcError as exc:
             if exc.code() == grpc.StatusCode.NOT_FOUND:
                 return
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
         except Exception as exc:  # noqa: BLE001
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
         if not mapped_id:
             return
         if artifact_id and mapped_id == artifact_id:

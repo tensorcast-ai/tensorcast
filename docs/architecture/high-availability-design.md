@@ -31,7 +31,7 @@ Materialization HA invariant: v2 descriptor streaming in the daemon uses UMA vie
 ## Registration & Identity
 
 - The daemon must advertise a routable address (non-loopback, non-unspecified). `server.advertise.host` overrides `server.listen.host`; `RegisterWorker` rejects loopback/unspecified IPs.
-- `daemon_id` is required and is the stable identity used for Global Store registration; `worker_id` is an assigned row id and may change across re-registrations.
+- `daemon_id` is required and is the stable identity used for Global Store registration; when omitted in config it is auto-generated and persisted under the host-scoped runtime root. `worker_id` is an assigned row id and may change across re-registrations.
 - HA requires `server.p2p_listen.port` to be non-zero; startup aborts otherwise.
 - Recovery registration preserves `worker_id` when possible and always requests a state sync; stale replicas owned by the previous worker id are reassigned or marked unavailable.
 

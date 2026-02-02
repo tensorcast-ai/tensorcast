@@ -31,10 +31,15 @@ managing clients manually.
   continue to work.
 - `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
   artifacts via the daemon `ResolveArtifactFromDisk` RPC. The daemon validates
-  descriptor multihashes when `verify_checksums=True`, returns canonical
-  `canonical_index_bytes` + `generation`, and seeds `ArtifactCache` while
-  binding a disk-first `FallbackOptions` so materialization prefers the local
-  files without extra resolver RPCs.
+  descriptor multihashes when `verify_checksums=True` (when a descriptor is
+  present), returns canonical `canonical_index_bytes` + `generation`, and seeds
+  `ArtifactCache` while binding a disk-first `FallbackOptions` so
+  materialization prefers the local files without extra resolver RPCs. For
+  safetensors directories, the daemon prefers `tensor_index.(json|cbor)` when
+  present; otherwise it builds canonical metadata directly from `.safetensors`
+  headers. When checksums are verified and the daemon can write to the
+  directory, it will backfill `tensor_index.(json|cbor)` for faster subsequent
+  metadata reads.
   Set `verify_checksums=False` on `FallbackOptions.for_disk(...)` to allow
   descriptor-free local development; checksum validation (and descriptor
   requirements) remain the default in production.

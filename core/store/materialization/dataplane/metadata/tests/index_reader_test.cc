@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 
@@ -117,6 +117,23 @@ TEST_CASE("IndexReader builds canonical index from safetensors files", "[index_r
   REQUIRE(st_info_or.ok());
   CHECK(st_info_or->is_safetensors);
   CHECK(st_info_or->total_size_bytes == 48);
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("IndexReader prefers tensor_index.json over safetensors headers", "[index_reader][safetensors]") {
+  fs::path dir = make_temp_dir("index_reader_prefers_json");
+  write_text(dir / "tensor_index.json", R"({"from_index":[0,8,[1],[1],"torch.uint8",0]})");
+  create_safetensors_file(dir / "part0.safetensors", "from_safetensors", /*size_bytes=*/16);
+
+  auto info_or = read_from_artifact_dir(dir, /*target_device_id=*/0);
+  REQUIRE(info_or.ok());
+  const IndexInfo& info = info_or.value();
+  CHECK_FALSE(info.is_safetensors);
+
+  nlohmann::json parsed = nlohmann::json::parse(info.canonical_index_json);
+  CHECK(parsed.contains("from_index"));
+  CHECK_FALSE(parsed.contains("from_safetensors"));
 
   fs::remove_all(dir);
 }

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ import random
 import threading
 import time
 from concurrent.futures import CancelledError
-from typing import Mapping
+from typing import Mapping, NoReturn
 
 import grpc
 
 from tensorcast.api._errors import DeviceMismatch, TensorCastError
 from tensorcast.api.store.types import ArtifactError, RetryPolicy
+from tensorcast.error_reporting import debug_errors_enabled, debug_errors_hint
 
 RetryPolicyMap = Mapping[str, RetryPolicy]
 
@@ -118,13 +119,37 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         return ArtifactError(
             message, status_code="FAILED_PRECONDITION", retryable=False
         )
+    lowered = message.lower()
+    if "tensor index not found" in lowered:
+        hint = (
+            "Ensure the directory contains tensor_index.json, tensor_index.cbor, or *.safetensors files. "
+            "If this is a raw model folder, run a TensorCast save path "
+            "(e.g., tensorcast.save_* examples) to generate the index."
+        )
+        message = f"{message}\nHint: {hint}"
+        if not debug_errors_enabled():
+            message = f"{message}\nDebug: {debug_errors_hint()}"
+        return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
     if isinstance(exc, RuntimeError):
-        lowered = message.lower()
         if "not found" in lowered:
             return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
         if "unavailable" in lowered or "not available" in lowered:
             return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
     return ArtifactError(message, status_code="UNKNOWN", retryable=False)
+
+
+def raise_mapped_materialization_error(exc: Exception) -> NoReturn:
+    error = map_materialization_error(exc)
+    if debug_errors_enabled():
+        raise error from exc
+    raise error from None
+
+
+def raise_mapped_registration_error(exc: Exception) -> NoReturn:
+    error = map_registration_error(exc)
+    if debug_errors_enabled():
+        raise error from exc
+    raise error from None
 
 
 def should_retry(
@@ -175,6 +200,8 @@ __all__ = [
     "compute_retry_delay",
     "map_materialization_error",
     "map_registration_error",
+    "raise_mapped_materialization_error",
+    "raise_mapped_registration_error",
     "remaining_budget",
     "should_retry",
 ]

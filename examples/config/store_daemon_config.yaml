@@ -7,7 +7,7 @@ meta:
   # Cluster identity token to prevent split-brain when talking to Global Store.
   cluster_token: ""
 
-# gRPC server and daemon identity settings.
+# gRPC server settings.
 server:
   # Control-plane listen socket for the gRPC API.
   listen:
@@ -27,8 +27,8 @@ server:
     host: 0.0.0.0
     # P2P port; must be non-zero when high_availability.enabled is true.
     port: 65090
-  # Shared root directory for daemon-owned artifacts; all disk_path values must resolve under this root when set.
-  # Leave empty to disable disk materialization (P2P-only).
+  # Optional default root for relative disk_path values.
+  # When empty, disk materialization accepts absolute disk_path only.
   storage_path: ""
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
@@ -134,7 +134,7 @@ capability_directory:
 # Global Store registration and heartbeat coordination.
 high_availability:
   # When true, the daemon registers with Global Store and emits heartbeats/sync; requires p2p_listen.port.
-  enabled: true
+  enabled: false
   # Global Store endpoints; keep the first entry as the primary registration target.
   global_store_endpoints:
     -
@@ -183,6 +183,10 @@ lifecycle:
     #   $TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session
     #   (or ~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session)
     # Auto-discovery relies on TENSORCAST_INSTANCE (CLI/SDK-launched daemon).
+    # If TENSORCAST_INSTANCE is not set, the daemon falls back to:
+    #   $TENSORCAST_HOME/hosts/<host_id>/runtime/daemons/<daemon_id>/local_handle.sock
+    # If the selected socket path exceeds AF_UNIX limits, the daemon falls back to:
+    #   $TENSORCAST_HOME/uds/lh-<hash>.sock
     # Set explicitly when daemon and client SDK run in different pods and need a shared path.
     # Socket path must have a daemon-owned parent directory (not world-writable); create the directory beforehand.
     local_handle_socket_path: ""

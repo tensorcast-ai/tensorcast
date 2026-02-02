@@ -1,8 +1,8 @@
+#  Copyright (c) 2025-2026, TensorCast Team.
 """Client utilities for interacting with the TensorCast Store Daemon."""
 
 from __future__ import annotations
 
-#  Copyright (c) 2025-2026, TensorCast Team.
 import atexit
 import os
 import random
@@ -10,7 +10,16 @@ import time
 from contextlib import contextmanager, suppress
 from datetime import timezone
 from threading import RLock
-from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast, overload
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Iterator,
+    Literal,
+    NoReturn,
+    Sequence,
+    cast,
+    overload,
+)
 
 import grpc
 from opentelemetry import trace
@@ -19,6 +28,7 @@ from opentelemetry.trace import SpanKind
 if TYPE_CHECKING:
     from tensorcast.api._config import StorePolicy
     from tensorcast.proto.operation.v1 import operation_pb2
+from tensorcast.error_reporting import debug_errors_enabled
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
@@ -56,6 +66,12 @@ logger = init_logger(__name__)
 _METRICS_LOCK: RLock = RLock()
 _METRIC_CHANNEL_REFRESHES: int = 0
 _METRIC_RPC_RETRIES: int = 0
+
+
+def _raise_grpc_error(err: Exception, *, cause: BaseException | None) -> NoReturn:
+    if debug_errors_enabled() and cause is not None:
+        raise err from cause
+    raise err from None
 
 
 def _inc_channel_refresh(server_address: str) -> int:
@@ -241,14 +257,21 @@ class DaemonCtl:
         raise last_err
 
     def __del__(self):
-        # Best-effort channel cleanup
-        with suppress(Exception):
-            self.close()
+        # Best-effort channel cleanup (avoid module globals during shutdown)
+        try:
+            channel = getattr(self, "channel", None)
+            if channel is not None:
+                channel.close()
+        except Exception:
+            pass
 
     def close(self) -> None:
         """Close underlying gRPC channel."""
+        channel = getattr(self, "channel", None)
+        if channel is None:
+            return
         with suppress(Exception):
-            self.channel.close()
+            channel.close()
 
     def __enter__(self) -> "DaemonCtl":
         return self
@@ -1282,22 +1305,30 @@ class DaemonCtl:
                 span.record_exception(e)
                 code = e.code()
                 if code == grpc.StatusCode.UNAVAILABLE:
-                    raise RuntimeError(
-                        f"Local StoreDaemon ({self.server_address}) is not available."
-                    ) from e
+                    _raise_grpc_error(
+                        RuntimeError(
+                            f"Local StoreDaemon ({self.server_address}) is not available."
+                        ),
+                        cause=e,
+                    )
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(e.details() or str(e)) from e
+                    _raise_grpc_error(ValueError(e.details() or str(e)), cause=e)
                 if code == grpc.StatusCode.NOT_FOUND:
-                    raise FileNotFoundError(
-                        e.details() or "artifact not found on disk"
-                    ) from e
+                    _raise_grpc_error(
+                        FileNotFoundError(e.details() or "artifact not found on disk"),
+                        cause=e,
+                    )
                 if code == grpc.StatusCode.PERMISSION_DENIED:
-                    raise PermissionError(
-                        e.details() or "disk_path not permitted"
-                    ) from e
-                raise RuntimeError(
-                    f"ResolveArtifactFromDiskV2 RPC failed: {e.details() or str(e)}"
-                ) from e
+                    _raise_grpc_error(
+                        PermissionError(e.details() or "disk_path not permitted"),
+                        cause=e,
+                    )
+                _raise_grpc_error(
+                    RuntimeError(
+                        f"ResolveArtifactFromDiskV2 RPC failed: {e.details() or str(e)}"
+                    ),
+                    cause=e,
+                )
 
     def materialize_by_key(
         self,
