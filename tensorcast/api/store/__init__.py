@@ -991,8 +991,16 @@ def artifact(
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return _coerce_store().artifact(
-        ref,
+    store = _coerce_store()
+    if ref is None:
+        return store.artifact(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return store.artifact(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
@@ -1008,8 +1016,16 @@ async def artifact_async(
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return await _coerce_store().artifact_async(
-        ref,
+    store = _coerce_store()
+    if ref is None:
+        return await store.artifact_async(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return await store.artifact_async(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
