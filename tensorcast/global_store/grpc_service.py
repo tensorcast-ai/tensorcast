@@ -2665,7 +2665,6 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             )
 
         timeout_ms = int(request.timeout_ms or 0)
-        deadline = time.time() + (timeout_ms / 1000.0) if timeout_ms > 0 else None
         interval = (
             self.transport_service.config.transport_wait_retry_interval_ms / 1000.0
         )
@@ -2679,16 +2678,27 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             )
 
         drained = current == 0
-        while not drained and deadline is not None and time.time() < deadline:
-            time.sleep(interval)
-            current = self.replica_repository.get_current_requests(replica_id)
-            if current is None:
-                return global_store_pb2.WaitReplicaDrainResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND,
-                    drained=False,
-                    current_requests=0,
-                )
-            drained = current == 0
+        if not drained and timeout_ms > 0:
+            now = time.monotonic()
+            deadline = now + (timeout_ms / 1000.0)
+            context_remaining = context.time_remaining()
+            if context_remaining is not None:
+                deadline = min(deadline, now + max(context_remaining, 0.0))
+
+            while not drained:
+                now = time.monotonic()
+                remaining = deadline - now
+                if remaining <= 0:
+                    break
+                time.sleep(min(interval, remaining))
+                current = self.replica_repository.get_current_requests(replica_id)
+                if current is None:
+                    return global_store_pb2.WaitReplicaDrainResponse(
+                        status=global_store_pb2.Status.STATUS_NOT_FOUND,
+                        drained=False,
+                        current_requests=0,
+                    )
+                drained = current == 0
 
         oldest_age_ms = self.transport_repository.get_oldest_in_progress_age_ms(
             replica_id

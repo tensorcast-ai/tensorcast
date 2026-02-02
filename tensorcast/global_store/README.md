@@ -234,7 +234,8 @@ counts by scope and capability.
 - Supports blocking wait with timeout for high-contention scenarios
 - Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
 - Provides swap-safety helpers: `MarkReplicaUnavailable` flips `is_available=false` for a replica, and `WaitReplicaDrain`
-  waits until `current_requests==0` without mutating transport state
+  waits until `current_requests==0` without mutating transport state; the drain wait honors the requested timeout and
+  RPC deadline by capping sleep intervals to the remaining time budget
 - Cleans up stale transports as safety net for crashed clients
 
 **Load balancing strategy:**

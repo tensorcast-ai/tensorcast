@@ -121,6 +121,85 @@ void fill_failed_status(v2::ReplicaOperationStatus& out, const absl::Status& st)
   err->set_retryable(is_retryable(grpc_st.error_code()));
 }
 
+absl::StatusOr<std::optional<std::string>> parse_view_id(const tensorcast::common::v1::ByteSpaceRef& space) {
+  switch (space.kind()) {
+    case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
+    case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
+      return std::nullopt;
+    case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
+      if (space.id().empty()) {
+        return absl::InvalidArgumentError("byte_space VIEW requires id");
+      }
+      return std::optional<std::string>(space.id());
+    default:
+      return absl::InvalidArgumentError("unsupported byte_space kind");
+  }
+}
+
+uint32_t remaining_timeout_ms(absl::Time deadline, uint32_t timeout_ms) {
+  if (timeout_ms == 0) {
+    return 0;
+  }
+  const absl::Duration remaining = deadline - absl::Now();
+  if (remaining <= absl::ZeroDuration()) {
+    return 0;
+  }
+  const int64_t remaining_ms = absl::ToInt64Milliseconds(remaining);
+  const int64_t clamped_ms = std::min<int64_t>(remaining_ms, timeout_ms);
+  return static_cast<uint32_t>(clamped_ms);
+}
+
+struct DrainOutcome {
+  bool drained{true};
+  std::optional<std::string> replica_id;
+};
+
+absl::StatusOr<DrainOutcome> retire_replica_with_drain(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    std::string_view artifact_id,
+    const ArtifactDeviceKey& key,
+    bool wait_for_drain,
+    uint32_t timeout_ms,
+    std::optional<std::string_view> operation_id) {
+  DrainOutcome outcome{.drained = !wait_for_drain, .replica_id = std::nullopt};
+  const absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
+
+  outcome.replica_id = lip_manager->find_replica_id(key);
+  if (outcome.replica_id.has_value() && !outcome.replica_id->empty()) {
+    if (global_store_client == nullptr || !global_store_client->is_connected()) {
+      return absl::FailedPreconditionError("Global Store client unavailable");
+    }
+    auto mark_or = global_store_client->mark_replica_unavailable(
+        artifact_id,
+        *outcome.replica_id,
+        /*reason=*/"retire",
+        operation_id);
+    if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
+      return mark_or.status();
+    }
+    if (wait_for_drain) {
+      const uint32_t remaining_ms = remaining_timeout_ms(deadline, timeout_ms);
+      auto drain_or = global_store_client->wait_replica_drain(*outcome.replica_id, remaining_ms, operation_id);
+      if (!drain_or.ok() && !absl::IsNotFound(drain_or.status())) {
+        return drain_or.status();
+      }
+      if (drain_or.ok() && !drain_or->drained) {
+        return absl::DeadlineExceededError("drain timed out; artifact remains quiesced");
+      }
+    }
+  }
+
+  if (wait_for_drain) {
+    const bool drained = lip_manager->wait_exports_drained(key, deadline);
+    if (!drained) {
+      return absl::DeadlineExceededError("drain timed out; artifact remains quiesced");
+    }
+    outcome.drained = true;
+  }
+  return outcome;
+}
+
 void fill_degraded_timeout_status(v2::ReplicaOperationStatus& out, std::string_view message) {
   out.set_state(v2::ReplicaOperationState::REPLICA_OPERATION_STATE_DEGRADED);
   out.set_message(std::string(message));
@@ -1017,23 +1096,11 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   }
   const std::string artifact_id = req->artifact_id();
 
-  std::optional<std::string> view_id;
-  if (req->has_byte_space()) {
-    const auto& space = req->byte_space();
-    switch (space.kind()) {
-      case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
-      case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
-        break;
-      case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
-        if (space.id().empty()) {
-          return {StatusCode::INVALID_ARGUMENT, "byte_space VIEW requires id"};
-        }
-        view_id = space.id();
-        break;
-      default:
-        return {StatusCode::INVALID_ARGUMENT, "unsupported byte_space kind"};
-    }
+  auto view_id_or = parse_view_id(req->byte_space());
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
   }
+  std::optional<std::string> view_id = *view_id_or;
 
   std::optional<LipLeaseEntry> lease;
   ArtifactDeviceKey key;
@@ -1068,53 +1135,29 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
 
   lip_manager_->quiesce_lease(key);
 
-  bool drained = true;
   const bool wait_for_drain = req->wait_for_drain();
   const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-  const absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
-
-  std::optional<std::string> replica_id = lip_manager_->find_replica_id(key);
-  if (replica_id.has_value() && !replica_id->empty()) {
-    if (!global_store_client_ || !global_store_client_->is_connected()) {
-      return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
-    }
-    auto mark_or = global_store_client_->mark_replica_unavailable(
-        artifact_id,
-        *replica_id,
-        /*reason=*/"retire",
-        req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-    if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
-      return to_grpc_status(mark_or.status());
-    }
-    if (wait_for_drain) {
-      auto drain_or = global_store_client_->wait_replica_drain(
-          *replica_id,
-          timeout_ms,
-          req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-      if (!drain_or.ok() && !absl::IsNotFound(drain_or.status())) {
-        return to_grpc_status(drain_or.status());
-      }
-      if (drain_or.ok() && !drain_or->drained) {
-        return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
-      }
-    }
+  auto drain_or = retire_replica_with_drain(
+      lip_manager_,
+      global_store_client_.get(),
+      artifact_id,
+      key,
+      wait_for_drain,
+      timeout_ms,
+      req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return to_grpc_status(drain_or.status());
   }
-
-  if (wait_for_drain) {
-    drained = lip_manager_->wait_exports_drained(key, deadline);
-    if (!drained) {
-      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
-    }
-  }
+  const auto& drain = *drain_or;
 
   absl::Status revoke_status = lip_manager_->revoke_by_registration_id(lease->registration_id);
   if (!revoke_status.ok()) {
     return to_grpc_status(revoke_status);
   }
-  resp->set_drained(drained);
+  resp->set_drained(drain.drained);
   resp->set_removed(true);
 
-  if ((!replica_id.has_value() || replica_id->empty()) && !view_id.has_value()) {
+  if ((!drain.replica_id.has_value() || drain.replica_id->empty()) && !view_id.has_value()) {
     absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, key.device_id);
     if (!gs_st.ok()) {
       resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
@@ -1161,23 +1204,11 @@ Status StoreDaemonServiceImpl::RetirePublishedReplica(
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
 
-  std::optional<std::string> view_id;
-  {
-    const auto& space = req->byte_space();
-    switch (space.kind()) {
-      case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
-      case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
-        break;
-      case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
-        if (space.id().empty()) {
-          return {StatusCode::INVALID_ARGUMENT, "byte_space VIEW requires id"};
-        }
-        view_id = space.id();
-        break;
-      default:
-        return {StatusCode::INVALID_ARGUMENT, "unsupported byte_space kind"};
-    }
+  auto view_id_or = parse_view_id(req->byte_space());
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
   }
+  std::optional<std::string> view_id = *view_id_or;
 
   std::optional<LipLeaseEntry> lease;
   ArtifactDeviceKey key;
@@ -1230,47 +1261,24 @@ Status StoreDaemonServiceImpl::RetirePublishedReplica(
 
   const bool wait_for_drain = req->wait_for_drain();
   const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-  const absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
-
-  std::optional<std::string> replica_id = lip_manager_->find_replica_id(key);
-  if (replica_id.has_value() && !replica_id->empty()) {
-    if (!global_store_client_ || !global_store_client_->is_connected()) {
-      return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
-    }
-    auto mark_or = global_store_client_->mark_replica_unavailable(
-        req->artifact_id(),
-        *replica_id,
-        /*reason=*/"retire",
-        req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-    if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
-      return to_grpc_status(mark_or.status());
-    }
-    if (wait_for_drain) {
-      auto drain_or = global_store_client_->wait_replica_drain(
-          *replica_id,
-          timeout_ms,
-          req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-      if (!drain_or.ok() && !absl::IsNotFound(drain_or.status())) {
-        return to_grpc_status(drain_or.status());
-      }
-      if (drain_or.ok() && !drain_or->drained) {
-        return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
-      }
-    }
+  auto drain_or = retire_replica_with_drain(
+      lip_manager_,
+      global_store_client_.get(),
+      req->artifact_id(),
+      key,
+      wait_for_drain,
+      timeout_ms,
+      req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return to_grpc_status(drain_or.status());
   }
-
-  if (wait_for_drain) {
-    const bool drained = lip_manager_->wait_exports_drained(key, deadline);
-    if (!drained) {
-      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
-    }
-  }
+  const auto& drain = *drain_or;
 
   absl::Status revoke_status = lip_manager_->revoke_by_registration_id(lease->registration_id);
   if (!revoke_status.ok()) {
     return to_grpc_status(revoke_status);
   }
-  resp->set_drained(true);
+  resp->set_drained(drain.drained);
   resp->set_removed(true);
   rctx.mark_success();
   return Status::OK;

@@ -240,20 +240,20 @@ TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][mate
   auto* storage = layout->add_storages();
   storage->set_storage_id("storage-0");
   storage->set_device_id(0);
-  storage->set_storage_length(8);
+  storage->set_storage_length(12);
   storage->set_vram_region_id("region-0");
   storage->set_mapping_base_offset(0);
 
   auto* offset_b = layout->add_offsets();
   offset_b->set_name("b");
   offset_b->set_storage_id("storage-0");
-  offset_b->set_storage_offset(4);
+  offset_b->set_storage_offset(0);
   offset_b->set_logical_length(4);
 
   auto* offset_a = layout->add_offsets();
   offset_a->set_name("a");
   offset_a->set_storage_id("storage-0");
-  offset_a->set_storage_offset(0);
+  offset_a->set_storage_offset(8);
   offset_a->set_logical_length(4);
 
   MaterializeIntoTargetResponse resp;
