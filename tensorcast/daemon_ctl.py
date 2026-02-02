@@ -1875,7 +1875,7 @@ class DaemonCtl:
 
         expires_at = None
         if resp.HasField("expires_at"):
-            expires_at = resp.expires_at.ToDatetime(tz=timezone.utc)
+            expires_at = resp.expires_at.ToDatetime(tzinfo=timezone.utc)
         return VramRegionHandle(
             region_id=str(resp.region_id),
             ttl_ms=int(resp.ttl_ms),
