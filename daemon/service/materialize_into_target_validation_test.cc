@@ -141,6 +141,7 @@ struct ValidationFixture {
                 .refs = refs,
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
+                .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,
@@ -233,7 +234,7 @@ TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][mate
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
-  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
   layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
 
   auto* storage = layout->add_storages();

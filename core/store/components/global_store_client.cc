@@ -1344,6 +1344,100 @@ absl::Status GlobalStoreClient::unregister_replica_by_worker(
   return absl::OkStatus();
 }
 
+absl::StatusOr<bool> GlobalStoreClient::mark_replica_unavailable(
+    std::string_view artifact_id,
+    std::string_view replica_id,
+    std::optional<std::string_view> reason,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+  global_store::MarkReplicaUnavailableRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_replica_id(std::string(replica_id));
+  if (reason.has_value()) {
+    request.set_reason(std::string(*reason));
+  }
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::MarkReplicaUnavailableResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->MarkReplicaUnavailable(ctx, req, resp); },
+      "MarkReplicaUnavailable");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "MarkReplicaUnavailable failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  return response.updated();
+}
+
+absl::StatusOr<ReplicaDrainStatus> GlobalStoreClient::wait_replica_drain(
+    std::string_view replica_id,
+    uint32_t timeout_ms,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+
+  global_store::WaitReplicaDrainRequest request;
+  request.set_replica_id(std::string(replica_id));
+  request.set_timeout_ms(timeout_ms);
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::WaitReplicaDrainResponse response;
+  RpcOptions rpc_opts;
+  if (timeout_ms > 0) {
+    rpc_opts.timeout = absl::Milliseconds(timeout_ms) + absl::Seconds(1);
+  }
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WaitReplicaDrain(ctx, req, resp); },
+      "WaitReplicaDrain",
+      rpc_opts);
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_TIMED_OUT) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "WaitReplicaDrain failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  ReplicaDrainStatus out;
+  out.drained = response.drained();
+  out.current_requests = response.current_requests();
+  if (response.has_oldest_transport_age_ms()) {
+    out.oldest_transport_age_ms = response.oldest_transport_age_ms();
+  }
+  return out;
+}
+
 absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     std::string_view artifact_id,
     std::string_view source_node_id,

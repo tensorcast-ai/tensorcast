@@ -94,6 +94,12 @@ struct TransportSession {
   absl::Time start_time;
 };
 
+struct ReplicaDrainStatus {
+  bool drained{false};
+  uint32_t current_requests{0};
+  std::optional<uint64_t> oldest_transport_age_ms;
+};
+
 struct ChunkLocationInfo {
   uint32_t chunk_idx;
   std::string node_id;
@@ -343,6 +349,17 @@ class IGlobalStoreClient {
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) = 0;
 
+  virtual absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
+
   virtual absl::StatusOr<TransportSession> request_replica_transport(
       std::string_view artifact_id,
       std::string_view source_node_id,
@@ -582,6 +599,17 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view worker_id,
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) override;
+
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
+
+  absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
 
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_replica_transport(

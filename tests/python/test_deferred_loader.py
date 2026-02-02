@@ -33,9 +33,18 @@ def _make_index_bytes(
     for dim in shape_value:
         numel *= int(dim)
     size_bytes = int(numel) * 4
+    elem_bytes = 4
+    beta_storage_offset = size_bytes // elem_bytes
     index = {
         "alpha": [0, size_bytes, shape_value, stride_value, "torch.float32", 0],
-        "beta": [size_bytes, size_bytes, shape_value, stride_value, "torch.float32", 0],
+        "beta": [
+            size_bytes,
+            size_bytes,
+            shape_value,
+            stride_value,
+            "torch.float32",
+            beta_storage_offset,
+        ],
     }
     return json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -176,16 +185,46 @@ def test_deferred_loader_commit_preserves_order(
         assert tensor_alpha.is_cuda
         assert tuple(tensor_beta.shape) == (4,)
         assert tuple(tensor_alpha.shape) == (4,)
-        result = loader.commit()
+        slot = loader.commit()
 
     assert len(client.materialize_calls) == 1
     call = client.materialize_calls[0]
     assert tuple(call["tensor_names"]) == ("beta", "alpha")
     layout = call["target_layout"]
     assert layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
-    assert result.tensor_names == ("beta", "alpha")
-    assert result.view_id is None
-    assert result.view_subset_hash is not None
+    commit_result = slot.commit_result
+    assert commit_result.tensor_names == ("beta", "alpha")
+    assert commit_result.view_id is None
+    assert commit_result.view_subset_hash == b""
+
+
+def test_deferred_loader_byte_space_full_selection_has_empty_selection(
+    store_and_client: tuple[Store, FakeDeferredClient],
+) -> None:
+    store, client = store_and_client
+    artifact = store.artifact(artifact_id="artifact-1")
+
+    with artifact.deferred_loader(device="cuda:0", packing="byte_space") as loader:
+        tensor_beta = loader.tensor("beta")
+        tensor_alpha = loader.tensor("alpha")
+        arena = loader._arena
+        assert arena is not None
+        assert tensor_alpha.data_ptr() == arena.data_ptr() + loader._offsets["alpha"]
+        assert tensor_beta.data_ptr() == arena.data_ptr() + loader._offsets["beta"]
+        slot = loader.commit()
+
+    assert len(client.materialize_calls) == 1
+    call = client.materialize_calls[0]
+    assert tuple(call["tensor_names"]) == ()
+    assert call["view_subset_hash"] == b""
+    layout = call["target_layout"]
+    assert (
+        layout.index_kind
+        == store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+    )
+    commit_result = slot.commit_result
+    assert commit_result.tensor_names == ()
+    assert commit_result.view_subset_hash == b""
 
 
 def test_deferred_loader_empty_stride_is_contiguous(
@@ -225,7 +264,7 @@ def test_deferred_loader_append_retry_does_not_duplicate_order(
 
         monkeypatch.setattr(loader, "_ensure_arena", original_ensure)
         loader.tensor("alpha")
-        result = loader.commit()
+        slot = loader.commit()
 
-    assert result.tensor_names == ("alpha",)
+    assert slot.commit_result.tensor_names == ("alpha",)
     assert len(client.materialize_calls) == 1

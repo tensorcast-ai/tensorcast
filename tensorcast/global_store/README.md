@@ -233,6 +233,8 @@ counts by scope and capability.
 - Atomically claims the replica (increment counter) and creates transport record
 - Supports blocking wait with timeout for high-contention scenarios
 - Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
+- Provides swap-safety helpers: `MarkReplicaUnavailable` flips `is_available=false` for a replica, and `WaitReplicaDrain`
+  waits until `current_requests==0` without mutating transport state
 - Cleans up stale transports as safety net for crashed clients
 
 **Load balancing strategy:**

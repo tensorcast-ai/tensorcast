@@ -322,6 +322,20 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "target_write_registry_lib",
+    srcs = ["state/target_write_registry.cc"],
+    hdrs = ["state/target_write_registry.h"],
+    deps = [
+        ":types_hdr",
+        "//proto/tensorcast/common/v1:common_cc",
+        "@abseil-cpp//absl/base:core_headers",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
     name = "ipc_region_registry_lib",
     srcs = ["state/ipc_region_registry.cc"],
     hdrs = ["state/ipc_region_registry.h"],
@@ -456,6 +470,7 @@ sc_header_only_library(
     hdrs = ["state/types.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":ipc_region_registry_lib",
         "//core/common:artifact_identity_lib",
         "//core/cuda:cuda_ipc_lib",
     ],
@@ -711,7 +726,9 @@ sc_cc_library(
         ":sessions_service_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
+        ":target_write_registry_lib",
         ":worker_identity_store_lib",
+        "//core/common:capability_token_lib",
         "//core/common:selection_identity_lib",
         "//core/cuda:cuda_api_lib",
         "//core/cuda:cuda_ipc_lib",
@@ -1057,6 +1074,35 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/store:testing_global_store_client_stub",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_publish_target_replica_test",
+    srcs = ["service/grpc_service_impl_publish_target_replica_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/common:capability_token_lib",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_retire_published_replica_test",
+    srcs = ["service/grpc_service_impl_retire_published_replica_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_recording_global_store_client",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
     ],

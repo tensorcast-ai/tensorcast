@@ -91,6 +91,7 @@ struct LipLeaseEntry {
 // Temporary export record for LIP-based staged transport
 struct LipExportRecord {
   std::string artifact_id;
+  std::string view_id;
   int device_id{0};
   std::vector<cuda::IpcMapping> opened_maps; // RAII CUDA IPC mappings held until unlock
   std::vector<std::string> tensor_keys; // registered keys to unregister

@@ -106,6 +106,7 @@ struct ResolveFixture {
                 .refs = refs,
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
+                .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
                 .shutdown_signal = shutdown_signal,

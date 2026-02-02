@@ -22,8 +22,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
+#include "absl/strings/string_view.h"
+#include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "google/protobuf/io/coded_stream.h"
 #include "google/protobuf/io/zero_copy_stream_impl_lite.h"
@@ -37,6 +40,7 @@
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
@@ -60,12 +64,74 @@ namespace {
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
 
+constexpr absl::Duration kTargetWriteTokenTtl = absl::Minutes(5);
+
 absl::StatusOr<bool> check_post_seal_view_reuse_safe(
     store::components::IGlobalStoreClient& client,
     std::string_view assembly_id,
     std::string_view mi2_id);
 using store::loading::MaterializationSource;
 using store::loading::SourcePreference;
+
+std::string mint_write_id(absl::BitGen& bitgen) {
+  std::string raw;
+  raw.resize(16);
+  for (size_t i = 0; i < raw.size(); ++i) {
+    raw[i] = static_cast<char>(absl::Uniform<uint32_t>(bitgen, 0u, 256u));
+  }
+  return absl::BytesToHexString(raw);
+}
+
+std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
+  std::string buffer;
+  buffer.reserve(512);
+  absl::StrAppend(
+      &buffer,
+      "lk:",
+      static_cast<int>(layout.layout_kind()),
+      "|ik:",
+      static_cast<int>(layout.index_kind()),
+      "|tk:",
+      static_cast<int>(layout.tensor_spec_kind()),
+      "|vid:",
+      layout.view_id(),
+      "|");
+  buffer.append(layout.logical_layout_hash().data(), layout.logical_layout_hash().size());
+  for (const auto& storage : layout.storages()) {
+    absl::StrAppend(
+        &buffer,
+        "|s:",
+        storage.storage_id(),
+        ":",
+        storage.device_id(),
+        ":",
+        storage.storage_length(),
+        ":",
+        storage.mapping_base_offset(),
+        ":");
+    if (storage.storage_source_case() == v2::StorageEntry::kVramRegionId) {
+      absl::StrAppend(&buffer, "r:", storage.vram_region_id());
+    } else if (storage.storage_source_case() == v2::StorageEntry::kCudaIpcHandle) {
+      buffer.append("h:");
+      buffer.append(storage.cuda_ipc_handle().data(), storage.cuda_ipc_handle().size());
+    }
+  }
+  for (const auto& entry : layout.offsets()) {
+    absl::StrAppend(
+        &buffer,
+        "|o:",
+        entry.name(),
+        ":",
+        entry.storage_id(),
+        ":",
+        entry.storage_offset(),
+        ":",
+        entry.logical_length());
+  }
+  const std::vector<uint8_t> digest = common::sha256_digest_bytes(
+      absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()));
+  return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
+}
 
 void record_disk_path_denied() {
   try {
@@ -997,7 +1063,10 @@ absl::Status populate_materialize_payloads(
 
 } // namespace
 
-MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
+MaterializationController::MaterializationController(Dep d)
+    : d_(std::move(d)),
+      capability_tokens_(d_.capability_tokens),
+      target_write_registry_(TargetWriteRegistry::Options{.ttl = kTargetWriteTokenTtl}) {
   if (!d_.storage_path.empty()) {
     std::error_code ec;
     storage_path_ = std::filesystem::weakly_canonical(d_.storage_path, ec);
@@ -1006,6 +1075,11 @@ MaterializationController::MaterializationController(Dep d) : d_(std::move(d)) {
       storage_path_ = d_.storage_path.lexically_normal();
     }
   }
+}
+
+TargetWriteRegistry::Record MaterializationController::insert_target_write_for_testing(
+    TargetWriteRegistry::Record record) {
+  return target_write_registry_.insert(std::move(record));
 }
 
 grpc::Status MaterializationController::materialize_replica(
@@ -1979,21 +2053,28 @@ grpc::Status MaterializationController::materialize_into_target(
     }
     layout_names.push_back(entry.name);
   }
-  std::sort(layout_names.begin(), layout_names.end());
 
+  std::vector<std::string> request_names;
+  absl::flat_hash_set<std::string> request_name_set;
   if (req.tensor_names_size() > 0) {
-    absl::flat_hash_set<std::string> request_names;
     request_names.reserve(req.tensor_names_size());
+    request_name_set.reserve(req.tensor_names_size());
     for (const auto& name : req.tensor_names()) {
-      request_names.insert(name);
+      request_names.push_back(name);
+      request_name_set.insert(name);
     }
-    if (request_names.size() != layout_name_set.size()) {
+    if (request_name_set.size() != static_cast<size_t>(req.tensor_names_size())) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "tensor_names must not contain duplicates"};
+    }
+    if (request_name_set.size() != layout_name_set.size()) {
       record_materialize_into_target(
           "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
       return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
     }
     for (const auto& name : layout_name_set) {
-      if (!request_names.contains(name)) {
+      if (!request_name_set.contains(name)) {
         record_materialize_into_target(
             "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
         return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
@@ -2031,6 +2112,7 @@ grpc::Status MaterializationController::materialize_into_target(
       }
     }
   }
+  const bool has_ordered_selection = !request_names.empty();
 
   std::optional<ViewSpec> view_spec;
   std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
@@ -2078,10 +2160,13 @@ grpc::Status MaterializationController::materialize_into_target(
   }
 
   std::optional<store::loader::ViewPlan> view_plan;
-  if (view_spec.has_value() || has_subset || layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+  if (view_spec.has_value() || has_subset || layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW ||
+      has_ordered_selection) {
     ViewSpec plan_spec = view_spec.value_or(ViewSpec{});
     std::vector<std::string> subset_names;
-    if (has_subset) {
+    if (has_ordered_selection) {
+      subset_names = request_names;
+    } else if (has_subset) {
       subset_names = layout_names;
     }
     auto plan_or = store::StoreEngine::compute_view_plan(*canonical_json_or, plan_spec, subset_names);
@@ -2102,16 +2187,16 @@ grpc::Status MaterializationController::materialize_into_target(
   }
 
   if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
-    if (has_view_transform || has_subset) {
+    if (has_view_transform || has_subset || has_ordered_selection) {
       record_materialize_into_target(
           "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset"};
+      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset selection"};
     }
   } else {
-    if (!has_view_transform && !has_subset) {
+    if (!has_view_transform && !has_subset && !has_ordered_selection) {
       record_materialize_into_target(
           "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or subset selection"};
+      return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or selection order"};
     }
   }
 
@@ -2247,6 +2332,11 @@ grpc::Status MaterializationController::materialize_into_target(
     uint64_t length{0};
   };
 
+  std::vector<RegisterStorageMeta> publish_storages;
+  std::vector<LeaseSegMeta> publish_segments;
+  publish_storages.reserve(layout.storages_size());
+  publish_segments.reserve(layout.storages_size());
+
   absl::flat_hash_map<std::string, StorageRange> storage_ranges;
   storage_ranges.reserve(layout.storages_size());
   uint64_t range_cursor = 0;
@@ -2271,6 +2361,25 @@ grpc::Status MaterializationController::materialize_into_target(
     range.base_offset = range_cursor;
     range.length = storage.storage_length();
     storage_ranges.emplace(range.storage_id, range);
+    RegisterStorageMeta meta;
+    meta.storage_id = storage.storage_id();
+    meta.device_id = storage.device_id();
+    meta.storage_length = storage.storage_length();
+    if (!storage.vram_region_id().empty()) {
+      meta.region_id = storage.vram_region_id();
+    }
+    if (!storage.cuda_ipc_handle().empty()) {
+      meta.handle_bytes = storage.cuda_ipc_handle();
+    }
+    meta.mapping_base_offset = storage.mapping_base_offset();
+    publish_storages.push_back(std::move(meta));
+
+    LeaseSegMeta seg;
+    seg.storage_id = storage.storage_id();
+    seg.storage_offset = 0;
+    seg.artifact_offset = range_cursor;
+    seg.length = storage.storage_length();
+    publish_segments.push_back(std::move(seg));
     if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
       record_materialize_into_target(
           "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -2329,11 +2438,19 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  const std::string view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(layout_names));
-  if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
+  std::string view_subset_hash;
+  if (has_subset) {
+    const auto& subset_names = has_ordered_selection ? request_names : layout_names;
+    view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(subset_names));
+    if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
+      record_materialize_into_target(
+          "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
+    }
+  } else if (!req.view_subset_hash().empty()) {
     record_materialize_into_target(
         "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
+    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash must be empty for full selection"};
   }
 
   std::optional<std::string> expected_data_hash;
@@ -2548,7 +2665,332 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
   resp.set_generation(generation);
+  if (capability_tokens_ != nullptr && capability_tokens_->configured()) {
+    const std::string view_id_value = resolved_view_id.value_or("");
+    const bool needs_view_index = layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW;
+    const std::string logical_layout_hash = common::compute_logical_layout_hash_bytes(
+        absl::Span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(selected_index_json.data()), selected_index_json.size()),
+        needs_view_index);
+    std::optional<std::string_view> subset_hash_opt;
+    if (!view_subset_hash.empty()) {
+      subset_hash_opt = view_subset_hash;
+    }
+    const std::string selection_hash = common::compute_selection_hash_bytes(view_id_value, subset_hash_opt);
+
+    tensorcast::common::v1::ArtifactSelection selection;
+    selection.set_artifact_id(resolved_artifact_id);
+    selection.set_view_id(view_id_value);
+    selection.set_logical_layout_hash(logical_layout_hash);
+    selection.set_selection_hash(selection_hash);
+    if (!view_subset_hash.empty()) {
+      selection.set_view_subset_hash(view_subset_hash);
+    }
+    for (const auto& name : req.tensor_names()) {
+      selection.add_tensor_names(name);
+    }
+    if (view_spec_proto.has_value()) {
+      selection.mutable_view_spec()->CopyFrom(*view_spec_proto);
+    }
+
+    tensorcast::common::v1::ByteSpaceRef byte_space;
+    if (!view_id_value.empty()) {
+      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+      byte_space.set_id(view_id_value);
+    } else {
+      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+      byte_space.set_id("");
+    }
+
+    const std::string layout_hash = compute_target_layout_hash(layout);
+    const std::string write_id = mint_write_id(bitgen_);
+    const absl::Time expires_at = absl::Now() + kTargetWriteTokenTtl;
+
+    auto stable_index_or = store::loader::rebuild_stable_canonical_index(*canonical_json_or, device.ordinal);
+    if (!stable_index_or.ok()) {
+      VLOG(1) << "MaterializeIntoTarget: failed to rebuild canonical index for target write token: "
+              << stable_index_or.status();
+    } else {
+      std::string stable_index_json = std::move(*stable_index_or);
+      const auto digest = common::sha256_digest_bytes(
+          absl::Span<const uint8_t>(
+              reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
+      std::string index_key_hex =
+          absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+
+      tensorcast::common::v1::TargetWriteScope scope;
+      scope.set_write_id(write_id);
+      scope.mutable_selection()->CopyFrom(selection);
+      scope.mutable_byte_space()->CopyFrom(byte_space);
+      scope.set_device_uuid(req.device_uuid());
+      scope.set_owner_pid(req.pid());
+      scope.set_target_layout_hash(layout_hash);
+
+      auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+      if (scope_or.ok()) {
+        const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
+        auto token_or = capability_tokens_->mint(
+            d_.identity.daemon_id(),
+            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+            *scope_or,
+            expires_at_ms);
+        if (token_or.ok()) {
+          TargetWriteRegistry::Record record;
+          record.write_id = write_id;
+          record.layout_key = layout_hash;
+          record.target_layout_hash = layout_hash;
+          record.selection = selection;
+          record.byte_space = byte_space;
+          record.canonical_index_json = std::move(stable_index_json);
+          record.index_key_hex = std::move(index_key_hex);
+          record.device_uuid = req.device_uuid();
+          record.owner_pid = req.pid();
+          if (req.has_operation_id()) {
+            record.operation_id = req.operation_id();
+          }
+          record.expires_at = expires_at;
+          record.segments = std::move(publish_segments);
+          record.storages = std::move(publish_storages);
+          auto inserted = target_write_registry_.insert(std::move(record));
+          (void)inserted;
+          resp.set_target_write_token(*token_or);
+        } else {
+          VLOG(1) << "MaterializeIntoTarget: failed to mint target_write_token: " << token_or.status();
+        }
+      } else {
+        VLOG(1) << "MaterializeIntoTarget: failed to serialize target_write scope: " << scope_or.status();
+      }
+    }
+  }
   record_materialize_into_target("ok", "ok", resp.source());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status MaterializationController::publish_target_replica(
+    RpcContext& rctx,
+    const v2::PublishTargetReplicaRequest& req,
+    v2::PublishTargetReplicaResponse& resp) {
+  auto& span = rctx.span();
+  if (rctx.allow_high_card_attrs() && req.has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req.operation_id());
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req.target_write_token().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_write_token is required"};
+  }
+  if (capability_tokens_ == nullptr || !capability_tokens_->configured()) {
+    return {StatusCode::FAILED_PRECONDITION, "capability tokens not configured"};
+  }
+  if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
+    return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
+  }
+
+  auto normalize_space =
+      [](const tensorcast::common::v1::ByteSpaceRef& space) -> absl::StatusOr<tensorcast::common::v1::ByteSpaceRef> {
+    tensorcast::common::v1::ByteSpaceRef out;
+    switch (space.kind()) {
+      case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
+      case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
+        out.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+        out.set_id("");
+        return out;
+      case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
+        if (space.id().empty()) {
+          return absl::InvalidArgumentError("byte_space VIEW requires id");
+        }
+        out.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+        out.set_id(space.id());
+        return out;
+      default:
+        return absl::InvalidArgumentError("unsupported byte_space kind");
+    }
+  };
+
+  auto normalized_req_or = normalize_space(req.byte_space());
+  if (!normalized_req_or.ok()) {
+    return to_grpc_status(normalized_req_or.status());
+  }
+  tensorcast::common::v1::ByteSpaceRef normalized_req = std::move(*normalized_req_or);
+
+  auto env_or = capability_tokens_->verify(
+      req.target_write_token(),
+      tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+      d_.identity.daemon_id(),
+      absl::Now(),
+      /*require_not_expired=*/true);
+  if (!env_or.ok()) {
+    return to_grpc_status(env_or.status());
+  }
+
+  tensorcast::common::v1::TargetWriteScope scope;
+  if (!scope.ParseFromString(env_or->scope())) {
+    return {StatusCode::INVALID_ARGUMENT, "target_write_token scope parse failed"};
+  }
+  if (req.has_owner_pid() && scope.owner_pid() != req.owner_pid()) {
+    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for target_write_token"};
+  }
+
+  auto normalized_scope_or = normalize_space(scope.byte_space());
+  if (!normalized_scope_or.ok()) {
+    return to_grpc_status(normalized_scope_or.status());
+  }
+  tensorcast::common::v1::ByteSpaceRef normalized_scope = std::move(*normalized_scope_or);
+  if (normalized_scope.kind() != normalized_req.kind() || normalized_scope.id() != normalized_req.id()) {
+    return {StatusCode::INVALID_ARGUMENT, "byte_space does not match target_write_token"};
+  }
+
+  if (scope.write_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "target_write_token missing write_id"};
+  }
+
+  auto record_opt = target_write_registry_.lookup(scope.write_id(), absl::Now(), /*require_not_expired=*/true);
+  if (!record_opt.has_value()) {
+    return {StatusCode::NOT_FOUND, "target_write_token is no longer valid"};
+  }
+  auto record = std::move(*record_opt);
+  if (!target_write_registry_.is_current_for_layout(record.layout_key, scope.write_id())) {
+    return {StatusCode::FAILED_PRECONDITION, "target_write_token is stale for layout"};
+  }
+  if (record.device_uuid != scope.device_uuid()) {
+    return {StatusCode::FAILED_PRECONDITION, "device_uuid mismatch for target_write_token"};
+  }
+  if (record.owner_pid != scope.owner_pid()) {
+    return {StatusCode::FAILED_PRECONDITION, "owner_pid mismatch for target_write_token"};
+  }
+  if (record.target_layout_hash != scope.target_layout_hash()) {
+    return {StatusCode::FAILED_PRECONDITION, "target_layout_hash mismatch for target_write_token"};
+  }
+  if (record.byte_space.kind() != normalized_scope.kind() || record.byte_space.id() != normalized_scope.id()) {
+    return {StatusCode::FAILED_PRECONDITION, "byte_space mismatch for target_write_token"};
+  }
+  if (record.selection.artifact_id() != scope.selection().artifact_id() ||
+      record.selection.view_id() != scope.selection().view_id() ||
+      record.selection.logical_layout_hash() != scope.selection().logical_layout_hash() ||
+      record.selection.selection_hash() != scope.selection().selection_hash() ||
+      record.selection.view_subset_hash() != scope.selection().view_subset_hash() ||
+      record.selection.tensor_names_size() != scope.selection().tensor_names_size()) {
+    return {StatusCode::FAILED_PRECONDITION, "selection mismatch for target_write_token"};
+  }
+  for (int i = 0; i < record.selection.tensor_names_size(); ++i) {
+    if (record.selection.tensor_names(i) != scope.selection().tensor_names(i)) {
+      return {StatusCode::FAILED_PRECONDITION, "selection tensor_names mismatch for target_write_token"};
+    }
+  }
+
+  if (!scope.selection().tensor_names().empty() || !scope.selection().view_subset_hash().empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "selection is not publishable (packed or subset)"};
+  }
+  if (scope.selection().artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id missing from target_write_token"};
+  }
+
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, scope.device_uuid(), std::nullopt);
+  if (device.type != DeviceType::GPU || device.ordinal < 0) {
+    return {StatusCode::INVALID_ARGUMENT, "invalid device_uuid for target_write_token"};
+  }
+
+  const std::string view_id =
+      normalized_scope.kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW ? normalized_scope.id() : "";
+  ArtifactDeviceKey key{
+      .artifact_id = scope.selection().artifact_id(), .view_id = view_id, .device_id = device.ordinal};
+
+  if (auto active = d_.lip_manager.find_active_by_key(key); active.has_value()) {
+    if (active->registration_id == scope.write_id()) {
+      auto replica_id = d_.lip_manager.find_replica_id(key);
+      if (!replica_id.has_value()) {
+        return {StatusCode::FAILED_PRECONDITION, "target already published without replica_id"};
+      }
+      resp.set_lease_id(scope.write_id());
+      resp.set_replica_id(*replica_id);
+      rctx.mark_success();
+      return Status::OK;
+    }
+    return {StatusCode::ALREADY_EXISTS, "another lease already exists for target"};
+  }
+
+  uint64_t total_size = 0;
+  for (const auto& seg : record.segments) {
+    if (seg.length == 0) {
+      continue;
+    }
+    const uint64_t end = seg.artifact_offset + seg.length;
+    if (end > total_size) {
+      total_size = end;
+    }
+  }
+  if (total_size == 0) {
+    return {StatusCode::FAILED_PRECONDITION, "target_write_token has empty segments"};
+  }
+
+  struct LipRollback {
+    LipManager* lip{nullptr};
+    std::string registration_id;
+    bool active{true};
+
+    ~LipRollback() {
+      if (!active || lip == nullptr) {
+        return;
+      }
+      absl::Status st = lip->revoke_by_registration_id(registration_id);
+      if (!st.ok()) {
+        LOG(WARNING) << "PublishTargetReplica rollback: revoke failed for id=" << registration_id << ": " << st;
+      }
+    }
+
+    void release() {
+      active = false;
+    }
+  } lip_rollback{.lip = &d_.lip_manager, .registration_id = scope.write_id()};
+
+  const uint32_t ttl_ms = req.has_ttl_ms() ? req.ttl_ms() : 0U;
+  const uint64_t epoch = static_cast<uint64_t>(absl::ToUnixMillis(absl::Now()));
+  auto lease_or = d_.lip_manager.commit_routable_view_lease_in_place(
+      scope.write_id(),
+      scope.selection().artifact_id(),
+      view_id,
+      device.ordinal,
+      scope.owner_pid(),
+      ttl_ms,
+      epoch,
+      total_size,
+      std::move(record.segments),
+      std::move(record.storages));
+  if (!lease_or.ok()) {
+    lip_rollback.release();
+    return to_grpc_status(lease_or.status());
+  }
+
+  std::string worker_id = d_.identity.worker_id();
+  if (worker_id.empty()) {
+    worker_id = "local";
+  }
+
+  auto replica_id_or = d_.global_store_client->register_memory_replica(
+      scope.selection().artifact_id(),
+      worker_id,
+      device,
+      total_size,
+      record.index_key_hex,
+      lease_or->remote_memory_keys,
+      lease_or->buffer_sizes,
+      record.canonical_index_json,
+      /*encoding=*/"json",
+      /*schema_version=*/"v3",
+      /*max_concurrency=*/1,
+      /*verification_json=*/std::nullopt,
+      view_id.empty() ? std::nullopt : std::optional<std::string_view>(view_id));
+  if (!replica_id_or.ok()) {
+    return to_grpc_status(replica_id_or.status());
+  }
+  const std::string replica_id = *replica_id_or;
+  d_.lip_manager.attach_replica_id(scope.write_id(), replica_id);
+
+  lip_rollback.release();
+  resp.set_lease_id(scope.write_id());
+  resp.set_replica_id(replica_id);
   rctx.mark_success();
   return Status::OK;
 }

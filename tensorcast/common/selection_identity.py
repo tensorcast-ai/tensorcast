@@ -16,6 +16,8 @@ def compute_logical_layout_hash(*, index_bytes: bytes, needs_view_index: bool) -
 
 def compute_view_subset_hash(tensor_names: Sequence[str]) -> bytes:
     names = sorted({str(name) for name in tensor_names})
+    if not names:
+        return b""
     payload = json.dumps(names, separators=(",", ":"), ensure_ascii=True).encode(
         "utf-8"
     )
@@ -23,6 +25,8 @@ def compute_view_subset_hash(tensor_names: Sequence[str]) -> bytes:
 
 
 def compute_selection_hash(*, view_id: str, view_subset_hash: bytes | None) -> bytes:
+    if view_subset_hash == b"":
+        view_subset_hash = None
     digest = hashlib.sha256()
     digest.update(view_id.encode("utf-8"))
     if view_subset_hash is not None:

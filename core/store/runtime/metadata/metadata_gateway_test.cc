@@ -269,6 +269,24 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>) override {
+    return true;
+  }
+
+  absl::StatusOr<tensorcast::store::components::ReplicaDrainStatus> wait_replica_drain(
+      std::string_view,
+      uint32_t,
+      std::optional<std::string_view>) override {
+    tensorcast::store::components::ReplicaDrainStatus out;
+    out.drained = true;
+    out.current_requests = 0;
+    return out;
+  }
+
   absl::Status update_artifact_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
     return absl::OkStatus();
   }

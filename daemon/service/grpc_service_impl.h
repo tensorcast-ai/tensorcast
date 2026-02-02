@@ -3,6 +3,7 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <vector>
 
 #include "core/common/capability_token.h"
@@ -40,6 +41,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     StatusController& status_controller;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     PersistenceManager* persistence_manager{nullptr};
     SessionsService& sessions_service;
     SessionLifecycleManager& lifecycle_manager;
@@ -103,6 +105,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::DeregisterArtifactRequest* req,
       v2::DeregisterArtifactResponse* resp) override;
+
+  grpc::Status PublishTargetReplica(
+      grpc::ServerContext* ctx,
+      const v2::PublishTargetReplicaRequest* req,
+      v2::PublishTargetReplicaResponse* resp) override;
+
+  grpc::Status RetirePublishedReplica(
+      grpc::ServerContext* ctx,
+      const v2::RetirePublishedReplicaRequest* req,
+      v2::RetirePublishedReplicaResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
@@ -265,6 +277,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   StatusController* status_controller_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   PersistenceManager* persistence_manager_;
   SessionsService* sessions_service_;
   SessionLifecycleManager* lifecycle_manager_;

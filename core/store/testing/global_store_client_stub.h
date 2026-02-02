@@ -105,6 +105,21 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("unregister_replica_by_worker not supported in GlobalStoreClientStub");
   }
 
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>) override {
+    return absl::UnimplementedError("mark_replica_unavailable not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<components::ReplicaDrainStatus> wait_replica_drain(
+      std::string_view,
+      uint32_t,
+      std::optional<std::string_view>) override {
+    return absl::UnimplementedError("wait_replica_drain not supported in GlobalStoreClientStub");
+  }
+
   absl::StatusOr<components::TransportSession> request_replica_transport(
       std::string_view,
       std::string_view,

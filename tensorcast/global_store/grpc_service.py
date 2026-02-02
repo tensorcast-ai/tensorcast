@@ -2594,6 +2594,116 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 
+    def MarkReplicaUnavailable(
+        self,
+        request: global_store_pb2.MarkReplicaUnavailableRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.MarkReplicaUnavailableResponse:
+        try:
+            if not request.replica_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("replica_id is required")
+                return global_store_pb2.MarkReplicaUnavailableResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR, updated=False
+                )
+            replica_id = UUID(request.replica_id)
+            replica = self.replica_repository.find_by_replica_id(replica_id)
+            if replica is None or (
+                request.artifact_id and replica.artifact_id != request.artifact_id
+            ):
+                return global_store_pb2.MarkReplicaUnavailableResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND, updated=False
+                )
+
+            set_span_attributes(
+                {
+                    "tc.artifact.id": replica.artifact_id,
+                    "tc.replica.id": str(replica_id),
+                }
+            )
+
+            updated = self.replica_repository.mark_unavailable(replica_id)
+            return global_store_pb2.MarkReplicaUnavailableResponse(
+                status=global_store_pb2.Status.STATUS_OK, updated=updated
+            )
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.MarkReplicaUnavailableResponse(
+                status=global_store_pb2.Status.STATUS_ERROR, updated=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error marking replica unavailable")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.MarkReplicaUnavailableResponse(
+                status=global_store_pb2.Status.STATUS_ERROR, updated=False
+            )
+
+    def WaitReplicaDrain(
+        self,
+        request: global_store_pb2.WaitReplicaDrainRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.WaitReplicaDrainResponse:
+        if not request.replica_id:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details("replica_id is required")
+            return global_store_pb2.WaitReplicaDrainResponse(
+                status=global_store_pb2.Status.STATUS_ERROR,
+                drained=False,
+                current_requests=0,
+            )
+        try:
+            replica_id = UUID(request.replica_id)
+        except ValueError as exc:
+            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+            context.set_details(str(exc))
+            return global_store_pb2.WaitReplicaDrainResponse(
+                status=global_store_pb2.Status.STATUS_ERROR,
+                drained=False,
+                current_requests=0,
+            )
+
+        timeout_ms = int(request.timeout_ms or 0)
+        deadline = time.time() + (timeout_ms / 1000.0) if timeout_ms > 0 else None
+        interval = (
+            self.transport_service.config.transport_wait_retry_interval_ms / 1000.0
+        )
+
+        current = self.replica_repository.get_current_requests(replica_id)
+        if current is None:
+            return global_store_pb2.WaitReplicaDrainResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND,
+                drained=False,
+                current_requests=0,
+            )
+
+        drained = current == 0
+        while not drained and deadline is not None and time.time() < deadline:
+            time.sleep(interval)
+            current = self.replica_repository.get_current_requests(replica_id)
+            if current is None:
+                return global_store_pb2.WaitReplicaDrainResponse(
+                    status=global_store_pb2.Status.STATUS_NOT_FOUND,
+                    drained=False,
+                    current_requests=0,
+                )
+            drained = current == 0
+
+        oldest_age_ms = self.transport_repository.get_oldest_in_progress_age_ms(
+            replica_id
+        )
+        response = global_store_pb2.WaitReplicaDrainResponse(
+            status=global_store_pb2.Status.STATUS_OK
+            if drained
+            else global_store_pb2.Status.STATUS_TIMED_OUT,
+            drained=drained,
+            current_requests=int(current or 0),
+        )
+        if oldest_age_ms is not None:
+            response.oldest_transport_age_ms = int(oldest_age_ms)
+        return response
+
     # Legacy ListReplicas removed in favor of ListReplicasV2
 
     def ListReplicasV2(

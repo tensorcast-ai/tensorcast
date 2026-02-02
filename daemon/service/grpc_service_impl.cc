@@ -211,6 +211,7 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       status_controller_(&deps.status_controller),
       region_registry_(&deps.region_registry),
       lip_manager_(&deps.lip_manager),
+      global_store_client_(std::move(deps.global_store_client)),
       persistence_manager_(deps.persistence_manager),
       sessions_service_(&deps.sessions_service),
       lifecycle_manager_(&deps.lifecycle_manager),
@@ -1001,8 +1002,12 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
     const v2::DeregisterArtifactRequest* req,
     v2::DeregisterArtifactResponse* resp) {
   RpcContext rctx{"DeregisterArtifact", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
   if (!req->artifact_id().empty()) {
-    rctx.span()->SetAttribute("tc.artifact.id", req->artifact_id());
+    span->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (rctx.allow_high_card_attrs() && req->has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req->operation_id());
   }
   if (shutdown_signal_->is_shutting_down()) {
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
@@ -1011,54 +1016,264 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
   const std::string artifact_id = req->artifact_id();
-  auto lip_opt = lip_manager_->find_active_by_artifact_id(artifact_id);
-  if (!lip_opt.has_value()) {
-    return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+
+  std::optional<std::string> view_id;
+  if (req->has_byte_space()) {
+    const auto& space = req->byte_space();
+    switch (space.kind()) {
+      case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
+      case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
+        break;
+      case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
+        if (space.id().empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "byte_space VIEW requires id"};
+        }
+        view_id = space.id();
+        break;
+      default:
+        return {StatusCode::INVALID_ARGUMENT, "unsupported byte_space kind"};
+    }
   }
-  const auto& lip = *lip_opt;
-  if (req->has_owner_pid() && lip.owner_pid != req->owner_pid()) {
+
+  std::optional<LipLeaseEntry> lease;
+  ArtifactDeviceKey key;
+  if (req->has_device_id()) {
+    key = ArtifactDeviceKey{.artifact_id = artifact_id, .view_id = view_id.value_or(""), .device_id = req->device_id()};
+    lease = lip_manager_->find_active_by_key(key);
+    if (!lease.has_value()) {
+      return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+    }
+  } else {
+    auto leases = lip_manager_->list_active_by_artifact_id(artifact_id, view_id);
+    if (leases.empty()) {
+      return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+    }
+    if (leases.size() > 1) {
+      return {StatusCode::INVALID_ARGUMENT, "device_id required to disambiguate replicas"};
+    }
+    lease = leases.front();
+    key = ArtifactDeviceKey{.artifact_id = artifact_id, .view_id = view_id.value_or(""), .device_id = lease->device_id};
+  }
+
+  if (req->has_owner_pid() && lease->owner_pid != req->owner_pid()) {
     return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for active lease"};
   }
-  // Optional TTL extension before quiesce
+
   if (req->has_extend_ttl_ms() && req->extend_ttl_ms() > 0) {
-    auto st = lip_manager_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms());
-    if (!st.ok())
+    auto st = lip_manager_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms(), view_id);
+    if (!st.ok()) {
       return to_grpc_status(st);
+    }
   }
-  // Quiesce new staged exports
-  lip_manager_->quiesce_artifact(artifact_id);
+
+  lip_manager_->quiesce_lease(key);
+
   bool drained = true;
-  if (req->wait_for_drain()) {
-    const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-    absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
-    drained = lip_manager_->wait_exports_drained(artifact_id, deadline);
+  const bool wait_for_drain = req->wait_for_drain();
+  const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
+  const absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
+
+  std::optional<std::string> replica_id = lip_manager_->find_replica_id(key);
+  if (replica_id.has_value() && !replica_id->empty()) {
+    if (!global_store_client_ || !global_store_client_->is_connected()) {
+      return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
+    }
+    auto mark_or = global_store_client_->mark_replica_unavailable(
+        artifact_id,
+        *replica_id,
+        /*reason=*/"retire",
+        req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+    if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
+      return to_grpc_status(mark_or.status());
+    }
+    if (wait_for_drain) {
+      auto drain_or = global_store_client_->wait_replica_drain(
+          *replica_id,
+          timeout_ms,
+          req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+      if (!drain_or.ok() && !absl::IsNotFound(drain_or.status())) {
+        return to_grpc_status(drain_or.status());
+      }
+      if (drain_or.ok() && !drain_or->drained) {
+        return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+      }
+    }
+  }
+
+  if (wait_for_drain) {
+    drained = lip_manager_->wait_exports_drained(key, deadline);
     if (!drained) {
       return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
     }
   }
-  // Remove active lease if owner matches (or no owner provided)
-  bool removed = lip_manager_->revoke_commit_lease_if_owner_matches(artifact_id, lip.device_id, lip.owner_pid);
+
+  absl::Status revoke_status = lip_manager_->revoke_by_registration_id(lease->registration_id);
+  if (!revoke_status.ok()) {
+    return to_grpc_status(revoke_status);
+  }
   resp->set_drained(drained);
-  resp->set_removed(removed);
-  if (removed) {
-    // Best-effort: synchronize removal with Global Store
-    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, lip.device_id);
+  resp->set_removed(true);
+
+  if ((!replica_id.has_value() || replica_id->empty()) && !view_id.has_value()) {
+    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, key.device_id);
     if (!gs_st.ok()) {
-      // Do not fail the RPC; attach message for observability
       resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
     }
   }
-  // Return referenced region ids for observability
+
   absl::flat_hash_set<std::string> unique_regions;
-  for (const auto& s : lip.storages) {
-    if (s.has_region())
+  for (const auto& s : lease->storages) {
+    if (s.has_region()) {
       unique_regions.insert(s.region_id);
+    }
   }
   for (const auto& rid : unique_regions) {
     resp->add_released_region_ids(rid);
   }
   rctx.mark_success();
   return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::PublishTargetReplica(
+    grpc::ServerContext* ctx,
+    const v2::PublishTargetReplicaRequest* req,
+    v2::PublishTargetReplicaResponse* resp) {
+  RpcContext rctx{"PublishTargetReplica", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->publish_target_replica(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::RetirePublishedReplica(
+    grpc::ServerContext* ctx,
+    const v2::RetirePublishedReplicaRequest* req,
+    v2::RetirePublishedReplicaResponse* resp) {
+  RpcContext rctx{"RetirePublishedReplica", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  if (!req->artifact_id().empty()) {
+    span->SetAttribute("tc.artifact.id", req->artifact_id());
+  }
+  if (rctx.allow_high_card_attrs() && req->has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req->operation_id());
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  if (req->artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  }
+
+  std::optional<std::string> view_id;
+  {
+    const auto& space = req->byte_space();
+    switch (space.kind()) {
+      case tensorcast::common::v1::BYTE_SPACE_KIND_UNSPECIFIED:
+      case tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL:
+        break;
+      case tensorcast::common::v1::BYTE_SPACE_KIND_VIEW:
+        if (space.id().empty()) {
+          return {StatusCode::INVALID_ARGUMENT, "byte_space VIEW requires id"};
+        }
+        view_id = space.id();
+        break;
+      default:
+        return {StatusCode::INVALID_ARGUMENT, "unsupported byte_space kind"};
+    }
+  }
+
+  std::optional<LipLeaseEntry> lease;
+  ArtifactDeviceKey key;
+  if (req->has_lease_id() && !req->lease_id().empty()) {
+    auto key_opt = lip_manager_->find_key_by_registration_id(req->lease_id());
+    if (!key_opt.has_value()) {
+      return {StatusCode::NOT_FOUND, "lease_id not found"};
+    }
+    key = *key_opt;
+    lease = lip_manager_->find_active_by_key(key);
+    if (!lease.has_value()) {
+      return {StatusCode::NOT_FOUND, "no active lease for lease_id"};
+    }
+    if (key.artifact_id != req->artifact_id()) {
+      return {StatusCode::INVALID_ARGUMENT, "lease_id does not match artifact_id"};
+    }
+    if (view_id.has_value() && key.view_id != *view_id) {
+      return {StatusCode::INVALID_ARGUMENT, "lease_id does not match byte_space"};
+    }
+    if (req->has_device_id() && key.device_id != req->device_id()) {
+      return {StatusCode::INVALID_ARGUMENT, "lease_id does not match device_id"};
+    }
+  } else {
+    if (req->has_device_id()) {
+      key = ArtifactDeviceKey{
+          .artifact_id = req->artifact_id(), .view_id = view_id.value_or(""), .device_id = req->device_id()};
+      lease = lip_manager_->find_active_by_key(key);
+      if (!lease.has_value()) {
+        return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+      }
+    } else {
+      auto leases = lip_manager_->list_active_by_artifact_id(req->artifact_id(), view_id);
+      if (leases.empty()) {
+        return {StatusCode::NOT_FOUND, "no active lease for artifact"};
+      }
+      if (leases.size() > 1) {
+        return {StatusCode::INVALID_ARGUMENT, "device_id required to disambiguate replicas"};
+      }
+      lease = leases.front();
+      key = ArtifactDeviceKey{
+          .artifact_id = req->artifact_id(), .view_id = view_id.value_or(""), .device_id = lease->device_id};
+    }
+  }
+
+  if (req->has_owner_pid() && lease->owner_pid != req->owner_pid()) {
+    return {StatusCode::PERMISSION_DENIED, "owner_pid mismatch for active lease"};
+  }
+
+  lip_manager_->quiesce_lease(key);
+
+  const bool wait_for_drain = req->wait_for_drain();
+  const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
+  const absl::Time deadline = absl::Now() + absl::Milliseconds(timeout_ms);
+
+  std::optional<std::string> replica_id = lip_manager_->find_replica_id(key);
+  if (replica_id.has_value() && !replica_id->empty()) {
+    if (!global_store_client_ || !global_store_client_->is_connected()) {
+      return {StatusCode::FAILED_PRECONDITION, "Global Store client unavailable"};
+    }
+    auto mark_or = global_store_client_->mark_replica_unavailable(
+        req->artifact_id(),
+        *replica_id,
+        /*reason=*/"retire",
+        req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+    if (!mark_or.ok() && !absl::IsNotFound(mark_or.status())) {
+      return to_grpc_status(mark_or.status());
+    }
+    if (wait_for_drain) {
+      auto drain_or = global_store_client_->wait_replica_drain(
+          *replica_id,
+          timeout_ms,
+          req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
+      if (!drain_or.ok() && !absl::IsNotFound(drain_or.status())) {
+        return to_grpc_status(drain_or.status());
+      }
+      if (drain_or.ok() && !drain_or->drained) {
+        return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+      }
+    }
+  }
+
+  if (wait_for_drain) {
+    const bool drained = lip_manager_->wait_exports_drained(key, deadline);
+    if (!drained) {
+      return {StatusCode::DEADLINE_EXCEEDED, "drain timed out; artifact remains quiesced"};
+    }
+  }
+
+  absl::Status revoke_status = lip_manager_->revoke_by_registration_id(lease->registration_id);
+  if (!revoke_status.ok()) {
+    return to_grpc_status(revoke_status);
+  }
+  resp->set_drained(true);
+  resp->set_removed(true);
+  rctx.mark_success();
+  return Status::OK;
 }
 
 Status StoreDaemonServiceImpl::UnlockTransportChunks(

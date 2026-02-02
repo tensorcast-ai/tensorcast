@@ -108,12 +108,16 @@ region-backed data plane:
   the arena as a VRAM region, and returns CUDA tensors immediately.
 - `DeferredLoader.tensor(...)` returns placeholder views into the arena; no I/O
   occurs until `commit()`.
-- `commit()` issues a single `MaterializeIntoTarget` RPC with ordered
-  `tensor_names` so `ViewPlanner` packs the subset in that order (8B alignment),
-  and `TargetLayout` respects per-storage boundaries when streaming.
-- Optional `publish=True` registers the filled slice artifact via
-  `VRAM_LEASED` (LIP), enabling P2P reuse without creating a daemon-owned
-  replica.
+- `commit()` issues a single `MaterializeIntoTarget` RPC and returns an
+  `InplaceSlot` that keeps tensor storage pointers stable across swaps.
+- `packing="byte_space"` places tensors at their logical offsets in the selected
+  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
+  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
+  local-only.
+- `packing="append"` / `packing="plan"` build local packed layouts (ordered
+  call/plan order) and are not publishable in Phase 1. Use
+  `slot.publish_replica()` or `slot.swap(..., publish=True)` to publish a
+  routable memory replica once the slot is filled.
 
 ### Lease-In-Place Fast Path & Use Leases
 
