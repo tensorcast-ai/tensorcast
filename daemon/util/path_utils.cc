@@ -21,40 +21,6 @@ bool path_has_prefix(const std::filesystem::path& path, const std::filesystem::p
   return true;
 }
 
-absl::StatusOr<std::filesystem::path> canonicalize_path(
-    const std::filesystem::path& candidate,
-    const std::filesystem::path& normalized_root,
-    bool enforce_root) {
-  std::error_code ec;
-  auto normalized = std::filesystem::weakly_canonical(candidate, ec);
-  if (!ec) {
-    if (enforce_root && !path_has_prefix(normalized, normalized_root)) {
-      return absl::InvalidArgumentError(
-          absl::StrCat(
-              "disk_path must resolve under storage_path: ",
-              normalized.string(),
-              " (root=",
-              normalized_root.string(),
-              ")"));
-    }
-    return normalized;
-  }
-  normalized = candidate.lexically_normal();
-  if (normalized.empty()) {
-    return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
-  }
-  if (enforce_root && !path_has_prefix(normalized, normalized_root)) {
-    return absl::InvalidArgumentError(
-        absl::StrCat(
-            "disk_path must resolve under storage_path: ",
-            normalized.string(),
-            " (root=",
-            normalized_root.string(),
-            ")"));
-  }
-  return normalized;
-}
-
 } // namespace
 
 absl::StatusOr<std::filesystem::path> normalize_disk_path(
@@ -70,40 +36,29 @@ absl::StatusOr<std::filesystem::path> normalize_disk_path(
   if (has_storage_root && !is_absolute) {
     candidate = storage_root / candidate;
   }
-  std::filesystem::path normalized_root;
-  if (has_storage_root) {
-    std::error_code root_ec;
-    normalized_root = std::filesystem::weakly_canonical(storage_root, root_ec);
-    if (root_ec) {
-      normalized_root = storage_root.lexically_normal();
+  auto normalized = std::filesystem::weakly_canonical(candidate, ec);
+  if (!ec) {
+    if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat(
+              "disk_path must resolve under storage_path: ",
+              normalized.string(),
+              " (root=",
+              storage_root.string(),
+              ")"));
     }
+    return normalized;
   }
-  const bool enforce_root = has_storage_root;
-  return canonicalize_path(candidate, normalized_root, enforce_root);
-}
-
-absl::StatusOr<std::filesystem::path> normalize_disk_import_path(
-    std::string_view disk_path,
-    const std::filesystem::path& storage_root) {
-  std::filesystem::path candidate(disk_path);
-  const bool has_storage_root = !storage_root.empty();
-  const bool is_absolute = candidate.is_absolute();
-  if (!has_storage_root && !is_absolute) {
-    return absl::InvalidArgumentError("storage_path is empty; disk_path must be absolute");
+  normalized = candidate.lexically_normal();
+  if (normalized.empty()) {
+    return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
   }
-  if (has_storage_root && !is_absolute) {
-    candidate = storage_root / candidate;
+  if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));
   }
-  std::filesystem::path normalized_root;
-  if (has_storage_root) {
-    std::error_code root_ec;
-    normalized_root = std::filesystem::weakly_canonical(storage_root, root_ec);
-    if (root_ec) {
-      normalized_root = storage_root.lexically_normal();
-    }
-  }
-  const bool enforce_root = has_storage_root && !is_absolute;
-  return canonicalize_path(candidate, normalized_root, enforce_root);
+  return normalized;
 }
 
 } // namespace tensorcast::daemon
