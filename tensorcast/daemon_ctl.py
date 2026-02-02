@@ -74,6 +74,19 @@ def _raise_grpc_error(err: Exception, *, cause: BaseException | None) -> NoRetur
     raise err from None
 
 
+def _grpc_details(err: grpc.RpcError) -> str:
+    with suppress(Exception):
+        details = err.details() or ""
+        if details:
+            return str(details)
+    return ""
+
+
+def _grpc_message(err: grpc.RpcError, *, fallback: str) -> str:
+    details = _grpc_details(err)
+    return details if details else fallback
+
+
 def _inc_channel_refresh(server_address: str) -> int:
     global _METRIC_CHANNEL_REFRESHES
     with _METRICS_LOCK:
@@ -391,13 +404,17 @@ class DaemonCtl:
             except grpc.RpcError as e:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.CANCELLED:
-                    raise RuntimeError(f"Artifact not loaded {e}") from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="Artifact not loaded")
+                    ) from e
                 elif e.code() == grpc.StatusCode.UNAVAILABLE:
                     raise RuntimeError(
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 else:
-                    raise RuntimeError(f"Error: {e}") from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="MaterializeReplica RPC failed")
+                    ) from e
 
         load_status = response.status
         if (
@@ -494,12 +511,16 @@ class DaemonCtl:
             except grpc.RpcError as e:
                 span.record_exception(e)
                 if e.code() == grpc.StatusCode.CANCELLED:
-                    raise RuntimeError(f"Artifact not loaded {e}") from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="Artifact not loaded")
+                    ) from e
                 if e.code() == grpc.StatusCode.UNAVAILABLE:
                     raise RuntimeError(
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
-                raise RuntimeError(f"Error: {e}") from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="MaterializeReplica RPC failed")
+                ) from e
 
         load_status = response.status
         if (
@@ -621,7 +642,9 @@ class DaemonCtl:
                     raise RuntimeError(
                         f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
-                raise RuntimeError(f"Error: {e}") from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="MaterializeIntoTargetV2 RPC failed")
+                ) from e
         if not return_response:
             raise RuntimeError(
                 "materialize_into_target_v2 requires return_response=True"
@@ -1035,7 +1058,9 @@ class DaemonCtl:
                     raise RuntimeError(
                         f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
-                raise RuntimeError(f"Error: {e}") from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="MaterializeReplicaV2 RPC failed")
+                ) from e
 
         load_status = response.status
         if (
@@ -1227,11 +1252,10 @@ class DaemonCtl:
                         message += f" Daemon response: {detail}."
                     raise RuntimeError(message) from e
                 status_name = "UNKNOWN"
-                detail_msg = str(e)
+                detail_msg = _grpc_message(e, fallback="RPC failed")
                 with suppress(Exception):
                     if code is not None:
                         status_name = code.name
-                    detail_msg = e.details() or detail_msg
                 raise RuntimeError(
                     f"MaterializeByKeyV2 RPC failed with status={status_name}: {detail_msg}"
                 ) from e
@@ -1312,20 +1336,28 @@ class DaemonCtl:
                         cause=e,
                     )
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    _raise_grpc_error(ValueError(e.details() or str(e)), cause=e)
+                    _raise_grpc_error(
+                        ValueError(_grpc_message(e, fallback="invalid argument")),
+                        cause=e,
+                    )
                 if code == grpc.StatusCode.NOT_FOUND:
                     _raise_grpc_error(
-                        FileNotFoundError(e.details() or "artifact not found on disk"),
+                        FileNotFoundError(
+                            _grpc_message(e, fallback="artifact not found on disk")
+                        ),
                         cause=e,
                     )
                 if code == grpc.StatusCode.PERMISSION_DENIED:
                     _raise_grpc_error(
-                        PermissionError(e.details() or "disk_path not permitted"),
+                        PermissionError(
+                            _grpc_message(e, fallback="disk_path not permitted")
+                        ),
                         cause=e,
                     )
                 _raise_grpc_error(
                     RuntimeError(
-                        f"ResolveArtifactFromDiskV2 RPC failed: {e.details() or str(e)}"
+                        "ResolveArtifactFromDiskV2 RPC failed: "
+                        f"{_grpc_message(e, fallback='rpc failed')}"
                     ),
                     cause=e,
                 )
@@ -1386,11 +1418,10 @@ class DaemonCtl:
                     message += " Verify the key spelling or register the artifact before loading."
                     raise RuntimeError(message) from e
                 status_name = "UNKNOWN"
-                detail_msg = str(e)
+                detail_msg = _grpc_message(e, fallback="RPC failed")
                 with suppress(Exception):
                     if code is not None:
                         status_name = code.name
-                    detail_msg = e.details() or detail_msg
                 raise RuntimeError(
                     f"MaterializeByKey RPC failed with status={status_name}: {detail_msg}"
                 ) from e
@@ -1625,12 +1656,21 @@ class DaemonCtl:
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
-                    raise MemoryError(str(e)) from e
+                    raise MemoryError(
+                        _grpc_message(e, fallback="resource exhausted")
+                    ) from e
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise TimeoutError(str(e)) from e
-                raise RuntimeError(f"BeginRegisterArtifact failed: {e}") from e
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "BeginRegisterArtifact failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
             # Build typed handshake result
             if resp.HasField("coalesced"):
@@ -1690,12 +1730,21 @@ class DaemonCtl:
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
-                    raise KeyError(str(e)) from e
+                    raise KeyError(
+                        _grpc_message(e, fallback="registration not found")
+                    ) from e
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise TimeoutError(str(e)) from e
-                raise RuntimeError(f"CommitRegisteredArtifact failed: {e}") from e
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "CommitRegisteredArtifact failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
             existed = bool(resp.existed)
             if existed:
@@ -1773,7 +1822,9 @@ class DaemonCtl:
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
                     # Treat as already-aborted/missing
                     logger.warning(
@@ -1781,7 +1832,10 @@ class DaemonCtl:
                         registration_id,
                     )
                     return False
-                raise RuntimeError(f"AbortRegisteredArtifact failed: {e}") from e
+                raise RuntimeError(
+                    "AbortRegisteredArtifact failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
             return True
 
@@ -1897,12 +1951,21 @@ class DaemonCtl:
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.FAILED_PRECONDITION:
-                    raise RuntimeError(str(e)) from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="failed precondition")
+                    ) from e
                 if code == grpc.StatusCode.RESOURCE_EXHAUSTED:
-                    raise MemoryError(str(e)) from e
-                raise RuntimeError(f"RegisterVramRegion failed: {e}") from e
+                    raise MemoryError(
+                        _grpc_message(e, fallback="resource exhausted")
+                    ) from e
+                raise RuntimeError(
+                    "RegisterVramRegion failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
         expires_at = None
         if resp.HasField("expires_at"):
@@ -1952,8 +2015,13 @@ class DaemonCtl:
                 if code == grpc.StatusCode.NOT_FOUND:
                     return False
                 if code == grpc.StatusCode.FAILED_PRECONDITION:
-                    raise RuntimeError(str(e)) from e
-                raise RuntimeError(f"UnregisterVramRegion failed: {e}") from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="failed precondition")
+                    ) from e
+                raise RuntimeError(
+                    "UnregisterVramRegion failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
         return bool(resp.released)
 
@@ -2023,15 +2091,24 @@ class DaemonCtl:
                         drained=True,
                         removed=False,
                         released_region_ids=(),
-                        message=str(e),
+                        message=_grpc_message(e, fallback="artifact not found"),
                     )
                 if code == grpc.StatusCode.FAILED_PRECONDITION:
-                    raise RuntimeError(str(e)) from e
+                    raise RuntimeError(
+                        _grpc_message(e, fallback="failed precondition")
+                    ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise TimeoutError(str(e)) from e
-                raise RuntimeError(f"DeregisterArtifact failed: {e}") from e
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "DeregisterArtifact failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
         return DeregisterArtifactOutcome(
             drained=bool(resp.drained),
@@ -2081,7 +2158,10 @@ class DaemonCtl:
                     raise RuntimeError(
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
-                raise RuntimeError(f"PublishTargetReplica failed: {e}") from e
+                raise RuntimeError(
+                    "PublishTargetReplica failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
         return resp
 
     def retire_published_replica(
@@ -2138,8 +2218,13 @@ class DaemonCtl:
                         drained=True, removed=False
                     )
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise TimeoutError(str(e)) from e
-                raise RuntimeError(f"RetirePublishedReplica failed: {e}") from e
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    "RetirePublishedReplica failed: "
+                    f"{_grpc_message(e, fallback='rpc failed')}"
+                ) from e
         return resp
 
     def feed_register_artifact_view_chunks(
@@ -2374,12 +2459,18 @@ class DaemonCtl:
                         f"Local StoreDaemon ({self.server_address}) is not available."
                     ) from e
                 if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    raise ValueError(str(e)) from e
+                    raise ValueError(
+                        _grpc_message(e, fallback="invalid argument")
+                    ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
-                    raise KeyError(str(e)) from e
+                    raise KeyError(_grpc_message(e, fallback="not found")) from e
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise TimeoutError(str(e)) from e
-                raise RuntimeError(f"SealAssembly failed: {e}") from e
+                    raise TimeoutError(
+                        _grpc_message(e, fallback="deadline exceeded")
+                    ) from e
+                raise RuntimeError(
+                    f"SealAssembly failed: {_grpc_message(e, fallback='rpc failed')}"
+                ) from e
 
         desc = resp.descriptor
         ad = ArtifactDescriptor(
