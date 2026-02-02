@@ -9,6 +9,7 @@ from typing import Callable, Generic, TypeVar
 
 import grpc
 
+from tensorcast.error_reporting import debug_errors_enabled
 from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
 
 _T = TypeVar("_T")
@@ -166,7 +167,10 @@ class CapabilityDirectoryClient:
             )
             state.next_refresh_at = now + state.backoff_s
             if stale:
-                raise RuntimeError(stale_error) from e
+                err = RuntimeError(stale_error)
+                if debug_errors_enabled():
+                    raise err from e
+                raise err from None
 
 
 __all__ = [
