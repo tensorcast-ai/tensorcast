@@ -9,7 +9,7 @@
 
 #include "absl/container/flat_hash_map.h"
 #include "core/store/store_engine.h"
-#include "daemon/ref_tracker.h"
+#include "daemon/state/ref_tracker.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {

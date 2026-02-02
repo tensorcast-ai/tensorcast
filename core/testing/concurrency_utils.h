@@ -17,6 +17,7 @@
 #include "absl/status/status.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/cuda/cuda_api.h"
+#include "core/store/device_registry.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/store_engine.h"
 #include "core/testing/common.h"
@@ -187,7 +188,10 @@ inline std::unique_ptr<store::StoreEngine> make_test_store(
 
 // Device key helpers
 inline store::DeviceKey make_gpu_key(int ordinal, const std::string& uuid = "") {
-  return store::DeviceKey{DeviceType::GPU, ordinal, uuid};
+  if (!uuid.empty()) {
+    return store::DeviceKey{DeviceType::GPU, ordinal, uuid};
+  }
+  return store::DeviceRegistry::instance().gpu_key(ordinal);
 }
 
 inline store::loading::ReplicaKey make_replica_key(const std::string& artifact_id, int gpu_ordinal) {

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """
 Proto-based loader for the Store Daemon unified runtime configuration.
@@ -176,6 +176,41 @@ def _normalize_units_inplace(data: Any, desc) -> None:
             _normalize_units_inplace(item, desc)
 
 
+def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
+    engine = msg.engine
+
+    if engine.HasField("memory_tiers"):
+        mt = engine.memory_tiers
+        if mt.preemptible_low_watermark_ratio <= 0:
+            mt.preemptible_low_watermark_ratio = 0.4
+
+    bm = engine.byte_mapping
+    if not bm.HasField("enable_strided_execution"):
+        bm.enable_strided_execution = True
+    if not bm.HasField("enable_direct_write_at"):
+        bm.enable_direct_write_at = True
+    if bm.program_cache_entries == 0:
+        bm.program_cache_entries = 256
+    if bm.strided_run_min_ranges == 0:
+        bm.strided_run_min_ranges = 128
+    if bm.strided_min_row_len_bytes == 0:
+        bm.strided_min_row_len_bytes = 4096
+    if bm.strided_max_amplification == 0:
+        bm.strided_max_amplification = 8
+    if bm.strided_block_target_bytes == 0:
+        bm.strided_block_target_bytes = 16 * 1024 * 1024
+    if bm.strided_block_max_bytes == 0:
+        bm.strided_block_max_bytes = 64 * 1024 * 1024
+
+    retention_handles = msg.retention_handles
+    if not retention_handles.HasField("default_ttl"):
+        retention_handles.default_ttl.seconds = 600
+        retention_handles.default_ttl.nanos = 0
+    if not retention_handles.HasField("max_ttl"):
+        retention_handles.max_ttl.seconds = 24 * 60 * 60
+        retention_handles.max_ttl.nanos = 0
+
+
 def _parse_override_value(value: str) -> Any:
     if value == "":
         return ""
@@ -282,10 +317,7 @@ def apply_daemon_config_overrides(
     normalize_enum_aliases_inplace(overlay, cfg_pb.DaemonConfig.DESCRIPTOR)
     _normalize_units_inplace(overlay, cfg_pb.DaemonConfig.DESCRIPTOR)
     ParseDict(overlay, msg, ignore_unknown_fields=False)
-    if msg.engine.HasField("memory_tiers"):
-        mt = msg.engine.memory_tiers
-        if mt.preemptible_low_watermark_ratio <= 0:
-            mt.preemptible_low_watermark_ratio = 0.4
+    _normalize_defaults_inplace(msg)
 
 
 def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
@@ -305,10 +337,7 @@ def load_daemon_config(path: str | Path) -> cfg_pb.DaemonConfig:
 
     msg = cfg_pb.DaemonConfig()
     ParseDict(raw, msg, ignore_unknown_fields=False)
-    if msg.engine.HasField("memory_tiers"):
-        mt = msg.engine.memory_tiers
-        if mt.preemptible_low_watermark_ratio <= 0:
-            mt.preemptible_low_watermark_ratio = 0.4
+    _normalize_defaults_inplace(msg)
     return msg
 
 

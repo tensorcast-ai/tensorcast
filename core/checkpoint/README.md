@@ -17,6 +17,9 @@ The Checkpoint module provides efficient tensor serialization and deserializatio
 - **CUDA Integration**: Native support for GPU memory management and IPC handles
 - **CUDA IPC restores**: Uses the shared `core/cuda` IPC handle bytes/mapping abstraction so tensors share a single
   reference-counted owner and the mapping is closed exactly once after the last tensor is released.
+- **restore_tensors single-device contract**: `restore_tensors` requires a single device per call; use one call per device when working with multi-GPU mappings.
+- **CPU shared-memory restores (memfd)**: Restores CPU tensors from a local `memfd` file descriptor and binds a daemon
+  handle lease to the lifetime of the returned tensors (RAII).
 - **Fake CUDA test mode**: When `TENSORCAST_CUDA_BACKEND=fake` is active in tests, device restores use shared-memory mappings and `device_id` restores fall back to CPU tensors.
 - **Verification Support**: Built-in replica integrity verification
 - **Streaming GPU Tensor Saving**: Asynchronous GPU→Host→Disk pipeline using pinned memory (`StreamingTensorWriter`)
@@ -54,14 +57,27 @@ std::unordered_map<std::string, std::pair<uint64_t, uint64_t>> tensor_data;
 // ... populate tensor_data with (data_ptr, size) pairs
 
 // Save to disk
-auto offsets = tensorcast::store::save_tensors(tensor_names, tensor_data, "/path/to/replica");
+auto offsets = tensorcast::checkpoint::save_tensors(tensor_names, tensor_data, "/path/to/replica");
 ```
 
 ### Loading Tensors
 ```cpp
 // Load from disk
-auto tensors = tensorcast::store::restore_tensors_from_disk(
+auto tensors = tensorcast::checkpoint::restore_tensors_from_disk(
     meta_state_dict, "/path/to/replica", tensor_offsets);
+```
+
+### Loading Tensors (CPU memfd)
+```cpp
+// Load from a local memfd export (shared-DRAM) and bind lease release to tensor lifetime.
+auto tensors = tensorcast::checkpoint::restore_tensors_from_cpu_fd_with_lease(
+    meta_state_dict,
+    /*fd=*/memfd_fd,
+    /*size_bytes=*/memfd_size_bytes,
+    /*offset_bytes=*/0,
+    tensor_offsets,
+    /*lease_token=*/lease_token,
+    /*local_handle_socket_path=*/local_handle_socket_path);
 ```
 
 ### Streaming Save Example (GPU)

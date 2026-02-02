@@ -14,16 +14,26 @@ Related docs:
 - Public surface and fallbacks: [API Design](./api-design.md)
 - Region-backed lifecycles and teardown: [Region-Backed](./region-backed.md)
 - Error/retry semantics: [Error, Retry, Observability](./error-retry-observability.md)
+- View semantics: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 
 ## Definitions and Payloads
 
 - **Canonical index**: JSON mapping `tensor_name -> [logical_offset, logical_length, shape, stride, dtype, storage_offset]`.
   It defines the logical layout and is used to build payload descriptors. See
   `core/store/materialization/dataplane/metadata/canonical_index.h` for the stable format.
+- **View id (`view_id`)**: Deterministic identity of a variant ByteSpace (see `docs/architecture/artifact-views-and-retrieval.md`).
+  Non-identity views must have a resolved `view_id` so `ReplicaKey` disambiguation and variant verification apply.
+- **View data hash (`view_data_hash`)**: Integrity hash of the realized view byte stream (post-transform). It is distinct
+  from `view_id` and is not used as a subset identifier.
+- **View subset hash (`view_subset_hash` / `ViewSubset.subset_hash`)**: Opaque raw digest bytes identifying a selection
+  (e.g., sorted+unique `tensor_names`). These bytes must not be UTF-8/hex-string bytes; see
+  `docs/architecture/artifact-views-and-retrieval.md` and `docs/architecture/api/region-backed.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
-  into CPU and/or GPU memory states and exported via CUDA IPC handles.
+  into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
 - **Materialization**: Resolving an artifact reference (artifact_id/key/disk path)
   into GPU-visible tensors plus descriptors and canonical index bytes.
+- **Handle lease (lease_token)**: An opaque daemon capability returned alongside the exported handle (CUDA IPC or CPU
+  memfd). The SDK binds it to returned tensor lifetimes and releases it over the local handle plane.
 - **Region-backed get_into**: A no-replica path that writes directly into a
   caller-provided CUDA region when the layout is coalesced and matches canonical.
 
@@ -36,6 +46,11 @@ The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/stor
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
 - `ResolveArtifactFromDisk`: validates disk path and returns canonical index.
 - `ConfirmReplica` / `WaitReplicaVerification`: readiness + verification waits.
+- `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports. When the socket path is unset in config, the daemon auto-selects
+  `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to
+  `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or
+  `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on
+  `TENSORCAST_INSTANCE`); set it explicitly for cross-pod deployments.
 
 The SDK builds these requests in `tensorcast/api/_materialize.py` and
 `tensorcast/api/store/materialization.py`.
@@ -58,8 +73,8 @@ sequenceDiagram
   PL->>SRC: read data (disk or P2P)
   PL-->>SE: ReplicaHandle or MaterializeIntoTargetResult
   SE-->>DM: handle + metadata
-  DM-->>SDK: descriptors + canonical index + CUDA IPC handle
-  SDK-->>H: tensors restored from IPC handle
+  DM-->>SDK: descriptors + canonical index + MemCopyHandle (CUDA IPC or CPU memfd) + lease_token
+  SDK-->>H: tensors restored from exported handle
 ```
 
 Key controller behavior lives in `daemon/service/controllers/materialization_controller.cc`.
@@ -84,7 +99,8 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
 1. **Validate inputs**: require `artifact_id` or disk path; `prefer_p2p` requires
    `artifact_id`; device UUID/ID must be valid.
 2. **Normalize disk path**: disk paths are normalized under `storage_path` and
-   rejected if they escape the configured root.
+   rejected if they escape the configured root; when `server.storage_path` is
+   empty, disk paths are rejected and disk materialization is disabled.
 3. **Disk descriptor checks**:
    - If `verify_checksums=true`, `artifact_descriptor.json` is required and
      validated against the computed index multihash.
@@ -96,7 +112,7 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
 4. **LIP fast path** (local IPC):
    - If a local LIP lease exists and the target GPU is different, the daemon
      copies LIP segments into a new coalesced GPU buffer and returns a CUDA IPC
-     handle (`daemon/lip_bridge.cc`, `daemon/lip_manager.cc`).
+     handle (`daemon/state/lip_bridge.cc`, `daemon/state/lip_manager.cc`).
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
@@ -148,6 +164,8 @@ Materialization ingestion uses a structured pipeline in
 
 ## Data Plane: Loaders, Pump, and Sinks
 
+Byte-range mapping and execution semantics are documented in `docs/internals/byte-range-mapping-and-execution.md`.
+
 ### Sources
 
 - **DiskLoader** (`core/store/materialization/dataplane/loaders/disk_loader.cc`)
@@ -187,8 +205,11 @@ Materialization ingestion uses a structured pipeline in
   (`StreamingPinnedBuffer`) to avoid pageable copies during H2D.
 - **AsyncCopyManager**: GPU writes are scheduled asynchronously and awaited via
   CopyHandles; sink-level scheduling limits avoid GPU copy storms.
-- **CUDA IPC**: Materialization responses include a CUDA IPC handle; the SDK
-  maps it to a device pointer and reconstructs tensors via offsets.
+- **CUDA IPC (GPU)**: GPU materialization responses include a CUDA IPC handle plus a `lease_token`; the SDK maps it to
+  a device pointer and reconstructs tensors via offsets, releasing the lease when tensor views are destroyed.
+- **CPU memfd (CPU)**: CPU materialization responses include a `cpu_memfd` descriptor plus a `lease_token`. The SDK
+  exchanges the token for the backing FD over the local handle plane (UDS + `SCM_RIGHTS`), mmaps it, reconstructs CPU
+  tensors via offsets, and releases the lease token when the last tensor view is destroyed.
 - **Replica states**: `UNALLOCATED -> ALLOCATED -> LOADING -> LOADED`, with a
   `ReadySignal` used for `ConfirmReplica` and session tracking.
 
@@ -198,6 +219,8 @@ Views can be requested by spec (`ViewSpec`) or by ID (`view_id`):
 
 - **Planning**: The daemon computes view plans from canonical index and view
   ops (`ViewPlanner`). Plans include selection ranges and optional transforms.
+- **Identity**: If a request provides `view` but omits `view_id`, the daemon must resolve a deterministic `view_id`
+  (non-identity views must never execute without one). Identity views fold to the canonical path (no `view_id`).
 - **Placement**:
   - `TransformPlacement::kServer`: server applies transforms after load
     (`Replica::ensure_loaded_async` post-load hook).
@@ -214,15 +237,20 @@ Region-backed mode bypasses replica allocation and streams directly into a
 CUDA region registered by the client:
 
 - **SDK constraints** (`tensorcast/api/store/materialization.py`):
-  - Requires `artifact_id`, full canonical tensor set, CUDA contiguous tensors,
-    matching dtype/shape/stride, and coalesced canonical layout.
+  - Requires `artifact_id`, CUDA contiguous tensors, matching dtype/shape/stride, and a
+    coalesced layout over canonical or view-indexed ByteSpaces (including subsets).
+  - Non-identity views resolve a deterministic `view_id`; multi-storage layouts must
+    be ordered concatenations across registered regions.
 - **Daemon validation**:
-  - Requires `TargetLayout` with a single storage entry, coalesced layout,
-    canonical index kind, and a `vram_region_id`.
-  - Validates offsets and storage length against canonical index.
+  - The RPC is **loopback/UDS only**; non-loopback peers are rejected before any write begins.
+  - Requires `TargetLayout` with coalesced layout, canonical or view index kind,
+    `vram_region_id` storages (single or ordered multi-storage), and a matching `view_id`
+    when view transforms are requested.
+  - Validates offsets and storage length against the selected index, plus optional
+    `view_subset_hash` when provided.
 - **Execution**:
-  - The daemon maps the region via CUDA IPC, builds a segment plan from the
-    canonical index, and runs the same pump path into GPU memory.
+  - The daemon maps the region via CUDA IPC, builds a segment or view plan from
+    the selected index, and runs the same pump path into GPU memory.
   - Verification is explicitly skipped (`MaterializeHints::Verify::NONE`).
   - On DataLoss, the region is marked poisoned and the client unregisters it.
 
@@ -260,7 +288,7 @@ CUDA region registered by the client:
 - SDK pipeline: `tensorcast/api/store/materialization.py`
 - SDK RPC wrapper: `tensorcast/api/_materialize.py`
 - Daemon controller: `daemon/service/controllers/materialization_controller.cc`
-- LIP fast path: `daemon/lip_bridge.cc`, `daemon/lip_manager.cc`
+- LIP fast path: `daemon/state/lip_bridge.cc`, `daemon/state/lip_manager.cc`
 - Materialization service: `core/store/runtime/ingestion/materialization_service.cc`
 - Ingestion pipeline: `core/store/materialization/runtime/pipeline/ingestion_pipeline.cc`
 - Transfer and pump: `core/store/replica/transfer_service.cc`, `core/store/materialization/dataplane/runtime/pump.cc`

@@ -45,6 +45,25 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
       return client_or.status();
     }
     auto client = std::move(*client_or);
+    std::optional<common::v1::ArtifactDescriptor> descriptor;
+    if (!publication.index_multihash.empty() || !publication.data_multihash.empty()) {
+      common::v1::ArtifactDescriptor desc;
+      desc.set_artifact_id(publication.artifact_id);
+      if (!publication.index_multihash.empty()) {
+        desc.set_index_multihash(publication.index_multihash);
+      }
+      if (!publication.data_multihash.empty()) {
+        desc.set_data_multihash(publication.data_multihash);
+      }
+      desc.set_schema_version(publication.schema_version);
+      desc.set_encoding(publication.encoding);
+      desc.set_total_size(publication.size_bytes);
+      desc.set_id_kind(
+          publication.id_kind == common::ArtifactIdKind::kCgid
+              ? tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_CGID
+              : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
+      descriptor = std::move(desc);
+    }
     auto reg_or = client->register_memory_replica(
         publication.artifact_id,
         worker_id(),
@@ -57,14 +76,16 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         publication.encoding,
         publication.schema_version,
         /*max_concurrency=*/1,
-        publication.verification_json);
+        publication.verification_json,
+        publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
+        descriptor);
     if (!reg_or.ok()) {
       return reg_or.status();
     }
     return absl::OkStatus();
   }
 
-  absl::Status update_variant_view(const components::VariantViewUpdate& update) override {
+  absl::Status update_view_state(const components::ViewStateUpdate& update) override {
     auto client_or = get_connected_client();
     if (!client_or.ok()) {
       return client_or.status();
@@ -171,8 +192,8 @@ absl::Status MetadataGateway::register_replica(
   auto client = std::move(*client_or);
 
   if (key.view_id.has_value()) {
-    VLOG(1) << "MetadataGateway registering variant view_id=" << *key.view_id
-            << " (canonical_artifact_id=" << key.artifact_id << ")";
+    VLOG(1) << "MetadataGateway registering view_id=" << *key.view_id << " (canonical_artifact_id=" << key.artifact_id
+            << ")";
   }
 
   auto size_or = replica_runtime_->get_replica_size(key);
@@ -195,18 +216,19 @@ absl::Status MetadataGateway::register_replica(
       artifact_id,
       key.device,
       loc,
-      *size_or);
+      *size_or,
+      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt);
   if (!register_status.ok()) {
     return register_status;
   }
 
   if (key.view_id.has_value()) {
-    auto variant_status = client->record_variant_residency(key.artifact_id, *key.view_id, *size_or);
-    if (!variant_status.ok()) {
-      if (absl::IsUnimplemented(variant_status)) {
-        VLOG(1) << "Global Store does not yet accept variant residency updates: " << variant_status.message();
+    auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
+    if (!view_status.ok()) {
+      if (absl::IsUnimplemented(view_status)) {
+        VLOG(1) << "Global Store does not yet accept view residency updates: " << view_status.message();
       } else {
-        LOG(WARNING) << "record_variant_residency failed for view_id=" << *key.view_id << ": " << variant_status;
+        LOG(WARNING) << "record_view_residency failed for view_id=" << *key.view_id << ": " << view_status;
       }
     }
   }
@@ -241,6 +263,16 @@ absl::StatusOr<std::string> MetadataGateway::get_canonical_index(std::string_vie
     return client_or.status();
   }
   return (*client_or)->get_artifact_index_by_id(artifact_id);
+}
+
+absl::StatusOr<components::ViewMetadata> MetadataGateway::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) const {
+  auto client_or = get_connected_client();
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->get_view_metadata(artifact_id, view_id);
 }
 
 absl::Status MetadataGateway::upsert_key_mapping(
@@ -384,6 +416,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .async_runtime = runtime_context_->async_runtime(),
       .memory_tier_budget = runtime_context_->memory_tier_budget(),
       .memory_tier_config = runtime_context_->options().memory_tier_config,
+      .byte_mapping_config = runtime_context_->options().byte_mapping,
   };
   return resources;
 }

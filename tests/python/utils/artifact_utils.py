@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -48,8 +48,8 @@ def create_dummy_artifact(storage_root: Path, disk_path: str, size_bytes: int = 
             "__dummy__": [
                 0,  # offset
                 int(size_bytes),  # size
-                [],  # shape
-                [],  # stride
+                [int(size_bytes)],  # shape
+                [1],  # stride
                 "torch.uint8",  # dtype
                 0,  # storage_offset
             ]
@@ -61,12 +61,14 @@ def create_dummy_artifact(storage_root: Path, disk_path: str, size_bytes: int = 
     descriptor_path = artifact_dir / "artifact_descriptor.json"
     # Always write/overwrite descriptor to ensure compliance with current loader rules
     # and avoid stale descriptors from previous runs
+    index_mh = "dummy_index"
+    data_mh = "dummy_data"
     descriptor = {
         # Per RFC-0007 and DiskLoader validation, artifact_id must be content-addressed (mi2:...)
         # Use fixed dummy multihashes suitable for tests.
-        "artifact_id": "mi2:dummy_index:dummy_data",
-        "index_multihash": "mh:dummy_index",
-        "data_multihash": "mh:dummy_data",
+        "artifact_id": f"mi2:{index_mh}:{data_mh}",
+        "index_multihash": index_mh,
+        "data_multihash": data_mh,
         # Helpful extras for completeness
         "schema_version": "1",
         "encoding": "raw",

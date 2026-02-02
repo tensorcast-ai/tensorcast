@@ -281,6 +281,12 @@ void normalize_duration_fields(nlohmann::json& root) {
       if (lf.contains(f))
         to_duration(lf[f]);
     }
+    if (lf.contains("handle_leases") && lf["handle_leases"].is_object()) {
+      auto& hl = lf["handle_leases"];
+      if (hl.contains("ttl")) {
+        to_duration(hl["ttl"]);
+      }
+    }
   }
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {
@@ -296,6 +302,14 @@ void normalize_duration_fields(nlohmann::json& root) {
       if (ha.contains(f))
         to_duration(ha[f]);
     }
+  }
+
+  if (root.contains("retention_handles") && root["retention_handles"].is_object()) {
+    auto& rh = root["retention_handles"];
+    if (rh.contains("default_ttl"))
+      to_duration(rh["default_ttl"]);
+    if (rh.contains("max_ttl"))
+      to_duration(rh["max_ttl"]);
   }
 }
 
@@ -316,6 +330,34 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
     if (mt->preemptible_low_watermark_ratio() <= 0.0) {
       mt->set_preemptible_low_watermark_ratio(0.4);
     }
+  }
+  if (!e->has_byte_mapping()) {
+    e->mutable_byte_mapping();
+  }
+  auto* bm = e->mutable_byte_mapping();
+  if (!bm->has_enable_strided_execution()) {
+    bm->set_enable_strided_execution(true);
+  }
+  if (!bm->has_enable_direct_write_at()) {
+    bm->set_enable_direct_write_at(true);
+  }
+  if (bm->program_cache_entries() == 0) {
+    bm->set_program_cache_entries(256);
+  }
+  if (bm->strided_run_min_ranges() == 0) {
+    bm->set_strided_run_min_ranges(128);
+  }
+  if (bm->strided_min_row_len_bytes() == 0) {
+    bm->set_strided_min_row_len_bytes(4096);
+  }
+  if (bm->strided_max_amplification() == 0) {
+    bm->set_strided_max_amplification(8);
+  }
+  if (bm->strided_block_target_bytes() == 0) {
+    bm->set_strided_block_target_bytes(16ULL * 1024 * 1024);
+  }
+  if (bm->strided_block_max_bytes() == 0) {
+    bm->set_strided_block_max_bytes(64ULL * 1024 * 1024);
   }
 
   if (cfg->has_pinned_memory()) {
@@ -342,6 +384,19 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   auto* log = obs->mutable_logging();
   if (log->level() == tcfg::Observability::LOG_LEVEL_UNSPECIFIED)
     log->set_level(tcfg::Observability::LOG_LEVEL_INFO);
+
+  // Retention handle defaults (durations)
+  auto* rh = cfg->mutable_retention_handles();
+  if (!rh->has_default_ttl()) {
+    auto* d = rh->mutable_default_ttl();
+    d->set_seconds(600);
+    d->set_nanos(0);
+  }
+  if (!rh->has_max_ttl()) {
+    auto* d = rh->mutable_max_ttl();
+    d->set_seconds(24 * 60 * 60);
+    d->set_nanos(0);
+  }
 
   // Communicator defaults via existing helper
   tensorcast::communicator::normalize_defaults(cfg->mutable_communicator());

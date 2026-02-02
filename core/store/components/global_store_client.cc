@@ -30,6 +30,45 @@ namespace tensorcast::store::components {
 namespace global_store = tensorcast::global_store::v1;
 namespace memory_tier = tensorcast::memory_tier::v1;
 
+TransportLease::TransportLease(IGlobalStoreClient* client, std::string transport_id)
+    : client_(client), transport_id_(std::move(transport_id)) {}
+
+TransportLease::TransportLease(TransportLease&& other) noexcept
+    : client_(other.client_), transport_id_(std::move(other.transport_id_)) {
+  other.client_ = nullptr;
+}
+
+TransportLease& TransportLease::operator=(TransportLease&& other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  complete();
+  client_ = other.client_;
+  transport_id_ = std::move(other.transport_id_);
+  other.client_ = nullptr;
+  return *this;
+}
+
+TransportLease::~TransportLease() {
+  complete();
+}
+
+void TransportLease::release() {
+  client_ = nullptr;
+}
+
+void TransportLease::complete() {
+  if (!client_ || transport_id_.empty()) {
+    return;
+  }
+  absl::Status st = client_->complete_replica_transport(transport_id_);
+  if (!st.ok()) {
+    LOG(WARNING) << "complete_replica_transport failed for " << transport_id_ << ": " << st;
+  }
+  client_ = nullptr;
+  transport_id_.clear();
+}
+
 namespace {
 // Map Global Store Status enum to readable string
 const char* status_to_cstr(global_store::Status s) {
@@ -144,6 +183,13 @@ bool is_loopback_or_unspecified(absl::string_view addr) {
   }
 
   return trimmed == "127.0.0.1" || trimmed == "::" || trimmed == "::1" || trimmed == "0:0:0:0:0:0:0:1";
+}
+
+std::optional<absl::Time> timestamp_to_absl(const google::protobuf::Timestamp& ts) {
+  if (ts.seconds() == 0 && ts.nanos() == 0) {
+    return std::nullopt;
+  }
+  return absl::UnixEpoch() + absl::Seconds(ts.seconds()) + absl::Nanoseconds(ts.nanos());
 }
 } // namespace
 
@@ -376,7 +422,13 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
     uint64_t mem_pool_total_size,
     uint64_t mem_pool_available_size,
     bool is_recovery_registration,
-    std::string_view previous_worker_id) {
+    std::string_view previous_worker_id,
+    std::string_view daemon_id,
+    uint64_t capability_flags) {
+  if (daemon_id.empty()) {
+    return absl::InvalidArgumentError(
+        "register_worker requires a non-empty daemon_id; configure DaemonConfig.daemon_id.");
+  }
   if (is_loopback_or_unspecified(node_address)) {
     return absl::InvalidArgumentError(
         absl::StrFormat(
@@ -402,12 +454,14 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
   request.set_p2p_port(p2p_port);
   request.set_mem_pool_total_size(mem_pool_total_size);
   request.set_mem_pool_available_size(mem_pool_available_size);
+  request.set_capability_flags(capability_flags);
   if (is_recovery_registration) {
     request.set_is_recovery_registration(true);
     if (!previous_worker_id.empty()) {
       request.set_previous_worker_id(std::string(previous_worker_id));
     }
   }
+  request.set_daemon_id(std::string(daemon_id));
 
   global_store::RegisterWorkerResponse response;
 
@@ -467,7 +521,9 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
     const std::vector<std::string>& registered_artifact_ids,
     int64_t last_successful_sync,
     global_store::ConnectionStatus connection_status,
-    const RpcOptions& rpc_options) {
+    const RpcOptions& rpc_options,
+    std::string_view daemon_id,
+    uint64_t capability_flags) {
   global_store::WorkerHeartbeatRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_mem_pool_available_size(mem_pool_available_size);
@@ -479,6 +535,10 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
   }
   request.set_last_successful_sync(last_successful_sync);
   request.set_global_store_status(connection_status);
+  request.set_capability_flags(capability_flags);
+  if (!daemon_id.empty()) {
+    request.set_daemon_id(std::string(daemon_id));
+  }
 
   global_store::WorkerHeartbeatResponse response;
   auto status = execute_rpc_with_retry(
@@ -538,14 +598,15 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
     const DeviceKey& device,
     MemoryLocation location,
     uint64_t memory_size,
-    uint32_t max_concurrency) {
+    uint32_t max_concurrency,
+    std::optional<std::string_view> view_id) {
   global_store::RegisterReplicaRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
 
   auto* mem_info = request.mutable_mem_info();
-  if (auto fill_st = fill_memory_info(mem_info, device, location, memory_size); !fill_st.ok()) {
+  if (auto fill_st = fill_memory_info(mem_info, device, location, memory_size, view_id); !fill_st.ok()) {
     return fill_st;
   }
 
@@ -571,7 +632,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   return response.replica_id();
 }
 
-absl::Status GlobalStoreClient::record_variant_residency(
+absl::Status GlobalStoreClient::record_view_residency(
     std::string_view canonical_artifact_id,
     std::string_view view_id,
     uint64_t view_size_bytes,
@@ -580,47 +641,63 @@ absl::Status GlobalStoreClient::record_variant_residency(
   (void)view_id;
   (void)view_size_bytes;
   (void)view_data_hash;
-  // Global Store plan 0016-c introduces a dedicated RPC for variant metadata.
+  // A dedicated RPC for view metadata will be introduced for view-residency signals.
   // Until that lands, treat this as a best-effort noop so core plumbing can wire
   // the call sites without coupling to server availability.
-  return absl::UnimplementedError("Global Store variant residency RPC not yet implemented");
+  return absl::UnimplementedError("Global Store view residency RPC not yet implemented");
 }
 
-absl::Status GlobalStoreClient::update_artifact_view_state(const VariantViewUpdate& update) {
+absl::Status GlobalStoreClient::update_artifact_view_state(const ViewStateUpdate& update) {
   if (!is_connected()) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
   if (update.artifact_id.empty()) {
     return absl::InvalidArgumentError("update_artifact_view_state requires artifact_id");
   }
-  if (update.view_id.empty()) {
-    return absl::InvalidArgumentError("update_artifact_view_state requires view_id");
+  const bool has_view = !update.view_id.empty() || !update.view_spec_json.empty() || update.view_size_bytes > 0 ||
+      update.view_data_hash.has_value() || update.mark_verified || update.canonical_size_bytes > 0 ||
+      update.canonical_bytes_covered > 0 || !update.canonical_ranges.empty();
+  if (has_view && update.view_id.empty()) {
+    return absl::InvalidArgumentError("update_artifact_view_state view payload requires view_id");
+  }
+  if (!update.proof_digests.empty() && update.view_id.empty()) {
+    return absl::InvalidArgumentError("update_artifact_view_state proof digests require view_id");
   }
 
   global_store::UpdateArtifactViewStateRequest request;
   request.set_artifact_id(update.artifact_id);
-  auto* variant = request.mutable_variant();
-  variant->set_view_id(update.view_id);
-  variant->set_view_spec_json(update.view_spec_json);
-  variant->set_view_size(update.view_size_bytes);
-  if (update.view_data_hash.has_value()) {
-    variant->set_view_data_hash(*update.view_data_hash);
-  }
-  if (update.canonical_size_bytes > 0 || update.canonical_bytes_covered > 0) {
-    auto* coverage = variant->mutable_canonical_coverage();
-    coverage->set_total_bytes(update.canonical_size_bytes);
-    coverage->set_covered_bytes(update.canonical_bytes_covered);
-  }
-  if (update.mark_verified) {
-    const absl::Time now = absl::Now();
-    auto* ts = variant->mutable_verified_at();
-    const int64_t seconds = absl::ToUnixSeconds(now);
-    const int64_t nanos = absl::ToInt64Nanoseconds(now - absl::UnixEpoch() - absl::Seconds(seconds));
-    ts->set_seconds(seconds);
-    ts->set_nanos(static_cast<int32_t>(nanos));
+  if (has_view) {
+    auto* view = request.mutable_view();
+    view->set_view_id(update.view_id);
+    view->set_view_spec_json(update.view_spec_json);
+    view->set_view_size(update.view_size_bytes);
+    if (update.view_data_hash.has_value()) {
+      view->set_view_data_hash(*update.view_data_hash);
+    }
+    if (update.canonical_size_bytes > 0 || update.canonical_bytes_covered > 0) {
+      auto* coverage = view->mutable_canonical_coverage();
+      coverage->set_total_bytes(update.canonical_size_bytes);
+      coverage->set_covered_bytes(update.canonical_bytes_covered);
+    }
+    for (const auto& range : update.canonical_ranges) {
+      auto* out = view->add_canonical_ranges();
+      out->set_off(range.offset);
+      out->set_len(range.length);
+    }
+    if (update.mark_verified) {
+      const absl::Time now = absl::Now();
+      auto* ts = view->mutable_verified_at();
+      const int64_t seconds = absl::ToUnixSeconds(now);
+      const int64_t nanos = absl::ToInt64Nanoseconds(now - absl::UnixEpoch() - absl::Seconds(seconds));
+      ts->set_seconds(seconds);
+      ts->set_nanos(static_cast<int32_t>(nanos));
+    }
   }
   for (const auto& leaf : update.leaf_writes) {
     *request.add_leaf_writes() = leaf;
+  }
+  for (const auto& digest : update.proof_digests) {
+    *request.add_proof_digests() = digest;
   }
 
   global_store::UpdateArtifactViewStateResponse response;
@@ -639,6 +716,467 @@ absl::Status GlobalStoreClient::update_artifact_view_state(const VariantViewUpda
   return absl::OkStatus();
 }
 
+absl::StatusOr<std::vector<ViewInfo>> GlobalStoreClient::list_views(std::string_view artifact_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("list_views requires artifact_id");
+  }
+
+  std::vector<ViewInfo> views;
+  std::string next_page_token;
+  do {
+    global_store::ListViewsRequest request;
+    request.set_artifact_id(std::string(artifact_id));
+    auto* pagination = request.mutable_pagination();
+    pagination->set_page_size(200);
+    if (!next_page_token.empty()) {
+      pagination->set_page_token(next_page_token);
+    }
+
+    global_store::ListViewsResponse response;
+    auto status = execute_rpc_with_retry(
+        request,
+        &response,
+        [this](auto* ctx, const auto& req, auto* resp) { return stub_->ListViews(ctx, req, resp); },
+        "ListViews");
+    if (!status.ok()) {
+      return status;
+    }
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(absl::StrCat("views not found for artifact_id=", artifact_id));
+    }
+    if (response.status() != global_store::STATUS_OK) {
+      return absl::InternalError(absl::StrFormat("ListViews failed: status=%s", status_to_cstr(response.status())));
+    }
+
+    for (const auto& entry : response.views()) {
+      ViewInfo info;
+      info.view_id = entry.view_id();
+      info.view_spec_json = entry.view_spec_json();
+      info.view_size_bytes = entry.view_size();
+      if (!entry.view_data_hash().empty()) {
+        info.view_data_hash = entry.view_data_hash();
+      }
+      if (entry.has_verified_at()) {
+        info.verified_at = timestamp_to_absl(entry.verified_at());
+      }
+      if (entry.has_canonical_coverage()) {
+        info.canonical_size_bytes = entry.canonical_coverage().total_bytes();
+        info.canonical_bytes_covered = entry.canonical_coverage().covered_bytes();
+      }
+      info.canonical_ranges.reserve(static_cast<size_t>(entry.canonical_ranges_size()));
+      for (const auto& range : entry.canonical_ranges()) {
+        info.canonical_ranges.push_back(CanonicalRange{.offset = range.off(), .length = range.len()});
+      }
+      views.push_back(std::move(info));
+    }
+
+    next_page_token = response.has_page_info() ? response.page_info().next_page_token() : std::string();
+  } while (!next_page_token.empty());
+
+  return views;
+}
+
+absl::StatusOr<global_store::AssemblyLayoutBinding> GlobalStoreClient::get_assembly_layout_binding(
+    std::string_view assembly_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (assembly_id.empty()) {
+    return absl::InvalidArgumentError("get_assembly_layout_binding requires assembly_id");
+  }
+
+  global_store::GetAssemblyLayoutBindingRequest request;
+  request.set_assembly_id(std::string(assembly_id));
+
+  global_store::GetAssemblyLayoutBindingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetAssemblyLayoutBinding(ctx, req, resp); },
+      "GetAssemblyLayoutBinding");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(absl::StrCat("assembly layout binding not found for ", assembly_id));
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("GetAssemblyLayoutBinding failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (!response.has_binding()) {
+    return absl::InternalError("GetAssemblyLayoutBinding returned empty binding");
+  }
+  return response.binding();
+}
+
+absl::StatusOr<layout::LayoutSpecRecord> GlobalStoreClient::get_layout_spec(std::string_view layout_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (layout_id.empty()) {
+    return absl::InvalidArgumentError("get_layout_spec requires layout_id");
+  }
+
+  global_store::GetLayoutSpecRequest request;
+  request.set_layout_id(std::string(layout_id));
+
+  global_store::GetLayoutSpecResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetLayoutSpec(ctx, req, resp); },
+      "GetLayoutSpec");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(absl::StrCat("layout spec not found for ", layout_id));
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(absl::StrFormat("GetLayoutSpec failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (!response.has_record()) {
+    return absl::InternalError("GetLayoutSpec returned empty record");
+  }
+  return response.record();
+}
+
+absl::Status GlobalStoreClient::attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (mi2_id.empty() || layout_id.empty()) {
+    return absl::InvalidArgumentError("attach_layout_to_artifact requires mi2_id and layout_id");
+  }
+
+  global_store::AttachLayoutToArtifactRequest request;
+  request.set_mi2_id(std::string(mi2_id));
+  request.set_layout_id(std::string(layout_id));
+
+  global_store::AttachLayoutToArtifactResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->AttachLayoutToArtifact(ctx, req, resp); },
+      "AttachLayoutToArtifact");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(
+          absl::StrCat("AttachLayoutToArtifact not found: mi2_id=", mi2_id, " layout_id=", layout_id));
+    }
+    return absl::InternalError(
+        absl::StrFormat("AttachLayoutToArtifact failed: status=%s", status_to_cstr(response.status())));
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<std::string>> GlobalStoreClient::list_artifact_layouts(std::string_view mi2_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (mi2_id.empty()) {
+    return absl::InvalidArgumentError("list_artifact_layouts requires mi2_id");
+  }
+
+  global_store::ListArtifactLayoutsRequest request;
+  request.set_mi2_id(std::string(mi2_id));
+
+  global_store::ListArtifactLayoutsResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ListArtifactLayouts(ctx, req, resp); },
+      "ListArtifactLayouts");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(absl::StrCat("artifact layouts not found for ", mi2_id));
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("ListArtifactLayouts failed: status=%s", status_to_cstr(response.status())));
+  }
+  std::vector<std::string> layout_ids;
+  layout_ids.reserve(static_cast<size_t>(response.layout_ids_size()));
+  for (const auto& layout_id : response.layout_ids()) {
+    layout_ids.push_back(layout_id);
+  }
+  return layout_ids;
+}
+
+absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> GlobalStoreClient::write_tensor_proof_commitments(
+    const global_store::WriteTensorProofCommitmentsRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (request.mi2_id().empty()) {
+    return absl::InvalidArgumentError("write_tensor_proof_commitments requires mi2_id");
+  }
+  if (request.proof_schema_version().empty()) {
+    return absl::InvalidArgumentError("write_tensor_proof_commitments requires proof_schema_version");
+  }
+
+  global_store::WriteTensorProofCommitmentsResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WriteTensorProofCommitments(ctx, req, resp); },
+      "WriteTensorProofCommitments");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("WriteTensorProofCommitments failed: status=%s", status_to_cstr(response.status())));
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> GlobalStoreClient::check_proof_commitments_match(
+    const global_store::CheckProofCommitmentsMatchRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (request.assembly_id().empty() || request.mi2_id().empty()) {
+    return absl::InvalidArgumentError("check_proof_commitments_match requires assembly_id and mi2_id");
+  }
+  if (request.proof_schema_version().empty()) {
+    return absl::InvalidArgumentError("check_proof_commitments_match requires proof_schema_version");
+  }
+  if (request.tensor_names().empty()) {
+    return absl::InvalidArgumentError("check_proof_commitments_match requires tensor_names");
+  }
+
+  global_store::CheckProofCommitmentsMatchResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->CheckProofCommitmentsMatch(ctx, req, resp); },
+      "CheckProofCommitmentsMatch");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("CheckProofCommitmentsMatch not found");
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("CheckProofCommitmentsMatch failed: status=%s", status_to_cstr(response.status())));
+  }
+  return response;
+}
+
+absl::StatusOr<global_store::AssemblyRuntimePolicy> GlobalStoreClient::get_assembly_runtime_policy(
+    std::string_view assembly_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (assembly_id.empty()) {
+    return absl::InvalidArgumentError("get_assembly_runtime_policy requires assembly_id");
+  }
+
+  global_store::GetAssemblyRuntimePolicyRequest request;
+  request.set_assembly_id(std::string(assembly_id));
+
+  global_store::GetAssemblyRuntimePolicyResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetAssemblyRuntimePolicy(ctx, req, resp); },
+      "GetAssemblyRuntimePolicy");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(absl::StrCat("assembly runtime policy not found for ", assembly_id));
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("GetAssemblyRuntimePolicy failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (!response.has_policy()) {
+    return absl::InternalError("GetAssemblyRuntimePolicy returned empty policy");
+  }
+  return response.policy();
+}
+
+absl::StatusOr<operation::AcquireOperationLeaseResponse> GlobalStoreClient::acquire_operation_lease(
+    const operation::AcquireOperationLeaseRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  operation::AcquireOperationLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->AcquireOperationLease(ctx, req, resp); },
+      "AcquireOperationLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<operation::KeepaliveOperationLeaseResponse> GlobalStoreClient::keepalive_operation_lease(
+    const operation::KeepaliveOperationLeaseRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  operation::KeepaliveOperationLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->KeepaliveOperationLease(ctx, req, resp); },
+      "KeepaliveOperationLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<operation::ReleaseOperationLeaseResponse> GlobalStoreClient::release_operation_lease(
+    const operation::ReleaseOperationLeaseRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  operation::ReleaseOperationLeaseResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ReleaseOperationLease(ctx, req, resp); },
+      "ReleaseOperationLease");
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::StatusOr<operation::GetOperationResponse> GlobalStoreClient::get_operation(
+    const operation::GetOperationRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  operation::GetOperationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetOperation(ctx, req, resp); },
+      "GetOperation");
+  if (!status.ok()) {
+    return status;
+  }
+  return response;
+}
+
+absl::Status GlobalStoreClient::update_operation(const operation::UpdateOperationRequest& request) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  operation::UpdateOperationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpdateOperation(ctx, req, resp); },
+      "UpdateOperation");
+  if (!status.ok()) {
+    return status;
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<ArtifactBinding> GlobalStoreClient::get_artifact_binding(std::string_view artifact_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (artifact_id.empty()) {
+    return absl::InvalidArgumentError("get_artifact_binding requires artifact_id");
+  }
+  global_store::GetArtifactBindingRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  global_store::GetArtifactBindingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactBinding(ctx, req, resp); },
+      "GetArtifactBinding");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(absl::StrCat("artifact binding not found for ", artifact_id));
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("GetArtifactBinding failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (!response.has_binding()) {
+    return absl::InternalError("GetArtifactBinding returned empty binding");
+  }
+  const auto& binding_proto = response.binding();
+  ArtifactBinding binding;
+  binding.from_artifact_id = binding_proto.from_artifact_id();
+  binding.to_artifact_id = binding_proto.to_artifact_id();
+  binding.kind = binding_proto.kind();
+  if (binding_proto.has_created_at()) {
+    binding.created_at = timestamp_to_absl(binding_proto.created_at());
+  }
+  return binding;
+}
+
+absl::StatusOr<ArtifactBindingResult> GlobalStoreClient::upsert_artifact_binding(const ArtifactBinding& binding) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (binding.from_artifact_id.empty() || binding.to_artifact_id.empty()) {
+    return absl::InvalidArgumentError("upsert_artifact_binding requires from/to artifact ids");
+  }
+  global_store::UpsertArtifactBindingRequest request;
+  auto* binding_proto = request.mutable_binding();
+  binding_proto->set_from_artifact_id(binding.from_artifact_id);
+  binding_proto->set_to_artifact_id(binding.to_artifact_id);
+  binding_proto->set_kind(binding.kind);
+
+  global_store::UpsertArtifactBindingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpsertArtifactBinding(ctx, req, resp); },
+      "UpsertArtifactBinding");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat("UpsertArtifactBinding failed: status=%s", status_to_cstr(response.status())));
+  }
+  if (!response.has_binding()) {
+    return absl::InternalError("UpsertArtifactBinding returned empty binding");
+  }
+  ArtifactBindingResult out;
+  const auto& resp_binding = response.binding();
+  out.binding.from_artifact_id = resp_binding.from_artifact_id();
+  out.binding.to_artifact_id = resp_binding.to_artifact_id();
+  out.binding.kind = resp_binding.kind();
+  if (resp_binding.has_created_at()) {
+    out.binding.created_at = timestamp_to_absl(resp_binding.created_at());
+  }
+  out.created = response.created();
+  return out;
+}
+
 absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     std::string_view artifact_id,
     std::string_view worker_id,
@@ -651,7 +1189,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     std::string_view encoding,
     std::string_view schema_version,
     uint32_t max_concurrency,
-    const std::optional<std::string>& verification_json) {
+    const std::optional<std::string>& verification_json,
+    std::optional<std::string_view> view_id,
+    const std::optional<common::v1::ArtifactDescriptor>& descriptor) {
   // NOTE: This implementation relies on proto/global_store.proto support for
   // memory replicas with tensor index key. If the server does not support the
   // new fields it will still accept the request but ignore extra data.
@@ -662,7 +1202,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   request.set_max_concurrency(max_concurrency);
 
   auto* mem_info = request.mutable_mem_info();
-  if (auto fill_st = fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size); !fill_st.ok()) {
+  if (auto fill_st = fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size, view_id); !fill_st.ok()) {
     return fill_st;
   }
   // If server supports memory replica fields, populate them via extension fields in MemoryInfo
@@ -686,6 +1226,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     ts->set_nanos(0);
   }
   mem_info->set_source_process_id(std::to_string(getpid()));
+  if (descriptor.has_value()) {
+    *request.mutable_descriptor_() = *descriptor;
+  }
 
   for (const auto& key : remote_memory_keys) {
     mem_info->add_remote_memory_keys(key);
@@ -801,6 +1344,100 @@ absl::Status GlobalStoreClient::unregister_replica_by_worker(
   return absl::OkStatus();
 }
 
+absl::StatusOr<bool> GlobalStoreClient::mark_replica_unavailable(
+    std::string_view artifact_id,
+    std::string_view replica_id,
+    std::optional<std::string_view> reason,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+  global_store::MarkReplicaUnavailableRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_replica_id(std::string(replica_id));
+  if (reason.has_value()) {
+    request.set_reason(std::string(*reason));
+  }
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::MarkReplicaUnavailableResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->MarkReplicaUnavailable(ctx, req, resp); },
+      "MarkReplicaUnavailable");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "MarkReplicaUnavailable failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  return response.updated();
+}
+
+absl::StatusOr<ReplicaDrainStatus> GlobalStoreClient::wait_replica_drain(
+    std::string_view replica_id,
+    uint32_t timeout_ms,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+
+  global_store::WaitReplicaDrainRequest request;
+  request.set_replica_id(std::string(replica_id));
+  request.set_timeout_ms(timeout_ms);
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::WaitReplicaDrainResponse response;
+  RpcOptions rpc_opts;
+  if (timeout_ms > 0) {
+    rpc_opts.timeout = absl::Milliseconds(timeout_ms) + absl::Seconds(1);
+  }
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WaitReplicaDrain(ctx, req, resp); },
+      "WaitReplicaDrain",
+      rpc_opts);
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_TIMED_OUT) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "WaitReplicaDrain failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  ReplicaDrainStatus out;
+  out.drained = response.drained();
+  out.current_requests = response.current_requests();
+  if (response.has_oldest_transport_age_ms()) {
+    out.oldest_transport_age_ms = response.oldest_transport_age_ms();
+  }
+  return out;
+}
+
 absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
     std::string_view artifact_id,
     std::string_view source_node_id,
@@ -813,6 +1450,7 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   request.set_source_node_id(std::string(source_node_id));
   request.set_source_address(std::string(source_address));
   request.set_source_port(source_port);
+  request.mutable_requested_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
   // Use standard duration
   auto* dur = request.mutable_wait_timeout_dur();
   dur->set_seconds(static_cast<int64_t>(wait_timeout_ms / 1000));
@@ -864,15 +1502,61 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
     uint32_t source_port,
     const DeviceKey& target_device,
     uint32_t wait_timeout_ms) {
-  (void)view_id;
-  // Placeholder: until Global Store exposes view-aware routes, fall back to canonical transport.
-  auto session_or = request_replica_transport(
-      artifact_id, source_node_id, source_address, source_port, target_device, wait_timeout_ms);
-  if (!session_or.ok()) {
-    return session_or;
+  if (view_id.empty()) {
+    return absl::InvalidArgumentError("view_id must be non-empty for view transport");
   }
-  VLOG(1) << "request_view_transport fell back to canonical routing for view_id=" << view_id;
-  return session_or;
+
+  global_store::RequestReplicaTransportRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_source_node_id(std::string(source_node_id));
+  request.set_source_address(std::string(source_address));
+  request.set_source_port(source_port);
+  auto* dur = request.mutable_wait_timeout_dur();
+  dur->set_seconds(static_cast<int64_t>(wait_timeout_ms / 1000));
+  dur->set_nanos(static_cast<int32_t>((wait_timeout_ms % 1000) * 1000000));
+
+  auto* local_mem_info = request.mutable_local_memory_info();
+  if (auto fill_st = fill_memory_info(local_mem_info, target_device, MemoryLocation::GPU, 0); !fill_st.ok()) {
+    return fill_st;
+  }
+
+  auto* requested_space = request.mutable_requested_byte_space();
+  requested_space->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+  requested_space->set_id(std::string(view_id));
+
+  global_store::RequestReplicaTransportResponse response;
+
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RequestReplicaTransport(ctx, req, resp); },
+      "RequestReplicaTransport(view)");
+
+  if (!status.ok()) {
+    return status;
+  }
+
+  if (response.status() != global_store::STATUS_OK) {
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(
+          absl::StrFormat("No available replicas for view transport: %s view_id=%s", artifact_id, view_id));
+    }
+    return absl::InternalError(
+        absl::StrFormat(
+            "RequestReplicaTransport(view) failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+
+  TransportSession session;
+  session.transport_id = response.transport_id();
+  session.remote_replica = convert_from_proto_memory_info(response.remote_memory_info());
+  session.start_time = absl::Now();
+
+  LOG(INFO) << "Started view transport " << session.transport_id << " from " << session.remote_replica.node_id
+            << " view_id=" << view_id;
+
+  return session;
 }
 
 absl::Status GlobalStoreClient::complete_replica_transport(std::string_view transport_id) {
@@ -898,9 +1582,18 @@ absl::Status GlobalStoreClient::complete_replica_transport(std::string_view tran
   return absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_replicas(std::string_view artifact_id) {
+absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_replicas(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) {
   global_store::GetArtifactInfoByIdRequest request;
   request.set_artifact_id(std::string(artifact_id));
+  auto* byte_space = request.mutable_requested_byte_space();
+  if (view_id.has_value()) {
+    byte_space->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+    byte_space->set_id(std::string(*view_id));
+  } else {
+    byte_space->set_kind(common::v1::BYTE_SPACE_KIND_CANONICAL);
+  }
 
   global_store::GetArtifactInfoByIdResponse response;
 
@@ -1021,7 +1714,8 @@ absl::Status GlobalStoreClient::fill_memory_info(
     tensorcast::common::v1::MemoryInfo* info,
     const DeviceKey& device,
     MemoryLocation location,
-    uint64_t memory_size) {
+    uint64_t memory_size,
+    std::optional<std::string_view> view_id) {
   std::string node_id;
   std::string node_address;
   uint32_t node_port = 0;
@@ -1069,6 +1763,14 @@ absl::Status GlobalStoreClient::fill_memory_info(
     info->set_device_id(device.ordinal);
   }
 
+  auto* byte_space = info->mutable_byte_space();
+  if (view_id.has_value() && !view_id->empty()) {
+    byte_space->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+    byte_space->set_id(std::string(*view_id));
+  } else {
+    byte_space->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+  }
+
   return absl::OkStatus();
 }
 
@@ -1090,6 +1792,11 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   }
   if (!info.verification_json().empty()) {
     replica.verification_json = info.verification_json();
+  }
+  if (info.has_byte_space() && info.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW) {
+    if (!info.byte_space().id().empty()) {
+      replica.view_id = info.byte_space().id();
+    }
   }
 
   return replica;
@@ -1153,6 +1860,36 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
 
     if (status.ok()) {
       return absl::OkStatus();
+    }
+
+    const auto code = status.error_code();
+    switch (code) {
+      case grpc::StatusCode::FAILED_PRECONDITION:
+        return absl::FailedPreconditionError(status.error_message());
+      case grpc::StatusCode::INVALID_ARGUMENT:
+        return absl::InvalidArgumentError(status.error_message());
+      case grpc::StatusCode::NOT_FOUND:
+        return absl::NotFoundError(status.error_message());
+      case grpc::StatusCode::ALREADY_EXISTS:
+        return absl::AlreadyExistsError(status.error_message());
+      case grpc::StatusCode::PERMISSION_DENIED:
+        return absl::PermissionDeniedError(status.error_message());
+      case grpc::StatusCode::UNAUTHENTICATED:
+        return absl::UnauthenticatedError(status.error_message());
+      case grpc::StatusCode::RESOURCE_EXHAUSTED:
+        return absl::ResourceExhaustedError(status.error_message());
+      case grpc::StatusCode::ABORTED:
+        return absl::AbortedError(status.error_message());
+      case grpc::StatusCode::OUT_OF_RANGE:
+        return absl::OutOfRangeError(status.error_message());
+      case grpc::StatusCode::UNIMPLEMENTED:
+        return absl::UnimplementedError(status.error_message());
+      case grpc::StatusCode::DATA_LOSS:
+        return absl::DataLossError(status.error_message());
+      case grpc::StatusCode::CANCELLED:
+        return absl::CancelledError(status.error_message());
+      default:
+        break;
     }
 
     if (attempt < max_retries) {
@@ -1425,6 +2162,56 @@ absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::str
     return absl::NotFoundError("artifact index not found");
   }
   return response.tensor_index_data();
+}
+
+absl::StatusOr<ViewMetadata> GlobalStoreClient::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) {
+  if (artifact_id.empty() || view_id.empty()) {
+    return absl::InvalidArgumentError("get_view_metadata requires artifact_id and view_id");
+  }
+  global_store::GetArtifactInfoByIdRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.mutable_requested_byte_space()->set_kind(common::v1::BYTE_SPACE_KIND_VIEW);
+  request.mutable_requested_byte_space()->set_id(std::string(view_id));
+  request.set_include_view_meta(true);
+
+  global_store::GetArtifactInfoByIdResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactInfoById(ctx, req, resp); },
+      "GetArtifactInfoById");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    if (response.status() == global_store::STATUS_NOT_FOUND) {
+      return absl::NotFoundError(
+          absl::StrFormat("View metadata not found for artifact_id=%s view_id=%s", artifact_id, view_id));
+    }
+    return absl::InternalError(
+        absl::StrFormat(
+            "GetArtifactInfoById failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  if (!response.has_view_meta()) {
+    return absl::NotFoundError(
+        absl::StrFormat("View metadata missing for artifact_id=%s view_id=%s", artifact_id, view_id));
+  }
+  const auto& meta = response.view_meta();
+  if (meta.view_spec_json().empty()) {
+    return absl::NotFoundError(
+        absl::StrFormat("view_spec_json missing for artifact_id=%s view_id=%s", artifact_id, view_id));
+  }
+  ViewMetadata result;
+  result.view_spec_json = meta.view_spec_json();
+  result.view_size_bytes = meta.view_size();
+  if (!meta.view_data_hash().empty()) {
+    result.view_data_hash = meta.view_data_hash();
+  }
+  return result;
 }
 
 absl::StatusOr<PlacementPlanResult> GlobalStoreClient::plan_placement(

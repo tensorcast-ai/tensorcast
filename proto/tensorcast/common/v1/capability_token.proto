@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package tensorcast.common.v1;
+
+import "tensorcast/common/v1/common.proto";
+
+// Capability audiences prevent token type confusion.
+enum CapabilityAudience {
+  CAPABILITY_AUDIENCE_UNSPECIFIED = 0;
+  CAPABILITY_AUDIENCE_PLACEMENT_LEASE = 1;
+  CAPABILITY_AUDIENCE_RETENTION_HANDLE = 2;
+  CAPABILITY_AUDIENCE_QUEUE_WORK_LEASE = 3;
+  CAPABILITY_AUDIENCE_TARGET_WRITE = 4;
+}
+
+// Scope for placement lease capability tokens.
+message PlacementLeaseScope {
+  uint64 lease_id = 1;
+}
+
+// Scope for retention handle capability tokens.
+message RetentionHandleScope {
+  string handle_id = 1;
+}
+
+message TargetWriteScope {
+  string write_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 2;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 3;
+  string device_uuid = 4;
+  int32 owner_pid = 5;
+  bytes target_layout_hash = 6;
+}
+
+// Optional fencing for volatile control-plane operations.
+message QueueEpochFencing {
+  string queue_operation_id = 1;
+  uint64 queue_epoch = 2;
+}
+
+// Unified capability token envelope for daemon-issued capabilities.
+message CapabilityTokenEnvelope {
+  uint32 token_version = 1;
+  string issuer_daemon_id = 2;
+  CapabilityAudience audience = 3;
+  bytes scope = 4;
+  uint64 expires_at_ms = 5;
+
+  oneof fencing {
+    QueueEpochFencing queue_epoch = 10;
+  }
+
+  bytes auth_tag = 100;
+}

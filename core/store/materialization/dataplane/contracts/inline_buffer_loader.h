@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -69,6 +69,10 @@ class InlineBufferLoader : public IArtifactLoader {
       InlineSeekableSource(std::shared_ptr<const void> data, uint64_t size)
           : data_(std::move(data)), size_(size), cursor_(0) {}
 
+      [[nodiscard]] uint64_t total_bytes() const override {
+        return size_;
+      }
+
       absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
         auto bytes_or = read_at(cursor_, dst, max_bytes);
         if (!bytes_or.ok()) {
@@ -89,20 +93,26 @@ class InlineBufferLoader : public IArtifactLoader {
         return to_copy;
       }
 
-      [[nodiscard]] bool supports_direct_write() const override {
+      [[nodiscard]] bool supports_direct_write_at() const override {
         return true;
       }
 
-      absl::StatusOr<size_t> read_into(uint64_t dest_va_offset, size_t bytes, const DirectWriteGrant& grant) override {
+      absl::StatusOr<size_t> read_into_at(
+          uint64_t src_offset,
+          uint64_t dest_va_offset,
+          size_t bytes,
+          const DirectWriteGrant& grant) override {
         if (bytes == 0) {
           return static_cast<size_t>(0);
         }
-        if (dest_va_offset + bytes > size_) {
-          return absl::OutOfRangeError("Inline buffer read exceeds source bounds");
+        if (src_offset >= size_) {
+          return static_cast<size_t>(0);
         }
+        const uint64_t remaining = size_ - src_offset;
+        const size_t to_copy = static_cast<size_t>(std::min<uint64_t>(bytes, remaining));
         const DirectWriteGrant::Window* target = nullptr;
         for (const auto& window : grant.windows) {
-          if (dest_va_offset >= window.va_offset && dest_va_offset + bytes <= window.va_offset + window.length) {
+          if (dest_va_offset >= window.va_offset && dest_va_offset + to_copy <= window.va_offset + window.length) {
             target = &window;
             break;
           }
@@ -112,9 +122,9 @@ class InlineBufferLoader : public IArtifactLoader {
         }
         auto window_offset = dest_va_offset - target->va_offset;
         auto* dst = reinterpret_cast<void*>(target->local_addr + window_offset);
-        const auto* src = static_cast<const std::byte*>(data_.get()) + dest_va_offset;
-        std::memcpy(dst, src, bytes);
-        return bytes;
+        const auto* src = static_cast<const std::byte*>(data_.get()) + src_offset;
+        std::memcpy(dst, src, to_copy);
+        return to_copy;
       }
 
      private:

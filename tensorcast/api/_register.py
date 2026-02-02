@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import torch
 from opentelemetry import trace
@@ -90,6 +90,7 @@ class RegistrationResult:
     view_index_json: bytes | None = None
     view_data_hash: str | None = None
     canonical_ranges: tuple[CanonicalRange, ...] = ()
+    registration_kind: Literal["canonical", "piece"] = "canonical"
     allow_partial: bool = False
     local_stable_tier: LocalStableTierResult | None = None
 
@@ -137,7 +138,7 @@ class ViewRegistrationContext:
     plan: ViewPlanMetadata
     tensors: dict[str, torch.Tensor]
     canonical_ranges: tuple[CanonicalRange, ...]
-    allow_partial: bool
+    registration_kind: int
 
 
 class RegisteredArtifact:
@@ -1165,9 +1166,15 @@ def _register_artifact_core(
         if normalized_artifact_id:
             span.set_attribute("tc.artifact.client_artifact_id", normalized_artifact_id)
         policy = StorePolicy.parse(options.policy)
+        total_size_bytes = layout.total_size
+        if (
+            view is not None
+            and view.registration_kind == store_daemon_pb2.VIEW_REGISTRATION_KIND_PIECE
+        ):
+            total_size_bytes = view.plan.view_size_bytes
         begin_response = ctl.begin_register_artifact(
             device_id=ctx.device_id,
-            total_size_bytes=layout.total_size,
+            total_size_bytes=total_size_bytes,
             ttl_ms=ttl_ms,
             tensor_index_data=index_bytes,
             encoding="json",
@@ -1230,7 +1237,8 @@ def _register_artifact_core(
                             view_data_hash=commit_res.view_data_hash,
                             canonical_ranges=commit_res.canonical_ranges
                             or view.canonical_ranges,
-                            allow_partial=view.allow_partial,
+                            registration_kind=commit_res.registration_kind,
+                            allow_partial=commit_res.registration_kind == "piece",
                             local_stable_tier=commit_res.local_stable_tier,
                         )
                     except CancelledError:
@@ -1286,6 +1294,7 @@ def _register_artifact_core(
                         view_index_json=commit_res.view_index_json,
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
+                        registration_kind=commit_res.registration_kind,
                         allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )
@@ -1329,6 +1338,7 @@ def _register_artifact_core(
                         view_index_json=commit_res.view_index_json,
                         view_data_hash=commit_res.view_data_hash,
                         canonical_ranges=commit_res.canonical_ranges,
+                        registration_kind=commit_res.registration_kind,
                         allow_partial=commit_res.allow_partial,
                         local_stable_tier=commit_res.local_stable_tier,
                     )

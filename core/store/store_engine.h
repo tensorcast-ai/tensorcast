@@ -23,6 +23,7 @@
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/chunk_state.h"
 #include "core/store/replica/memory_state.h"
+#include "core/store/replica/unified_memory_authority.h"
 #include "core/store/runtime/context/runtime_context_events.h"
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
 #include "core/store/runtime/metadata/metadata_gateway.h"
@@ -30,6 +31,7 @@
 #include "core/store/runtime/replica/replica_info.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/runtime/runtime_env.h"
+#include "core/store/seal_assembly_result.h"
 #include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
@@ -80,11 +82,25 @@ class StoreEngine {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
-      gsl::not_null<void*> target_ptr,
-      uint64_t total_size,
+      const loading::IntoTargetLayout& target_layout,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints = {});
+
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
+      std::string_view assembly_id,
+      std::string_view target_artifact_id,
+      std::string_view view_id,
+      std::string_view view_spec_json,
+      const DeviceKey& target_device,
+      loading::TransformPlacement placement,
+      const std::vector<std::string>* allowed_view_ids = nullptr);
+
+  absl::StatusOr<SealAssemblyResult> seal_assembly(
+      std::string_view assembly_id,
+      bool publish_canonical,
+      runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb = {},
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
   absl::StatusOr<loading::ReplicaHandle> ingest_from_p2p(
       const std::string& artifact_identifier,
@@ -103,6 +119,11 @@ class StoreEngine {
       std::string_view canonical_index_json,
       const loader::ViewSpec& spec);
 
+  static absl::StatusOr<loader::ViewPlan> compute_view_plan(
+      std::string_view canonical_index_json,
+      const loader::ViewSpec& spec,
+      absl::Span<const std::string> subset_names);
+
   static bool view_plan_allows_alias(const loader::ViewPlan& plan);
 
   static absl::StatusOr<std::string> compute_view_data_hash_from_source(
@@ -111,6 +132,7 @@ class StoreEngine {
       size_t leaf_chunk_bytes = 4ULL * 1024 * 1024);
 
   using ViewPlacement = runtime::metadata::ViewPlacement;
+  using ViewRegistrationKind = runtime::metadata::ViewRegistrationKind;
   using CanonicalRange = runtime::metadata::CanonicalRange;
   using ViewRegistration = runtime::metadata::ViewRegistration;
 
@@ -172,7 +194,9 @@ class StoreEngine {
   /**
    * @brief Returns the set of devices where a given artifact_id is already loaded.
    */
-  [[nodiscard]] std::vector<DeviceKey> get_resident_devices(std::string_view artifact_id) const;
+  [[nodiscard]] std::vector<DeviceKey> get_resident_devices(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   [[nodiscard]] std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
 
@@ -181,7 +205,9 @@ class StoreEngine {
    *        one GPU; returns -1 if not present on any GPU; returns InvalidArgument
    *        when the artifact resides on multiple GPUs (ambiguous without a device).
    */
-  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(std::string_view artifact_id) const;
+  [[nodiscard]] absl::StatusOr<int> get_unique_gpu_residency(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) const;
 
   /**
    * @brief Inject a custom Global Store client (primarily for testing).
@@ -203,6 +229,11 @@ class StoreEngine {
   [[nodiscard]] absl::StatusOr<StableCacheAdmissionResult> admit_stable_cache_policy(
       const loading::ReplicaKey& key,
       const components::StableDramCachePolicy& policy);
+
+  [[nodiscard]] absl::Status update_stable_cache_policy(
+      const loading::ReplicaKey& key,
+      const components::StableDramCachePolicy& policy,
+      std::optional<absl::Time> retention_deadline = std::nullopt);
 
   /**
    * @brief Returns all ReplicaKey(s) that reside on a particular device.
@@ -242,6 +273,18 @@ class StoreEngine {
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location);
 
+  [[nodiscard]] absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> set_replica_exported(
+      const loading::ReplicaKey& key,
+      common::memory::MemoryLocation location,
+      absl::Span<const uint32_t> chunks,
+      bool on);
+
+  [[nodiscard]] absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> acquire_replica_stable_lease(
+      const loading::ReplicaKey& key,
+      absl::Span<const uint32_t> chunks);
+
+  [[nodiscard]] absl::Status release_replica_stable_lease(const replica::UnifiedMemoryAuthority::StableLease& lease);
+
   // Register a loaded replica with the Global Store if connected. When
   // artifact_id_override is provided it must be a canonical `mi2:` identifier
   // (e.g., disk-ingested replicas that computed hashes locally); otherwise the
@@ -263,6 +306,7 @@ class StoreEngine {
       std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration());
   absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
+  absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id);
   absl::Status revoke_key_mapping(std::string_view key);
 
   // --------------------------------------------------------------------

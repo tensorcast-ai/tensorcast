@@ -13,6 +13,7 @@ Related docs:
 - Public surface and caller contracts: [API Design](./api-design.md)
 - Policy and what happens after commit: [Policy & Persistence](./policy-persistence.md)
 - Region registration and teardown: [Region-Backed](./region-backed.md)
+- View semantics and piece assembly: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure modes and retry guidance: [Error, Retry, Observability](./error-retry-observability.md)
 
 ## What is “registration”?
@@ -126,7 +127,9 @@ The commit response is the boundary where the artifact becomes addressable:
 - `artifact_descriptor` contains the content-addressed artifact id and related metadata.
 - `existed=true` indicates idempotent join of an existing local replica/lease.
 - `local_stable_tier` reports whether synchronous local stable admission succeeded (see below).
-- view fields (`view_id`, `canonical_ranges`, `allow_partial`) apply to view registrations.
+- view fields (`view_id`, `canonical_ranges`, `registration_kind`) apply to view
+  registrations. `allow_partial` is deprecated and maps to
+  `registration_kind=PIECE`.
 
 ## Lease In Place Path
 
@@ -222,5 +225,5 @@ sequenceDiagram
 - SDK registration: [tensorcast/api/store/registration.py](../../../tensorcast/api/store/registration.py)
 - Storage graph and LIP upload: [tensorcast/api/_register.py](../../../tensorcast/api/_register.py)
 - Daemon registration controller: [daemon/service/controllers/registration_controller.cc](../../../daemon/service/controllers/registration_controller.cc)
-- Policy resolution: [daemon/store_policy_resolver.cc](../../../daemon/store_policy_resolver.cc)
+- Policy resolution: [daemon/state/store_policy_resolver.cc](../../../daemon/state/store_policy_resolver.cc)
 - Stable cache admission: [core/store/components/stable_dram_cache_manager.h](../../../core/store/components/stable_dram_cache_manager.h)

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -11,6 +11,7 @@
 #include "core/store/materialization/contracts/view/view_plan.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
 #include "core/store/replica/replica.h"
+#include "core/store/store_engine_options.h"
 
 namespace tensorcast::store {
 
@@ -21,6 +22,7 @@ using tensorcast::store::materialization::view::ViewPlan;
 
 struct ViewHashConfig {
   size_t default_leaf_chunk_bytes = 4ULL * 1024 * 1024;
+  StoreEngineOptions::ByteMappingConfig byte_mapping{};
 };
 
 // Centralized view hashing helper that exposes both in-memory and stream-based
@@ -55,6 +57,7 @@ class ViewHashComputer {
 
  private:
   size_t default_leaf_chunk_bytes_;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_;
 };
 
 // Legacy helper preserved for callers that have not yet been migrated to the

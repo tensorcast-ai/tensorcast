@@ -48,6 +48,18 @@ def restore_tensors(
     memory_base_address: Mapping[_DeviceId, _Ptr],
     tensor_device_offsets: Mapping[_DeviceId, Mapping[str, _Offset]],
     from_ipc_shm: bool,
+    lease_token: bytes = b"",
+    local_handle_socket_path: str = "",
+) -> Dict[str, torch.Tensor]: ...
+
+def restore_tensors_from_cpu_fd_with_lease(
+    meta_state_dict: Mapping[str, Tuple[Sequence[int], Sequence[int], str, int]],
+    fd: int,
+    size_bytes: int,
+    offset_bytes: int,
+    tensor_device_offsets: Mapping[str, _Offset],
+    lease_token: bytes,
+    local_handle_socket_path: str,
 ) -> Dict[str, torch.Tensor]: ...
 
 

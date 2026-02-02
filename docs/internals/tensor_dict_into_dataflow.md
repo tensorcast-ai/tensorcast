@@ -8,7 +8,11 @@ areas: ["sdk", "daemon", "core"]
 
 This document describes how `tensor_dict_into` / `tensor_into` / `get_into` populate
 caller-owned tensors. It covers the legacy daemon-owned replica path and the
-region-backed path introduced in Design 0042.
+region-backed path described in `docs/architecture/api/region-backed.md`.
+
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/api/region-backed.md`
 
 ## Legacy path (daemon-owned replica)
 
@@ -51,8 +55,8 @@ sequenceDiagram
   participant Engine as StoreEngine
   participant GS as Global Store
 
-  SDK->>SDK: Build TargetLayout + TargetTensorOffset
-  SDK->>Daemon: MaterializeIntoTarget (artifact_id, layout, device_uuid)
+  SDK->>SDK: Build TargetLayout + TargetTensorOffset (canonical or view index)
+  SDK->>Daemon: MaterializeIntoTarget (artifact_id, layout, device_uuid, pid, view/subset)
   Daemon->>Daemon: Acquire IpcRegionRegistry ref + map IPC handle
   Daemon->>Engine: materialize_into_target(target_ptr, total_size, index_json)
   Engine->>GS: RequestReplicaTransport (if P2P)
@@ -60,12 +64,16 @@ sequenceDiagram
   Daemon-->>SDK: success (no mem_handle)
 ```
 
-Phase 1 constraints:
+Current constraints:
 
 - `artifact_id` required; key-based resolution is not supported.
-- Canonical index only; no view/subset (no `tensor_names` or `view_subset_hash`).
-- Single coalesced storage; `storage_length` must match the logical total size.
+- Canonical or view-indexed layouts supported; view/subset selection uses `tensor_names` and optional `view_subset_hash`.
+- Non-identity views require a deterministic `view_id` that matches `target_layout.view_id`.
+- `view_subset_hash` is treated as raw digest bytes and must match the selected names when provided.
+- Coalesced storages may be single or ordered-concatenation multi-storage; the storage lengths must span the selected logical ByteSpace.
 - `device_uuid` is required and must match `storage.device_id`.
+- The RPC is loopback/UDS only; `pid` is required and must match the registered
+  region owner PID.
 - Verification is skipped for external targets; metrics record the skip.
 
 Failure handling:

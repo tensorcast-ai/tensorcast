@@ -5,9 +5,9 @@
 #pragma once
 
 #include "core/store/store_engine.h"
-#include "daemon/lip_manager.h"
-#include "daemon/rpc_context.h"
-#include "daemon/transport_lock_manager.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/transport_lock_manager.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
 namespace tensorcast::daemon {

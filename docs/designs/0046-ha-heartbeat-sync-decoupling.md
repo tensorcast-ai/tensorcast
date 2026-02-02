@@ -4,8 +4,8 @@ title: HA Heartbeat and State Sync Decoupling (Design)
 status: draft
 areas: ["daemon", "core", "global_store"]
 related_code:
-  - daemon/worker_lifecycle_manager.{h,cc}
-  - daemon/server_main.cc
+  - daemon/ha/worker_lifecycle_manager.{h,cc}
+  - daemon/app/server_main.cc
   - core/store/components/global_store_client.{h,cc}
   - proto/tensorcast/config/v1/daemon_config.proto
   - tensorcast/global_store/grpc_service.py
@@ -123,6 +123,6 @@ None.
 
 # References
 
-- `daemon/worker_lifecycle_manager.cc`
+- `daemon/ha/worker_lifecycle_manager.cc`
 - `core/store/components/global_store_client.cc`
 - `docs/designs/0004-unified-runtime-config.md`

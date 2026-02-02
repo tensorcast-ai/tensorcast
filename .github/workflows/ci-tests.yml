@@ -53,7 +53,7 @@ jobs:
           bazelisk-cache: true
           disk-cache: ${{ github.workflow }}
           repository-cache: true
-          bazelisk-version: 1.16.0
+          bazelisk-version: 1.28.1
 
       - name: Create symlink to external packages
         run: |
@@ -351,6 +351,5 @@ jobs:
           uv run pytest tests/python/ -v --tb=short
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/tensorcast/lib:${{ env.LD_LIBRARY_PATH }}
-          GLIBC_TUNABLES: glibc.rtld.optional_static_tls=4096
           TENSORCAST_CUDA_BACKEND: fake
         shell: bash

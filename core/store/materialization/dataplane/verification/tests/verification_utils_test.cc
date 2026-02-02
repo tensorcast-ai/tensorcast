@@ -58,6 +58,10 @@ class VectorSource : public tensorcast::store::loader::SeekableSource {
  public:
   explicit VectorSource(std::vector<uint8_t> data) : data_(std::move(data)) {}
 
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
+
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     const size_t to_copy = std::min(max_bytes, data_.size() - cursor_);
     std::memcpy(dst, data_.data() + cursor_, to_copy);

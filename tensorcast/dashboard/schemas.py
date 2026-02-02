@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Pydantic response models and conversion helpers for the dashboard API."""
 
@@ -311,6 +311,8 @@ class CoverageRange(BaseModel):
 
 
 class PartialCoverageEntry(BaseModel):
+    """Missing byte coverage ranges (units: bytes)."""
+
     space_kind: str
     space_id: str
     missing: list[CoverageRange]
@@ -319,15 +321,66 @@ class PartialCoverageEntry(BaseModel):
     def from_proto(
         cls, detail: global_store_pb2.PartialCoverageDetail
     ) -> "PartialCoverageEntry":
-        mapping = {
-            global_store_pb2.ByteSpaceKind.BYTE_SPACE_KIND_CANONICAL: "CANONICAL",
-            global_store_pb2.ByteSpaceKind.BYTE_SPACE_KIND_VARIANT: "VARIANT",
-        }
-        space_kind = mapping.get(detail.space_kind, "UNSPECIFIED")
+        if not detail.HasField("hash_space"):
+            return cls(space_kind="UNSPECIFIED", space_id="", missing=[])
+        hash_space = detail.hash_space
+        byte_space = hash_space.byte_space
+        if byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL:
+            space_kind = "CANONICAL"
+            space_id = hash_space.canonical_index_multihash
+        elif byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+            space_kind = "VIEW"
+            space_id = byte_space.id
+        else:
+            space_kind = "UNSPECIFIED"
+            space_id = ""
         return cls(
             space_kind=space_kind,
-            space_id=detail.space_id,
+            space_id=space_id,
             missing=[CoverageRange.from_proto(rng) for rng in detail.missing_ranges],
+        )
+
+
+class LeafIndexRangeEntry(BaseModel):
+    start: int
+    count: int
+
+    @classmethod
+    def from_proto(cls, rng: global_store_pb2.LeafIndexRange) -> "LeafIndexRangeEntry":
+        return cls(start=rng.start, count=rng.count)
+
+
+class PartialLeafCoverageEntry(BaseModel):
+    """Missing Merkle leaf digest ranges (units: leaf indices)."""
+
+    space_kind: str
+    space_id: str
+    missing: list[LeafIndexRangeEntry]
+
+    @classmethod
+    def from_proto(
+        cls, detail: global_store_pb2.PartialLeafCoverageDetail
+    ) -> "PartialLeafCoverageEntry":
+        if not detail.HasField("hash_space"):
+            return cls(space_kind="UNSPECIFIED", space_id="", missing=[])
+        hash_space = detail.hash_space
+        byte_space = hash_space.byte_space
+        if byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL:
+            space_kind = "CANONICAL"
+            space_id = hash_space.canonical_index_multihash
+        elif byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+            space_kind = "VIEW"
+            space_id = byte_space.id
+        else:
+            space_kind = "UNSPECIFIED"
+            space_id = ""
+        return cls(
+            space_kind=space_kind,
+            space_id=space_id,
+            missing=[
+                LeafIndexRangeEntry.from_proto(rng)
+                for rng in detail.missing_leaf_ranges
+            ],
         )
 
 
@@ -354,6 +407,7 @@ class ArtifactDetailResponse(BaseModel):
     replicas: list[ArtifactReplica] = Field(default_factory=list)
     leaves: list[LeafEntry] = Field(default_factory=list)
     partial_coverage: list[PartialCoverageEntry] = Field(default_factory=list)
+    partial_leaf_coverage: list[PartialLeafCoverageEntry] = Field(default_factory=list)
     view_meta: ViewMetaEntry | None = None
 
     @classmethod
@@ -367,6 +421,10 @@ class ArtifactDetailResponse(BaseModel):
         coverage = [
             PartialCoverageEntry.from_proto(detail)
             for detail in response.partial_coverage
+        ]
+        leaf_coverage = [
+            PartialLeafCoverageEntry.from_proto(detail)
+            for detail in response.partial_leaf_coverage
         ]
         descriptor_entry = (
             ArtifactDescriptorEntry.from_proto(response.descriptor)
@@ -390,6 +448,7 @@ class ArtifactDetailResponse(BaseModel):
             replicas=replicas,
             leaves=leaves,
             partial_coverage=coverage,
+            partial_leaf_coverage=leaf_coverage,
             view_meta=view_meta,
         )
 

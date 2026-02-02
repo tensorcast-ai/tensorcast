@@ -16,12 +16,23 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 
 - gRPC surface for artifact loading, lifecycle, key mapping, and status.
 - Orchestration via controllers with strong input validation and deadline handling.
-- Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking.
+- Ephemeral state management with TTL: sessions (`replica_uuid` → key + readiness), PID references, transport locks, verification tracking. Session joins are safe under retries: reusing a `replica_uuid` for a different `ReplicaKey` fails fast (`FAILED_PRECONDITION`) instead of silently overwriting state.
+- Programmable control-plane RPCs for operation-scoped wait/cancel: `QueryReplicaStatus`, `WaitReplicaStatus` (unary long-poll), and `ReleaseReplica` operate on `replica_uuid` operation records (not replica identity).
+- Placement pin RPCs (`CreatePlacementLease`, `RenewPlacementLease`, `ReleasePlacementLease`) expose daemon-owned placement pins behind a daemon-scoped capability token (`lease_token`) for renew/release.
+- Retention handle RPCs (`AcquireRetentionHandle`, `RenewRetentionHandle`, `ReleaseRetentionHandle`) issue daemon-scoped, capability-tokenized handles that keep local stable DRAM rematerializable for a bounded TTL. Acquire fails fast with explicit errors if handle ID/token minting or lease creation fails (before stable cache admission). When the last handle is released/expired, the daemon downgrades stable retention intent so resources can be reclaimed. Metrics: `tc_retention_handles_active`, `tc_retention_bytes_charged`, `tc_retention_handles_expired_total`.
+- Materialization supports explicit `lease_mode`; `NO_LEASE` is used for process-independent daemon-owned actions (prefetch/pinning) and disables PID-bound use leases / IPC handle lease minting.
+- Local-only handle plane (Unix domain socket) for handle leases: exchanges CPU memfd FDs (`SCM_RIGHTS`) and releases `lease_token`s when client tensor views are destroyed. Handle leases are only minted for loopback/UDS gRPC callers; CPU shared-memory materialization is rejected for non-loopback peers. When `engine.cpu_shared_memory.enabled=true` and `lifecycle.handle_leases.local_handle_socket_path` is empty, the daemon auto-selects
+  `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on `TENSORCAST_INSTANCE`); set the socket path explicitly when daemon and client SDK run in different pods. Handle lease minting can be rate-limited via `lifecycle.handle_leases.max_mints_per_second` as a guardrail against buggy/abusive clients. Handle-lease TTL is disabled by default (PID-exit + explicit release); operators may enable TTL as a crash/bug backstop. Metrics: `tc_handle_leases_active_gauge`, `tc_handle_cpu_exports_active_gauge`.
 - Event-driven background scheduling with a unified `SessionLifecycleTask` (sessions TTL, PID liveness, registration join TTL), plus Lock TTL and Verification tasks. The lifecycle manager exposes a schedule hook so the scheduler can be rescheduled immediately when the earliest deadline changes, minimizing expiry drift.
 - Observability wrappers that attach unified metrics and tracing to each RPC.
-- Handles view registration uploads (slice/transpose) without feature flags: `RegistrationController` streams view chunks to the StoreEngine and publishes variant telemetry through Global Store (see [Variant View Registration Telemetry](../docs/architecture/p2p-transfer-strategies.md#variant-view-registration-telemetry)).
+- Handles view registration uploads (slice/transpose) without feature flags: `RegistrationController` streams view chunks to the StoreEngine and publishes view telemetry through Global Store (see [View Registration Telemetry](../docs/architecture/p2p-transfer-strategies.md#view-registration-telemetry)). Registration now requires `registration_kind` (`CANONICAL` or `PIECE`); `allow_partial` is deprecated. Piece registrations are selection-only and reject transpose. The daemon computes deterministic `view_id` values from the canonical index + view spec when omitted and rejects mismatches when supplied.
+- Supports assembly sealing (`SealAssembly`) and binding-aware reads: materialization resolves `assembly_id → mi2_id` when sealed, and piece registrations are rejected after sealing.
+- Post-seal policies (`post_seal.*` config) can migrate cached views under the sealed `mi2_id`, enable proof-gated reuse
+  of CGID-scoped views, and retire CGID-scoped pieces after seal to reclaim memory.
 - Enforces routable advertisement when registering with Global Store; if `server.advertise.host` is set but non-routable, startup fails. Resolution prefers `server.advertise.host`, then a routable `server.listen.host`, then the outbound route IP to the configured Global Store endpoint, and finally the default interface IP. Startup fails if no routable IP can be determined, and the resolved advertise address is logged.
-- Requires `server.storage_path` as a shared disk root; the daemon canonicalizes this root on startup, and all `disk_path` inputs are canonicalized under it and rejected when they escape it.
+- HA registration/heartbeats require a stable `daemon_id` (from daemon config) so Global Store can reconcile restarts and address changes without using address:port as identity.
+- When `capability_directory.enabled=true`, HA registration/heartbeats publish daemon capability flags (retention handles, capability-token envelope) so brokers/controllers can discover compatible daemons.
+- When `server.storage_path` is set, the daemon canonicalizes this shared disk root on startup and rejects `disk_path` inputs that escape it; when empty, disk materialization is disabled and `disk_path` inputs are rejected.
 - Immediate reclaim: when the last UseLease retires and no PlacementPins remain for a daemon-owned GPU replica, the lifecycle finalizer unloads the replica immediately (best-effort).
 - Eviction consults lifecycle counters (use_count, placement_pins); request-level cache hints removed.
 - Join TTL via leases: duplicate coalesced commits (`existed=true`) create a TTL-bound UseLease for the owner PID. On expiry, the lease finalizer drops the lightweight RefTracker ref and may reclaim memory immediately.
@@ -40,31 +51,37 @@ The Store Daemon is the data-plane service process that exposes a stable gRPC AP
 
 ```mermaid
 flowchart TB
-  SVC[StoreDaemonService (gRPC)] --> CTRLS[Controllers]
-  CTRLS --> MGRS[Managers/Registries]
-  CTRLS --> OBS[RpcContext (metrics/tracing)]
-  MGRS --> RUNTIME[BackgroundScheduler]
-  MGRS --> ENGINE[StoreEngine]
-  CTRLS --> ENGINE
+  Main["server_main.cc"] --> App["DaemonApp<br>(composition root)"]
+  App --> Kernel["DaemonKernel<br>(state + background tasks)"]
+  App --> Svc["StoreDaemonServiceImpl<br>(gRPC adapter)"]
+  App --> Uds["LocalHandleServer<br>(UDS adapter)"]
+  App --> Ha["WorkerLifecycleManager<br>(HA adapter)"]
+
+  Svc --> Ctrls[Controllers]
+  Ctrls --> Kernel
+  Ha --> Ports["WorkerLifecyclePorts<br>(narrow ports)"]
+  Ports --> Kernel
 ```
 
-- Service (gRPC): constructs dependencies, gates shutdown, validates inputs, maps `absl::Status` to gRPC.
+- App (composition root): constructs and wires subsystems; owns start/stop order for background tasks, UDS, gRPC, and HA.
+- Service (gRPC): thin adapter that routes RPCs to controllers and maps `absl::Status` to gRPC.
 - Controllers:
   - MaterializationController: `Materialize*`, `Confirm`, `WaitVerification`, `Unload`, `GetArtifactIndexById`.
   - RegistrationController: `Begin`/`Feed`/`KeepAlive`/`Commit`/`Abort`/`Revoke` (unified feed path).
   - TransportController: `LockTransportChunks`/`UnlockTransportChunks`.
   - StatusController: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2`.
-- Managers/Registries:
-  - RegistrationManager, SessionsService + ReplicaSessionManager, RefTracker, TransportLockManager, VerificationTracker, LipManager/LipBridge.
+- State/Kernel:
+  - DaemonKernel owns long-lived state (sessions, registries, lifecycle, persistence, identity) and wires background tasks.
   - Runtime: BackgroundScheduler runs the unified `SessionLifecycleTask` for sessions/PID/join TTL, plus Lock TTL and Verification tasks, with “sleep until deadline or signal” semantics. PID liveness is event-driven via a `PidMonitor` (pidfd + epoll) with a `/proc` polling fallback when pidfd is unavailable.
+- HA: WorkerLifecycleManager uses `WorkerLifecyclePorts` (identity, retire gates, shutdown, async runtime) and does not depend on gRPC internals.
 - Engine: single source of truth for materialization orchestration, memory lifecycle, UMA ledger semantics, verification readiness.
 
 ## Interfaces (Public Surface)
 
 - Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`. Materialization responses include descriptor payloads derived from UMA view plans (offset/stride/byte-length) so exported buffer layouts match the planner.
-- Region-backed loading: `MaterializeIntoTarget` streams bytes directly into a client-registered CUDA region when the SDK supplies a full coalesced `TargetLayout` (`layout_kind=LAYOUT_KIND_COALESCED_UNSPECIFIED`, `index_kind=INDEX_KIND_CANONICAL_UNSPECIFIED`, `tensor_spec_kind=TENSOR_SPEC_KIND_OFFSETS`) and `artifact_id`. The daemon validates layout/device constraints, maps the IPC handle, and never allocates a daemon-owned replica.
+- Region-backed loading: `MaterializeIntoTarget` streams bytes directly into client-registered CUDA regions with a coalesced `TargetLayout`. Canonical and view-indexed byte spaces are supported (including packed subset selection via `tensor_names`/`view_subset_hash`); non-identity views must resolve a deterministic `view_id` that matches `target_layout.view_id`. The daemon validates layout/device/region constraints, maps the IPC handles (single or ordered-concatenation multi-storage), and never allocates a daemon-owned replica. Successful calls may return a `target_write_token`; `PublishTargetReplica` publishes the filled target as a routable memory replica without re-hashing GPU bytes, and `RetirePublishedReplica` performs a safe retire (GS drain + local cleanup) before overwrite with drain waits bounded by `drain_timeout_ms` across Global Store and local export drain. `DeregisterArtifact` now accepts `ByteSpaceRef` to target canonical vs view replicas explicitly.
 - Disk fallbacks honor `verify_checksums` on `DiskFallbackHint`/`MaterializeReplicaRequest` and propagate the flag into engine `MaterializeHints` so checksum/descriptor validation is enforced by default but can be disabled for local development.
-- Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`.
+- Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`, `SealAssembly`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
@@ -74,9 +91,10 @@ flowchart TB
 
 Contract highlights:
 - `Materialize*` returns after allocation with a CUDA IPC handle; clients must `ConfirmReplica` and may `WaitReplicaVerification`.
+- `WaitReplicaStatus` is a unary long-poll: `timeout_ms=0` waits until the replica reaches a terminal state or the RPC deadline expires; `timeout_ms>0` bounds the server-side wait and is clamped to the RPC deadline.
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
 - `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
-- `MaterializeIntoTarget` requires canonical layouts and `artifact_id` in Phase 1, skips verification, and returns `DATA_LOSS` on post-start failures after poisoning the region to prevent reuse.
+- `MaterializeIntoTarget` requires `artifact_id`, accepts canonical or view-indexed layouts (including subset-packed and multi-storage coalesced targets), and can optionally verify external target writes when `engine.enable_external_target_verification=true`; verification failures poison the region and return `DATA_LOSS`.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 - `UnloadReplica` surfaces detailed failure reasons (state/location/release status) via gRPC status messages so clients can
   diagnose unload failures without daemon-side logs.
@@ -86,6 +104,9 @@ Contract highlights:
 - `MaterializeReplicaRequest` accepts optional `view` (deterministic slice/transpose spec) or `view_id` along with a `placement` hint (`SERVER` for slice/min-byte, `CLIENT` for transpose). Requests using `view` require the canonical `artifact_id` so the daemon can normalise against canonical index v3.
 - When a non-identity view is requested, `MaterializeReplicaResponse` populates `view_index_json` (canonicalised layout for the requested ByteSpace) and `view_data_hash` when verification completes. For canonical disk-source loads, `view_index_json` is also filled from the artifact directory so clients can reconstruct tensors without querying Global Store.
 - The controller collapses identity views to the canonical path, preserves LIP fast-path semantics, and forwards `VariantIdentity` into the StoreEngine so replica keys and telemetry track `(artifact_id, view_id)` tuples.
+- When `post_seal.reuse_views_if_safe=true`, view requests for sealed assemblies may reuse CGID-scoped view replicas
+  only after Global Store verifies proof-commitment equality for replicated tensors; otherwise the request fails with
+  the original `NOT_FOUND` for the missing mi2-scoped view.
 
 ## Invariants and Guardrails
 
@@ -104,24 +125,23 @@ Contract highlights:
 
 ## Directory Layout (What lives here)
 
-- `grpc_service_impl.{h,cc}`: thin gRPC service entry points and dependency wiring.
-- `service/controllers/*`: controllers for materialization, registration, transport, and status.
-- `registration_manager.h`, `replica_session_manager.h`, `sessions_service.h`: unified registration/session lifecycles with TTL.
-- `ref_tracker.h`: PID reference tracking; liveness integrated via `SessionLifecycleTask`.
-- `transport_lock_manager.h`: tokenized chunk locking with TTL and best-effort unlock.
-- `verification_tracker.h`: completion-driven verification tracking (ReadySignal subscriptions) with capacity/expiry pruning.
-- `lip_manager.{h,cc}`, `lip_bridge.{h,cc}`: LIP fast path and cross-device helpers.
-- `background_scheduler.h`, `session_lifecycle.h`, `sweep_tasks.h`: event-driven runtime scheduler and lifecycle/task definitions.
-- `ipc_region_registry.{h,cc}`: tracks client-registered CUDA IPC regions with TTL, refcounts, and poison state.
-- `rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `deadline_utils.h`, `device_resolver.h`, `status_utils.h`.
-- `worker_lifecycle_manager.{h,cc}`: integration with Global Store (register/heartbeat/reconcile) using a constructor-built `gsl::not_null` `GlobalStoreClient`, fixed node identity captured at construction, and a mutable worker id that is populated during registration; heartbeat/state sync run independently with monotonic sync tokens (epoch + request id), inventory/checksums use publishable + resident replicas, state sync includes remote_memory_keys/buffer_sizes when comm registration is enabled, heartbeat obsolete hints only request sync, and full-state sync/REMOVE changes enqueue a retire queue that disables remote access (GPU/CPU) and unloads only after ref/use/pin/transport-lock gates clear; `start()` performs the handshake/registration, and shutdown signals interruptible waits so stop exits promptly.
-- `server_main.cc`: flags/bootstrap and service registration.
+- `app/`: composition root (`daemon_app.{h,cc}`), entrypoint (`server_main.cc`), shutdown drain test.
+- `service/`: gRPC adapter (`grpc_service_impl.{h,cc}`), controllers (`service/controllers/*`), and RPC helpers (`rpc_context.h`, `grpc_span.h`, `grpc_metrics.h`, `replica_listing.h`).
+- `ha/`: HA adapter (`worker_lifecycle_manager.{h,cc}`) and `worker_lifecycle_ports.h` for decoupled state access.
+- `state/`: daemon kernel and state modules (`daemon_kernel.{h,cc}`, `shutdown_signal.h`, `worker_identity_store.{h,cc}`, `retire_gates.{h,cc}`),
+  registries/lifecycle (`session_lifecycle.{h,cc}`, `pid_monitor.{h,cc}`, `replica_session_manager.h`, `sessions_service.h`,
+  `ref_tracker.h`, `handle_lease_registry.{h,cc}`, `ipc_region_registry.{h,cc}`, `transport_lock_manager.h`,
+  `verification_tracker.h`, `background_scheduler.h`, `sweep_tasks.h`, `persistence_manager.{h,cc}`, `local_handle_server.{h,cc}`).
+- `util/`: shared helpers (`path_utils.{h,cc}`, `identity_utils.{h,cc}`, `deadline_utils.h`, `grpc_peer_utils.{h,cc}`, `status_utils.h`).
+- `testing/`: shared daemon service harness for gRPC tests, plus the spawn-based `cuda_ipc_helper` used by CUDA IPC tests.
+- `common/`: low-level safe syscall wrappers (`safe_sys.h`).
 
 ## Build, Run, Test
 
 - Build binary: `bazel build //daemon:tensorcast_daemon`
 - Launch with unified config: see `../docs/deployment/store-daemon.md`
 - C++ tests: `bazel test //daemon:grpc_service_impl_registration_test` (and related `*_test.cc` in this directory)
+- CUDA IPC tests spawn `//daemon:cuda_ipc_helper` via runfiles; when running outside Bazel, build it in `bazel-bin/daemon/`.
 
 ## Error Handling Conventions
 
@@ -132,6 +152,8 @@ These conventions improve observability while keeping best‑effort paths fast a
 ## Key Links
 
 - Architecture overview: `../docs/architecture/architecture-overview.md`
+- Artifact views and retrieval: `../docs/architecture/artifact-views-and-retrieval.md`
+- View replicas and assembly: `../docs/architecture/view-replicas-and-assembly.md`
 - Model loading internals: `../docs/internals/model-loading.md`
 - P2P transfer strategies: `../docs/architecture/p2p-transfer-strategies.md`
 - Store Engine internals: `../core/store/README.md`

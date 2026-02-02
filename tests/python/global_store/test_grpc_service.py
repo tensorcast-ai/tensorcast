@@ -10,6 +10,11 @@ import grpc
 from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.config.settings import (
+    GlobalStoreConfig,
+    get_config,
+    set_config,
+)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -106,6 +111,248 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_mark_replica_unavailable_idempotent(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        register_response = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_unavailable",
+                mem_info=memory_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        replica_id = register_response.replica_id
+        first = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="test_artifact_unavailable", replica_id=replica_id
+            ),
+            test_context,
+        )
+        assert first.status == global_store_pb2.Status.STATUS_OK
+        assert first.updated is True
+
+        second = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="test_artifact_unavailable", replica_id=replica_id
+            ),
+            test_context,
+        )
+        assert second.status == global_store_pb2.Status.STATUS_OK
+        assert second.updated is True
+
+    def test_wait_replica_drain_timeout_snapshot(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        register_response = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_drain",
+                mem_info=memory_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        replica_id = register_response.replica_id
+
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        transport_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_drain",
+                local_memory_info=memory_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+            ),
+            test_context,
+        )
+        assert transport_response.status == global_store_pb2.Status.STATUS_OK
+
+        drain_response = servicer.WaitReplicaDrain(
+            global_store_pb2.WaitReplicaDrainRequest(
+                replica_id=replica_id, timeout_ms=1
+            ),
+            test_context,
+        )
+        assert drain_response.status == global_store_pb2.Status.STATUS_TIMED_OUT
+        assert drain_response.drained is False
+        assert drain_response.current_requests == 1
+        assert drain_response.HasField("oldest_transport_age_ms")
+
+        current = servicer.replica_repository.get_current_requests(
+            uuid.UUID(replica_id)
+        )
+        assert current == 1
+
+        servicer.CompleteReplicaTransport(
+            global_store_pb2.CompleteReplicaTransportRequest(
+                transport_id=transport_response.transport_id
+            ),
+            test_context,
+        )
+
+    def test_worker_capability_flags_filtering(self, servicer, test_context):
+        flags = (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="cap_worker",
+            node_address="192.168.2.10",
+            grpc_port=8010,
+            p2p_port=8011,
+            mem_pool_total_size=1000000000,
+            mem_pool_available_size=900000000,
+            daemon_id="daemon_cap_worker",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert any(
+            w.worker_id == register_response.worker_id for w in list_response.workers
+        )
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert all(
+            w.worker_id != register_response.worker_id for w in list_response.workers
+        )
+
+    def test_instance_capability_flags_filtering(self, servicer, test_context):
+        flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+        register_request = global_store_pb2.RegisterInstanceRequest(
+            instance_id="instance-cap-1",
+            daemon_id="daemon-cap-instance",
+            engine="test",
+            signals_endpoint="ipc://signals",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterInstance(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert any(
+            inst.instance_id == register_request.instance_id
+            for inst in list_response.instances
+        )
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=(
+                    1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED
+                )
+            ),
+            test_context,
+        )
+        assert all(
+            inst.instance_id != register_request.instance_id
+            for inst in list_response.instances
+        )
+
+    def test_worker_capability_flags_clear_on_heartbeat(
+        self, servicer, test_context
+    ):
+        flags = (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
+        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="cap_worker_clear",
+            node_address="192.168.2.20",
+            grpc_port=8020,
+            p2p_port=8021,
+            mem_pool_total_size=1000000000,
+            mem_pool_available_size=900000000,
+            daemon_id="daemon_cap_worker_clear",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=register_response.worker_id,
+                mem_pool_available_size=900000000,
+                accepting_new_requests=True,
+                state_version=1,
+                capability_flags=0,
+            ),
+            test_context,
+        )
+
+        list_response = servicer.ListActiveWorkers(
+            global_store_pb2.ListActiveWorkersRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert all(
+            worker.worker_id != register_response.worker_id
+            for worker in list_response.workers
+        )
+
+    def test_instance_capability_flags_clear_on_heartbeat(
+        self, servicer, test_context
+    ):
+        flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
+        register_request = global_store_pb2.RegisterInstanceRequest(
+            instance_id="instance-cap-clear-1",
+            daemon_id="daemon-cap-instance-clear",
+            engine="test",
+            signals_endpoint="ipc://signals",
+            capability_flags=flags,
+        )
+        register_response = servicer.RegisterInstance(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        servicer.InstanceHeartbeat(
+            global_store_pb2.InstanceHeartbeatRequest(
+                instance_id=register_request.instance_id,
+                capability_flags=0,
+            ),
+            test_context,
+        )
+
+        list_response = servicer.ListActiveInstances(
+            global_store_pb2.ListActiveInstancesRequest(
+                required_capability_flags=flags
+            ),
+            test_context,
+        )
+        assert all(
+            inst.instance_id != register_request.instance_id
+            for inst in list_response.instances
+        )
+
     def test_list_replicas(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -195,6 +442,96 @@ class TestGRPCService:
         assert transport_response.remote_memory_info is not None
         assert transport_response.transport_id is not None
 
+    def test_request_replica_transport_respects_byte_space(
+        self, servicer, test_context, registered_worker
+    ):
+        artifact_id = "artifact-bytespace"
+
+        canonical_info = common_pb2.MemoryInfo(
+            node_id=str(uuid.uuid4()),
+            node_address="192.168.1.10",
+            node_port=8010,
+            memory_size=1024,
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+            device_id=0,
+            byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+            ),
+        )
+        view_id = "view-1"
+        view_info = common_pb2.MemoryInfo(
+            node_id=str(uuid.uuid4()),
+            node_address="192.168.1.11",
+            node_port=8011,
+            memory_size=256,
+            memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
+            device_id=0,
+            byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
+            ),
+        )
+
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=canonical_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id=artifact_id,
+                mem_info=view_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        view_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            local_memory_info=canonical_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
+            ),
+        )
+        view_response = servicer.RequestReplicaTransport(view_request, test_context)
+        assert view_response.status == global_store_pb2.Status.STATUS_OK
+        assert view_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert view_response.remote_memory_info.byte_space.id == view_id
+
+        canonical_request = global_store_pb2.RequestReplicaTransportRequest(
+            artifact_id=artifact_id,
+            local_memory_info=canonical_info,
+            wait_timeout_dur=duration_pb2.Duration(seconds=1),
+            source_node_id="source_node",
+            source_address="192.168.1.2",
+            source_port=9000,
+            requested_byte_space=common_pb2.ByteSpaceRef(
+                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+            ),
+        )
+        canonical_response = servicer.RequestReplicaTransport(
+            canonical_request, test_context
+        )
+        assert canonical_response.status == global_store_pb2.Status.STATUS_OK
+        assert canonical_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
+
     def test_get_artifact_index_by_id_with_multibase(self, servicer, test_context, memory_info, registered_worker):
         index_bytes = b'{"tensor":[0,4,[1],[1],"float32",0]}'
 
@@ -225,6 +562,49 @@ class TestGRPCService:
             test_context,
         )
 
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.tensor_index_data == index_bytes
+
+    def test_register_replica_honors_descriptor_binding(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        index_bytes = b'{"tensor":[0,16,[4],[1],"float32",0]}'
+
+        def _multibase(d: bytes) -> str:
+            digest = hashlib.sha256(d).digest()
+            mh = b"\x12\x20" + digest
+            encoded = base64.b32encode(mh).decode("ascii").strip("=").lower()
+            return "b" + encoded
+
+        index_mh = _multibase(index_bytes)
+        artifact_id = "cgid:test-assembly"
+        descriptor = common_pb2.ArtifactDescriptor(
+            artifact_id=artifact_id,
+            index_multihash=index_mh,
+            data_multihash="",
+            schema_version="v3",
+            encoding="json",
+            total_size=16,
+            id_kind=common_pb2.ARTIFACT_ID_KIND_CGID,
+        )
+
+        register_request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+            tensor_index_data=index_bytes,
+            encoding="json",
+            schema_version="v3",
+            descriptor=descriptor,
+        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        resp = servicer.GetArtifactIndexById(
+            global_store_pb2.GetArtifactIndexByIdRequest(artifact_id=artifact_id),
+            test_context,
+        )
         assert resp.status == global_store_pb2.Status.STATUS_OK
         assert resp.tensor_index_data == index_bytes
 
@@ -308,6 +688,10 @@ class TestGRPCService:
     def test_persistence(self, test_context, memory_info, temp_db_file):
         """Test that the database persists data between servicer instances"""
         try:
+            try:
+                get_config()
+            except RuntimeError:
+                set_config(GlobalStoreConfig())
             # Create a servicer with the file path - DuckDB will create the file
             servicer1 = GlobalStoreServicer(db_file=temp_db_file)
 
@@ -319,6 +703,7 @@ class TestGRPCService:
                 p2p_port=8002,
                 mem_pool_total_size=10000000000,
                 mem_pool_available_size=8000000000,
+                daemon_id="daemon_test_node_1",
             )
             worker_response = servicer1.RegisterWorker(worker_request, test_context)
 
@@ -404,6 +789,7 @@ class TestGRPCService:
         """Test worker registration functionality"""
         request = global_store_pb2.RegisterWorkerRequest(
             node_id="test_node_1",
+            daemon_id="daemon_test_1",
             node_address="192.168.1.10",
             grpc_port=8001,
             p2p_port=8002,
@@ -418,6 +804,45 @@ class TestGRPCService:
         assert len(response.worker_id) > 0
         assert response.heartbeat_interval_ms > 0
 
+    def test_worker_registration_daemon_id_is_stable_identity(
+        self, servicer, test_context
+    ):
+        """Registering with the same daemon_id should upsert the same worker_id."""
+        request1 = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_1",
+            daemon_id="daemon_stable",
+            node_address="192.168.1.10",
+            grpc_port=8001,
+            p2p_port=8002,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+        )
+        response1 = servicer.RegisterWorker(request1, test_context)
+        assert response1.status == global_store_pb2.Status.STATUS_OK
+
+        request2 = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_1",
+            daemon_id="daemon_stable",
+            node_address="192.168.1.11",
+            grpc_port=8005,
+            p2p_port=8006,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=7000000000,
+        )
+        response2 = servicer.RegisterWorker(request2, test_context)
+        assert response2.status == global_store_pb2.Status.STATUS_OK
+        assert response2.worker_id == response1.worker_id
+
+        list_request = global_store_pb2.ListActiveWorkersRequest(
+            include_unavailable=True
+        )
+        list_response = servicer.ListActiveWorkers(list_request, test_context)
+        info_by_id = {w.worker_id: w for w in list_response.workers}
+        info = info_by_id[response1.worker_id]
+        assert info.daemon_id == "daemon_stable"
+        assert info.node_address == "192.168.1.11"
+        assert info.grpc_port == 8005
+
     def test_worker_heartbeat(self, servicer, test_context):
         """Test worker heartbeat functionality"""
         # First register a worker
@@ -428,6 +853,7 @@ class TestGRPCService:
             p2p_port=8002,
             mem_pool_total_size=10000000000,
             mem_pool_available_size=8000000000,
+            daemon_id="daemon_test_node_1",
         )
         register_response = servicer.RegisterWorker(register_request, test_context)
 
@@ -453,6 +879,7 @@ class TestGRPCService:
             p2p_port=8002,
             mem_pool_total_size=10000000000,
             mem_pool_available_size=8000000000,
+            daemon_id="daemon_test_node_1",
         )
         register_response = servicer.RegisterWorker(register_request, test_context)
 
@@ -470,10 +897,11 @@ class TestGRPCService:
     def test_list_active_workers(self, servicer, test_context):
         """Test listing active workers"""
         # Register multiple workers
-        worker_ids = []
+        worker_records = []
         for i in range(3):
             register_request = global_store_pb2.RegisterWorkerRequest(
                 node_id=f"test_node_{i}",
+                daemon_id=f"daemon_{i}",
                 node_address=f"192.168.1.{10+i}",
                 grpc_port=8001 + i,
                 p2p_port=8002 + i,
@@ -481,7 +909,7 @@ class TestGRPCService:
                 mem_pool_available_size=8000000000,
             )
             register_response = servicer.RegisterWorker(register_request, test_context)
-            worker_ids.append(register_response.worker_id)
+            worker_records.append((register_response.worker_id, f"daemon_{i}"))
 
         # List workers
         list_request = global_store_pb2.ListActiveWorkersRequest(
@@ -490,9 +918,10 @@ class TestGRPCService:
         list_response = servicer.ListActiveWorkers(list_request, test_context)
 
         assert len(list_response.workers) >= 3
-        listed_worker_ids = [w.worker_id for w in list_response.workers]
-        for worker_id in worker_ids:
-            assert worker_id in listed_worker_ids
+        info_by_id = {w.worker_id: w for w in list_response.workers}
+        for worker_id, daemon_id in worker_records:
+            assert worker_id in info_by_id
+            assert info_by_id[worker_id].daemon_id == daemon_id
 
     def test_get_artifact_info(
         self, servicer, test_context, memory_info, registered_worker
@@ -543,7 +972,7 @@ class TestGRPCService:
 
         update_request = global_store_pb2.UpdateArtifactViewStateRequest(
             artifact_id=artifact_id,
-            variant=global_store_pb2.VariantUpsert(
+            view=global_store_pb2.ViewUpsert(
                 view_id="view-1",
                 view_spec_json="{}",
                 view_size=4096,
@@ -552,14 +981,21 @@ class TestGRPCService:
             ),
             leaf_writes=[
                 global_store_pb2.LeafWrite(
-                    space_kind=global_store_pb2.BYTE_SPACE_KIND_VARIANT,
-                    space_id="view-1",
+                    hash_space=common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_VIEW, id="view-1"
+                        ),
+                    ),
                     leaf_idx=0,
                     digest=b"\x01" * 32,
                 ),
                 global_store_pb2.LeafWrite(
-                    space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
-                    space_id="index_hash",
+                    hash_space=common_pb2.HashSpaceRef(
+                        byte_space=common_pb2.ByteSpaceRef(
+                            kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                        ),
+                        canonical_index_multihash="index_hash",
+                    ),
                     leaf_idx=2,
                     digest=b"\x02" * 32,
                 ),
@@ -579,7 +1015,8 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        view_request.view_id = "view-1"
+        view_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        view_request.requested_byte_space.id = "view-1"
         view_response = servicer.GetArtifactInfoById(view_request, test_context)
 
         assert view_response.status == global_store_pb2.Status.STATUS_OK
@@ -596,8 +1033,8 @@ class TestGRPCService:
             artifact_id=artifact_id,
             include_replicas=wrappers_pb2.BoolValue(value=False),
             include_leaves=True,
-            canonical=True,
         )
+        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         canonical_response = servicer.GetArtifactInfoById(
             canonical_request, test_context
         )
@@ -614,26 +1051,139 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        partial_request.view_id = "view-1"
+        partial_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        partial_request.requested_byte_space.id = "view-1"
         partial_request.leaf_idxs.extend([0, 3])
         partial_response = servicer.GetArtifactInfoById(partial_request, test_context)
 
         assert partial_response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(partial_response.leaves) == 1
         assert partial_response.leaves[0].leaf_idx == 0
-        assert len(partial_response.partial_coverage) == 1
-        detail = partial_response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
-        assert detail.space_id == "view-1"
-        assert len(detail.missing_ranges) == 1
-        assert detail.missing_ranges[0].off == 3
-        assert detail.missing_ranges[0].len == 1
+        assert len(partial_response.partial_leaf_coverage) == 1
+        detail = partial_response.partial_leaf_coverage[0]
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert detail.hash_space.byte_space.id == "view-1"
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 3
+        assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND
+
+    def test_write_tensor_proof_commitments_roundtrip(self, servicer, test_context):
+        artifact_id = "mi2:index_hash:data_hash"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=artifact_id,
+            index_multihash="index_hash",
+            data_multihash="data_hash",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        req = global_store_pb2.WriteTensorProofCommitmentsRequest(
+            mi2_id=artifact_id,
+            proof_schema_version="v1",
+            commitments=[
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=0,
+                    digest=b"\x01" * 32,
+                ),
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=1,
+                    digest=b"\x02" * 32,
+                ),
+            ],
+        )
+
+        resp = servicer.WriteTensorProofCommitments(req, test_context)
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.inserted == 2
+        assert test_context.code is None
+
+        test_context.code = None
+        resp2 = servicer.WriteTensorProofCommitments(req, test_context)
+        assert resp2.status == global_store_pb2.Status.STATUS_OK
+        assert resp2.inserted == 0
+        assert test_context.code is None
+
+        test_context.code = None
+        conflict = global_store_pb2.WriteTensorProofCommitmentsRequest(
+            mi2_id=artifact_id,
+            proof_schema_version="v1",
+            commitments=[
+                global_store_pb2.TensorProofCommitmentWrite(
+                    tensor_name="weights",
+                    proof_chunk_idx=0,
+                    digest=b"\x03" * 32,
+                ),
+            ],
+        )
+        conflict_resp = servicer.WriteTensorProofCommitments(conflict, test_context)
+        assert conflict_resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+
+    def test_check_proof_commitments_match(self, servicer, test_context):
+        assembly_id = "cgid:assembly-proof"
+        mi2_id = "mi2:index:proof"
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=assembly_id,
+            index_multihash="index",
+            data_multihash="data",
+            schema_version="v3",
+            encoding="json",
+        )
+        servicer.artifacts_repo.upsert_artifact(
+            artifact_id=mi2_id,
+            index_multihash="index",
+            data_multihash="proof",
+            schema_version="v3",
+            encoding="json",
+        )
+
+        servicer.proof_repository.upsert_assembly_proof_commitment(
+            assembly_id=assembly_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=0,
+            digest=b"\x01" * 32,
+        )
+        servicer.proof_repository.upsert_tensor_proof_commitment(
+            mi2_id=mi2_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=0,
+            digest=b"\x01" * 32,
+        )
+
+        req = global_store_pb2.CheckProofCommitmentsMatchRequest(
+            assembly_id=assembly_id,
+            mi2_id=mi2_id,
+            proof_schema_version="v1",
+            tensor_names=["weights"],
+        )
+        test_context.code = None
+        resp = servicer.CheckProofCommitmentsMatch(req, test_context)
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert resp.match is True
+        assert test_context.code is None
+
+        servicer.proof_repository.upsert_assembly_proof_commitment(
+            assembly_id=assembly_id,
+            tensor_name="weights",
+            proof_schema_version="v1",
+            proof_chunk_idx=1,
+            digest=b"\x02" * 32,
+        )
+        test_context.code = None
+        resp2 = servicer.CheckProofCommitmentsMatch(req, test_context)
+        assert resp2.status == global_store_pb2.Status.STATUS_OK
+        assert resp2.match is False
+        assert test_context.code is None
 
     def test_get_artifact_view_info_not_found(
         self, servicer, test_context, memory_info, registered_worker
     ):
-        """Missing variant should respond with NOT_FOUND."""
+        """Missing view should respond with NOT_FOUND."""
         artifact_id = "mi2:index:data"
         servicer.artifacts_repo.upsert_artifact(
             artifact_id=artifact_id,
@@ -657,16 +1207,19 @@ class TestGRPCService:
             include_leaves=True,
             include_view_meta=True,
         )
-        request.view_id = "missing-view"
+        request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+        request.requested_byte_space.id = "missing-view"
         request.leaf_idxs.extend([0, 1])
         response = servicer.GetArtifactInfoById(request, test_context)
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
-        assert len(response.replicas) == 1
-        assert len(response.partial_coverage) == 1
-        detail = response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_VARIANT
-        assert detail.space_id == "missing-view"
-        assert sorted(r.off for r in detail.missing_ranges) == [0, 1]
+        assert len(response.replicas) == 0
+        assert len(response.partial_leaf_coverage) == 1
+        detail = response.partial_leaf_coverage[0]
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert detail.hash_space.byte_space.id == "missing-view"
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 0
+        assert detail.missing_leaf_ranges[0].count == 2
         assert test_context.code == grpc.StatusCode.NOT_FOUND
 
     def test_register_replica_with_cgid(
@@ -688,10 +1241,10 @@ class TestGRPCService:
         assert record["index_multihash"] is None
         assert record["data_multihash"] is None
 
-    def test_get_artifact_canonical_partial_coverage(
+    def test_get_artifact_canonical_partial_leaf_coverage(
         self, servicer, test_context, memory_info, registered_worker
     ):
-        """Canonical leaf queries return partial coverage detail when missing."""
+        """Canonical leaf queries return partial leaf coverage detail when missing."""
         artifact_id = "mi2:index:data"
         servicer.artifacts_repo.upsert_artifact(
             artifact_id=artifact_id,
@@ -715,8 +1268,12 @@ class TestGRPCService:
                 artifact_id=artifact_id,
                 leaf_writes=[
                     global_store_pb2.LeafWrite(
-                        space_kind=global_store_pb2.BYTE_SPACE_KIND_CANONICAL,
-                        space_id="index",
+                        hash_space=common_pb2.HashSpaceRef(
+                            byte_space=common_pb2.ByteSpaceRef(
+                                kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
+                            ),
+                            canonical_index_multihash="index",
+                        ),
                         leaf_idx=0,
                         digest=b"\xaa" * 32,
                     )
@@ -728,18 +1285,18 @@ class TestGRPCService:
         canonical_request = global_store_pb2.GetArtifactInfoByIdRequest(
             artifact_id=artifact_id,
             include_leaves=True,
-            canonical=True,
         )
+        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
         canonical_request.leaf_idxs.extend([0, 2])
         response = servicer.GetArtifactInfoById(canonical_request, test_context)
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
         assert len(response.leaves) == 1 and response.leaves[0].leaf_idx == 0
-        assert len(response.partial_coverage) == 1
-        detail = response.partial_coverage[0]
-        assert detail.space_kind == global_store_pb2.BYTE_SPACE_KIND_CANONICAL
-        assert detail.space_id == "index"
-        assert len(detail.missing_ranges) == 1
-        assert detail.missing_ranges[0].off == 2
-        assert detail.missing_ranges[0].len == 1
+        assert len(response.partial_leaf_coverage) == 1
+        detail = response.partial_leaf_coverage[0]
+        assert detail.hash_space.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
+        assert detail.hash_space.canonical_index_multihash == "index"
+        assert len(detail.missing_leaf_ranges) == 1
+        assert detail.missing_leaf_ranges[0].start == 2
+        assert detail.missing_leaf_ranges[0].count == 1
         assert test_context.code == grpc.StatusCode.NOT_FOUND

@@ -69,7 +69,8 @@ class ReplicaLoadController : public std::enable_shared_from_this<ReplicaLoadCon
       size_t streaming_buffer_chunks,
       uint64_t artifact_size,
       std::optional<std::string> view_id = std::nullopt,
-      std::optional<MemoryTierConfig> memory_tier_config = std::nullopt);
+      std::optional<MemoryTierConfig> memory_tier_config = std::nullopt,
+      bool cpu_shared_memory_enabled = false);
 
   ~ReplicaLoadController() noexcept;
 

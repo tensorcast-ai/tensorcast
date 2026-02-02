@@ -13,6 +13,7 @@ Related docs:
 - Public surface: [API Design](./api-design.md#region-apis)
 - LIP registration internals: [Registration Flow](./registration-flow.md#lease-in-place-path)
 - Region-backed `get_into` (different mechanism, same motivation): [Materialization Flow](./materialization-flow.md#region-backed-get_into-materializeintotarget-v2)
+- View semantics and identity: [Artifact Views and Retrieval](../artifact-views-and-retrieval.md)
 - Failure semantics: [Error, Retry, Observability](./error-retry-observability.md)
 
 ## What is a “VRAM region”?
@@ -102,9 +103,9 @@ Why “fully covered” matters:
 ## Region-Backed get_into (MaterializeIntoTarget)
 
 Region-backed `get_into` uses the same region registry but a different control
-path from LIP registration. The daemon writes directly into an existing CUDA
-region when the target layout is fully coalesced and matches the canonical
-index. No replica is allocated.
+path from LIP registration. The daemon writes directly into existing CUDA
+regions when the target layout is coalesced and matches the selected
+byte-space (canonical or view-indexed). No replica is allocated.
 
 ### SDK preconditions
 
@@ -112,10 +113,11 @@ The SDK enforces strict eligibility rules before invoking
 `MaterializeIntoTarget`:
 
 - `artifact_id` is required (key-based requests are rejected).
-- Full tensor set required (no subset).
-- All target tensors must be CUDA, contiguous, and match canonical dtype/shape/stride.
-- Canonical layout must be coalesced (segment offsets equal storage offsets).
-- The target tensors must map into a single registered region.
+- Canonical or view-indexed selection supported, including packed subsets
+  (`tensor_names`); non-identity views resolve a deterministic `view_id`.
+- All target tensors must be CUDA, contiguous, and match the selected index dtype/shape/stride.
+- Coalesced layouts may span multiple storages using ordered concatenation.
+- Each storage must map into a registered region and cover its logical range.
 
 These checks are implemented in `tensorcast/api/store/materialization.py` and
 `tensorcast/api/_region_cache.py`.
@@ -124,14 +126,21 @@ These checks are implemented in `tensorcast/api/store/materialization.py` and
 
 The daemon validates the request and the layout strictly:
 
+- The RPC is **loopback/UDS only**; non-loopback peers are rejected before any
+  write begins.
 - `TargetLayout` must be `LAYOUT_KIND_COALESCED_UNSPECIFIED` with
-  `INDEX_KIND_CANONICAL_UNSPECIFIED`.
-- Exactly one storage entry, using `vram_region_id` and `mapping_base_offset`.
+  `INDEX_KIND_CANONICAL_UNSPECIFIED` or `INDEX_KIND_VIEW`.
+- One or more storage entries, each using `vram_region_id` and
+  `mapping_base_offset`, ordered by concatenation.
 - `tensor_spec_kind` must be offsets or alias format.
-- All canonical tensors must be present; offsets/lengths must match canonical
-  index entries, and `storage_offset` must equal canonical logical offset.
-- `storage_length` must cover the full logical size.
+- Offsets/lengths must match the selected index entries (canonical or view),
+  and `storage_offset` must equal logical offset within the concatenated layout.
+- `storage_length` must cover the selected logical size.
 - `device_uuid` and `pid` are required and must match the region device.
+- When `INDEX_KIND_VIEW` is used, the daemon resolves a view plan and validates
+  `target_layout.view_id` against the resolved `view_id` (empty for subset-only
+  layouts). `view_subset_hash` is treated as raw digest bytes and must match
+  the selected `tensor_names` when provided.
 
 ### Execution
 
@@ -140,8 +149,10 @@ Once validated, the daemon:
 1. Acquires the region from `IpcRegionRegistry` and maps its CUDA IPC handle.
 2. Computes the canonical index plan and materializes directly into the region
    via `StoreEngine::materialize_into_target`.
-3. Skips verification (`MaterializeHints::Verify::NONE`) by design; metrics
-   record that verification was skipped.
+3. Skips external-target verification by default (`engine.enable_external_target_verification=false`);
+   when enabled, the daemon hashes the target ByteSpace and compares against the
+   expected mi2/view hash, poisoning the region on mismatch and emitting metrics
+   for enabled/skipped verification.
 
 On transfer `DataLoss`, the daemon marks the region as poisoned to prevent
 reuse. The client then unregisters the region from its cache.
@@ -180,13 +191,14 @@ Proto: [proto/tensorcast/daemon/v2/store_daemon.proto](../../../proto/tensorcast
 ## Failure Modes
 
 - Owner mismatch returns `PERMISSION_DENIED`.
-- Expired regions return `FAILED_PRECONDITION`.
+- Expired regions behave as missing and return `NOT_FOUND`.
 - Drain timeouts return `DEADLINE_EXCEEDED` and leave the artifact quiesced.
+- The drain timeout bounds both Global Store drain waits and local export drain; total wait does not exceed the requested budget.
 
 ## Code Map
 
-- Region registry: [daemon/ipc_region_registry.h](../../../daemon/ipc_region_registry.h)
-- LIP manager: [daemon/lip_manager.cc](../../../daemon/lip_manager.cc)
-- Daemon RPC wiring: [daemon/grpc_service_impl.cc](../../../daemon/grpc_service_impl.cc)
+- Region registry: [daemon/state/ipc_region_registry.h](../../../daemon/state/ipc_region_registry.h)
+- LIP manager: [daemon/state/lip_manager.cc](../../../daemon/state/lip_manager.cc)
+- Daemon RPC wiring: [daemon/service/grpc_service_impl.cc](../../../daemon/service/grpc_service_impl.cc)
 - SDK region cache: [tensorcast/api/_region_cache.py](../../../tensorcast/api/_region_cache.py)
 - SDK APIs: [tensorcast/api/store/__init__.py](../../../tensorcast/api/store/__init__.py)

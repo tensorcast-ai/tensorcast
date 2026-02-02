@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
-from tensorcast.global_store.models import MemoryType, Replica
+from tensorcast.global_store.models import ByteSpaceRef, MemoryType, Replica
 from tensorcast.global_store.repositories.base import BaseRepository
 from tensorcast.logger import init_logger
 
@@ -101,7 +101,7 @@ class ReplicaRepository(BaseRepository):
     # We expose a single source of truth for SELECT projections to guarantee
     # column presence and ordering, while mapping by name in _row_to_model.
     _REPLICA_PROJECTION = (
-        "mr.replica_id, mr.artifact_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
+        "mr.replica_id, mr.artifact_id, mr.view_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
         "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
         "COALESCE(rc.current_requests, 0) AS current_requests, "
         "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.verification_json, mr.worker_id, "
@@ -126,13 +126,13 @@ class ReplicaRepository(BaseRepository):
             + f"{join_type} replica_counters rc ON rc.replica_id = mr.replica_id"
         )
 
-    def has_any_replica(self, artifact_id: str) -> bool:
+    def has_any_replica(self, artifact_id: str, view_id: str | None = None) -> bool:
         """Return True when at least one replica exists for *artifact_id*."""
 
         cursor = self.get_cursor()
         row = cursor.execute(
-            "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? LIMIT 1",
-            [artifact_id],
+            "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '') LIMIT 1",
+            [artifact_id, view_id or ""],
         ).fetchone()
         return row is not None
 
@@ -152,9 +152,38 @@ class ReplicaRepository(BaseRepository):
             return self._row_to_model(row, columns)
         return None
 
+    def find_by_replica_id(self, replica_id: UUID) -> Replica | None:
+        """Find a replica by ID (artifact_id not required)."""
+        cursor = self.get_cursor()
+        sql = self._replica_select_sql("LEFT JOIN") + " WHERE mr.replica_id = ?"
+        query = cursor.execute(sql, [str(replica_id)])
+        row = query.fetchone()
+        if row:
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
+        return None
+
+    def get_current_requests(self, replica_id: UUID) -> int | None:
+        """Return current_requests for a replica, or None if not found."""
+        cursor = self.get_cursor()
+        row = cursor.execute(
+            """
+            SELECT COALESCE(rc.current_requests, 0) AS current_requests
+            FROM artifact_replicas mr
+            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
+            WHERE mr.replica_id = ?
+            """,
+            [str(replica_id)],
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row[0] or 0)
+
     def find_existing(
         self,
         artifact_id: str,
+        view_id: str | None,
         node_id: str,
         node_address: str,
         node_port: int,
@@ -166,6 +195,7 @@ class ReplicaRepository(BaseRepository):
         sql = (
             self._replica_select_sql("LEFT JOIN")
             + " WHERE mr.artifact_id = ?"
+            + " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
             + " AND mr.node_id = ?"
             + " AND mr.node_address = ?"
             + " AND mr.node_port = ?"
@@ -176,6 +206,7 @@ class ReplicaRepository(BaseRepository):
             sql,
             [
                 artifact_id,
+                view_id,
                 node_id,
                 node_address,
                 node_port,
@@ -192,7 +223,10 @@ class ReplicaRepository(BaseRepository):
         return None
 
     def find_available_for_transport(
-        self, artifact_id: str, heartbeat_timeout_seconds: float
+        self,
+        artifact_id: str,
+        heartbeat_timeout_seconds: float,
+        view_id: str | None = None,
     ) -> Replica | None:
         """
         Find best available replica for transport with load balancing.
@@ -211,6 +245,7 @@ class ReplicaRepository(BaseRepository):
                 LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
                 LEFT JOIN workers w ON r.worker_id = w.worker_id
                 WHERE r.artifact_id = ?
+                  AND COALESCE(r.view_id, '') = COALESCE(?, '')
                   AND COALESCE(rc.current_requests, 0) < r.max_concurrency
                   AND r.is_available = TRUE
                   AND w.accepting_new_requests = TRUE
@@ -241,7 +276,7 @@ class ReplicaRepository(BaseRepository):
             WHERE replica_id = (SELECT replica_id FROM candidate)
             RETURNING replica_id
             """,
-            [artifact_id, cutoff],
+            [artifact_id, view_id or "", cutoff],
         )
 
         row = result.fetchone()
@@ -264,6 +299,7 @@ class ReplicaRepository(BaseRepository):
     def get_transport_eligibility_snapshot(
         self,
         artifact_id: str,
+        view_id: str | None,
         heartbeat_timeout_seconds: float,
         sample_limit: int = 10,
     ) -> TransportEligibilitySnapshot:
@@ -306,8 +342,9 @@ class ReplicaRepository(BaseRepository):
             LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
             LEFT JOIN workers w ON r.worker_id = w.worker_id
             WHERE r.artifact_id = ?
+              AND COALESCE(r.view_id, '') = COALESCE(?, '')
             """,
-            [cutoff, cutoff, cutoff, artifact_id],
+            [cutoff, cutoff, cutoff, artifact_id, view_id or ""],
         ).fetchone()
 
         if summary_row is None:
@@ -345,10 +382,11 @@ class ReplicaRepository(BaseRepository):
                 LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
                 LEFT JOIN workers w ON r.worker_id = w.worker_id
                 WHERE r.artifact_id = ?
+                  AND COALESCE(r.view_id, '') = COALESCE(?, '')
                 ORDER BY r.updated_at ASC
                 LIMIT ?
                 """,
-                [artifact_id, sample_limit],
+                [artifact_id, view_id or "", sample_limit],
             ).fetchall()
 
         now_ts = time.time()
@@ -406,14 +444,15 @@ class ReplicaRepository(BaseRepository):
         cursor.execute(
             """
             INSERT INTO artifact_replicas (
-                replica_id, artifact_id, node_id, node_address, node_port,
+                replica_id, artifact_id, view_id, node_id, node_address, node_port,
                 memory_size, memory_type, device_id, max_concurrency,
                 is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(replica.replica_id),
                 replica.artifact_id,
+                replica.byte_space.id,
                 replica.node_id,
                 replica.node_address,
                 replica.node_port,
@@ -449,6 +488,7 @@ class ReplicaRepository(BaseRepository):
         """Create a new replica or update existing one."""
         existing = self.find_existing(
             replica.artifact_id,
+            replica.byte_space.id,
             replica.node_id,
             replica.node_address,
             replica.node_port,
@@ -481,12 +521,14 @@ class ReplicaRepository(BaseRepository):
         existing_result = cursor.execute(
             """
             SELECT replica_id FROM artifact_replicas
-            WHERE artifact_id = ? AND node_id = ? AND node_address = ?
+            WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '')
+              AND node_id = ? AND node_address = ?
               AND node_port = ? AND memory_type = ?
               AND COALESCE(device_id, -1) = COALESCE(?, -1)
             """,
             [
                 replica.artifact_id,
+                replica.byte_space.id,
                 replica.node_id,
                 replica.node_address,
                 replica.node_port,
@@ -531,14 +573,15 @@ class ReplicaRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO artifact_replicas (
-                    replica_id, artifact_id, node_id, node_address, node_port,
+                    replica_id, artifact_id, view_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
                     is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
                     replica.artifact_id,
+                    replica.byte_space.id,
                     replica.node_id,
                     replica.node_address,
                     replica.node_port,
@@ -758,13 +801,16 @@ class ReplicaRepository(BaseRepository):
 
         return result.fetchone() is not None
 
-    def find_by_artifact(self, artifact_id: str) -> list[Replica]:
+    def find_by_artifact(
+        self, artifact_id: str, view_id: str | None = None
+    ) -> list[Replica]:
         """Convenience helper to list replicas for a given content-addressed artifact_id."""
-        return self.find_by_filters(artifact_id=artifact_id)
+        return self.find_by_filters(artifact_id=artifact_id, view_id=view_id)
 
     def find_by_filters(
         self,
         artifact_id: str | None = None,
+        view_id: str | None = None,
         node_id: str | None = None,
         node_address: str | None = None,
         node_port: int | None = None,
@@ -781,6 +827,10 @@ class ReplicaRepository(BaseRepository):
         if artifact_id is not None:
             query += " AND mr.artifact_id = ?"
             params.append(artifact_id)
+
+        if view_id is not None:
+            query += " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
+            params.append(view_id)
 
         if node_id is not None:
             query += " AND mr.node_id = ?"
@@ -1021,6 +1071,7 @@ class ReplicaRepository(BaseRepository):
 
         replica_id = _to_uuid(require("replica_id"))
         artifact_id = require("artifact_id")
+        view_id = get("view_id")
         disk_path = get("disk_path")
         node_id = require("node_id")
         node_address = require("node_address")
@@ -1048,9 +1099,16 @@ class ReplicaRepository(BaseRepository):
         updated_at = get("updated_at")
         expires_at = get("expires_at")
 
+        byte_space = (
+            ByteSpaceRef.view(str(view_id))
+            if view_id is not None
+            else ByteSpaceRef.canonical()
+        )
+
         return Replica(
             replica_id=replica_id,
             artifact_id=artifact_id,
+            byte_space=byte_space,
             disk_path=disk_path,
             node_id=node_id,
             node_address=node_address,

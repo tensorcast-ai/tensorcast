@@ -59,7 +59,8 @@ struct StoreEngineOptions {
   std::string p2p_listen_host{"127.0.0.1"};
 
   // Port used by Communicator for P2P transfers.
-  uint16_t p2p_port{9090};
+  // When set to 0, the engine binds an ephemeral port chosen by the OS.
+  uint16_t p2p_port{0};
 
   // Toggle RDMA support for the Communicator. When true the communicator will
   // attempt to register RDMA transports; otherwise it operates in TCP-only
@@ -102,6 +103,23 @@ struct StoreEngineOptions {
   // Stable/preemptible memory tier settings (optional). When unset, the
   // engine preserves legacy preemptible behavior.
   std::optional<MemoryTierConfig> memory_tier_config;
+
+  // When true, UMA CPU allocations are backed by memfd + MAP_SHARED so they can
+  // be exported cross-process for zero-copy CPU tensor materialization.
+  bool cpu_shared_memory_enabled{false};
+
+  struct ByteMappingConfig {
+    bool enable_strided_execution{true};
+    bool enable_direct_write_at{true};
+    uint32_t program_cache_entries{256};
+    uint32_t strided_run_min_ranges{128};
+    uint64_t strided_min_row_len_bytes{4096};
+    uint32_t strided_max_amplification{8};
+    uint64_t strided_block_target_bytes{16ULL * 1024 * 1024};
+    uint64_t strided_block_max_bytes{64ULL * 1024 * 1024};
+  };
+
+  ByteMappingConfig byte_mapping{};
 };
 
 } // namespace tensorcast::store

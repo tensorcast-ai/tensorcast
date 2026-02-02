@@ -4,15 +4,16 @@
 
 #pragma once
 
-#include <atomic>
 #include <chrono>
-#include <functional>
+#include <string>
 
 #include "core/store/store_engine.h"
-#include "daemon/ref_tracker.h"
-#include "daemon/replica_listing.h"
-#include "daemon/rpc_context.h"
 #include "daemon/service/controllers/status_assembler.h"
+#include "daemon/service/replica_listing.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/shutdown_signal.h"
+#include "daemon/state/worker_identity_store.h"
 #include "opentelemetry/context/context.h"
 #include "opentelemetry/metrics/provider.h"
 
@@ -23,10 +24,11 @@ class StatusController {
   struct Dep {
     store::StoreEngine& engine;
     RefTracker& refs;
-    std::atomic<bool>& is_shutting_down;
-    std::function<bool()> is_registered;
-    std::function<std::string()> worker_id;
-    std::function<std::chrono::seconds()> uptime;
+    ShutdownSignal& shutdown_signal;
+    WorkerIdentityStore& identity;
+    std::chrono::steady_clock::time_point start_time;
+    std::string local_handle_socket_path;
+    bool cpu_shared_memory_enabled{false};
   };
 
   explicit StatusController(Dep d) : d_(std::move(d)) {}
@@ -38,18 +40,21 @@ class StatusController {
     // Canonical fields (no gRPC frame size surfaced)
     resp.set_artifact_chunk_bytes(static_cast<uint64_t>(e.get_artifact_chunk_bytes()));
     resp.set_tx_slice_bytes(static_cast<uint64_t>(e.get_tx_slice_bytes()));
+    resp.set_local_handle_socket_path(d_.local_handle_socket_path);
+    resp.set_cpu_shared_memory_enabled(d_.cpu_shared_memory_enabled);
     rctx.mark_success();
     return grpc::Status::OK;
   }
 
   grpc::Status get_worker_status(RpcContext& rctx, v2::GetWorkerStatusResponse& resp) const {
-    resp.set_is_registered(d_.is_registered());
+    resp.set_is_registered(d_.identity.is_registered());
     resp.set_is_healthy(true);
-    resp.set_is_shutting_down(d_.is_shutting_down.load());
+    resp.set_is_shutting_down(d_.shutdown_signal.is_shutting_down());
     resp.set_mem_pool_total_size(d_.engine.get_mem_pool_size());
     resp.set_mem_pool_available_size(d_.engine.get_available_memory());
-    resp.set_uptime_seconds(d_.uptime().count());
-    resp.set_worker_id(d_.is_registered() ? d_.worker_id() : "");
+    resp.set_uptime_seconds(uptime().count());
+    resp.set_worker_id(d_.identity.is_registered() ? d_.identity.worker_id() : "");
+    resp.set_daemon_id(d_.identity.daemon_id());
     // Optional metrics for status snapshots
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -65,11 +70,11 @@ class StatusController {
   }
 
   grpc::Status get_detailed_status(RpcContext& rctx, v2::GetDetailedStatusResponse& resp) {
-    resp.set_is_registered(d_.is_registered());
+    resp.set_is_registered(d_.identity.is_registered());
     resp.set_is_healthy(true);
-    resp.set_is_shutting_down(d_.is_shutting_down.load());
-    resp.set_uptime_seconds(d_.uptime().count());
-    resp.set_worker_id(d_.is_registered() ? d_.worker_id() : "");
+    resp.set_is_shutting_down(d_.shutdown_signal.is_shutting_down());
+    resp.set_uptime_seconds(uptime().count());
+    resp.set_worker_id(d_.identity.is_registered() ? d_.identity.worker_id() : "");
     StatusAssembler::FillDetailedStatus(d_.engine, d_.refs, resp);
     try {
       static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -108,6 +113,10 @@ class StatusController {
 
  private:
   Dep d_;
+
+  std::chrono::seconds uptime() const {
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - d_.start_time);
+  }
 };
 
 } // namespace tensorcast::daemon

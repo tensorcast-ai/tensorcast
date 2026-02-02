@@ -14,7 +14,22 @@ sc_header_only_library(
     hdrs = ["view/view_plan.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":byte_range_map",
         ":view_spec",
+    ],
+)
+
+sc_cc_library(
+    name = "byte_range_map",
+    srcs = ["byte_range/byte_range_map.cc"],
+    hdrs = [
+        "byte_range/byte_range_fingerprint_encoding.h",
+        "byte_range/byte_range_map.h",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "@abseil-cpp//absl/hash",
     ],
 )
 
@@ -41,6 +56,7 @@ sc_header_only_library(
         "@abseil-cpp//absl/hash",
         "@folly//folly/futures:core",
         "@glog",
+        "@gsl",
     ],
 )
 
@@ -54,6 +70,7 @@ sc_cc_library(
         "//core/common:artifact_identity_lib",
         "//core/common:memory_location_lib",
         "//core/store:device_manager",
+        "//core/store:device_registry",
         "//core/store:device_types",
         "@abseil-cpp//absl/strings",
     ],

@@ -37,6 +37,30 @@ enum MemoryType {
   MEMORY_TYPE_DISK = 3;
 }
 
+enum ByteSpaceKind {
+  BYTE_SPACE_KIND_UNSPECIFIED = 0;
+  BYTE_SPACE_KIND_CANONICAL = 1;
+  BYTE_SPACE_KIND_VIEW = 2;
+}
+
+message ByteSpaceRef {
+  ByteSpaceKind kind = 1;
+  string id = 2;
+}
+
+// HashSpaceRef identifies a verifiable byte stream for hashing and leaf digests.
+//
+// This is distinct from ByteSpaceRef:
+// - ByteSpaceRef is used for routing/residency/locks/transport (physical concerns).
+// - HashSpaceRef is used for verification and proofs (hashing concerns).
+//
+// Canonical hashing is anchored by the canonical index, so `canonical_index_multihash`
+// is required when `byte_space.kind == BYTE_SPACE_KIND_CANONICAL`.
+message HashSpaceRef {
+  ByteSpaceRef byte_space = 1;
+  string canonical_index_multihash = 2;
+}
+
 message MemoryInfo {
   string node_id = 1;
   string node_address = 2;
@@ -54,6 +78,7 @@ message MemoryInfo {
   // integrity verification (e.g., KEY_POINTS or SEGMENT_HASHES) after transfer.
   string verification_json = 14;
   google.protobuf.Timestamp expires_at = 15;
+  ByteSpaceRef byte_space = 16;
 }
 
 message ReplicaRef {
@@ -72,4 +97,40 @@ message ReplicaInfo {
   ReplicaRef ref = 1;
   MemoryInfo memory_info = 2;
   ReplicaStats stats = 3;
+}
+
+message NarrowOp {
+  uint32 dim = 1;
+  int64 start = 2;
+  uint64 length = 3;
+}
+
+message TransposeOp {
+  uint32 dim0 = 1;
+  uint32 dim1 = 2;
+}
+
+message Op {
+  oneof kind {
+    NarrowOp narrow = 1;
+    TransposeOp transpose = 2;
+  }
+}
+
+message TensorViewOps {
+  repeated Op ops = 1;
+}
+
+message ViewSpec {
+  map<string, TensorViewOps> tensors = 1;
+}
+
+message ArtifactSelection {
+  string artifact_id = 1;
+  string view_id = 2;
+  bytes logical_layout_hash = 3;
+  bytes selection_hash = 4;
+  bytes view_subset_hash = 5;
+  ViewSpec view_spec = 6;
+  repeated string tensor_names = 7;
 }

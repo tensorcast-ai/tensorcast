@@ -8,6 +8,11 @@ sidebar_position: 1
 
 This diagram shows the complete artifact loading workflow in TensorCast, including the interaction between different components.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/api/materialization-flow.md`
+- `docs/internals/byte-range-mapping-and-execution.md`
+
 ## System Components
 
 - **InferenceInstance**: Python + CXX EXT
@@ -19,7 +24,7 @@ This diagram shows the complete artifact loading workflow in TensorCast, includi
   - Binary: `daemon/tensorcast_daemon`
   - Service: `store_daemon.StoreDaemonService` (MaterializeByKey/MaterializeReplica/ConfirmReplica/UnloadReplica/MaterializeIntoTarget)
 
-- **SessionLifecycle & LIP Runtime**: `SessionLifecycleManager`, `RefTracker`, and `LipManager` (under `daemon/session_lifecycle.*` and `daemon/lip_manager.*`) track per-PID references, mint `UseLease`s for GPU replicas, and satisfy `MaterializeByKey` from already-resident CUDA IPC handles when a matching Lease-In-Place replica exists.
+- **SessionLifecycle & LIP Runtime**: `SessionLifecycleManager`, `RefTracker`, and `LipManager` (under `daemon/state/session_lifecycle.*` and `daemon/state/lip_manager.*`) track per-PID references, mint `UseLease`s for GPU replicas, and satisfy `MaterializeByKey` from already-resident CUDA IPC handles when a matching Lease-In-Place replica exists.
 
 - **GlobalStore**: Python
   - Entrypoint: `tensorcast/global_store/grpc_service.py::GlobalStoreServicer`
@@ -85,13 +90,34 @@ sequenceDiagram
 
 Region-backed into calls bypass daemon-owned replicas by streaming bytes into a
 client-registered CUDA region using `MaterializeIntoTarget`. The SDK computes a
-full coalesced `TargetLayout` from the target tensors, validates against the
-canonical index, and invokes the v2 RPC directly. The daemon maps the IPC handle,
+coalesced `TargetLayout` over canonical or view-indexed ByteSpaces (including
+packed subsets), validates against the selected index, and invokes the v2 RPC
+directly. The daemon maps the IPC handles (single or ordered multi-storage),
 streams bytes from P2P or disk, and releases the region reference on completion
 without allocating VRAM.
 
 See [tensor_dict_into dataflow](tensor_dict_into_dataflow.md) for the detailed
-sequence and Phase 1 constraints.
+sequence and constraints.
+
+## Deferred Slice Materialization
+
+Deferred loaders expose vLLM-friendly placeholder binding while still using the
+region-backed data plane:
+
+- `Artifact.deferred_loader(...)` allocates a client-owned CUDA arena, registers
+  the arena as a VRAM region, and returns CUDA tensors immediately.
+- `DeferredLoader.tensor(...)` returns placeholder views into the arena; no I/O
+  occurs until `commit()`.
+- `commit()` issues a single `MaterializeIntoTarget` RPC and returns an
+  `InplaceSlot` that keeps tensor storage pointers stable across swaps.
+- `packing="byte_space"` places tensors at their logical offsets in the selected
+  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
+  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
+  local-only.
+- `packing="append"` / `packing="plan"` build local packed layouts (ordered
+  call/plan order) and are not publishable in Phase 1. Use
+  `slot.publish_replica()` or `slot.swap(..., publish=True)` to publish a
+  routable memory replica once the slot is filled.
 
 ### Lease-In-Place Fast Path & Use Leases
 
@@ -121,13 +147,13 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 - Unified API: BeginRegisterArtifact → FeedRegisterArtifactStream → CommitRegisteredArtifact.
 - Realization Plans:
   - Coalesced VRAM: daemon allocates a single VRAM segment and exposes CUDA IPC to the SDK which writes tensor bytes directly.
-  - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by linearizing SegmentPlan (PAD=0) from leased memory.
+  - VRAM Lease (FDML): client exports CUDA IPC handles for unique storage blocks and feeds LeaseSegments; daemon computes hash by compiling the canonical ByteRangeMap (PAD=0) and streaming leased memory through the unified byte-range program.
 
-### LeaseSegments ↔ SegmentPlan
+### LeaseSegments ↔ ByteRangeMap
 
 - Robust protocol: each `LeasedSegment` includes `artifact_offset` (logical byte offset in the canonical artifact layout) plus a `storage_id` reference. This removes any ordering assumption when sending lease segments.
 - Daemon behavior:
-  - Builds the `SegmentPlan` from canonical index bytes.
+  - Builds the canonical `ByteRangeMap` from canonical index bytes and compiles it into a `ByteRangeProgram`.
   - Treats all `PAD` intervals as zero-filled for hashing and for any materialization copies.
   - Reads `DATA` intervals from the referenced storage windows (`StorageEntry` + `mapping_base_offset` + `storage_offset`) regardless of feed order.
 - Client behavior:

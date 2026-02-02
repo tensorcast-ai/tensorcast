@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -15,6 +15,11 @@ def _index_names(conn, table: str) -> set[str]:
         [table.lower()],
     ).fetchall()
     return {row[0] for row in rows}
+
+
+def _column_names(conn, table: str) -> set[str]:
+    rows = conn.execute(f"PRAGMA table_info('{table}')").fetchall()
+    return {str(row[1]).lower() for row in rows}
 
 
 def test_persistence_tables_and_indexes_present(db_connection) -> None:
@@ -39,6 +44,34 @@ def test_persistence_tables_and_indexes_present(db_connection) -> None:
 
     status_indexes = _index_names(db_connection, "artifact_persistence_status")
     assert "idx_artifact_persistence_status_artifact_state" in status_indexes
+
+
+def test_piece_schema_columns_present(db_connection) -> None:
+    tables = {row[0].lower() for row in db_connection.execute("SHOW TABLES").fetchall()}
+    assert "artifact_replicas" in tables
+    assert "views" in tables
+    assert "view_coverage_ranges" in tables
+    assert "artifact_bindings" in tables
+    assert "layout_specs" in tables
+    assert "assembly_layout_bindings" in tables
+    assert "artifact_layout_attachments" in tables
+    assert "assembly_runtime_policies" in tables
+    assert "operations" in tables
+    assert "assembly_proof_commitments" in tables
+    assert "tensor_proof_commitments" in tables
+    assert "piece_proof_digests" in tables
+
+    replica_columns = _column_names(db_connection, "artifact_replicas")
+    assert "view_id" in replica_columns
+
+    view_columns = _column_names(db_connection, "views")
+    assert {
+        "canonical_size_bytes",
+        "canonical_bytes_covered",
+    }.issubset(view_columns)
+
+    binding_columns = _column_names(db_connection, "artifact_bindings")
+    assert {"from_artifact_id", "to_artifact_id", "kind"}.issubset(binding_columns)
 
 
 def test_persistence_tables_accept_inserts(db_connection) -> None:

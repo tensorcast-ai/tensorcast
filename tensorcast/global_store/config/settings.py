@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 import yaml
 from google.protobuf import json_format as _pb_json
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from tensorcast.common.config.normalize import normalize_enum_aliases_inplace
 from tensorcast.proto.config.v1 import (
@@ -18,8 +18,49 @@ from tensorcast.proto.config.v1 import (
 # GlobalStoreConfig now leverages Pydantic for validation / immutability
 
 
+class DigestWriteLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    max_leaf_writes_per_request: int = 16_384
+    max_proof_digests_per_request: int = 16_384
+    max_total_digests_per_request: int = 32_768
+    max_digest_bytes_per_request: int = 2 * 1024 * 1024
+
+
+class OperationLeasePolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    default_ttl_ms: int = 30_000
+    max_ttl_ms: int = 300_000
+
+
+class OperationWriteLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    min_status_update_interval_ms: int = 1_000
+
+
+class RetentionPolicyConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    operations_ttl_ms: int = 86_400_000  # 24h
+    assembly_proof_commitments_ttl_ms: int = 86_400_000  # 24h
+    piece_proof_digests_ttl_ms: int = 86_400_000  # 24h
+
+
+class GlobalStoreLimitsConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    digest_writes: DigestWriteLimitsConfig = DigestWriteLimitsConfig()
+    operation_leases: OperationLeasePolicyConfig = OperationLeasePolicyConfig()
+    retention: RetentionPolicyConfig = RetentionPolicyConfig()
+    operation_writes: OperationWriteLimitsConfig = OperationWriteLimitsConfig()
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
+
+    model_config = ConfigDict(frozen=True)
 
     # Database settings
     # Optional path to a persistent on-disk DuckDB database. When ``None`` a
@@ -54,10 +95,7 @@ class GlobalStoreConfig(BaseModel):
     metrics_port: int = 8000
     # Cluster identity (opaque token used to prevent split-brain)
     cluster_token: Optional[str] = None
-
-    class Config:
-        # Match previous @dataclass(frozen=True) behaviour (immutability)
-        frozen = True
+    limits: GlobalStoreLimitsConfig = GlobalStoreLimitsConfig()
 
     @property
     def port(self) -> int:
@@ -163,6 +201,69 @@ class GlobalStoreConfig(BaseModel):
                 else publish_interval_ms
             )
 
+        # Limits
+        limits = GlobalStoreLimitsConfig()
+        if pb.HasField("limits"):
+            pb_limits = pb.limits
+            digest_writes = limits.digest_writes
+            if pb_limits.HasField("digest_writes"):
+                dw = pb_limits.digest_writes
+                digest_writes = DigestWriteLimitsConfig(
+                    max_leaf_writes_per_request=int(dw.max_leaf_writes_per_request)
+                    or digest_writes.max_leaf_writes_per_request,
+                    max_proof_digests_per_request=int(dw.max_proof_digests_per_request)
+                    or digest_writes.max_proof_digests_per_request,
+                    max_total_digests_per_request=int(dw.max_total_digests_per_request)
+                    or digest_writes.max_total_digests_per_request,
+                    max_digest_bytes_per_request=int(dw.max_digest_bytes_per_request)
+                    or digest_writes.max_digest_bytes_per_request,
+                )
+
+            op_leases = limits.operation_leases
+            if pb_limits.HasField("operation_leases"):
+                ol = pb_limits.operation_leases
+                op_leases = OperationLeasePolicyConfig(
+                    default_ttl_ms=_dur_ms(ol.default_ttl)
+                    if ol.HasField("default_ttl")
+                    else op_leases.default_ttl_ms,
+                    max_ttl_ms=_dur_ms(ol.max_ttl)
+                    if ol.HasField("max_ttl")
+                    else op_leases.max_ttl_ms,
+                )
+
+            op_writes = limits.operation_writes
+            if pb_limits.HasField("operation_writes"):
+                ow = pb_limits.operation_writes
+                op_writes = OperationWriteLimitsConfig(
+                    min_status_update_interval_ms=_dur_ms(ow.min_status_update_interval)
+                    if ow.HasField("min_status_update_interval")
+                    else op_writes.min_status_update_interval_ms,
+                )
+
+            retention = limits.retention
+            if pb_limits.HasField("retention"):
+                rp = pb_limits.retention
+                retention = RetentionPolicyConfig(
+                    operations_ttl_ms=_dur_ms(rp.operations_ttl)
+                    if rp.HasField("operations_ttl")
+                    else retention.operations_ttl_ms,
+                    assembly_proof_commitments_ttl_ms=_dur_ms(
+                        rp.assembly_proof_commitments_ttl
+                    )
+                    if rp.HasField("assembly_proof_commitments_ttl")
+                    else retention.assembly_proof_commitments_ttl_ms,
+                    piece_proof_digests_ttl_ms=_dur_ms(rp.piece_proof_digests_ttl)
+                    if rp.HasField("piece_proof_digests_ttl")
+                    else retention.piece_proof_digests_ttl_ms,
+                )
+
+            limits = GlobalStoreLimitsConfig(
+                digest_writes=digest_writes,
+                operation_leases=op_leases,
+                retention=retention,
+                operation_writes=op_writes,
+            )
+
         return cls(
             db_file=db_file,
             heartbeat_timeout_ms=heartbeat_timeout_ms,
@@ -183,6 +284,7 @@ class GlobalStoreConfig(BaseModel):
             cluster_token=(pb.meta.cluster_token or None)
             if pb.HasField("meta")
             else None,
+            limits=limits,
         )
 
     @staticmethod

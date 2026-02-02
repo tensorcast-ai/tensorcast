@@ -106,7 +106,7 @@ Acceptance Criteria
 - Code surfaces
   - Python: `tensorcast/observability/otel.py`, `tensorcast/global_store/__main__.py`, `tensorcast/global_store/grpc_service.py`, `tensorcast/daemon_ctl.py`, `tensorcast/api`, `tensorcast/logger.py`, `tensorcast/global_store/metrics.py`
   - C++: `core/common/otel/{init.h,grpc_propagation.h,trace_scope_bridge.h,logging_sink.*}`,
-    `daemon/server_main.cc`, `daemon/grpc_service_impl.cc`,
+    `daemon/app/server_main.cc`, `daemon/service/grpc_service_impl.cc`,
     `core/store/store_engine.cc`, `core/communicator/transport/*`, `core/store/components/*`
 - Tools & configs: `tools/otel/collector-dev.yaml`
 

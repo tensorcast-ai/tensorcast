@@ -82,6 +82,8 @@ class StoreRuntimeContext:
             "daemon_endpoint": daemon_endpoint,
             "session_id": self._session_id,
         }
+        self._daemon_id_lock = threading.RLock()
+        self._daemon_id: str | None = None
         self._capabilities: StoreCapabilities | None = None
         self._retry_policies = build_retry_policies(self._opts.retry_overrides)
         self._client_lock = threading.RLock()
@@ -419,6 +421,8 @@ class StoreRuntimeContext:
             "daemon_endpoint": self._daemon_endpoint,
             "session_id": self._session_id,
         }
+        self._daemon_id_lock = threading.RLock()
+        self._daemon_id = None
         self._capabilities = None
         self._retry_policies = build_retry_policies(self._opts.retry_overrides)
         self._key_cache_lock = threading.RLock()
@@ -530,6 +534,23 @@ class StoreRuntimeContext:
     @property
     def daemon_endpoint(self) -> str:
         return self._daemon_endpoint
+
+    @property
+    def daemon_id(self) -> str | None:
+        if self._closed:
+            return None
+        with self._daemon_id_lock:
+            cached = self._daemon_id
+        if cached is not None:
+            return cached or None
+        try:
+            status = self.ensure_client().get_worker_status()
+        except Exception:
+            return None
+        daemon_id = getattr(status, "daemon_id", "") or ""
+        with self._daemon_id_lock:
+            self._daemon_id = daemon_id
+        return daemon_id or None
 
     @property
     def session_id(self) -> str:

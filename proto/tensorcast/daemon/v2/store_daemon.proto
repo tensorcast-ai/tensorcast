@@ -4,6 +4,7 @@ package tensorcast.daemon.v2;
 
 import "google/protobuf/timestamp.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/operation/v1/operation.proto";
 
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
@@ -54,23 +55,41 @@ service StoreDaemonService {
   rpc RegisterVramRegion(RegisterVramRegionRequest) returns (RegisterVramRegionResponse) {}
   rpc UnregisterVramRegion(UnregisterVramRegionRequest) returns (UnregisterVramRegionResponse) {}
   rpc DeregisterArtifact(DeregisterArtifactRequest) returns (DeregisterArtifactResponse) {}
+  rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
+  rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
 
   // ========== Key-based materialization and publish ==========
   // See docs/architecture/api/materialization-flow.md for semantics.
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
   rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
+  rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
+  rpc CreatePlacementLease(CreatePlacementLeaseRequest) returns (CreatePlacementLeaseResponse) {}
+  rpc RenewPlacementLease(RenewPlacementLeaseRequest) returns (RenewPlacementLeaseResponse) {}
+  rpc ReleasePlacementLease(ReleasePlacementLeaseRequest) returns (ReleasePlacementLeaseResponse) {}
+  rpc AcquireRetentionHandle(AcquireRetentionHandleRequest) returns (AcquireRetentionHandleResponse) {}
+  rpc RenewRetentionHandle(RenewRetentionHandleRequest) returns (RenewRetentionHandleResponse) {}
+  rpc ReleaseRetentionHandle(ReleaseRetentionHandleRequest) returns (ReleaseRetentionHandleResponse) {}
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+  // Seal an assembly (cgid) into a stable mi2 identity.
+  rpc SealAssembly(SealAssemblyRequest) returns (SealAssemblyResponse) {}
+  // Start sealing as a long-tail Operation.
+  rpc StartSealAssembly(StartSealAssemblyRequest) returns (StartSealAssemblyResponse) {}
+  // Query a long-tail operation by operation_id.
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  // Wait for a long-tail operation to reach a terminal state.
+  rpc WaitOperation(WaitOperationRequest) returns (WaitOperationResponse) {}
 
   // ========== Persistence ==========
   // See docs/architecture/api/policy-persistence.md for policy and task flow.
   rpc StartPersistence(StartPersistenceRequest) returns (StartPersistenceResponse) {}
   rpc QueryPersistenceStatus(QueryPersistenceStatusRequest) returns (QueryPersistenceStatusResponse) {}
+  rpc WaitPersistenceStatus(WaitPersistenceStatusRequest) returns (WaitPersistenceStatusResponse) {}
 }
 
 message GetServerConfigRequest {}
@@ -87,6 +106,10 @@ message GetServerConfigResponse {
   uint64 artifact_chunk_bytes = 4;
   // Canonical transfer slice/window size (pinned pool block size).
   uint64 tx_slice_bytes = 5;
+  // Unix domain socket path for local handle plane (FD handoff + lease release).
+  string local_handle_socket_path = 6;
+  // True when CPU shared-memory materialization is enabled.
+  bool cpu_shared_memory_enabled = 7;
 }
 
 message RegisterRequest {
@@ -132,6 +155,16 @@ enum MaterializationSource {
   MATERIALIZATION_SOURCE_DISK = 1;
   MATERIALIZATION_SOURCE_P2P = 2;
   MATERIALIZATION_SOURCE_LOCAL_REPLICA = 3;
+}
+
+enum LeaseMode {
+  LEASE_MODE_UNSPECIFIED = 0;
+  // Legacy behavior: daemon may create PID-bound use leases and handle leases
+  // for loopback/UDS callers.
+  LEASE_MODE_PID = 1;
+  // Programmable control-plane mode: do not mint handle leases and do not
+  // create PID-bound use leases (even for loopback/UDS callers).
+  LEASE_MODE_NO_LEASE = 2;
 }
 
 enum PlacementPolicy {
@@ -195,33 +228,17 @@ enum PersistenceState {
 }
 
 message MemCopyHandle {
-  bytes cuda_ipc_handle = 1;
-}
-
-message NarrowOp {
-  uint32 dim = 1;
-  int64 start = 2;
-  uint64 length = 3;
-}
-
-message TransposeOp {
-  uint32 dim0 = 1;
-  uint32 dim1 = 2;
-}
-
-message Op {
-  oneof kind {
-    NarrowOp narrow = 1;
-    TransposeOp transpose = 2;
+  oneof handle {
+    bytes cuda_ipc_handle = 1;
+    CpuMemfdHandle cpu_memfd = 2;
   }
+  // Opaque capability token bound to the daemon-side handle lifetime.
+  bytes lease_token = 3;
 }
 
-message TensorViewOps {
-  repeated Op ops = 1;
-}
-
-message ViewSpec {
-  map<string, TensorViewOps> tensors = 1;
+message CpuMemfdHandle {
+  uint64 size_bytes = 1;
+  uint64 offset_bytes = 2;
 }
 
 message CanonicalRange {
@@ -248,11 +265,18 @@ message StorePolicy {
 
 message ViewRegistrationOptions {
   string view_id = 1;
-  ViewSpec spec = 2;
+  tensorcast.common.v1.ViewSpec spec = 2;
   TransformPlacement placement = 3;
   uint64 canonical_size_bytes = 4;
   repeated CanonicalRange ranges = 5;
-  bool allow_partial = 6;
+  bool allow_partial = 6 [deprecated = true];
+  ViewRegistrationKind registration_kind = 7;
+}
+
+enum ViewRegistrationKind {
+  VIEW_REGISTRATION_KIND_UNSPECIFIED = 0;
+  VIEW_REGISTRATION_KIND_CANONICAL = 1;
+  VIEW_REGISTRATION_KIND_PIECE = 2;
 }
 
 message DiskFallbackHint {
@@ -317,6 +341,31 @@ message ReplicaTicket {
   google.protobuf.Timestamp expires_at = 5;
 }
 
+enum ReplicaOperationState {
+  REPLICA_OPERATION_STATE_UNSPECIFIED = 0;
+  REPLICA_OPERATION_STATE_PENDING = 1;
+  REPLICA_OPERATION_STATE_RUNNING = 2;
+  REPLICA_OPERATION_STATE_SUCCESS = 3;
+  REPLICA_OPERATION_STATE_FAILED = 4;
+  REPLICA_OPERATION_STATE_CANCELLED = 5;
+  REPLICA_OPERATION_STATE_DEGRADED = 6;
+}
+
+message ReplicaOperationError {
+  // gRPC canonical code name (e.g. DEADLINE_EXCEEDED).
+  string status_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message ReplicaOperationStatus {
+  ReplicaOperationState state = 1;
+  string message = 2;
+  double progress = 3;
+  google.protobuf.Timestamp as_of = 4;
+  optional ReplicaOperationError error = 5;
+}
+
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   optional string artifact_id = 1;
@@ -331,6 +380,7 @@ message MaterializeReplicaRequest {
 
   SourcePreference preference = 9;
   SourcePolicy source_policy = 14;
+  LeaseMode lease_mode = 15;
 
   // Selective materialization
   repeated string tensor_names = 10;
@@ -341,7 +391,7 @@ message MaterializeReplicaRequest {
   optional string disk_path = 13;
 
   oneof view_identity {
-    ViewSpec view = 1001;
+    tensorcast.common.v1.ViewSpec view = 1001;
     string view_id = 1002;
   }
 
@@ -391,9 +441,10 @@ message MaterializeIntoTargetRequest {
 
   repeated string tensor_names = 8;
   bytes view_subset_hash = 9;
+  optional string operation_id = 10;
 
   oneof view_identity {
-    ViewSpec view = 1001;
+    tensorcast.common.v1.ViewSpec view = 1001;
     string view_id = 1002;
   }
 
@@ -408,6 +459,7 @@ message MaterializeIntoTargetResponse {
   ViewSubset view_subset = 5;
   bytes view_index_bytes = 6;
   uint64 generation = 7;
+  bytes target_write_token = 8;
 }
 
 message ConfirmReplicaRequest {
@@ -449,6 +501,7 @@ message GetWorkerStatusResponse {
   uint64 mem_pool_available_size = 5; // 内存池可用大小（字节）
   int64 uptime_seconds = 6; // 运行时间（秒）
   string worker_id = 7; // Worker ID（如已注册）
+  string daemon_id = 8; // Stable daemon identity (from daemon config)
 }
 
 // ----------------------------------------------------------------------
@@ -595,6 +648,7 @@ message LockTransportChunksRequest {
   optional int32 device_id = 3;
   // Optional TTL extension hint (milliseconds) applied to active leases if granted.
   optional uint32 extend_ttl_ms = 4;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 5;
 }
 
 // Lock chunks response
@@ -858,6 +912,8 @@ message DeregisterArtifactRequest {
   optional int32 device_id = 7;
   // When true, release region references once deregistration completes.
   optional bool release_regions = 8;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 9;
+  optional string operation_id = 10;
 }
 
 message DeregisterArtifactResponse {
@@ -867,6 +923,36 @@ message DeregisterArtifactResponse {
   optional string message = 4;
 }
 
+message PublishTargetReplicaRequest {
+  bytes target_write_token = 1;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 2;
+  optional uint32 ttl_ms = 3;
+  optional int32 owner_pid = 4;
+  optional string operation_id = 5;
+}
+
+message PublishTargetReplicaResponse {
+  string lease_id = 1;
+  string replica_id = 2;
+}
+
+message RetirePublishedReplicaRequest {
+  optional string lease_id = 1;
+  string artifact_id = 2;
+  tensorcast.common.v1.ByteSpaceRef byte_space = 3;
+  optional int32 owner_pid = 4;
+  optional int32 device_id = 5;
+  bool wait_for_drain = 6;
+  optional uint32 drain_timeout_ms = 7;
+  optional string operation_id = 8;
+}
+
+message RetirePublishedReplicaResponse {
+  bool drained = 1;
+  bool removed = 2;
+  optional string message = 3;
+}
+
 // Key-based materialization request.
 message MaterializeByKeyRequest {
   string key = 1;
@@ -874,6 +960,8 @@ message MaterializeByKeyRequest {
   int32 pinned_allocation_timeout_ms = 3;
   string replica_uuid = 4;
   int32 pid = 5;
+  DeviceType target_device_type = 6;
+  LeaseMode lease_mode = 7;
 
   // Selective materialization
   repeated string tensor_names = 10;
@@ -911,10 +999,25 @@ message ResolveArtifactFromDiskResponse {
 
 message QueryReplicaStatusResponse {
   ReplicaTicket ticket = 1;
+  ReplicaOperationStatus status = 2;
+  bytes replica_key_hash = 3;
 }
 
 message QueryReplicaStatusRequest {
   ReplicaTicket ticket = 1;
+}
+
+message WaitReplicaStatusRequest {
+  ReplicaTicket ticket = 1;
+  // Server-side wait budget. When unset/0, the server waits until the replica
+  // reaches a terminal state or until the RPC deadline expires.
+  uint32 timeout_ms = 2;
+}
+
+message WaitReplicaStatusResponse {
+  ReplicaTicket ticket = 1;
+  ReplicaOperationStatus status = 2;
+  bytes replica_key_hash = 3;
 }
 
 message ReleaseReplicaRequest {
@@ -922,6 +1025,77 @@ message ReleaseReplicaRequest {
 }
 
 message ReleaseReplicaResponse {
+  bool released = 1;
+}
+
+// ========== Placement leases (device residency pins) ==========
+message CreatePlacementLeaseRequest {
+  string artifact_id = 1;
+  string view_id = 2;
+  int32 device_id = 3;
+  // When unset, the lease is best-effort and remains until explicitly released
+  // or daemon restart. When set, the lease is guarded by a deadline.
+  optional uint32 ttl_ms = 4;
+}
+
+message CreatePlacementLeaseResponse {
+  uint64 lease_id = 1;
+  bytes lease_token = 2;
+  optional google.protobuf.Timestamp expires_at = 3;
+}
+
+message RenewPlacementLeaseRequest {
+  bytes lease_token = 1;
+  uint32 ttl_ms = 2;
+}
+
+message RenewPlacementLeaseResponse {
+  uint64 lease_id = 1;
+  optional google.protobuf.Timestamp expires_at = 2;
+  bytes lease_token = 3;
+}
+
+message ReleasePlacementLeaseRequest {
+  bytes lease_token = 1;
+}
+
+message ReleasePlacementLeaseResponse {
+  bool released = 1;
+}
+
+// ========== Retention handles ==========
+message RetentionHandle {
+  string handle_id = 1;
+  uint64 expires_at_ms = 2;
+  bytes capability_token = 3;
+  uint64 charged_bytes = 4;
+  string diagnostics = 5;
+}
+
+message AcquireRetentionHandleRequest {
+  tensorcast.common.v1.ArtifactSelection selection = 1;
+  StorePolicy policy = 2;
+  uint64 ttl_ms = 3;
+}
+
+message AcquireRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message RenewRetentionHandleRequest {
+  bytes handle_token = 1;
+  uint64 extend_ttl_ms = 2;
+}
+
+message RenewRetentionHandleResponse {
+  RetentionHandle handle = 1;
+}
+
+message ReleaseRetentionHandleRequest {
+  bytes handle_token = 1;
+}
+
+message ReleaseRetentionHandleResponse {
   bool released = 1;
 }
 
@@ -952,6 +1126,54 @@ message GetArtifactIndexByIdRequest {
 }
 message GetArtifactIndexByIdResponse {
   bytes tensor_index_data = 1;
+}
+
+message SealAssemblyRequest {
+  string assembly_id = 1;
+  bool publish_canonical = 2;
+}
+
+message SealAssemblyResponse {
+  string sealed_artifact_id = 1;
+  tensorcast.common.v1.ArtifactDescriptor descriptor = 2;
+  bool already_sealed = 3;
+}
+
+message SealAssemblyResult {
+  tensorcast.common.v1.ArtifactDescriptor artifact = 1;
+}
+
+message StartSealAssemblyRequest {
+  string assembly_id = 1;
+  // Optional explicit layout selection; if absent, sealing uses the current assembly layout binding (if any).
+  string layout_id = 2;
+}
+
+message StartSealAssemblyResponse {
+  tensorcast.operation.v1.OperationRef operation = 1;
+}
+
+// Immutable seal snapshot stored inside Operation.snapshot.
+message SealAssemblySnapshotView {
+  string view_id = 1;
+  // Raw 32-byte SHA-256 digest over immutable view metadata (e.g., coverage ranges + view_data_hash).
+  bytes meta_digest = 2;
+}
+
+message SealAssemblySnapshot {
+  string assembly_id = 1;
+  string layout_id = 2;
+  uint64 assembly_layout_binding_version = 3;
+  repeated SealAssemblySnapshotView views = 4;
+}
+
+message WaitOperationRequest {
+  string operation_id = 1;
+  uint64 timeout_ms = 2;
+}
+
+message WaitOperationResponse {
+  tensorcast.operation.v1.GetOperationResponse operation = 1;
 }
 
 // ========== Persistence ==========
@@ -995,4 +1217,15 @@ message QueryPersistenceStatusResponse {
   string degraded_reason = 6;
   string last_error = 7;
   repeated PersistenceShardStatus shards = 8;
+}
+
+message WaitPersistenceStatusRequest {
+  string task_id = 1;
+  // Server-side wait budget. When unset/0, the server waits until the task
+  // reaches a terminal state or until the RPC deadline expires.
+  uint32 timeout_ms = 2;
+}
+
+message WaitPersistenceStatusResponse {
+  QueryPersistenceStatusResponse status = 1;
 }

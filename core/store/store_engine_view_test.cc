@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/store_engine.h"
 
@@ -48,6 +48,10 @@ nlohmann::json tensor_entry(
 class VectorSource final : public tensorcast::store::loader::SeekableSource {
  public:
   explicit VectorSource(const std::vector<uint8_t>& data) : data_(data) {}
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return data_.size();
+  }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
     auto bytes_or = read_at(cursor_, dst, max_bytes);

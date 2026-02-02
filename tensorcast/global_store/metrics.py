@@ -1,14 +1,17 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from contextlib import contextmanager
 from time import monotonic
 from typing import Callable, Iterator
 
 import grpc
 from prometheus_client import Counter, Gauge, Histogram, start_http_server
+
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 """Prometheus metrics for the Global Store service.
 
@@ -132,6 +135,37 @@ ACTIVE_TRANSPORTS_GAUGE = Gauge(
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
+# Capability directory -------------------------------------------------------
+
+CAPABILITY_DIRECTORY_GAUGE = Gauge(
+    "tc_capability_directory_entries",
+    "Active capability directory entries by scope and capability.",
+    labelnames=("scope", "capability"),
+)
+
+
+def _normalize_capability_name(raw: str) -> str:
+    for prefix in (
+        "WORKER_CAPABILITY_FLAG_",
+        "INSTANCE_CAPABILITY_FLAG_",
+    ):
+        if raw.startswith(prefix):
+            return raw[len(prefix) :].lower()
+    return raw.lower()
+
+
+_WORKER_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.WorkerCapabilityFlag.items()
+    if value != 0
+]
+
+_INSTANCE_CAPABILITIES: list[tuple[int, str]] = [
+    (value, _normalize_capability_name(name))
+    for name, value in global_store_pb2.InstanceCapabilityFlag.items()
+    if value != 0
+]
+
 # View registration ----------------------------------------------------------
 
 VIEW_REGISTRATION_COUNTER = Counter(
@@ -144,6 +178,38 @@ VIEW_PARTIAL_BACKLOG_GAUGE = Gauge(
     "tc_view_partial_backlog_bytes",
     "Canonical byte backlog for partial view registrations.",
     labelnames=("artifact_id", "view_id"),
+)
+
+# Digest grids (leaves + overlap proofs) -------------------------------------
+
+DIGEST_ENTRIES_WRITTEN_COUNTER = Counter(
+    "tc_digest_entries_written_total",
+    "Total number of digest entries newly written (inserted) by the Global Store.",
+    labelnames=(
+        "grid",
+    ),  # grid=leaves|assembly_proof_commitments|piece_proof_digests|tensor_proof_commitments
+)
+
+DIGEST_CONFLICT_COUNTER = Counter(
+    "tc_digest_conflicts_total",
+    "Total number of digest conflicts (mismatched writes) rejected by the Global Store.",
+    labelnames=("grid",),
+)
+
+DIGEST_REQUEST_REJECTED_COUNTER = Counter(
+    "tc_digest_requests_rejected_total",
+    "Total number of digest write requests rejected by the Global Store.",
+    labelnames=("reason",),  # reason=too_large|conflict|invalid
+)
+
+# Retention / GC -------------------------------------------------------------
+
+GC_ROWS_DELETED_COUNTER = Counter(
+    "tc_gc_rows_deleted_total",
+    "Total number of rows deleted by Global Store retention policies.",
+    labelnames=(
+        "table",
+    ),  # table=operations|assembly_proof_commitments|piece_proof_digests
 )
 
 # Recovery / state-sync ------------------------------------------------------
@@ -218,6 +284,27 @@ def set_total_replicas(count: int) -> None:
     """Set the total replicas gauge to *count*."""
 
     ARTIFACT_REPLICAS_GAUGE.set(count)
+
+
+def set_capability_counts(*, scope: str, entries: Sequence[object]) -> None:
+    """Set capability directory gauges for the given entries."""
+
+    if scope == "worker":
+        capabilities = _WORKER_CAPABILITIES
+    elif scope == "instance":
+        capabilities = _INSTANCE_CAPABILITIES
+    else:
+        return
+
+    counts = {name: 0 for _, name in capabilities}
+    for entry in entries:
+        flags = int(getattr(entry, "capability_flags", 0))
+        for bit, name in capabilities:
+            if flags & (1 << int(bit)):
+                counts[name] += 1
+
+    for name, count in counts.items():
+        CAPABILITY_DIRECTORY_GAUGE.labels(scope=scope, capability=name).set(count)
 
 
 def observe_memory_tier_snapshot(
@@ -297,6 +384,30 @@ def set_view_partial_backlog(
     VIEW_PARTIAL_BACKLOG_GAUGE.labels(artifact_id=artifact_id, view_id=view_id).set(
         backlog_bytes
     )
+
+
+def inc_digest_entries_written(*, grid: str, count: int) -> None:
+    if count <= 0:
+        return
+    DIGEST_ENTRIES_WRITTEN_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_conflict(*, grid: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_CONFLICT_COUNTER.labels(grid=grid).inc(count)
+
+
+def inc_digest_request_rejected(*, reason: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    DIGEST_REQUEST_REJECTED_COUNTER.labels(reason=reason).inc(count)
+
+
+def inc_gc_rows_deleted(*, table: str, count: int) -> None:
+    if count <= 0:
+        return
+    GC_ROWS_DELETED_COUNTER.labels(table=table).inc(count)
 
 
 # ---------------------------------------------------------------------------

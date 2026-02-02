@@ -18,6 +18,7 @@ logger = init_logger(__name__)
 _WORKER_SELECT = """
     SELECT
         workers.worker_id,
+        workers.daemon_id,
         workers.node_id,
         workers.node_address,
         workers.grpc_port,
@@ -25,6 +26,7 @@ _WORKER_SELECT = """
         workers.mem_pool_total_size,
         workers.mem_pool_available_size,
         workers.accepting_new_requests,
+        workers.capability_flags,
         workers.registered_at,
         workers.last_heartbeat,
         workers.inactive_at,
@@ -75,6 +77,23 @@ class WorkerRepository(BaseRepository):
             return self._row_to_model(result)
         return None
 
+    def find_by_daemon_id(
+        self, daemon_id: str, *, include_inactive: bool = False
+    ) -> Worker | None:
+        """Find a worker by stable daemon_id."""
+        if not daemon_id:
+            return None
+        cursor = self.get_cursor()
+        result = cursor.execute(
+            f"{_WORKER_SELECT} WHERE workers.daemon_id = ?"
+            + ("" if include_inactive else " AND workers.inactive_at IS NULL"),
+            [daemon_id],
+        ).fetchone()
+
+        if result:
+            return self._row_to_model(result)
+        return None
+
     def find_by_address_port(
         self, node_address: str, grpc_port: int, *, include_inactive: bool = True
     ) -> Worker | None:
@@ -100,13 +119,14 @@ class WorkerRepository(BaseRepository):
             cursor.execute(
                 """
                 INSERT INTO workers (
-                    worker_id, node_id, node_address, grpc_port, p2p_port,
+                    worker_id, daemon_id, node_id, node_address, grpc_port, p2p_port,
                     mem_pool_total_size, mem_pool_available_size,
-                    accepting_new_requests, state_version, state_checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    accepting_new_requests, capability_flags, state_version, state_checksum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     worker.worker_id,
+                    worker.daemon_id,
                     worker.node_id,
                     worker.node_address,
                     worker.grpc_port,
@@ -114,6 +134,7 @@ class WorkerRepository(BaseRepository):
                     worker.mem_pool_total_size,
                     worker.mem_pool_available_size,
                     worker.accepting_new_requests,
+                    int(worker.capability_flags),
                     worker.state_version,
                     worker.state_checksum,
                 ],
@@ -142,9 +163,10 @@ class WorkerRepository(BaseRepository):
             result = cursor.execute(
                 f"""
                 UPDATE workers
-                SET node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
+                SET daemon_id = ?, node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
                     mem_pool_total_size = ?, mem_pool_available_size = ?,
                     accepting_new_requests = ?,
+                    capability_flags = ?,
                     last_heartbeat = CURRENT_TIMESTAMP,
                     inactive_at = NULL
                     {reset_clause}
@@ -152,6 +174,7 @@ class WorkerRepository(BaseRepository):
                 RETURNING worker_id
                 """,
                 [
+                    worker.daemon_id,
                     worker.node_id,
                     worker.node_address,
                     worker.grpc_port,
@@ -159,6 +182,7 @@ class WorkerRepository(BaseRepository):
                     worker.mem_pool_total_size,
                     worker.mem_pool_available_size,
                     worker.accepting_new_requests,
+                    int(worker.capability_flags),
                     worker.worker_id,
                 ],
             )
@@ -188,6 +212,24 @@ class WorkerRepository(BaseRepository):
             )
 
         return result.fetchone() is not None
+
+    def update_capability_flags(self, worker_id: str, capability_flags: int) -> bool:
+        """Update capability flags only when changed."""
+        with self._write_lock:
+            cursor = self.get_cursor()
+            cursor.execute(
+                """
+                UPDATE workers
+                SET capability_flags = ?
+                WHERE worker_id = ?
+                  AND inactive_at IS NULL
+                  AND capability_flags != ?
+                RETURNING worker_id
+                """,
+                [int(capability_flags), worker_id, int(capability_flags)],
+            )
+            row = cursor.fetchone()
+        return bool(row)
 
     def batch_update_heartbeats(self, updates: list[tuple[str, int, bool]]) -> int:
         """
@@ -538,33 +580,35 @@ class WorkerRepository(BaseRepository):
     def _row_to_model(self, row: tuple) -> Worker:
         """Convert a database row to Worker object."""
         memory_tier_state = None
-        if row[13] is not None:
+        if row[15] is not None:
             memory_tier_state = WorkerMemoryTierState(
-                stable_total_bytes=row[13],
-                stable_used_bytes=row[14],
-                preemptible_total_bytes=row[15],
-                preemptible_marked_bytes=row[16],
-                faults_per_sec=row[17] or 0.0,
-                rehydrate_p99_ns=row[18] or 0,
-                enable_preemptible=bool(row[19]),
-                memory_tier_config_json=row[20] or "{}",
-                snapshot_epoch_ns=row[21] or 0,
+                stable_total_bytes=row[15],
+                stable_used_bytes=row[16],
+                preemptible_total_bytes=row[17],
+                preemptible_marked_bytes=row[18],
+                faults_per_sec=row[19] or 0.0,
+                rehydrate_p99_ns=row[20] or 0,
+                enable_preemptible=bool(row[21]),
+                memory_tier_config_json=row[22] or "{}",
+                snapshot_epoch_ns=row[23] or 0,
             )
 
         return Worker(
             worker_id=row[0],
-            node_id=row[1],
-            node_address=row[2],
-            grpc_port=row[3],
-            p2p_port=row[4],
-            mem_pool_total_size=row[5],
-            mem_pool_available_size=row[6],
-            accepting_new_requests=row[7],
-            registered_at=row[8],
-            last_heartbeat=row[9],
-            inactive_at=row[10],
-            state_version=row[11],
-            state_checksum=row[12] or "",
+            daemon_id=row[1] or "",
+            node_id=row[2],
+            node_address=row[3],
+            grpc_port=row[4],
+            p2p_port=row[5],
+            mem_pool_total_size=row[6],
+            mem_pool_available_size=row[7],
+            accepting_new_requests=row[8],
+            capability_flags=row[9] or 0,
+            registered_at=row[10],
+            last_heartbeat=row[11],
+            inactive_at=row[12],
+            state_version=row[13],
+            state_checksum=row[14] or "",
             memory_tier_state=memory_tier_state,
         )
 

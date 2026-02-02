@@ -8,7 +8,7 @@ areas: ["daemon", "communicator", "core"]
 links:
   supersedes: ../architecture/api/region-backed.md
 related_code:
-  - daemon/lip_manager.cc
+  - daemon/state/lip_manager.cc
   - core/communicator/engine/**
   - core/communicator/transport/**
   - tensorcast/communicator/**
@@ -117,7 +117,7 @@ sequenceDiagram
 
 # Implementation Notes
 
-- Communicator now exposes `PartitionTensor::direct_rdma_enabled()` plus `wait_mr_ready()` so region-backed tensors synchronously gate MR visibility before answering RDMA reads. Region export paths (`daemon/lip_manager`, UMA-backed exports, and ad-hoc communication manager registrations) set the flag only when RDMA is active.
+- Communicator now exposes `PartitionTensor::direct_rdma_enabled()` plus `wait_mr_ready()` so region-backed tensors synchronously gate MR visibility before answering RDMA reads. Region export paths (`daemon/state/lip_manager`, UMA-backed exports, and ad-hoc communication manager registrations) set the flag only when RDMA is active.
 - `handle_rdma_read_request` selects between a zero-copy `StageLease` (MR + raw GPU pointer, no stager) and the existing staging lambda. When eligibility fails, `record_direct_fallback_metric` increments `tc_rdma_direct_fallback_total{reason}` and the request transparently reverts to staging.
 - `direct_chunk_mb` in `CommunicatorConfig.stager` decouples zero-copy window sizing from staging chunk size. Defaults inherit `stage_chunk_mb_gpu` so existing deployments remain unchanged.
 - Observability is implemented via OpenTelemetry counters/histogram: `tc_rdma_direct_segments_total`, `tc_rdma_direct_bytes_total`, `tc_rdma_direct_window_bytes`, and fallback attribution. These record per-window activity inside `DriveRdmaSession`.
@@ -129,4 +129,4 @@ sequenceDiagram
 - `docs/architecture/api/region-backed.md`
 - `core/communicator/README.md`
 - `core/communicator/engine/engine.cc`
-- `daemon/lip_manager.cc`
+- `daemon/state/lip_manager.cc`

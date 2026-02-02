@@ -13,6 +13,7 @@
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_config.h"
+#include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 // No forward declarations from unrelated namespaces here
@@ -69,6 +70,8 @@ struct ReplicaConfig {
   std::optional<std::string> view_id = std::nullopt;
   // - View execution plan metadata for variant-aware replicas
   std::optional<loader::ViewPlan> view_plan;
+  // - Byte-range mapping config (strided thresholds, cache sizing)
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
   // - Transform placement preference (server/client)
   loading::TransformPlacement transform_placement = loading::TransformPlacement::kServer;
   // - Tensor compression strategies
@@ -77,6 +80,10 @@ struct ReplicaConfig {
   // - Performance tuning parameters
   // - Memory tier enforcement
   std::optional<MemoryTierConfig> memory_tier_config;
+
+  // When true, UMA CPU allocations are backed by memfd + MAP_SHARED so they can
+  // be exported cross-process for zero-copy CPU tensor materialization.
+  bool cpu_shared_memory_enabled{false};
 };
 
 } // namespace tensorcast::store::replica

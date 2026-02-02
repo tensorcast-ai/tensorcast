@@ -50,6 +50,19 @@ message Lifecycle {
   bool enable_periodic_eviction = 10;
   // If unset, service uses a conservative default (1s).
   google.protobuf.Duration eviction_loop_interval = 11;
+
+  message HandleLeases {
+    // Unix domain socket path for local handle plane (FD handoff + lease release).
+    // When empty, the local handle plane is disabled and the daemon will not issue
+    // handle leases (MemCopyHandle.lease_token).
+    string local_handle_socket_path = 1;
+    // TTL for handle leases issued by the daemon (best-effort crash safety).
+    // When unset or set to 0s, TTL is disabled and handle leases rely on explicit release and PID-exit cleanup.
+    google.protobuf.Duration ttl = 2;
+    // Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
+    uint32 max_mints_per_second = 3;
+  }
+  HandleLeases handle_leases = 20;
 }
 
 message HighAvailability {
@@ -80,6 +93,14 @@ message Engine {
   reserved "mem_pool_size_bytes", "tx_slice_bytes", "streaming_buffer_max_concurrent_sessions", "pinned_allocation_timeout";
   // Renamed: cpu_chunk_size_bytes -> artifact_chunk_bytes (field number unchanged)
   uint64 artifact_chunk_bytes = 3;
+
+  message CpuSharedMemory {
+    // When enabled, UMA CPU allocations are backed by memfd + MAP_SHARED so they
+    // can be exported cross-process for zero-copy CPU tensor materialization.
+    bool enabled = 1;
+  }
+  CpuSharedMemory cpu_shared_memory = 11;
+
   message MemoryTiers {
     // When false, UMA will operate in stable-only mode and skip preemptible markings.
     bool enable_preemptible = 1;
@@ -95,9 +116,24 @@ message Engine {
   // Depth (in slices) for engine-owned StreamingPinnedBuffer instances used for
   // streaming CPU<->GPU transfers and disk/p2p pipelines.
   uint32 streaming_buffer_chunks = 8;
+  // When true, MaterializeIntoTarget verifies external target writes against
+  // expected data hashes (content-addressed or view metadata).
+  bool enable_external_target_verification = 12;
   reserved 6, 7;
   reserved "p2p_fallback_disk_dir", "disk_path_whitelist";
   MemoryTiers memory_tiers = 10;
+
+  message ByteMapping {
+    optional bool enable_strided_execution = 1;
+    optional bool enable_direct_write_at = 2;
+    uint32 program_cache_entries = 3;
+    uint32 strided_run_min_ranges = 4;
+    uint64 strided_min_row_len_bytes = 5;
+    uint32 strided_max_amplification = 6;
+    uint64 strided_block_target_bytes = 7;
+    uint64 strided_block_max_bytes = 8;
+  }
+  ByteMapping byte_mapping = 13;
 }
 
 message PinnedMemory {
@@ -125,6 +161,9 @@ message DaemonConfig {
   tensorcast.communicator.v1.CommunicatorConfig communicator = 4;
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
+  // Stable identity for this daemon instance used by the control plane.
+  // Must not be derived from network address and should remain stable across restarts.
+  string daemon_id = 10;
 
   message Compatibility {
     bool confirm_requires_disk_path = 1;
@@ -135,9 +174,43 @@ message DaemonConfig {
   }
   Compatibility compatibility = 7;
 
+  message CapabilityTokens {
+    message Key {
+      uint32 version = 1;
+      bytes secret = 2;
+    }
+    Key active = 1;
+    repeated Key previous = 2;
+  }
+  CapabilityTokens capability_tokens = 22;
+
+  message RetentionHandles {
+    bool enabled = 1;
+    google.protobuf.Duration default_ttl = 2;
+    google.protobuf.Duration max_ttl = 3;
+  }
+  RetentionHandles retention_handles = 23;
+
+  message CapabilityDirectory {
+    bool enabled = 1;
+  }
+  CapabilityDirectory capability_directory = 24;
+
   reserved 8;
   reserved "checkpoint";
   PinnedMemory pinned_memory = 20;
+
+  message PostSealPolicy {
+    // When true, migrate selected assembly views under the sealed mi2_id.
+    bool migrate_views = 1;
+    // When true, only migrate views that require transforms (e.g., transpose).
+    bool migrate_transpose_only = 2;
+    // When true, allow safe reuse of CGID-scoped view replicas after sealing.
+    bool reuse_views_if_safe = 3;
+    // When true, retire CGID-scoped piece replicas after sealing.
+    bool retire_pieces = 4;
+  }
+  PostSealPolicy post_seal = 21;
 
   message Debug {
     message Cuda {

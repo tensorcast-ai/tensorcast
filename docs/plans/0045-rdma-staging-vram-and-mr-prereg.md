@@ -10,7 +10,7 @@ related_code:
   - core/communicator/engine/mr_cache.{h,cc}
   - core/communicator/misc/ibv_wrap.{h,cc}
   - core/communicator/transport/{partition_tensor,net_dev}.{h,cc}
-  - daemon/server_main.cc
+  - daemon/app/server_main.cc
   - proto/tensorcast/communicator/v1/communicator_config.proto
 links:
   design: ../designs/0045-rdma-staging-vram-and-mr-prereg.md

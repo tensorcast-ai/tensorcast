@@ -1,9 +1,10 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import weakref
@@ -22,6 +23,8 @@ from tensorcast.api.store.types import (
     CanonicalIndex,
     CanonicalIndexEntry,
 )
+from tensorcast.common.selection_identity import compute_view_subset_hash  # noqa: F401
+from tensorcast.proto.common.v1 import common_pb2
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +49,30 @@ def _serialize_index(index: CanonicalIndex) -> bytes:
             int(entry.storage_offset),
         ]
     return json.dumps(entries, separators=(",", ":")).encode("utf-8")
+
+
+def _multibase_multihash_sha256(digest: bytes) -> str:
+    if len(digest) != 32:
+        raise ValueError("SHA256 digest must be 32 bytes")
+    mh = b"\x12\x20" + digest
+    encoded = base64.b32encode(mh).decode("ascii").lower().rstrip("=")
+    return f"b{encoded}"
+
+
+def compute_index_multihash(index_bytes: bytes) -> str:
+    return _multibase_multihash_sha256(hashlib.sha256(index_bytes).digest())
+
+
+def compute_view_id(
+    view_spec: common_pb2.ViewSpec,
+    canonical_index_bytes: bytes,
+) -> str:
+    if view_spec is None or not view_spec.tensors:
+        raise ValueError("view_spec must be non-empty for view_id computation")
+    spec_bytes = view_spec.SerializeToString(deterministic=True)
+    index_mh = compute_index_multihash(canonical_index_bytes)
+    digest = hashlib.sha256(spec_bytes + index_mh.encode("utf-8")).digest()
+    return _multibase_multihash_sha256(digest)
 
 
 def _compose_narrow(
@@ -261,10 +288,22 @@ class ViewSpecComposer:
 
         view_cache: ViewMetadataCache | None = None
         if view_index is not None and tensor_names is not None:
+            view_index_bytes = _serialize_index(view_index)
             view_hash = self.hash_view_spec(composed_spec, subset=tensor_names)
+            view_id: str | None = None
+            if composed_spec is not None and not composed_spec.is_identity:
+                canonical_bytes = _serialize_index(canonical_index)
+                view_proto = composed_spec.proto
+                if view_proto is None:
+                    raise ArtifactError(
+                        "View spec proto missing while computing view_id",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                view_id = compute_view_id(view_proto, canonical_bytes)
             view_cache = ViewMetadataCache(
-                view_id=view_hash,
-                view_index_bytes=_serialize_index(view_index),
+                view_id=view_id or view_hash,
+                view_index_bytes=view_index_bytes,
                 view_data_hash=view_hash,
                 tensor_names=tensor_names,
                 nbytes=sum(entry.size_bytes for entry in view_index.entries),

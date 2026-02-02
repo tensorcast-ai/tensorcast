@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -219,7 +219,8 @@ class Replica {
       gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       common::memory::MemoryLocation source_type,
       std::optional<loader::ViewPlan> view_plan,
-      loading::TransformPlacement transform_placement);
+      loading::TransformPlacement transform_placement,
+      StoreEngineOptions::ByteMappingConfig byte_mapping_config);
 
   // Helper to determine the optimal source location for loading `target_location`
   absl::StatusOr<common::memory::MemoryLocation> find_best_source_for_target(
@@ -237,6 +238,7 @@ class Replica {
   // Optional view execution plan when this replica represents a variant byte space.
   const std::optional<loader::ViewPlan> view_plan_;
   const loading::TransformPlacement transform_placement_;
+  const StoreEngineOptions::ByteMappingConfig byte_mapping_config_;
 
   // Producer-side completion signals for in-flight load/copy operations.
   std::shared_ptr<common::ReadySignal<absl::Status>> cpu_ready_signal_ ABSL_GUARDED_BY(mutex_);

@@ -30,6 +30,7 @@ sc_header_only_library(
         "//core/common:async_runtime_lib",
         "//core/common:device_types_lib",
         "//core/common:pinned_buffer_pool_lib",
+        "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
     ],
 )
@@ -195,6 +196,7 @@ sc_cc_library(
         "//core/communicator:engine_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store:communication_types",
+        "//core/store:device_registry",
         "//core/store:device_types",
         "//core/store:memory_types",
         "//core/store:store_engine_options",

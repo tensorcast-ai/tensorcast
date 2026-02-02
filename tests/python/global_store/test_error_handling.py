@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Tests for error handling and edge cases in Global Store."""
 
@@ -226,6 +226,7 @@ class TestErrorHandling:
             p2p_port=50052,
             mem_pool_total_size=1024,
             mem_pool_available_size=1024,
+            daemon_id="daemon_test",
         )
 
         # The servicer may handle empty node_id differently
@@ -237,6 +238,7 @@ class TestErrorHandling:
             p2p_port=50052,
             mem_pool_total_size=1024,
             mem_pool_available_size=1024,
+            daemon_id="daemon_test",
         )
 
         response = servicer.RegisterWorker(request, context)
@@ -253,6 +255,7 @@ class TestEdgeCases:
         large_memory = 10**15
         worker = Worker(
             worker_id="large_worker",
+            daemon_id="daemon_large_worker",
             node_id="large_node",  # Unique node ID
             node_address="192.168.100.1",  # Unique address
             grpc_port=50151,
@@ -307,6 +310,7 @@ class TestEdgeCases:
         # Register a worker with unique identifiers
         worker = Worker(
             worker_id="rapid_worker",
+            daemon_id="daemon_rapid_worker",
             node_id="rapid_node",  # Unique node ID
             node_address="192.168.50.1",  # Unique address
             grpc_port=50251,
@@ -413,6 +417,7 @@ class TestEdgeCases:
         for port, should_succeed in port_tests:
             worker = Worker(
                 worker_id=f"worker_port_{port}",
+                daemon_id=f"daemon_port_{port}",
                 node_id=f"node_{port}",  # Unique node_id to avoid conflicts
                 node_address=f"192.168.1.{port % 255 + 1}",  # Unique address
                 grpc_port=port,

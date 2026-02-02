@@ -30,6 +30,7 @@
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
 
@@ -42,6 +43,8 @@ namespace tensorcast::store::runtime::metadata {
 enum class ViewPlacement : uint8_t { kUnspecified = 0, kServer = 1, kClient = 2 };
 
 using CanonicalRange = tensorcast::store::view::CanonicalRange;
+
+enum class ViewRegistrationKind : uint8_t { kUnspecified = 0, kCanonical = 1, kPiece = 2 };
 
 enum class RegistrationPlan : uint8_t { kCoalesced = 0, kStableDram = 1 };
 
@@ -56,7 +59,7 @@ struct ViewRegistration {
   ViewPlacement placement{ViewPlacement::kUnspecified};
   uint64_t canonical_size_bytes{0};
   std::vector<CanonicalRange> canonical_ranges;
-  bool allow_partial{false};
+  ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
 };
 
 struct ArtifactRegistration {
@@ -102,7 +105,7 @@ struct RegistrationCommitResult {
   std::optional<std::string> view_data_multihash;
   std::optional<std::string> view_index_json;
   std::vector<CanonicalRange> canonical_ranges;
-  bool allow_partial{false};
+  ViewRegistrationKind registration_kind{ViewRegistrationKind::kUnspecified};
   common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
 };
 
@@ -116,6 +119,7 @@ struct RegistrationResources {
   std::shared_ptr<common::AsyncRuntime> async_runtime;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;
@@ -124,6 +128,7 @@ struct RegistrationPublication {
   std::string artifact_id;
   DeviceKey device;
   uint64_t size_bytes{0};
+  std::optional<std::string> view_id;
   std::string tensor_index_key;
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
@@ -131,13 +136,16 @@ struct RegistrationPublication {
   std::string encoding{"json"};
   std::string schema_version{"v3"};
   std::optional<std::string> verification_json;
+  std::string index_multihash;
+  std::string data_multihash;
+  common::ArtifactIdKind id_kind{common::ArtifactIdKind::kMi2};
 };
 
 class RegistrationPublisher {
  public:
   virtual ~RegistrationPublisher() = default;
   virtual absl::Status publish_registration(const RegistrationPublication& publication) = 0;
-  virtual absl::Status update_variant_view(const components::VariantViewUpdate& update) = 0;
+  virtual absl::Status update_view_state(const components::ViewStateUpdate& update) = 0;
 };
 
 } // namespace tensorcast::store::runtime::metadata

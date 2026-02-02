@@ -132,6 +132,7 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
   LOG(INFO) << "Memory pool size: " << memory_pool_size_ / communicator::misc::GB << "GB";
   LOG(INFO) << "I/O threads: " << num_thread_ << ", tx_slice_bytes: " << tx_slice_bytes_ / communicator::misc::MB
             << "MB";
+  LOG(INFO) << "CPU shared memory enabled: " << (options_.cpu_shared_memory_enabled ? "true" : "false");
 
   auto init_status = runtime_env_->initialize();
   CHECK(init_status.ok()) << "Failed to initialize RuntimeEnv: " << init_status;
@@ -226,6 +227,20 @@ absl::StatusOr<StoreEngine::StableCacheAdmissionResult> StoreEngine::admit_stabl
   result.admitted = admit_or->admitted;
   result.skipped = admit_or->skipped;
   return result;
+}
+
+absl::Status StoreEngine::update_stable_cache_policy(
+    const loading::ReplicaKey& key,
+    const components::StableDramCachePolicy& policy,
+    std::optional<absl::Time> retention_deadline) {
+  if (key.device.type != DeviceType::CPU) {
+    return absl::FailedPreconditionError("stable cache policy update requires CPU ReplicaKey");
+  }
+  auto cache_manager = runtime_env_->runtime_context().stable_cache_manager();
+  if (!cache_manager) {
+    return absl::FailedPreconditionError("stable cache manager unavailable");
+  }
+  return cache_manager->update_policy(key, policy, retention_deadline);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -336,7 +351,7 @@ absl::StatusOr<components::MemoryTierLeaseDescriptor> StoreEngine::acquire_memor
     return result;
   }
 
-  auto lease_or = uma->acquire_stable_lease(cpu_key, absl::MakeSpan(result.chunk_ids));
+  auto lease_or = acquire_replica_stable_lease(cpu_key, absl::MakeSpan(result.chunk_ids));
   if (!lease_or.ok()) {
     return lease_or.status();
   }
@@ -418,8 +433,10 @@ absl::StatusOr<components::MemoryTierLeaseDescriptor> StoreEngine::release_memor
   return result;
 }
 
-absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(std::string_view artifact_id) const {
-  return replica_runtime_->get_unique_gpu_residency(artifact_id);
+absl::StatusOr<int> StoreEngine::get_unique_gpu_residency(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  return replica_runtime_->get_unique_gpu_residency(artifact_id, view_id);
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_p2p(
@@ -453,8 +470,10 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::ingest_from_buffer_internal(
 // ---------------------------------------------------------------------------
 // Query helpers
 // ---------------------------------------------------------------------------
-std::vector<DeviceKey> StoreEngine::get_resident_devices(std::string_view artifact_id) const {
-  return replica_runtime_->get_resident_devices(artifact_id);
+std::vector<DeviceKey> StoreEngine::get_resident_devices(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  return replica_runtime_->get_resident_devices(artifact_id, view_id);
 }
 
 std::vector<StoreEngine::ReplicaInventoryEntry> StoreEngine::get_ha_inventory() const {
@@ -516,6 +535,24 @@ absl::Status StoreEngine::disable_remote_replica_access(const ReplicaKey& key, M
   return replica_runtime_->disable_remote_replica_access(key, location);
 }
 
+absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> StoreEngine::set_replica_exported(
+    const ReplicaKey& key,
+    MemoryLocation location,
+    absl::Span<const uint32_t> chunks,
+    bool on) {
+  return replica_runtime_->set_replica_exported(key, location, chunks, on);
+}
+
+absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> StoreEngine::acquire_replica_stable_lease(
+    const ReplicaKey& key,
+    absl::Span<const uint32_t> chunks) {
+  return replica_runtime_->acquire_replica_stable_lease(key, chunks);
+}
+
+absl::Status StoreEngine::release_replica_stable_lease(const replica::UnifiedMemoryAuthority::StableLease& lease) {
+  return replica_runtime_->release_replica_stable_lease(lease);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Memory cleanup
 // ═══════════════════════════════════════════════════════════════════════════
@@ -533,13 +570,32 @@ absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_into_target(
     const DeviceKey& target_device,
-    gsl::not_null<void*> target_ptr,
-    uint64_t total_size,
+    const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
     const loading::MaterializeHints& hints) {
   return ingestion_runtime_->materialize_into_target(
-      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+      target_device, target_layout, canonical_index_json, generation, hints);
+}
+
+absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_view_from_assembly(
+    std::string_view assembly_id,
+    std::string_view target_artifact_id,
+    std::string_view view_id,
+    std::string_view view_spec_json,
+    const DeviceKey& target_device,
+    loading::TransformPlacement placement,
+    const std::vector<std::string>* allowed_view_ids) {
+  return ingestion_runtime_->materialize_view_from_assembly(
+      assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids);
+}
+
+absl::StatusOr<SealAssemblyResult> StoreEngine::seal_assembly(
+    std::string_view assembly_id,
+    bool publish_canonical,
+    runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb,
+    const std::vector<std::string>* allowed_view_ids) {
+  return ingestion_runtime_->seal_assembly(assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -566,6 +622,12 @@ absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::str
 
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
   return metadata_gateway_->get_canonical_index(artifact_id);
+}
+
+absl::StatusOr<components::ViewMetadata> StoreEngine::get_view_metadata(
+    std::string_view artifact_id,
+    std::string_view view_id) {
+  return metadata_gateway_->get_view_metadata(artifact_id, view_id);
 }
 
 absl::Status StoreEngine::upsert_key_mapping(
@@ -651,8 +713,15 @@ absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
   return loader::ViewPlanner::compute_view_plan(canonical_index_json, spec);
 }
 
+absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
+    std::string_view canonical_index_json,
+    const loader::ViewSpec& spec,
+    absl::Span<const std::string> subset_names) {
+  return loader::ViewPlanner::compute_view_plan(canonical_index_json, spec, subset_names);
+}
+
 bool StoreEngine::view_plan_allows_alias(const loader::ViewPlan& plan) {
-  if (plan.selection.total_bytes == 0) {
+  if (plan.selection.map.total_bytes == 0) {
     return false;
   }
   if (plan.selection.requires_materialization) {

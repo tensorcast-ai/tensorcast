@@ -1,6 +1,8 @@
+"""Client utilities for interacting with the TensorCast Store Daemon."""
+
+from __future__ import annotations
+
 #  Copyright (c) 2025-2026, TensorCast Team.
-
-
 import atexit
 import os
 import random
@@ -8,17 +10,20 @@ import time
 from contextlib import contextmanager, suppress
 from datetime import timezone
 from threading import RLock
-from typing import Any, Iterator, Literal, Sequence, cast, overload
+from typing import TYPE_CHECKING, Any, Iterator, Literal, Sequence, cast, overload
 
 import grpc
 from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
-from tensorcast.api._config import StorePolicy
+if TYPE_CHECKING:
+    from tensorcast.api._config import StorePolicy
+    from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.logger import init_logger
 from tensorcast.observability.otel import ensure_client_otel, set_span_attributes
 
 # Use v2 daemon proto path
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.daemon.v2 import (
     store_daemon_pb2_grpc as store_daemon_pb2_grpc,
@@ -37,6 +42,7 @@ from tensorcast.types import (
     Plan,
     RegisterStorage,
     RegisterTensorAlias,
+    SealAssemblyResult,
     ServerConfig,
     StableDramHandshake,
     VramRegionHandle,
@@ -411,7 +417,7 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
@@ -518,13 +524,21 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
+        tensor_names: Sequence[str] | None = None,
+        view: common_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        view_subset_hash: bytes | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
+        operation_id: str | None = None,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
+        if view is not None and view_id is not None:
+            raise ValueError("Specify at most one of view or view_id")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
             if preference is not None:
@@ -546,11 +560,23 @@ class DaemonCtl:
                 pid=pid_value,
                 preference=preference_value,
             )
+            if tensor_names is not None:
+                request.tensor_names.extend(list(tensor_names))
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
                 request.disk_fallback.verify_checksums = True
+            if view_subset_hash is not None:
+                request.view_subset_hash = bytes(view_subset_hash)
+            if view is not None:
+                request.view.CopyFrom(view)
+            elif view_id is not None:
+                request.view_id = str(view_id)
+            if placement is not None:
+                request.placement = placement
+            if operation_id:
+                request.operation_id = str(operation_id)
             try:
                 response: store_daemon_pb2.MaterializeIntoTargetResponse = (
                     self._unary_call(
@@ -599,6 +625,32 @@ class DaemonCtl:
                 raise
         return response
 
+    def wait_replica_status(
+        self,
+        ticket: store_daemon_pb2.ReplicaTicket,
+        *,
+        timeout_ms: int | None = None,
+    ) -> store_daemon_pb2.WaitReplicaStatusResponse:
+        with self._client_span("Client/WaitReplicaStatus") as span:
+            request = store_daemon_pb2.WaitReplicaStatusRequest(ticket=ticket)
+            if timeout_ms is not None:
+                request.timeout_ms = int(timeout_ms)
+            timeout_s: float = 610.0
+            if timeout_ms is not None and timeout_ms > 0:
+                timeout_s = max(1.0, float(timeout_ms) / 1000.0 + 1.0)
+            try:
+                response: store_daemon_pb2.WaitReplicaStatusResponse = self._unary_call(
+                    self.stub_v2.WaitReplicaStatus,
+                    request,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     def release_replica(
         self, ticket: store_daemon_pb2.ReplicaTicket
     ) -> store_daemon_pb2.ReleaseReplicaResponse:
@@ -617,6 +669,179 @@ class DaemonCtl:
                 raise
         return response
 
+    def create_placement_lease(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str,
+        device_id: int,
+        ttl_ms: int | None,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.CreatePlacementLeaseResponse:
+        with self._client_span("Client/CreatePlacementLease") as span:
+            request = store_daemon_pb2.CreatePlacementLeaseRequest(
+                artifact_id=str(artifact_id),
+                view_id=str(view_id),
+                device_id=int(device_id),
+            )
+            if ttl_ms is not None:
+                request.ttl_ms = int(ttl_ms)
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.CreatePlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.CreatePlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def renew_placement_lease(
+        self,
+        *,
+        lease_token: bytes,
+        ttl_ms: int,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.RenewPlacementLeaseResponse:
+        with self._client_span("Client/RenewPlacementLease") as span:
+            request = store_daemon_pb2.RenewPlacementLeaseRequest(
+                lease_token=bytes(lease_token),
+                ttl_ms=int(ttl_ms),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.RenewPlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.RenewPlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def release_placement_lease(
+        self,
+        *,
+        lease_token: bytes,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.ReleasePlacementLeaseResponse:
+        with self._client_span("Client/ReleasePlacementLease") as span:
+            request = store_daemon_pb2.ReleasePlacementLeaseRequest(
+                lease_token=bytes(lease_token),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.ReleasePlacementLeaseResponse = (
+                    self._unary_call(
+                        self.stub_v2.ReleasePlacementLease,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def acquire_retention_handle(
+        self,
+        *,
+        selection: common_pb2.ArtifactSelection,
+        policy: store_daemon_pb2.StorePolicy | None = None,
+        ttl_ms: int | None = None,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.AcquireRetentionHandleResponse:
+        with self._client_span("Client/AcquireRetentionHandle") as span:
+            request = store_daemon_pb2.AcquireRetentionHandleRequest(
+                selection=selection,
+            )
+            if policy is not None:
+                request.policy.CopyFrom(policy)
+            if ttl_ms is not None:
+                request.ttl_ms = int(ttl_ms)
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.AcquireRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.AcquireRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def renew_retention_handle(
+        self,
+        *,
+        handle_token: bytes,
+        extend_ttl_ms: int,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.RenewRetentionHandleResponse:
+        with self._client_span("Client/RenewRetentionHandle") as span:
+            request = store_daemon_pb2.RenewRetentionHandleRequest(
+                handle_token=bytes(handle_token),
+                extend_ttl_ms=int(extend_ttl_ms),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.RenewRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.RenewRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
+    def release_retention_handle(
+        self,
+        *,
+        handle_token: bytes,
+        timeout_s: float | None = None,
+    ) -> store_daemon_pb2.ReleaseRetentionHandleResponse:
+        with self._client_span("Client/ReleaseRetentionHandle") as span:
+            request = store_daemon_pb2.ReleaseRetentionHandleRequest(
+                handle_token=bytes(handle_token),
+            )
+            call_timeout = 5.0 if timeout_s is None else float(timeout_s)
+            try:
+                response: store_daemon_pb2.ReleaseRetentionHandleResponse = (
+                    self._unary_call(
+                        self.stub_v2.ReleaseRetentionHandle,
+                        request,
+                        timeout=call_timeout,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     @overload
     def materialize_by_artifact_id_v2(
         self,
@@ -626,7 +851,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
@@ -636,6 +861,9 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse: ...
 
     @overload
@@ -647,7 +875,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[False],
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
@@ -657,6 +885,9 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]: ...
 
     @overload
@@ -668,7 +899,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[True] = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
@@ -678,6 +909,9 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> bytes: ...
 
     def materialize_by_artifact_id_v2(
@@ -687,7 +921,7 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
-        view: store_daemon_pb2.ViewSpec | None = None,
+        view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
@@ -697,6 +931,9 @@ class DaemonCtl:
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> (
         store_daemon_pb2.MaterializeReplicaResponse
         | bytes
@@ -724,14 +961,20 @@ class DaemonCtl:
                 preference_value = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
+            device_uuid_value = (
+                ""
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else device_uuid
+            )
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
                 artifact_id=artifact_id,
                 replica_uuid=replica_uuid,
-                device_uuid=device_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                device_uuid=device_uuid_value,
+                target_device_type=target_device_type,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
                 preference=preference_value,
+                lease_mode=lease_mode,
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
@@ -753,7 +996,7 @@ class DaemonCtl:
                     self._unary_call(
                         self.stub_v2.MaterializeReplica,
                         request,
-                        timeout=60,
+                        timeout=60 if timeout_s is None else timeout_s,
                         span=span,
                         retries=1,
                     )
@@ -787,6 +1030,10 @@ class DaemonCtl:
             assert response.mem_handle is not None
             if return_response:
                 return response
+            if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+                raise ValueError(
+                    "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+                )
             return response.mem_handle.cuda_ipc_handle, load_status
 
         logger.info("Artifact loaded: %s, %s", artifact_id, replica_uuid)
@@ -794,13 +1041,21 @@ class DaemonCtl:
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            success = self.confirm_replica_loaded(disk_path or "", replica_uuid)
+            success = self.confirm_replica_loaded(
+                disk_path or "",
+                replica_uuid,
+                target_device_type=target_device_type,
+            )
             if not success:
                 raise RuntimeError(
                     f"Failed to confirm artifact loading for {artifact_id}"
                 )
         if return_response:
             return response
+        if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+            raise ValueError(
+                "materialize_by_artifact_id_v2 must use return_response=True for non-GPU targets"
+            )
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
 
@@ -818,6 +1073,9 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
 
     @overload
@@ -834,6 +1092,9 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
 
     @overload
@@ -850,6 +1111,9 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> tuple[bytes, str, str]: ...
 
     def materialize_by_key_v2(
@@ -864,6 +1128,9 @@ class DaemonCtl:
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
+        timeout_s: float | int | None = None,
     ) -> (
         store_daemon_pb2.MaterializeByKeyResponse
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
@@ -889,13 +1156,20 @@ class DaemonCtl:
                 preference_value = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
+            device_id_value = (
+                0
+                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
+                else int(device_id)
+            )
             request = store_daemon_pb2.MaterializeByKeyRequest(
                 key=key,
-                device_id=int(device_id),
+                device_id=device_id_value,
                 pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
                 pid=pid,
                 replica_uuid=replica_uuid,
                 preference=preference_value,
+                target_device_type=target_device_type,
+                lease_mode=lease_mode,
             )
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
@@ -907,7 +1181,7 @@ class DaemonCtl:
                 response: store_daemon_pb2.MaterializeByKeyResponse = self._unary_call(
                     self.stub_v2.MaterializeByKey,
                     request,
-                    timeout=60,
+                    timeout=60 if timeout_s is None else timeout_s,
                     span=span,
                     retries=1,
                 )
@@ -960,19 +1234,31 @@ class DaemonCtl:
             assert response.mem_handle is not None
             if return_response:
                 return response
+            if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+                raise ValueError(
+                    "materialize_by_key_v2 must use return_response=True for non-GPU targets"
+                )
             return (handle_bytes, load_status, used_disk_path, artifact_id)
 
         if (
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            success = self.confirm_replica_loaded(used_disk_path, replica_uuid)
+            success = self.confirm_replica_loaded(
+                used_disk_path,
+                replica_uuid,
+                target_device_type=target_device_type,
+            )
             if not success:
                 raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
 
         assert response.mem_handle is not None
         if return_response:
             return response
+        if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
+            raise ValueError(
+                "materialize_by_key_v2 must use return_response=True for non-GPU targets"
+            )
         return (handle_bytes, used_disk_path, artifact_id)
 
     def resolve_artifact_from_disk_v2(
@@ -1111,12 +1397,18 @@ class DaemonCtl:
             return response
         return (handle_bytes, used_disk_path, artifact_id)
 
-    def confirm_replica_loaded(self, disk_path: str, replica_uuid: str) -> bool:
+    def confirm_replica_loaded(
+        self,
+        disk_path: str,
+        replica_uuid: str,
+        *,
+        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+    ) -> bool:
         with self._client_span("Client/ConfirmReplica") as span:
             request = store_daemon_pb2.ConfirmReplicaRequest(
                 disk_path=disk_path,
                 replica_uuid=replica_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
+                target_device_type=target_device_type,
             )
             try:
                 _ = self._unary_call(
@@ -1154,13 +1446,51 @@ class DaemonCtl:
                 raise RuntimeError("GetServerConfig failed") from e
             else:
                 # Map both legacy and new fields for smooth migration
+                local_handle_socket_path = str(
+                    getattr(response, "local_handle_socket_path", "") or ""
+                )
+                cpu_shared_memory_enabled = bool(
+                    getattr(response, "cpu_shared_memory_enabled", False)
+                )
+                if not local_handle_socket_path and cpu_shared_memory_enabled:
+                    try:
+                        from tensorcast.cli_utils.paths import (
+                            discover_local_handle_socket_path,
+                            get_session_address,
+                        )
+
+                        session_address = get_session_address()
+                        if session_address and session_address == self.server_address:
+                            discovered = discover_local_handle_socket_path()
+                            if discovered is not None:
+                                local_handle_socket_path = str(discovered)
+                    except Exception:
+                        pass
                 return ServerConfig(
                     tx_slice_bytes=int(getattr(response, "tx_slice_bytes", 0)),
                     mem_pool_size=int(getattr(response, "mem_pool_size", 0)),
                     artifact_chunk_bytes=int(
                         getattr(response, "artifact_chunk_bytes", 0)
                     ),
+                    local_handle_socket_path=local_handle_socket_path,
+                    cpu_shared_memory_enabled=cpu_shared_memory_enabled,
                 )
+
+    def get_worker_status(self) -> store_daemon_pb2.GetWorkerStatusResponse:
+        with self._client_span("Client/GetWorkerStatus") as span:
+            request = store_daemon_pb2.GetWorkerStatusRequest()
+            try:
+                response: store_daemon_pb2.GetWorkerStatusResponse = self._unary_call(
+                    self.stub_v2.GetWorkerStatus,
+                    request,
+                    timeout=5.0,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
 
     # ------------------------------------------------------------------
     # Memory Artifact registration (outer-layer client API)
@@ -1359,6 +1689,7 @@ class DaemonCtl:
             )
             view_id = resp.view_id or None
             view_data_hash = resp.view_data_hash or None
+            registration_kind = "piece" if resp.allow_partial else "canonical"
             local_stable_tier = None
             if resp.HasField("local_stable_tier"):
                 status = resp.local_stable_tier.status
@@ -1379,6 +1710,7 @@ class DaemonCtl:
                 view_index_json=view_index_json,
                 view_data_hash=view_data_hash,
                 canonical_ranges=canonical_ranges,
+                registration_kind=registration_kind,
                 allow_partial=bool(resp.allow_partial),
                 local_stable_tier=local_stable_tier,
             )
@@ -1543,7 +1875,7 @@ class DaemonCtl:
 
         expires_at = None
         if resp.HasField("expires_at"):
-            expires_at = resp.expires_at.ToDatetime(tz=timezone.utc)
+            expires_at = resp.expires_at.ToDatetime(tzinfo=timezone.utc)
         return VramRegionHandle(
             region_id=str(resp.region_id),
             ttl_ms=int(resp.ttl_ms),
@@ -1604,7 +1936,9 @@ class DaemonCtl:
         extend_ttl_ms: int | None = None,
         owner_pid: int | None = None,
         device_id: int | None = None,
+        byte_space: common_pb2.ByteSpaceRef | None = None,
         release_regions: bool | None = None,
+        operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> DeregisterArtifactOutcome:
         if not artifact_id:
@@ -1624,8 +1958,12 @@ class DaemonCtl:
             req.extend_ttl_ms = int(extend_ttl_ms)
         if device_id is not None:
             req.device_id = int(device_id)
+        if byte_space is not None:
+            req.byte_space.CopyFrom(byte_space)
         if release_regions is not None:
             req.release_regions = bool(release_regions)
+        if operation_id:
+            req.operation_id = str(operation_id)
 
         with self._client_span("Client/DeregisterArtifact") as span:
             set_span_attributes(
@@ -1670,6 +2008,108 @@ class DaemonCtl:
             released_region_ids=tuple(resp.released_region_ids),
             message=resp.message or None,
         )
+
+    def publish_target_replica(
+        self,
+        *,
+        target_write_token: bytes,
+        byte_space: common_pb2.ByteSpaceRef,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 60.0,
+    ) -> store_daemon_pb2.PublishTargetReplicaResponse:
+        if not target_write_token:
+            raise ValueError("target_write_token is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.PublishTargetReplicaRequest(
+            target_write_token=bytes(target_write_token),
+            byte_space=byte_space,
+        )
+        if ttl_ms is not None:
+            req.ttl_ms = int(ttl_ms)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/PublishTargetReplica") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub_v2.PublishTargetReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                raise RuntimeError(f"PublishTargetReplica failed: {e}") from e
+        return resp
+
+    def retire_published_replica(
+        self,
+        *,
+        artifact_id: str,
+        byte_space: common_pb2.ByteSpaceRef,
+        lease_id: str | None = None,
+        owner_pid: int | None = None,
+        device_id: int | None = None,
+        wait_for_drain: bool = True,
+        drain_timeout_ms: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 60.0,
+    ) -> store_daemon_pb2.RetirePublishedReplicaResponse:
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if byte_space is None:
+            raise ValueError("byte_space is required")
+        req = store_daemon_pb2.RetirePublishedReplicaRequest(
+            artifact_id=artifact_id,
+            byte_space=byte_space,
+            wait_for_drain=bool(wait_for_drain),
+        )
+        if lease_id:
+            req.lease_id = str(lease_id)
+        if owner_pid is not None:
+            req.owner_pid = int(owner_pid)
+        if device_id is not None:
+            req.device_id = int(device_id)
+        if drain_timeout_ms is not None:
+            req.drain_timeout_ms = int(drain_timeout_ms)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/RetirePublishedReplica") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub_v2.RetirePublishedReplica,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    return store_daemon_pb2.RetirePublishedReplicaResponse(
+                        drained=True, removed=False
+                    )
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"RetirePublishedReplica failed: {e}") from e
+        return resp
 
     def feed_register_artifact_view_chunks(
         self,
@@ -1873,12 +2313,138 @@ class DaemonCtl:
             )
             return resp.tensor_index_data
 
+    def seal_assembly(
+        self,
+        assembly_id: str,
+        *,
+        publish_canonical: bool = True,
+        timeout_s: float = 120.0,
+    ) -> SealAssemblyResult:
+        if not assembly_id:
+            raise ValueError("assembly_id is required")
+        req = store_daemon_pb2.SealAssemblyRequest(
+            assembly_id=assembly_id,
+            publish_canonical=bool(publish_canonical),
+        )
+        with self._client_span("Client/SealAssembly") as span:
+            try:
+                resp = self._unary_call(
+                    self.stub.SealAssembly,
+                    req,
+                    timeout=timeout_s,
+                    span=span,
+                    retries=0,
+                )
+            except grpc.RpcError as e:
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.INVALID_ARGUMENT:
+                    raise ValueError(str(e)) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise KeyError(str(e)) from e
+                if code == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    raise TimeoutError(str(e)) from e
+                raise RuntimeError(f"SealAssembly failed: {e}") from e
+
+        desc = resp.descriptor
+        ad = ArtifactDescriptor(
+            artifact_id=desc.artifact_id,
+            index_multihash=desc.index_multihash,
+            data_multihash=desc.data_multihash,
+            schema_version=desc.schema_version,
+            encoding=desc.encoding,
+            total_size=int(desc.total_size),
+            id_kind=desc.id_kind,
+        )
+        sealed_artifact_id = resp.sealed_artifact_id or ad.artifact_id
+        return SealAssemblyResult(
+            sealed_artifact_id=sealed_artifact_id,
+            descriptor=ad,
+            already_sealed=bool(resp.already_sealed),
+        )
+
+    def start_seal_assembly(
+        self,
+        *,
+        assembly_id: str,
+        layout_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> store_daemon_pb2.StartSealAssemblyResponse:
+        if not assembly_id:
+            raise ValueError("assembly_id is required")
+        req = store_daemon_pb2.StartSealAssemblyRequest(
+            assembly_id=assembly_id,
+            layout_id=str(layout_id) if layout_id else "",
+        )
+        with self._client_span("Client/StartSealAssembly") as span:
+            resp = self._unary_call(
+                self.stub.StartSealAssembly,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        return resp
+
+    def get_operation(
+        self, operation_id: str, *, timeout_s: float = 10.0
+    ) -> "operation_pb2.GetOperationResponse":
+        if not operation_id:
+            raise ValueError("operation_id is required")
+        from tensorcast.proto.operation.v1 import operation_pb2
+
+        req = operation_pb2.GetOperationRequest(operation_id=operation_id)
+        with self._client_span("Client/GetOperation") as span:
+            return self._unary_call(
+                self.stub.GetOperation,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+
+    def wait_operation(
+        self,
+        operation_id: str,
+        *,
+        timeout_ms: int,
+        timeout_s: float,
+    ) -> "operation_pb2.GetOperationResponse":
+        if not operation_id:
+            raise ValueError("operation_id is required")
+        if timeout_ms < 0:
+            raise ValueError("timeout_ms must be >= 0")
+        from tensorcast.proto.operation.v1 import operation_pb2
+
+        req = store_daemon_pb2.WaitOperationRequest(
+            operation_id=operation_id,
+            timeout_ms=int(timeout_ms),
+        )
+        with self._client_span("Client/WaitOperation") as span:
+            resp = self._unary_call(
+                self.stub.WaitOperation,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=0,
+            )
+        # WaitOperationResponse wraps the canonical GetOperationResponse proto.
+        op = operation_pb2.GetOperationResponse()
+        op.CopyFrom(resp.operation)
+        return op
+
     @classmethod
     def _policy_to_proto(
         cls, policy: StorePolicy | dict[str, object] | str | None
     ) -> store_daemon_pb2.StorePolicy | None:
         if policy is None:
             return None
+        from tensorcast.api._config import StorePolicy
+
         resolved = StorePolicy.parse(policy)
         if resolved is None:
             return None

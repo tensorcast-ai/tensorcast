@@ -10,6 +10,7 @@
 #include <ostream>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "absl/hash/hash.h"
 #include "absl/status/status.h"
@@ -20,6 +21,7 @@
 #include "core/store/device_types.h"
 #include "core/store/materialization/contracts/view/view_id.h"
 #include "core/store/replica/memory_state.h"
+#include "gsl/pointers"
 
 namespace tensorcast::store::loading {
 
@@ -36,6 +38,16 @@ enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalRe
 
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
+};
+
+struct IntoTargetStorage {
+  gsl::not_null<void*> base_ptr;
+  uint64_t length{0};
+};
+
+struct IntoTargetLayout {
+  std::vector<IntoTargetStorage> storages;
+  uint64_t total_size{0};
 };
 
 struct DiskSource {
@@ -151,6 +163,12 @@ struct ReplicaKeyHash {
   }
 };
 
+struct CpuMemfdRegion {
+  int fd{-1};
+  uint64_t size_bytes{0};
+  uint64_t offset_bytes{0};
+};
+
 struct ReplicaHandle {
   ReplicaKey replica_key;
   std::shared_ptr<common::ReadySignal<absl::Status>> ready_signal;
@@ -158,6 +176,7 @@ struct ReplicaHandle {
   replica::MemoryState gpu_state{replica::MemoryState::UNINITIALIZED};
   void* gpu_base_ptr{nullptr};
   CudaIpcHandle cuda_ipc_handle;
+  std::optional<CpuMemfdRegion> cpu_memfd_region;
   std::optional<std::string> view_index_json;
   std::optional<std::string> view_data_hash;
   MaterializationSource source{MaterializationSource::kUnspecified};

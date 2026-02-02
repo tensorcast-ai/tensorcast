@@ -11,6 +11,7 @@
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
 
+#include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/contracts/inline_buffer_loader.h"
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
@@ -123,17 +124,18 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // --- Create ReplicaLoadController ---
   auto view_id = config.view_id;
 
-  DeviceKey dev_key;
   const bool gpu_requested = (config.device_type == DeviceType::GPU) || (config.local_device_id >= 0);
+  DeviceKey dev_key;
   if (gpu_requested) {
     // Either explicit GPU target or legacy configs that only set local_device_id.
     // Bind the Replica to that GPU so CUDA stream initialisation works for GPU copies.
-    dev_key.type = DeviceType::GPU;
-    dev_key.ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
+    const int ordinal = (config.local_device_id >= 0) ? config.local_device_id : 0;
+    dev_key = DeviceRegistry::instance().gpu_key(ordinal);
   } else {
     // Default / explicit CPU target (or unsupported type which we map to CPU for now).
     dev_key.type = DeviceType::CPU;
     dev_key.ordinal = -1;
+    dev_key.uuid.clear();
   }
 
   auto memory_manager = std::make_shared<ReplicaLoadController>(
@@ -147,7 +149,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.streaming_buffer_chunks,
       effective_size,
       view_id,
-      config.memory_tier_config);
+      config.memory_tier_config,
+      config.cpu_shared_memory_enabled);
 
   // --- Create Replica Instance ---
   // Build ReplicaKey for this replica/device
@@ -162,7 +165,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.async_runtime,
       source_type,
       std::move(view_plan),
-      config.transform_placement));
+      config.transform_placement,
+      config.byte_mapping_config));
   return replica_ptr;
 }
 
@@ -177,14 +181,16 @@ Replica::Replica(
     gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     common::memory::MemoryLocation source_type,
     std::optional<loader::ViewPlan> view_plan,
-    loading::TransformPlacement transform_placement)
+    loading::TransformPlacement transform_placement,
+    StoreEngineOptions::ByteMappingConfig byte_mapping_config)
     : key_(std::move(key)),
       loader_(std::move(loader)),
       memory_manager_(std::move(memory_manager)),
       async_runtime_(std::move(async_runtime)),
       original_source_type_(source_type),
       view_plan_(std::move(view_plan)),
-      transform_placement_(transform_placement) {}
+      transform_placement_(transform_placement),
+      byte_mapping_config_(std::move(byte_mapping_config)) {}
 
 //--------------------------------------------------------------------------
 // Destructor
@@ -326,7 +332,7 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
     if (view_plan_.has_value() && !view_plan_->is_identity) {
-      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection);
+      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
     }
     std::function<absl::Status()> post_load_fn;
     if (view_plan_.has_value() && !view_plan_->is_identity && view_plan_->transform.requires_materialization &&

@@ -1,13 +1,15 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import TYPE_CHECKING, Tuple
 
 from tensorcast import startup
 from tensorcast.api._config import RegionBackedMode
 from tensorcast.api._runtime_handle import RuntimeHandle
-from tensorcast.daemon_ctl import DaemonCtl
+
+if TYPE_CHECKING:
+    from tensorcast.daemon_ctl import DaemonCtl
 
 
 def is_initialized() -> bool:

@@ -21,11 +21,15 @@
 #include "tensorcast/common/v1/common.pb.h"
 #include "tensorcast/global_store/v1/global_store.grpc.pb.h"
 #include "tensorcast/global_store/v1/global_store.pb.h"
+#include "tensorcast/layout/v1/layout.pb.h"
 #include "tensorcast/memory_tier/v1/memory_tier.grpc.pb.h"
+#include "tensorcast/operation/v1/operation.pb.h"
 
 namespace tensorcast::store::components {
 
 namespace global_store = tensorcast::global_store::v1;
+namespace layout = tensorcast::layout::v1;
+namespace operation = tensorcast::operation::v1;
 
 // Configuration for Global Store Client
 struct GlobalStoreClientConfig {
@@ -80,6 +84,7 @@ struct RemoteReplicaInfo {
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
   std::string verification_json; // optional verification metadata (JSON)
+  std::optional<std::string> view_id;
 };
 
 // Transport session for P2P transfers
@@ -87,6 +92,12 @@ struct TransportSession {
   std::string transport_id;
   RemoteReplicaInfo remote_replica;
   absl::Time start_time;
+};
+
+struct ReplicaDrainStatus {
+  bool drained{false};
+  uint32_t current_requests{0};
+  std::optional<uint64_t> oldest_transport_age_ms;
 };
 
 struct ChunkLocationInfo {
@@ -115,7 +126,12 @@ struct KeyMapping {
   std::string disk_path;
 };
 
-struct VariantViewUpdate {
+struct CanonicalRange {
+  uint64_t offset{0};
+  uint64_t length{0};
+};
+
+struct ViewStateUpdate {
   std::string artifact_id;
   std::string view_id;
   std::string view_spec_json;
@@ -124,7 +140,38 @@ struct VariantViewUpdate {
   bool mark_verified{false};
   uint64_t canonical_size_bytes{0};
   uint64_t canonical_bytes_covered{0};
+  std::vector<CanonicalRange> canonical_ranges;
   std::vector<global_store::LeafWrite> leaf_writes;
+  std::vector<global_store::PieceProofDigestWrite> proof_digests;
+};
+
+struct ViewInfo {
+  std::string view_id;
+  std::string view_spec_json;
+  uint64_t view_size_bytes{0};
+  std::optional<std::string> view_data_hash;
+  std::optional<absl::Time> verified_at;
+  uint64_t canonical_size_bytes{0};
+  uint64_t canonical_bytes_covered{0};
+  std::vector<CanonicalRange> canonical_ranges;
+};
+
+struct ArtifactBinding {
+  std::string from_artifact_id;
+  std::string to_artifact_id;
+  global_store::ArtifactBindingKind kind{global_store::ARTIFACT_BINDING_KIND_UNSPECIFIED};
+  std::optional<absl::Time> created_at;
+};
+
+struct ArtifactBindingResult {
+  ArtifactBinding binding;
+  bool created{false};
+};
+
+struct ViewMetadata {
+  std::string view_spec_json;
+  uint64_t view_size_bytes{0};
+  std::optional<std::string> view_data_hash;
 };
 
 enum class MemoryTierLeaseKind { kStable, kPreemptible };
@@ -243,7 +290,9 @@ class IGlobalStoreClient {
       uint64_t mem_pool_total_size,
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
-      std::string_view previous_worker_id = {}) = 0;
+      std::string_view previous_worker_id = {},
+      std::string_view daemon_id = {},
+      uint64_t capability_flags = 0) = 0;
 
   virtual absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
       std::string_view worker_id,
@@ -254,7 +303,9 @@ class IGlobalStoreClient {
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
       global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
-      const RpcOptions& rpc_options = RpcOptions{}) = 0;
+      const RpcOptions& rpc_options = RpcOptions{},
+      std::string_view daemon_id = {},
+      uint64_t capability_flags = 0) = 0;
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
@@ -264,9 +315,10 @@ class IGlobalStoreClient {
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t memory_size,
-      uint32_t max_concurrency = 1) = 0;
+      uint32_t max_concurrency = 1,
+      std::optional<std::string_view> view_id = std::nullopt) = 0;
 
-  virtual absl::Status record_variant_residency(
+  virtual absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
@@ -284,7 +336,9 @@ class IGlobalStoreClient {
       std::string_view encoding = "json",
       std::string_view schema_version = "v3",
       uint32_t max_concurrency = 1,
-      const std::optional<std::string>& verification_json = std::nullopt) = 0;
+      const std::optional<std::string>& verification_json = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) = 0;
 
   virtual absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) = 0;
 
@@ -294,6 +348,17 @@ class IGlobalStoreClient {
       std::string_view worker_id,
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
 
   virtual absl::StatusOr<TransportSession> request_replica_transport(
       std::string_view artifact_id,
@@ -314,7 +379,9 @@ class IGlobalStoreClient {
 
   virtual absl::Status complete_replica_transport(std::string_view transport_id) = 0;
 
-  virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id) = 0;
+  virtual absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) = 0;
 
   virtual absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
@@ -342,6 +409,7 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<KeyMapping> resolve_key_mapping(std::string_view key) = 0;
 
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
+  virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
   virtual absl::Status upsert_key_mapping(
       std::string_view key,
@@ -380,7 +448,38 @@ class IGlobalStoreClient {
       uint32_t grpc_port,
       uint32_t p2p_port) = 0;
 
-  virtual absl::Status update_artifact_view_state(const VariantViewUpdate& update) = 0;
+  virtual absl::Status update_artifact_view_state(const ViewStateUpdate& update) = 0;
+
+  virtual absl::StatusOr<std::vector<ViewInfo>> list_views(std::string_view artifact_id) = 0;
+
+  // ========== Layout v2 ==========
+  virtual absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view assembly_id) = 0;
+  virtual absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) = 0;
+  virtual absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) = 0;
+  virtual absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) = 0;
+  virtual absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const global_store::WriteTensorProofCommitmentsRequest& request) = 0;
+  virtual absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const global_store::CheckProofCommitmentsMatchRequest& request) = 0;
+
+  virtual absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view assembly_id) = 0;
+
+  // ========== Unified Operations ==========
+  virtual absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const operation::AcquireOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const operation::KeepaliveOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::ReleaseOperationLeaseResponse> release_operation_lease(
+      const operation::ReleaseOperationLeaseRequest& request) = 0;
+  virtual absl::StatusOr<operation::GetOperationResponse> get_operation(
+      const operation::GetOperationRequest& request) = 0;
+  virtual absl::Status update_operation(const operation::UpdateOperationRequest& request) = 0;
+
+  virtual absl::StatusOr<ArtifactBinding> get_artifact_binding(std::string_view artifact_id) = 0;
+
+  virtual absl::StatusOr<ArtifactBindingResult> upsert_artifact_binding(const ArtifactBinding& binding) = 0;
 
   virtual absl::StatusOr<PlacementPlanResult> plan_placement(
       std::string_view artifact_id,
@@ -389,6 +488,36 @@ class IGlobalStoreClient {
       std::string_view source_node_id) = 0;
 
   virtual absl::Status report_persistence_status(const PersistenceReport& report) = 0;
+};
+
+class TransportLease {
+ public:
+  TransportLease() = default;
+  TransportLease(IGlobalStoreClient* client, std::string transport_id);
+
+  TransportLease(const TransportLease&) = delete;
+  TransportLease& operator=(const TransportLease&) = delete;
+
+  TransportLease(TransportLease&& other) noexcept;
+  TransportLease& operator=(TransportLease&& other) noexcept;
+
+  ~TransportLease();
+
+  const std::string& transport_id() const {
+    return transport_id_;
+  }
+
+  bool is_active() const {
+    return client_ != nullptr && !transport_id_.empty();
+  }
+
+  void release();
+
+ private:
+  void complete();
+
+  IGlobalStoreClient* client_{nullptr};
+  std::string transport_id_;
 };
 
 class GlobalStoreClient : public IGlobalStoreClient {
@@ -408,7 +537,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t mem_pool_total_size,
       uint64_t mem_pool_available_size,
       bool is_recovery_registration = false,
-      std::string_view previous_worker_id = {}) override;
+      std::string_view previous_worker_id = {},
+      std::string_view daemon_id = {},
+      uint64_t capability_flags = 0) override;
 
   // Enhanced heartbeat with HA state fields
   absl::StatusOr<global_store::WorkerHeartbeatResponse> send_heartbeat_enhanced(
@@ -420,7 +551,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<std::string>& registered_artifact_ids,
       int64_t last_successful_sync,
       global_store::ConnectionStatus connection_status = global_store::CONNECTION_STATUS_CONNECTED,
-      const RpcOptions& rpc_options = RpcOptions{}) override;
+      const RpcOptions& rpc_options = RpcOptions{},
+      std::string_view daemon_id = {},
+      uint64_t capability_flags = 0) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
 
@@ -431,11 +564,12 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t memory_size,
-      uint32_t max_concurrency = 1) override;
+      uint32_t max_concurrency = 1,
+      std::optional<std::string_view> view_id = std::nullopt) override;
 
-  // Record metadata for a variant (view) replica while keeping canonical routing unchanged.
-  // For v1, this is a placeholder that will be backed by Global Store plan 0016-c.
-  absl::Status record_variant_residency(
+  // Record metadata for a view replica while keeping canonical routing unchanged.
+  // This is a placeholder that will be backed by a dedicated Global Store RPC.
+  absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
       std::string_view view_id,
       uint64_t view_size_bytes,
@@ -454,7 +588,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view encoding = "json",
       std::string_view schema_version = "v3",
       uint32_t max_concurrency = 1,
-      const std::optional<std::string>& verification_json = std::nullopt) override;
+      const std::optional<std::string>& verification_json = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) override;
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override;
 
@@ -463,6 +599,17 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view worker_id,
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) override;
+
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
+
+  absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
 
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_replica_transport(
@@ -483,7 +630,9 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   absl::Status complete_replica_transport(std::string_view transport_id) override;
 
-  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(std::string_view artifact_id) override;
+  absl::StatusOr<std::vector<RemoteReplicaInfo>> get_artifact_replicas(
+      std::string_view artifact_id,
+      std::optional<std::string_view> view_id = std::nullopt) override;
 
   absl::StatusOr<std::vector<ChunkLocationInfo>> query_chunk_locations(
       std::string_view artifact_id,
@@ -528,11 +677,39 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::StatusOr<MemoryTierLeaseDescriptor> revoke_memory_tier_lease(std::string_view lease_id) override;
 
   absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override;
+  absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) override;
 
   void update_local_endpoint(std::string node_id, std::string node_address, uint32_t grpc_port, uint32_t p2p_port)
       override;
 
-  absl::Status update_artifact_view_state(const VariantViewUpdate& update) override;
+  absl::Status update_artifact_view_state(const ViewStateUpdate& update) override;
+
+  absl::StatusOr<std::vector<ViewInfo>> list_views(std::string_view artifact_id) override;
+
+  absl::StatusOr<global_store::AssemblyLayoutBinding> get_assembly_layout_binding(
+      std::string_view assembly_id) override;
+  absl::StatusOr<layout::LayoutSpecRecord> get_layout_spec(std::string_view layout_id) override;
+  absl::Status attach_layout_to_artifact(std::string_view mi2_id, std::string_view layout_id) override;
+  absl::StatusOr<std::vector<std::string>> list_artifact_layouts(std::string_view mi2_id) override;
+  absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> write_tensor_proof_commitments(
+      const global_store::WriteTensorProofCommitmentsRequest& request) override;
+  absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> check_proof_commitments_match(
+      const global_store::CheckProofCommitmentsMatchRequest& request) override;
+  absl::StatusOr<global_store::AssemblyRuntimePolicy> get_assembly_runtime_policy(
+      std::string_view assembly_id) override;
+
+  absl::StatusOr<operation::AcquireOperationLeaseResponse> acquire_operation_lease(
+      const operation::AcquireOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::KeepaliveOperationLeaseResponse> keepalive_operation_lease(
+      const operation::KeepaliveOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::ReleaseOperationLeaseResponse> release_operation_lease(
+      const operation::ReleaseOperationLeaseRequest& request) override;
+  absl::StatusOr<operation::GetOperationResponse> get_operation(const operation::GetOperationRequest& request) override;
+  absl::Status update_operation(const operation::UpdateOperationRequest& request) override;
+
+  absl::StatusOr<ArtifactBinding> get_artifact_binding(std::string_view artifact_id) override;
+
+  absl::StatusOr<ArtifactBindingResult> upsert_artifact_binding(const ArtifactBinding& binding) override;
 
   absl::StatusOr<PlacementPlanResult> plan_placement(
       std::string_view artifact_id,
@@ -559,7 +736,8 @@ class GlobalStoreClient : public IGlobalStoreClient {
       common::v1::MemoryInfo* info,
       const DeviceKey& device,
       common::memory::MemoryLocation location,
-      uint64_t memory_size);
+      uint64_t memory_size,
+      std::optional<std::string_view> view_id = std::nullopt);
   static RemoteReplicaInfo convert_from_proto_memory_info(const common::v1::MemoryInfo& info);
 
   const GlobalStoreClientConfig config_;

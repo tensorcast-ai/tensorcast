@@ -17,6 +17,7 @@
 #include "core/store/materialization/contracts/materialization_request.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::runtime::ingestion {
@@ -42,6 +43,7 @@ struct MaterializationDeps {
   std::chrono::milliseconds pinned_memory_timeout{0};
   size_t streaming_buffer_chunks{16};
   int num_threads = 0;
+  StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
   std::function<absl::StatusOr<ReplicaHandle>(const MaterializationRequest& request)> run_auto;
   std::function<absl::StatusOr<ReplicaHandle>(
       const std::string& artifact_identifier,

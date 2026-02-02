@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -9,7 +9,9 @@
 
 #include "absl/status/statusor.h"
 #include "core/store/materialization/dataplane/contracts/source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/store_engine_options.h"
 #include "gsl/pointers"
 
 namespace tensorcast::store::loader {
@@ -19,7 +21,11 @@ namespace tensorcast::store::loader {
 // allowing callers to consume the variant ByteSpace sequentially.
 class ViewPlanSource final : public SeekableSource {
  public:
-  ViewPlanSource(gsl::not_null<SeekableSource*> base, SelectionPlan plan);
+  ViewPlanSource(
+      gsl::not_null<SeekableSource*> base,
+      SelectionPlan plan,
+      StoreEngineOptions::ByteMappingConfig config = {});
+  ~ViewPlanSource() override = default;
 
   [[nodiscard]] bool alias_eligible() const {
     return alias_eligible_;
@@ -29,28 +35,30 @@ class ViewPlanSource final : public SeekableSource {
     return requires_materialization_;
   }
 
-  [[nodiscard]] uint64_t total_bytes() const {
+  [[nodiscard]] uint64_t total_bytes() const override {
     return total_bytes_;
   }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override;
   absl::StatusOr<size_t> read_at(uint64_t offset, void* dst, size_t bytes) override;
+  [[nodiscard]] bool supports_direct_write_at() const override;
+  absl::StatusOr<size_t> read_into_at(
+      uint64_t src_offset,
+      uint64_t dest_va_offset,
+      size_t bytes,
+      const DirectWriteGrant& grant) override;
 
  private:
-  absl::StatusOr<size_t> copy_from_range(
-      const SelectionPlan::Range& range,
-      uint64_t range_offset,
-      uint8_t* dst,
-      size_t bytes) const;
-
   gsl::not_null<SeekableSource*> base_;
-  std::vector<SelectionPlan::Range> ranges_;
+  std::unique_ptr<ByteRangeMappedSource> mapped_source_;
   uint64_t total_bytes_{0};
   bool alias_eligible_{false};
   bool requires_materialization_{false};
-  uint64_t cursor_{0};
 };
 
-std::unique_ptr<SeekableSource> make_view_plan_source(std::unique_ptr<SeekableSource> base, SelectionPlan plan);
+std::unique_ptr<SeekableSource> make_view_plan_source(
+    std::unique_ptr<SeekableSource> base,
+    SelectionPlan plan,
+    StoreEngineOptions::ByteMappingConfig config = {});
 
 } // namespace tensorcast::store::loader

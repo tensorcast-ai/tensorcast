@@ -9,6 +9,8 @@ proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/common/v1:common_proto",
+        "//proto/tensorcast/layout/v1:layout_proto",
+        "//proto/tensorcast/operation/v1:operation_proto",
         "@protobuf//:duration_proto",
         "@protobuf//:timestamp_proto",
         "@protobuf//:wrappers_proto",
@@ -21,6 +23,8 @@ cpp_proto_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/layout/v1:layout_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
     ],
 )
 
@@ -30,6 +34,8 @@ cpp_grpc_library(
     visibility = ["//visibility:public"],
     deps = [
         "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/layout/v1:layout_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
     ],
 )
 

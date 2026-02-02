@@ -6,16 +6,29 @@
 
 #include <atomic>
 #include <filesystem>
+#include <memory>
 #include <vector>
 
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/random/random.h"
+#include "absl/synchronization/mutex.h"
+#include "core/common/async_runtime.h"
+#include "core/common/capability_token.h"
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
-#include "daemon/device_resolver.h"
-#include "daemon/ipc_region_registry.h"
-#include "daemon/lip_bridge.h"
-#include "daemon/ref_tracker.h"
-#include "daemon/rpc_context.h"
-#include "daemon/session_lifecycle.h"
-#include "daemon/sessions_service.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/daemon_options.h"
+#include "daemon/state/device_resolver.h"
+#include "daemon/state/handle_lease_registry.h"
+#include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lip_bridge.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/session_lifecycle.h"
+#include "daemon/state/sessions_service.h"
+#include "daemon/state/shutdown_signal.h"
+#include "daemon/state/target_write_registry.h"
+#include "daemon/state/worker_identity_store.h"
 #include "tensorcast/daemon/v2/store_daemon.pb.h"
 
 namespace tensorcast::daemon {
@@ -27,11 +40,20 @@ class MaterializationController {
     RefTracker& refs;
     SessionsService& sessions;
     LipBridge& lip;
+    LipManager& lip_manager;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
-    std::atomic<bool>& is_shutting_down;
+    ShutdownSignal& shutdown_signal;
+    common::AsyncRuntime& async_runtime;
+    WorkerIdentityStore& identity;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager* lifecycle{nullptr};
+    HandleLeaseRegistry* handle_leases{nullptr};
+    common::CapabilityTokenManager* capability_tokens{nullptr};
+    bool cpu_shared_memory_enabled{false};
+    bool external_target_verification_enabled{false};
     std::filesystem::path storage_path;
+    DaemonOptions::PostSealPolicy post_seal_policy{};
   };
 
   explicit MaterializationController(Dep d);
@@ -51,6 +73,11 @@ class MaterializationController {
       const v2::MaterializeIntoTargetRequest& req,
       v2::MaterializeIntoTargetResponse& resp);
 
+  grpc::Status publish_target_replica(
+      RpcContext& rctx,
+      const v2::PublishTargetReplicaRequest& req,
+      v2::PublishTargetReplicaResponse& resp);
+
   grpc::Status resolve_artifact_from_disk(
       RpcContext& rctx,
       const v2::ResolveArtifactFromDiskRequest& req,
@@ -61,6 +88,20 @@ class MaterializationController {
       const v2::GetArtifactIndexByIdRequest& req,
       v2::GetArtifactIndexByIdResponse& resp);
 
+  grpc::Status seal_assembly(RpcContext& rctx, const v2::SealAssemblyRequest& req, v2::SealAssemblyResponse& resp);
+
+  grpc::Status start_seal_assembly(
+      RpcContext& rctx,
+      const v2::StartSealAssemblyRequest& req,
+      v2::StartSealAssemblyResponse& resp);
+
+  grpc::Status get_operation(
+      RpcContext& rctx,
+      const tensorcast::operation::v1::GetOperationRequest& req,
+      tensorcast::operation::v1::GetOperationResponse& resp);
+
+  grpc::Status wait_operation(RpcContext& rctx, const v2::WaitOperationRequest& req, v2::WaitOperationResponse& resp);
+
   grpc::Status confirm(RpcContext& rctx, const v2::ConfirmReplicaRequest& req, v2::ConfirmReplicaResponse& resp) const;
 
   grpc::Status unload(RpcContext& rctx, const v2::UnloadReplicaRequest& req, v2::UnloadReplicaResponse& resp);
@@ -70,9 +111,19 @@ class MaterializationController {
       const v2::WaitReplicaVerificationRequest& req,
       v2::WaitReplicaVerificationResponse& resp);
 
+  // Test helper: inject a target write record without materialization.
+  TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
+
  private:
   Dep d_;
   std::filesystem::path storage_path_;
+
+  absl::Mutex seal_mu_;
+  absl::flat_hash_set<std::string> active_seal_operations_ ABSL_GUARDED_BY(seal_mu_);
+
+  common::CapabilityTokenManager* capability_tokens_{nullptr};
+  TargetWriteRegistry target_write_registry_;
+  absl::BitGen bitgen_;
 };
 
 } // namespace tensorcast::daemon

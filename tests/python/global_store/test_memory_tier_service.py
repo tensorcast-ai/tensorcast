@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -41,6 +41,7 @@ def test_publish_status_updates_worker_and_metrics() -> None:
     worker_repo.create(
         Worker(
             worker_id="w1",
+            daemon_id="daemon-w1",
             node_id="n1",
             node_address="127.0.0.1",
             grpc_port=50051,

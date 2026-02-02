@@ -8,15 +8,22 @@ managing clients manually.
 ## Artifact Handles
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
-  bound to the process `Store`. Handles support metadata accessors
+  bound to the process `Store`. `tc.artifact("my-key")` is shorthand for
+  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`/`disk:`) map to
+  explicit identifier kinds.
+  Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
 - `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
   tensor directly into the provided buffer. Only the requested tensor must be
   present in the target mapping, so multi-tensor artifacts no longer require
   pre-allocating placeholders for every entry when using the helper.
-- `tensor_dict_into` / `tensor_into` region-backed paths assume daemon support;
-  `region_backed_mode` (`auto`/`require`/`disable`) controls fallback behavior.
+- `tensor_dict_into` / `tensor_into` region-backed paths stream into registered
+  CUDA regions via `MaterializeIntoTarget`, supporting view specs, packed
+  subset selection (`tensor_names`), and ordered multi-storage layouts. For
+  non-identity views the SDK resolves and sends a deterministic `view_id` in
+  the `TargetLayout`. `region_backed_mode` (`auto`/`require`/`disable`) controls
+  fallback behavior.
 - Handles retain whichever identifiers are available (`artifact_id`, `key`,
   `disk_path`). At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
@@ -49,6 +56,36 @@ managing clients manually.
   are computed exactly once in the derived view (no double-application of the
   parent slice).
 
+## Piece Registration and Sealing
+
+- `Store.register_piece(...)` registers dense view pieces under an assembly id
+  (`cgid:`). Pieces are selection-only (narrow only), do not allow transpose,
+  and require server placement.
+- Pass `canonical_index_bytes` to bootstrap a new assembly without needing
+  Global Store state. `register_view(..., registration_kind="piece")` is
+  equivalent, while `allow_partial` is deprecated.
+- `Store.seal_assembly(assembly_id, publish_canonical=True)` seals an assembly
+  into a stable MI2 identity and returns the bound descriptor.
+
+## Deferred Slice Materialization (vLLM)
+
+- `artifact.deferred_loader(device=..., packing="byte_space"|"append"|"plan", capacity_bytes=...)`
+  returns a `DeferredLoader` that issues no I/O until `commit()`.
+- `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
+  client-owned arena; contents are undefined until `commit()` completes.
+- `packing="byte_space"` places tensors at their logical offsets in the selected
+  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
+  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
+  local-only in Phase 1.
+- `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
+  first to precompute a deterministic layout before calling `tensor(...)`. Both
+  modes are local-only layouts (not publishable).
+- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
+  returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
+  replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
+- `capacity_bytes` bounds the arena size (defaults to the base canonical/view
+  total size); exceeding it raises `RESOURCE_EXHAUSTED`.
+
 ## Batching, Async, and Prefetch
 
 - Use `with artifact.batch(device="cuda:0")` to coalesce multiple tensor fetches
@@ -59,13 +96,18 @@ managing clients manually.
 - `tensor_dict_into_async` / `tensor_into_async` cancellation is best-effort:
   once a region-backed RPC is in-flight, `cancel()` may return `False`; streaming
   materialization remains cancellable before the RPC boundary.
-- `artifact.prefetch(device=...)` issues background materialization
-  (`wait_for_completion=False`) and returns a tuple of
-  `(prefetched_handle, PrefetchTicket)`. The returned handle is a clone whose
-  fallback carries the ticket’s `replica_uuid`, allowing callers to opt into the
-  hint without mutating the original handle. Use the ticket to `wait()` or
-  `cancel()` the staged replica before materializing tensors from the cloned
-  handle.
+- `artifact.prefetch(device=..., ctx=..., options=...) -> Operation[PrefetchedReplica]` issues background
+  materialization (`wait_for_completion=False`) and returns an operation handle. Use `op.result(timeout_s=...)` (or
+  `op.wait(...)`) to block and `op.cancel()` to best-effort release the operation record. Prefetch defaults to
+  `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
+  GPU-only; CPU targets are rejected because they require PID-bound handle leases.
+- Prefetch idempotency fingerprints derive `selection_hash` via
+  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan/Queue selection
+  identity semantics.
+- `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
+  (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
+  supports `renew()` / `release()`.
+- `ctx.deadline_ms` clamps retry and polling budgets for control-plane actions so waits do not exceed the call budget.
 
 ## Fallback Preferences
 

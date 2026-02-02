@@ -20,6 +20,7 @@ enum class ReplicaPublishState : std::uint8_t {
 };
 
 struct ReplicaInfo {
+  loading::ReplicaKey key;
   std::string artifact_id;
   uint64_t size_bytes;
   common::memory::MemoryLocation cpu_state;

@@ -11,12 +11,12 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 
 # Current State & Grounding
 
-- `daemon/worker_lifecycle_manager.cc:perform_state_sync` builds `WorkerLocalState` from `engine_->get_all_replicas_info()` and maps non-resident entries to DISK; `compute_state_checksum` uses the same list.
-- `daemon/worker_lifecycle_manager.cc:heartbeat_loop` sends `registered_ids` derived from `get_all_replicas_info()`, which feeds `tensorcast/global_store/services/recovery_service.py:get_obsolete_artifacts`.
+- `daemon/ha/worker_lifecycle_manager.cc:perform_state_sync` builds `WorkerLocalState` from `engine_->get_all_replicas_info()` and maps non-resident entries to DISK; `compute_state_checksum` uses the same list.
+- `daemon/ha/worker_lifecycle_manager.cc:heartbeat_loop` sends `registered_ids` derived from `get_all_replicas_info()`, which feeds `tensorcast/global_store/services/recovery_service.py:get_obsolete_artifacts`.
 - `core/store/runtime/replica/replica_runtime.cc:get_all_replicas_info` iterates registry keys even when CPU/GPU states are NONE; there is no publish state tracking.
 - `core/store/runtime/metadata/metadata_gateway.cc:handle_ingestion_result` registers replicas on success but does not record publish state or retry when GS is disconnected.
 - `tensorcast/global_store/services/recovery_service.py:_compute_state_changes` diffs local vs global replicas and issues `CHANGE_TYPE_REMOVE_REPLICA`; the daemon currently unloads immediately in `apply_obsolete_replicas` and `perform_state_sync`.
-- Safety gates exist in `daemon/sweep_tasks.h:EvictionTask` using `RefTracker`, `SessionLifecycleManager::use_count_for`, and `SessionLifecycleManager::placement_pin_count_for`; `TransportLockManager` has no per-replica query.
+- Safety gates exist in `daemon/state/sweep_tasks.h:EvictionTask` using `RefTracker`, `SessionLifecycleManager::use_count_for`, and `SessionLifecycleManager::placement_pin_count_for`; `TransportLockManager` has no per-replica query.
 - 0046/0047 provide a background sync loop and worker `state_version`/`state_checksum`, so retire processing belongs in `state_sync_loop`, not heartbeat.
 
 # Phases & Milestones
@@ -50,7 +50,7 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 
 ## Phase 1: Worker lifecycle integration
 
-- Update `daemon/worker_lifecycle_manager.cc`:
+- Update `daemon/ha/worker_lifecycle_manager.cc`:
   - Build `registered_ids` from `get_ha_inventory()` (only publishable artifacts).
   - Build `WorkerLocalState.local_replicas` from `get_ha_inventory()`; never map non-resident entries to DISK.
   - Update `compute_state_checksum` to accept inventory entries or filter `ReplicaInfo` by residency/publishability (align with GS checksum semantics).
@@ -76,8 +76,8 @@ Implement publish-state-backed HA inventory and a safe retire pipeline so state 
 ## Phase 3: Validation + docs
 
 - Tests (C++):
-  - `daemon/worker_lifecycle_manager_sync_test.cc`: verify `obsolete_replicas` no longer unloads and REMOVE/full-sync diffs only mark retire.
-  - `daemon/worker_lifecycle_manager_sync_test.cc`: assert retire gating honors ref/lock blockers and releases after gates clear.
+  - `daemon/ha/worker_lifecycle_manager_sync_test.cc`: verify `obsolete_replicas` no longer unloads and REMOVE/full-sync diffs only mark retire.
+  - `daemon/ha/worker_lifecycle_manager_sync_test.cc`: assert retire gating honors ref/lock blockers and releases after gates clear.
   - `core/store/runtime/replica/replica_runtime_test.cc`: validate `get_ha_inventory` filters non-resident and publish state transitions.
   - `core/store/runtime/metadata/metadata_gateway_test.cc`: verify registration failures leave `PUBLISH_PENDING`.
 - Docs:

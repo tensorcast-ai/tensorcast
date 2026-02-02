@@ -1,7 +1,8 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for transport data access."""
 
+from datetime import datetime
 from typing import Any, Optional
 from uuid import UUID
 
@@ -139,6 +140,26 @@ class TransportRepository(BaseRepository):
 
         rows = cursor.execute(query, params).fetchall()
         return [self._row_to_model(row) for row in rows]
+
+    def get_oldest_in_progress_age_ms(self, replica_id: UUID) -> int | None:
+        """Return age (ms) of oldest in-progress transport for replica_id."""
+        cursor = self.get_cursor()
+        row = cursor.execute(
+            """
+            SELECT MIN(created_at) FROM artifact_transports
+            WHERE replica_id = ? AND status = 'in_progress'
+            """,
+            [str(replica_id)],
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        created_at = row[0]
+        now = (
+            datetime.now(tz=created_at.tzinfo)
+            if created_at.tzinfo is not None
+            else datetime.now()
+        )
+        return int((now - created_at).total_seconds() * 1000)
 
     def count_with_filters(self, status: Optional[str] = None) -> int:
         """Count transports with optional filters."""

@@ -4,17 +4,20 @@
 
 #pragma once
 
+#include <memory>
 #include <utility>
 #include <vector>
 
 #include <gsl/pointers>
+#include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
-#include "daemon/ipc_region_registry.h"
-#include "daemon/lip_manager.h"
-#include "daemon/ref_tracker.h"
-#include "daemon/registration_manager.h"
-#include "daemon/rpc_context.h"
-#include "daemon/session_lifecycle.h"
+#include "daemon/service/rpc_context.h"
+#include "daemon/state/ipc_region_registry.h"
+#include "daemon/state/lip_manager.h"
+#include "daemon/state/ref_tracker.h"
+#include "daemon/state/registration_manager.h"
+#include "daemon/state/session_lifecycle.h"
+#include "daemon/state/worker_identity_store.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
 
@@ -27,6 +30,8 @@ class RegistrationController {
     RegistrationManager& reg;
     LipManager& lip;
     RefTracker& refs;
+    gsl::not_null<WorkerIdentityStore*> identity;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     gsl::not_null<SessionLifecycleManager*> lifecycle;
     IpcRegionRegistry& regions;
   };

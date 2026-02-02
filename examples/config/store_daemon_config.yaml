@@ -27,8 +27,9 @@ server:
     host: 0.0.0.0
     # P2P port; must be non-zero when high_availability.enabled is true.
     port: 65090
-  # Shared root directory for daemon-owned artifacts; all disk_path values must resolve under this root.
-  storage_path: /data/models
+  # Shared root directory for daemon-owned artifacts; all disk_path values must resolve under this root when set.
+  # Leave empty to disable disk materialization (P2P-only).
+  storage_path: ""
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
   # gRPC server channel args and TLS.
@@ -63,6 +64,11 @@ engine:
   artifact_chunk_bytes: 256MB
   # Default depth for StreamingPinnedBuffer instances created by StoreEngine.
   streaming_buffer_chunks: 16
+  # Enable external target verification for MaterializeIntoTarget (off by default).
+  enable_external_target_verification: false
+  # Enable memfd-backed UMA CPU allocations for zero-copy CPU tensor materialization.
+  cpu_shared_memory:
+    enabled: true
   # Memory tiers define stable/preemptible behavior; tune for DRAM pressure and HA telemetry.
   memory_tiers:
     # When false, CPU chunks stay resident (no preemptible marking); use for stability or debugging.
@@ -91,6 +97,39 @@ pinned_memory:
       slice_bytes: 4MB
       pool_bytes: 1GB
       rdma_preregister: true
+
+# Post-seal policies for assembly -> mi2 alias resolution.
+post_seal:
+  # When true, migrate selected assembly views under the sealed mi2_id.
+  migrate_views: false
+  # When true, only migrate views that require transforms (e.g., transpose).
+  migrate_transpose_only: false
+  # When true, allow safe reuse of CGID-scoped view replicas after sealing.
+  reuse_views_if_safe: false
+  # When true, retire CGID-scoped piece replicas after sealing.
+  retire_pieces: false
+
+# Capability token keys (daemon-issued capability envelope).
+capability_tokens:
+  active:
+    # Token version id; rotate by incrementing version and moving old key to previous.
+    version: 1
+    # Secret bytes (base64-encoded in YAML/JSON).
+    secret: ""
+  previous: []
+
+# Retention handle settings (control-plane only; requires capability_tokens).
+retention_handles:
+  # When true, daemon issues retention handles for local stable DRAM.
+  enabled: false
+  # Default TTL when caller does not specify ttl_ms.
+  default_ttl: 10m
+  # Maximum allowed TTL for any handle (issuer clamp).
+  max_ttl: 24h
+
+# Capability directory publishing (Global Store capability flags).
+capability_directory:
+  enabled: true
 
 # Global Store registration and heartbeat coordination.
 high_availability:
@@ -136,6 +175,22 @@ lifecycle:
   sessions_ttl: 60s
   # Transport lock TTL; long enough for worst-case transfers but short enough to recover from leaks.
   locks_ttl: 120s
+  # Local-only Unix domain socket for handle FD handoff and lease release.
+  handle_leases:
+    # Optional override. Leave empty to let the daemon auto-select
+    # <daemon_state_dir>/local_handle.sock for same-pod/local SDKs.
+    # daemon_state_dir defaults to:
+    #   $TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session
+    #   (or ~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session)
+    # Auto-discovery relies on TENSORCAST_INSTANCE (CLI/SDK-launched daemon).
+    # Set explicitly when daemon and client SDK run in different pods and need a shared path.
+    # Socket path must have a daemon-owned parent directory (not world-writable); create the directory beforehand.
+    local_handle_socket_path: ""
+    # Handle lease TTL as a crash-safety fallback; live clients release leases when tensors are freed.
+    # Set to 0s to disable TTL (leases rely on explicit release and PID-exit cleanup).
+    ttl: 0s
+    # Best-effort guardrail: limit lease-bearing handle mints per second (0 => unlimited).
+    max_mints_per_second: 0
 
 # Communicator transport configuration (TCP/RDMA).
 communicator:

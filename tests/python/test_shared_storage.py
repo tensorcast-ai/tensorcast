@@ -6,6 +6,7 @@ from typing import Sequence
 import pytest
 import torch
 import os
+import tempfile
 
 from tensorcast import FallbackOptions, artifact, startup
 from tensorcast.testing.io_disk import save_dict
@@ -55,7 +56,18 @@ def test_shared_storage_roundtrip(tmp_path):
     descriptor = save_dict(state_dict, str(save_path))
 
     listen = f"127.0.0.1:{get_free_port()}"
-    daemon_proc = start_daemon_binary(listen, storage_root)
+    cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
+    local_handle_socket_path: str | None = None
+    if cpu_target:
+        local_handle_dir = Path(tempfile.mkdtemp(prefix="tc_local_handle_"))
+        local_handle_socket_path = str(local_handle_dir / "local_handle.sock")
+    daemon_proc = start_daemon_binary(
+        listen,
+        storage_root,
+        cpu_shared_memory_enabled=cpu_target,
+        local_handle_socket_path=local_handle_socket_path,
+        stable_bytes=64 * 1024 * 1024,
+    )
     try:
         startup.init(mode="connect", address=listen)
         try:
@@ -65,11 +77,7 @@ def test_shared_storage_roundtrip(tmp_path):
                 allow_p2p=False,
                 verify_checksums=False,
             )
-            device_selector = (
-                "cpu"
-                if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
-                else ("cuda:0" if torch.cuda.is_available() else "cpu")
-            )
+            device_selector = "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
             loaded_state_dict = artifact(
                 artifact_id=descriptor["artifact_id"],
                 fallback=fallback,

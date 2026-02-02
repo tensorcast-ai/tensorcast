@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/ingestion/ingestion_runtime.h"
 
@@ -39,13 +39,12 @@ absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::materialize_replica(
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> IngestionRuntime::materialize_into_target(
     const DeviceKey& target_device,
-    gsl::not_null<void*> target_ptr,
-    uint64_t total_size,
+    const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
     const loading::MaterializeHints& hints) {
   return materialization_facade_->materialize_into_target(
-      target_device, target_ptr, total_size, canonical_index_json, generation, hints);
+      target_device, target_layout, canonical_index_json, generation, hints);
 }
 
 absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_from_disk(
@@ -66,10 +65,31 @@ absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::ingest_from_p2p(
       artifact_identifier, source, target, hints, /*publish_to_global_store=*/true);
 }
 
+absl::StatusOr<loading::ReplicaHandle> IngestionRuntime::materialize_view_from_assembly(
+    std::string_view assembly_id,
+    std::string_view target_artifact_id,
+    std::string_view view_id,
+    std::string_view view_spec_json,
+    const DeviceKey& target_device,
+    loading::TransformPlacement placement,
+    const std::vector<std::string>* allowed_view_ids) {
+  return materialization_facade_->materialize_view_from_assembly(
+      assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids);
+}
+
 absl::Status IngestionRuntime::register_replica_with_global_store(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override) {
   return materialization_facade_->register_replica_with_global_store(key, artifact_id_override);
+}
+
+absl::StatusOr<SealAssemblyResult> IngestionRuntime::seal_assembly(
+    std::string_view assembly_id,
+    bool publish_canonical,
+    ingestion::MaterializationFacade::SealProgressCallback progress_cb,
+    const std::vector<std::string>* allowed_view_ids) {
+  return materialization_facade_->seal_assembly(
+      assembly_id, publish_canonical, std::move(progress_cb), allowed_view_ids);
 }
 
 } // namespace tensorcast::store::runtime

@@ -18,9 +18,16 @@
 //  ----------------------------------------------------------------------------
 #include "pinned_buffer_pool.h"
 
+#include <cerrno>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
+
+#include <linux/mempolicy.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include "absl/log/log.h"
 #include "absl/strings/str_cat.h"
@@ -28,11 +35,59 @@
 
 namespace tensorcast::common::memory {
 
+namespace {
+
+std::vector<unsigned long> build_nodemask_single(int node) {
+  constexpr size_t kBitsPerWord = sizeof(unsigned long) * 8;
+  if (node < 0) {
+    return {};
+  }
+  const size_t words = (static_cast<size_t>(node) / kBitsPerWord) + 1;
+  std::vector<unsigned long> mask(words, 0);
+  mask[static_cast<size_t>(node) / kBitsPerWord] |= (1ul << (static_cast<size_t>(node) % kBitsPerWord));
+  return mask;
+}
+
+void prefault_pages(volatile char* base, size_t bytes) {
+  // Touch one byte per page to ensure physical pages are mapped under the current policy.
+  constexpr size_t kPage = 4096;
+  for (size_t off = 0; off < bytes; off += kPage) {
+    base[off] = 0;
+  }
+  if (bytes > 0) {
+    base[bytes - 1] = 0;
+  }
+}
+
+void maybe_bind_to_numa_node(char* base, size_t bytes, int numa_node, bool prefault) {
+  if (numa_node < 0 || bytes == 0 || base == nullptr) {
+    return;
+  }
+  auto mask = build_nodemask_single(numa_node);
+  if (mask.empty()) {
+    return;
+  }
+  const unsigned long maxnode = static_cast<unsigned long>(mask.size() * sizeof(unsigned long) * 8);
+  const long rc = ::syscall(SYS_mbind, base, bytes, MPOL_BIND, mask.data(), maxnode, static_cast<unsigned long>(0));
+  if (rc != 0) {
+    PLOG(WARNING) << "PinnedBufferPool: mbind(MPOL_BIND) failed (numa_node=" << numa_node << ")";
+    return;
+  }
+  if (prefault) {
+    prefault_pages(base, bytes);
+  }
+}
+
+} // namespace
+
 PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size)
     : PinnedBufferPool(total_size, chunk_size, /*name=*/std::string()) {}
 
 PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, std::string name)
-    : chunk_size_(chunk_size), name_(std::move(name)) {
+    : PinnedBufferPool(total_size, chunk_size, Options{.name = std::move(name)}) {}
+
+PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, Options options)
+    : chunk_size_(chunk_size), name_(std::move(options.name)) {
   if (chunk_size_ == 0) {
     LOG(FATAL) << "PinnedBufferPool: chunk_size must be > 0";
   }
@@ -62,6 +117,10 @@ PinnedBufferPool::PinnedBufferPool(size_t total_size, size_t chunk_size, std::st
   if (slab == nullptr) {
     LOG(FATAL) << "PinnedBufferPool: aligned_alloc failed for slab size " << slab_bytes;
   }
+
+  // Best-effort NUMA placement. Must happen before cudaHostRegister, otherwise
+  // the driver may fault/lock pages under the default policy.
+  maybe_bind_to_numa_node(slab, slab_bytes, options.numa_node, options.prefault);
 
   auto register_status = cuda::host_register(slab, slab_bytes, cudaHostRegisterDefault);
   if (!register_status.ok()) {

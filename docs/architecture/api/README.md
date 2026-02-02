@@ -32,6 +32,7 @@ These docs are intended to answer, in order of importance:
 - [Policy & Persistence](./policy-persistence.md): `StorePolicy` model, placement planning, and persistence task lifecycle.
 - [Region-Backed](./region-backed.md): VRAM region registration, region-referenced LIP, and quiesced teardown (`DeregisterArtifact`).
 - [Error, Retry, Observability](./error-retry-observability.md): Error taxonomy, retry model, and key metrics/logging signals.
+- [Artifact Views and Retrieval](../artifact-views-and-retrieval.md): Canonical view semantics and retrieval architecture.
 
 ## Concept Index
 
@@ -43,6 +44,7 @@ These docs are intended to answer, in order of importance:
 - Materialization source selection: [materialization-flow.md#fallback-and-source-preference](./materialization-flow.md#fallback-and-source-preference)
 - Region-backed `get_into`: [materialization-flow.md#region-backed-get_into-materializeintotarget-v2](./materialization-flow.md#region-backed-get_into-materializeintotarget-v2)
 - Status codes and retries: [error-retry-observability.md#error-model](./error-retry-observability.md#error-model)
+- View semantics and identity: [artifact-views-and-retrieval.md](../artifact-views-and-retrieval.md)
 
 ## Related Module Docs
 

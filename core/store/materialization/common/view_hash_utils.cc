@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/common/view_hash_utils.h"
 
@@ -10,8 +10,9 @@
 #include "absl/status/status.h"
 #include "core/common/memory/cuda_memory.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
+#include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_program.h"
 #include "core/store/materialization/dataplane/verification/verification_utils.h"
-#include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "gsl/pointers"
 
@@ -27,10 +28,12 @@ size_t NormalizeLeafBytes(size_t value) {
 
 } // namespace
 
-ViewHashComputer::ViewHashComputer() : default_leaf_chunk_bytes_(kDefaultLeafChunkBytes) {}
+ViewHashComputer::ViewHashComputer()
+    : default_leaf_chunk_bytes_(kDefaultLeafChunkBytes), byte_mapping_(StoreEngineOptions::ByteMappingConfig{}) {}
 
 ViewHashComputer::ViewHashComputer(ViewHashConfig config)
-    : default_leaf_chunk_bytes_(NormalizeLeafBytes(config.default_leaf_chunk_bytes)) {}
+    : default_leaf_chunk_bytes_(NormalizeLeafBytes(config.default_leaf_chunk_bytes)),
+      byte_mapping_(std::move(config.byte_mapping)) {}
 
 std::optional<std::string> ViewHashComputer::hash_replica_view(
     replica::Replica& replica,
@@ -82,22 +85,36 @@ absl::StatusOr<std::string> ViewHashComputer::hash_view_from_source(
     loader::SeekableSource& base_source,
     const loader::ViewPlan& plan,
     size_t leaf_chunk_bytes) const {
-  if (plan.selection.total_bytes == 0) {
+  if (plan.selection.map.total_bytes == 0) {
     return absl::InvalidArgumentError("view plan contains no data to hash");
   }
   if (leaf_chunk_bytes == 0) {
     return absl::InvalidArgumentError("leaf_chunk_bytes must be > 0");
   }
-  if (plan.selection.total_bytes > std::numeric_limits<size_t>::max()) {
+  if (plan.selection.map.total_bytes > std::numeric_limits<size_t>::max()) {
     return absl::OutOfRangeError("view plan exceeds host memory limits");
   }
 
-  loader::ViewPlanSource view_source(gsl::not_null<loader::SeekableSource*>{&base_source}, plan.selection);
-  const size_t total_bytes = static_cast<size_t>(plan.selection.total_bytes);
+  loader::ByteRangeCompiler compiler(byte_mapping_, "hash");
+  auto program_or = compiler.Compile(plan.selection.map);
+  if (!program_or.ok()) {
+    return program_or.status();
+  }
+  std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+  sources.emplace_back(std::shared_ptr<loader::SeekableSource>(&base_source, [](loader::SeekableSource*) {}));
+  loader::ByteRangeMappedSource::Options options;
+  options.path = "hash";
+  options.enable_direct_write_at = byte_mapping_.enable_direct_write_at;
+  auto mapped_or = loader::ByteRangeMappedSource::Create(plan.selection.map, *program_or, std::move(sources), options);
+  if (!mapped_or.ok()) {
+    return mapped_or.status();
+  }
+  loader::ByteRangeMappedSource& view_source = **mapped_or;
+  const size_t total_bytes = static_cast<size_t>(plan.selection.map.total_bytes);
 
   if (!plan.transform.requires_materialization && plan.transform.tensors.empty()) {
     return loader::compute_data_multihash_from_seekable_source(
-        view_source, plan.selection.total_bytes, leaf_chunk_bytes);
+        view_source, plan.selection.map.total_bytes, leaf_chunk_bytes);
   }
 
   std::vector<uint8_t> staging(total_bytes);
@@ -116,7 +133,7 @@ absl::StatusOr<std::string> ViewHashComputer::hash_view_from_source(
   }
 
   return loader::compute_data_multihash_from_cpu_memory(
-      gsl::not_null<const void*>{staging.data()}, plan.selection.total_bytes, leaf_chunk_bytes);
+      gsl::not_null<const void*>{staging.data()}, plan.selection.map.total_bytes, leaf_chunk_bytes);
 }
 
 absl::StatusOr<std::string> ViewHashComputer::hash_view_from_source(

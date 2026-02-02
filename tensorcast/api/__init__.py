@@ -20,6 +20,27 @@ from tensorcast.api._indices import (
     calculate_tensor_device_offsets,
 )
 from tensorcast.api._register import RegisteredLease, RegistrationResult
+from tensorcast.api.context import CallContext, QosClass, SpanAttributeValue, context
+from tensorcast.api.operation import (
+    Operation,
+    OperationError,
+    OperationState,
+    OperationStatus,
+    OperationTimeoutError,
+    TimeoutErrorDetails,
+)
+from tensorcast.api.plan import (
+    Instance,
+    Plan,
+    PlanFailedError,
+    PlanResult,
+    PlanStepRef,
+    PlanStepResult,
+    TargetSpec,
+    TransformSpec,
+    Worker,
+    plan,
+)
 from tensorcast.api.store import (
     Artifact,
     ArtifactError,
@@ -29,7 +50,12 @@ from tensorcast.api.store import (
     Store,
     StoreOptions,
 )
-from tensorcast.types import ArtifactDescriptor, CommitResult
+from tensorcast.types import (
+    ArtifactDescriptor,
+    CommitResult,
+    SealAssemblyResult,
+    ViewRegistrationKind,
+)
 
 __all__ = [
     "Store",
@@ -54,6 +80,28 @@ __all__ = [
     "calculate_tensor_device_offsets",
     "build_indices_from_safetensors",
     "CommitResult",
+    "SealAssemblyResult",
+    "ViewRegistrationKind",
     "ArtifactDescriptor",
     "Artifact",
+    "CallContext",
+    "Operation",
+    "OperationError",
+    "OperationState",
+    "OperationStatus",
+    "OperationTimeoutError",
+    "QosClass",
+    "SpanAttributeValue",
+    "TimeoutErrorDetails",
+    "context",
+    "Instance",
+    "Plan",
+    "PlanFailedError",
+    "PlanResult",
+    "PlanStepRef",
+    "PlanStepResult",
+    "TargetSpec",
+    "TransformSpec",
+    "Worker",
+    "plan",
 ]

@@ -43,6 +43,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 pytestmark = pytest.mark.requires_cuda_or_fake
 
+
 def _get_free_port() -> int:
     with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
         s.bind(("127.0.0.1", 0))
@@ -56,8 +57,9 @@ def gs_server():
     servicer = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
     global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
-    port = _get_free_port()
-    server.add_insecure_port(f"127.0.0.1:{port}")
+    port = server.add_insecure_port("127.0.0.1:0")
+    if port <= 0:
+        raise RuntimeError("failed to bind Global Store server port")
     server.start()
     try:
         yield (server, port)
@@ -92,6 +94,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
     # Allocate ports and temp storage dir
     listen_port = _get_free_port()
     storage_dir = Path(tempfile.mkdtemp(prefix="tc_daemon_it_"))
+    daemon_id = f"daemon_it_{listen_port}"
 
     # Build minimal unified DaemonConfig (YAML)
     log_path = storage_dir / "daemon.log"
@@ -103,6 +106,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
             "num_threads": 2,
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
         },
+        "daemon_id": daemon_id,
         "engine": {
             "artifact_chunk_bytes": 1 * 1024 * 1024,
             "streaming_buffer_chunks": 4,
@@ -110,9 +114,21 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         "pinned_memory": {
             "allocation_timeout": "30s",
             "classes": [
-                {"name": "engine", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 64 * 1024 * 1024},
-                {"name": "comm_gpu", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 4 * 1024 * 1024},
-                {"name": "comm_cpu", "slice_bytes": 1 * 1024 * 1024, "pool_bytes": 1 * 1024 * 1024},
+                {
+                    "name": "engine",
+                    "slice_bytes": 1 * 1024 * 1024,
+                    "pool_bytes": 64 * 1024 * 1024,
+                },
+                {
+                    "name": "comm_gpu",
+                    "slice_bytes": 1 * 1024 * 1024,
+                    "pool_bytes": 4 * 1024 * 1024,
+                },
+                {
+                    "name": "comm_cpu",
+                    "slice_bytes": 1 * 1024 * 1024,
+                    "pool_bytes": 1 * 1024 * 1024,
+                },
             ],
         },
         "high_availability": {

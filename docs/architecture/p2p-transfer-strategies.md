@@ -8,6 +8,10 @@ sidebar_position: 5
 
 This document explains how P2P transfers work in Global Store mode. It is code-derived and focuses on control flow, data flow, memory and VRAM movement, and the thread model that drives transfers.
 
+Related docs:
+- `docs/architecture/artifact-views-and-retrieval.md`
+- `docs/architecture/view-replicas-and-assembly.md`
+
 ## Scope and terminology
 
 - P2P transfer happens between Store Daemons; Global Store only coordinates.
@@ -42,7 +46,7 @@ sequenceDiagram
 - `RegistrationBackend::commit` optionally calls `Replica::enable_remote_memory_access`, which uses `MemoryExportRegistry::export_chunks` to coalesce chunk ranges and register them with the communicator (`core/store/replica/memory_export_registry.cc`).
 - CPU exports register tensors without MR (`register_mr=false`) and hold UMA keepalive + stable leases; GPU exports register MR when RDMA is enabled and set `direct_rdma_enabled` when staging is not required.
 - When `enable_p2p` is true, registration publishes a memory replica via `GlobalStoreClient::register_memory_replica` including `remote_memory_keys`, `buffer_sizes`, and optional `verification_json` (`core/store/runtime/metadata/registration_backend.cc`, `core/store/runtime/metadata/metadata_gateway.cc`).
-- `WorkerLifecycleManager` toggles local export on availability changes via `enable_remote_replica_access` and `disable_remote_replica_access`, and includes existing `remote_memory_keys`/`buffer_sizes` in HA state sync when available; it does not mint new keys on its own (`daemon/worker_lifecycle_manager.cc`).
+- `WorkerLifecycleManager` toggles local export on availability changes via `enable_remote_replica_access` and `disable_remote_replica_access`, and includes existing `remote_memory_keys`/`buffer_sizes` in HA state sync when available; it does not mint new keys on its own (`daemon/ha/worker_lifecycle_manager.cc`).
 
 ## Transport request and replica selection (Global Store)
 
@@ -195,18 +199,18 @@ Notes:
 - MTCP staging waits for credit up to `staging_wait_timeout` and fails with `ResourceExhausted` when the deadline is exceeded.
 - `do_channel_gc_loop` reaps stale `StageLease` entries when ACKs are missing (`ack_ttl_ms`).
 
-## Variant-aware routing and verification
+## View-aware routing and verification
 
 - `request_view_transport` is invoked when `view_id` is present. The client falls back to canonical routing when the server is view-unaware.
 - `MetadataStage` fetches the canonical index from Global Store when a view needs planning.
 - `VerificationStage` validates P2P transfers using `verification_json` (key-point verification) and computes optional view hashes.
 
-## Variant View Registration Telemetry
+## View Registration Telemetry
 
 - View registrations are handled by `RegistrationController` and `RegistrationBackend`, which build a bidirectional view plan and stream view writes into the target replica (`core/store/runtime/metadata/registration_backend.cc`).
-- On commit, the backend computes view hash and optional leaf digests (when a segment plan is available) and publishes a `VariantViewUpdate` via `RegistrationPublisher::update_variant_view`.
+- On commit, the backend computes view hash and optional leaf digests (when a canonical `ByteRangeMap` is available) and publishes a `ViewStateUpdate` via `RegistrationPublisher::update_view_state`.
 - `GlobalStoreRegistrationPublisher` calls `GlobalStoreClient::update_artifact_view_state` to persist view metadata; failures are logged and treated as best-effort when the server does not support the RPC.
-- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_variant_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
+- For view materialization via P2P, `MetadataGateway::register_replica` also calls `record_view_residency` (currently `Unimplemented` in the client), so view residency updates are best-effort until the server RPC lands.
 
 ## Observability
 

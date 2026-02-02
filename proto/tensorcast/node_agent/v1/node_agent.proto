@@ -1,0 +1,62 @@
+syntax = "proto3";
+
+package tensorcast.node_agent.v1;
+
+import "google/protobuf/timestamp.proto";
+import "tensorcast/plan/v1/plan.proto";
+
+service NodeAgentService {
+  rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
+  rpc GetAgentInfo(GetAgentInfoRequest) returns (GetAgentInfoResponse) {}
+}
+
+message ExecutePlanRequest {
+  tensorcast.plan.v1.PlanSpec plan = 1;
+  bool dry_run = 2;
+}
+
+message ExecutePlanResponse {
+  string request_id = 1;
+  bool ok = 2;
+  repeated StepResult steps = 3;
+}
+
+message StepResult {
+  string step_id = 1;
+  string target_id = 2;
+  string action = 3;
+  OperationStatus status = 4;
+}
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  OPERATION_STATE_PENDING = 1;
+  OPERATION_STATE_RUNNING = 2;
+  OPERATION_STATE_SUCCESS = 3;
+  OPERATION_STATE_FAILED = 4;
+  OPERATION_STATE_CANCELLED = 5;
+  OPERATION_STATE_DEGRADED = 6;
+}
+
+message OperationError {
+  string status_code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+message OperationStatus {
+  OperationState state = 1;
+  string message = 2;
+  double progress = 3;
+  google.protobuf.Timestamp as_of = 4;
+  OperationError error = 5;
+}
+
+message GetAgentInfoRequest {}
+
+message GetAgentInfoResponse {
+  string agent_id = 1;
+  string daemon_id = 2;
+  string instance_id = 3;
+  string version = 4;
+}

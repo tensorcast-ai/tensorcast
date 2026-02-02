@@ -4,10 +4,10 @@ title: HA Replica Visibility and Safe Retire Flow (Design)
 status: draft
 areas: ["daemon", "core", "global_store"]
 related_code:
-  - daemon/worker_lifecycle_manager.{h,cc}
-  - daemon/ref_tracker.h
-  - daemon/session_lifecycle.h
-  - daemon/transport_lock_manager.h
+  - daemon/ha/worker_lifecycle_manager.{h,cc}
+  - daemon/state/ref_tracker.h
+  - daemon/state/session_lifecycle.h
+  - daemon/state/transport_lock_manager.h
   - core/store/runtime/replica/replica_runtime.{h,cc}
   - core/store/runtime/metadata/metadata_gateway.{h,cc}
   - core/store/materialization/control/materialize_orchestrator.cc

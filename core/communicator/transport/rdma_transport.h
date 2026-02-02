@@ -3,6 +3,7 @@
 #ifndef CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 #define CORE_COMMUNICATOR_TRANSPORT_RDMA_TRANSPORT_H_
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -84,6 +85,9 @@ class RdmaTransport {
   }
 
  private:
+  static constexpr int kMaxQpCount = 16;
+  static_assert(kMaxQpCount > 0, "kMaxQpCount must be positive");
+
   RdmaContext* context_;
   net_dev_t dev_;
   rdma_thread_t io_thread_;
@@ -96,7 +100,8 @@ class RdmaTransport {
   std::atomic_bool ready_;
   std::atomic_int inflight_send_;
   misc::Queue<read_request_t> read_queue_;
-  misc::Queue<read_request_t> inflight_queue_;
+  
+  std::array<misc::Queue<read_request_t>, kMaxQpCount> per_qp_inflight_queues_;
 
   std::function<void(const read_request_t&)> ack_cb_;
 

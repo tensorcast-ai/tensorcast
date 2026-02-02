@@ -85,6 +85,22 @@ TensorCast supports two artifact identity schemes:
 
 The `artifacts` table stores both schemes with `id_kind` discriminating. MI2 identities are derived from multihashes of the tensor index and data, ensuring that identical saves resolve to identical IDs.
 
+### View and Assembly Awareness
+
+Global Store now treats replicas as ByteSpace-scoped:
+
+- Replicas are keyed by `(artifact_id, view_id)` via `MemoryInfo.byte_space` so
+  canonical and view pieces route independently.
+- View metadata persists canonical coverage ranges and `view_data_hash` so
+  daemons can assemble and seal from pieces (`ListViews` returns ranges).
+- `artifact_bindings` records `assembly_id → mi2_id` after sealing so reads can
+  resolve to the sealed identity while preserving view routing semantics.
+- Assembly CGIDs that provide `tensor_index_data` (or an `ArtifactDescriptor`
+  index multihash) persist `index_multihash` so `GetArtifactIndexById` can
+  resolve canonical index bytes before sealing.
+- Replica domain models expose `ByteSpaceKind` and `ByteSpaceRef` for routing
+  and checksum identity across canonical vs view byte spaces.
+
 ### Replica Lifecycle
 
 A replica represents a single copy of an artifact on a specific node. Its lifecycle:
@@ -142,9 +158,50 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
   [replicas marked unavailable]
 ```
 
+Workers must provide a stable `daemon_id` (from daemon config). Registration treats `daemon_id` as the
+primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
+identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
+
 Inactive workers remain in the registry with `inactive_at` set so routing can filter them while avoiding delete/update conflicts.
 
 **Design decision: batched heartbeats.** Workers send heartbeats every ~5 seconds. Writing each immediately would create unnecessary database load. Instead, `WorkerService` buffers heartbeats in memory and a background thread flushes batches every ~100ms. This trades sub-second staleness for dramatically reduced write amplification.
+
+### Instance Lifecycle
+
+Engine instances (user processes) register with the Global Store and send periodic heartbeats:
+
+```
+                 RegisterInstance
+                        │
+                        ▼
+┌─────────────────────────────────────────┐
+│         instance_id assigned            │
+└────────────────────┬────────────────────┘
+                     │
+              InstanceHeartbeat
+               (resets timeout)
+                     │
+                     ▼
+             [marked inactive]
+```
+
+Instances are keyed by a stable `instance_id` and associated with a `daemon_id` (and
+optionally a `worker_id`) to bridge engine processes with the node’s store daemon.
+
+### Capability Directory (Discovery)
+
+The worker/instance registries also act as a low-frequency **capability directory**:
+
+- Each worker/instance persists a bounded `capability_flags` bitset (see `global_store.proto`) advertising control-plane
+  capabilities (queue broker, retention handles, capability-token envelope, execution signals, node agent).
+- Writes are **update-on-change**: heartbeats update `capability_flags` only when the field is present and the value
+  changes. Omitting the field leaves the stored flags untouched; sending an explicit `0` clears capabilities.
+- `ListActiveWorkers` / `ListActiveInstances` accept `required_capability_flags` for server-side filtering; responses
+  always include the active `capability_flags`.
+- Clients should cache directory results with bounded staleness; this is **advisory discovery**, not a hot path.
+
+**Metrics:** `tc_capability_directory_entries{scope="worker|instance", capability="..."}` tracks active capability
+counts by scope and capability.
 
 ## Service Responsibilities
 
@@ -154,7 +211,8 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 
 **Key behaviors:**
 - Generates unique worker IDs incorporating node identity and UUID suffix (avoids collisions across restarts)
-- Validates address uniqueness—two workers cannot register the same `(address, port)` from different nodes
+- Requires stable `daemon_id` identity (allows address changes without changing `worker_id`)
+- Validates address uniqueness—two workers cannot register the same `(address, port)` from different daemon IDs
 - Detects stale workers via heartbeat timeout, marks them inactive, and cleans up their replicas
 
 ### ArtifactService
@@ -175,6 +233,9 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 - Atomically claims the replica (increment counter) and creates transport record
 - Supports blocking wait with timeout for high-contention scenarios
 - Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
+- Provides swap-safety helpers: `MarkReplicaUnavailable` flips `is_available=false` for a replica, and `WaitReplicaDrain`
+  waits until `current_requests==0` without mutating transport state; the drain wait honors the requested timeout and
+  RPC deadline by capping sleep intervals to the remaining time budget
 - Cleans up stale transports as safety net for crashed clients
 
 **Load balancing strategy:**
@@ -191,8 +252,17 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
 - Persists `state_version` and `state_checksum` per worker (non-null defaults); heartbeats use cached checksum to avoid full-table scans
-- Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
-- Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+  - Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
+  - Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+
+### InstanceService
+
+**Purpose:** Manage engine instance registrations.
+
+**Key behaviors:**
+- Validates instance identity (instance_id, daemon_id, engine).
+- Updates worker association on heartbeat when daemon_id resolves to a new worker_id.
+- Marks inactive instances when heartbeats expire.
 - Validates consistency via a stable FNV-1a checksum over sorted replica state (aligned with the daemon)
 - Applies endpoint/metadata drift updates (node address/port, memory size, transport keys when reported) during sync
 - HA checksum format is `artifact_id:node_id:node_address:node_port:device_id:memory_type:available;` (FNV-1a 64-bit).
@@ -229,12 +299,19 @@ Inactive workers remain in the registry with `inactive_at` set so routing can fi
 
 ### ViewStateService
 
-**Purpose:** Manage variant metadata and leaf digests for integrity verification.
+**Purpose:** Manage view metadata, TreeHash leaves, and overlap proof digests (v2).
 
 **Key behaviors:**
-- Persists variant view specifications (transformed views of canonical artifacts)
-- Stores Merkle leaf digests keyed by byte-space (canonical or variant)
+- Persists view specifications (transformed views of canonical artifacts) and canonical coverage ranges for pieces.
+- Exposes `CheckProofCommitmentsMatch` to compare assembly-scoped and MI2-scoped proof commitments for specified
+  tensors (used by post-seal view reuse policies).
+- Stores Merkle leaf digests keyed by **HashSpaceRef**:
+  - canonical hash-space is anchored by `index_multihash`
+  - view hash-space is anchored by `view_id`
 - Supports partial verification by querying specific leaf indices
+  - When requested leaf digests are missing, `GetArtifactInfoById` returns `STATUS_NOT_FOUND` and populates
+    `partial_leaf_coverage` (units: leaf indices). `partial_coverage` is reserved for missing *byte* coverage ranges
+    (units: bytes) and must not be used for leaf indices.
 
 ## Data Model
 
@@ -257,8 +334,17 @@ The canonical schema lives in `/schema.sql`. Key tables:
 | `key_mappings` | Human-friendly key → artifact_id lookup | Cold |
 | `memory_tier_snapshots` | UMA telemetry time-series | Warm |
 | `memory_tier_leases` | Preemptible memory lease lifecycle | Warm |
-| `variants` | View metadata for transformed artifacts | Cold |
+| `views` | View metadata for transformed artifacts | Cold |
+| `view_coverage_ranges` | Canonical coverage ranges for views (pieces) | Cold |
 | `leaves` | Merkle leaf digests for integrity verification | Cold |
+| `layout_specs` | Immutable, content-addressed layout declarations (v2) | Cold |
+| `assembly_layout_bindings` | Versioned `assembly_id → layout_id` pointer (v2) | Warm |
+| `artifact_layout_attachments` | Immutable `mi2_id → layout_id` attachments (v2) | Cold |
+| `assembly_runtime_policies` | Mutable per-assembly operational knobs (v2) | Warm |
+| `operations` | Unified operation status + coordinator leases (v2) | Warm |
+| `assembly_proof_commitments` | Assembly-scoped proof commitments (v2) | Warm |
+| `tensor_proof_commitments` | MI2-scoped proof commitments (v2) | Cold |
+| `piece_proof_digests` | Per-piece proof digests (v2) | Warm |
 
 **Why separate `replica_counters` from `artifact_replicas`?**
 

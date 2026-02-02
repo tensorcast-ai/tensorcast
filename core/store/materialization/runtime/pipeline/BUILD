@@ -39,7 +39,6 @@ sc_cc_library(
         "//core/store/materialization/dataplane:canonical_index",
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:safetensors_util",
-        "//core/store/materialization/dataplane:segment_plan_source",
         "//core/store/materialization/dataplane:source_hash",
         "//core/store/materialization/dataplane:verification_utils",
         "//core/store/materialization/dataplane:view_ingest_executor",

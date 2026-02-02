@@ -6,6 +6,8 @@ import "google/protobuf/duration.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/wrappers.proto";
 import "tensorcast/common/v1/common.proto";
+import "tensorcast/layout/v1/layout.proto";
+import "tensorcast/operation/v1/operation.proto";
 
 service GlobalStoreService {
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
@@ -18,6 +20,11 @@ service GlobalStoreService {
   // Useful when the caller does not track replica_id but knows (artifact_id, worker_id)
   // and optionally device or memory type to disambiguate.
   rpc UnregisterReplicaByWorker(UnregisterReplicaByWorkerRequest) returns (UnregisterReplicaByWorkerResponse) {}
+
+  // Mark a single replica unavailable (idempotent).
+  rpc MarkReplicaUnavailable(MarkReplicaUnavailableRequest) returns (MarkReplicaUnavailableResponse) {}
+  // Wait for in-flight transports to drain for a replica.
+  rpc WaitReplicaDrain(WaitReplicaDrainRequest) returns (WaitReplicaDrainResponse) {}
 
   rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
 
@@ -32,6 +39,38 @@ service GlobalStoreService {
   // Upsert variant metadata and batched leaf digests
   rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
 
+  // Batch write MI2-scoped overlap proof commitments (v2).
+  rpc WriteTensorProofCommitments(WriteTensorProofCommitmentsRequest) returns (WriteTensorProofCommitmentsResponse) {}
+  // Compare assembly-scoped proof commitments against MI2-scoped commitments.
+  rpc CheckProofCommitmentsMatch(CheckProofCommitmentsMatchRequest) returns (CheckProofCommitmentsMatchResponse) {}
+
+  // List variant (view) metadata for an artifact
+  rpc ListViews(ListViewsRequest) returns (ListViewsResponse) {}
+
+  // ========== Layout v2 ==========
+  rpc PutLayoutSpec(PutLayoutSpecRequest) returns (PutLayoutSpecResponse) {}
+  rpc GetLayoutSpec(GetLayoutSpecRequest) returns (GetLayoutSpecResponse) {}
+
+  rpc GetAssemblyLayoutBinding(GetAssemblyLayoutBindingRequest) returns (GetAssemblyLayoutBindingResponse) {}
+  rpc UpdateAssemblyLayoutBinding(UpdateAssemblyLayoutBindingRequest) returns (UpdateAssemblyLayoutBindingResponse) {}
+
+  rpc AttachLayoutToArtifact(AttachLayoutToArtifactRequest) returns (AttachLayoutToArtifactResponse) {}
+  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
+
+  rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
+  rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
+
+  // ========== Unified Operations ==========
+  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest) returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
+  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest) returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
+  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest) returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  rpc UpdateOperation(tensorcast.operation.v1.UpdateOperationRequest) returns (tensorcast.operation.v1.UpdateOperationResponse) {}
+
+  // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
+  rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
+  rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
+
   // Get artifact tensor index data by key
   rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
 
@@ -43,6 +82,12 @@ service GlobalStoreService {
   rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse) {}
   rpc UnregisterWorker(UnregisterWorkerRequest) returns (UnregisterWorkerResponse) {}
   rpc ListActiveWorkers(ListActiveWorkersRequest) returns (ListActiveWorkersResponse) {}
+
+  // Instance management (engine process registry)
+  rpc RegisterInstance(RegisterInstanceRequest) returns (RegisterInstanceResponse) {}
+  rpc InstanceHeartbeat(InstanceHeartbeatRequest) returns (InstanceHeartbeatResponse) {}
+  rpc UnregisterInstance(UnregisterInstanceRequest) returns (UnregisterInstanceResponse) {}
+  rpc ListActiveInstances(ListActiveInstancesRequest) returns (ListActiveInstancesResponse) {}
 
   // High Availability and State Synchronization
   rpc SynchronizeWorkerState(SynchronizeWorkerStateRequest) returns (SynchronizeWorkerStateResponse) {}
@@ -90,6 +135,21 @@ enum ConnectionStatus {
   CONNECTION_STATUS_CONNECTED = 3;
 }
 
+// Worker/daemon capability flags (bit positions in capability_flags).
+enum WorkerCapabilityFlag {
+  WORKER_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED = 1;
+  WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED = 2;
+  WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED = 3;
+}
+
+// Instance capability flags (bit positions in capability_flags).
+enum InstanceCapabilityFlag {
+  INSTANCE_CAPABILITY_FLAG_UNSPECIFIED = 0;
+  INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED = 1;
+  INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED = 2;
+}
+
 // ========== Worker管理相关消息 ==========
 
 // Worker注册请求
@@ -104,6 +164,8 @@ message RegisterWorkerRequest {
   // HA fields
   bool is_recovery_registration = 7; // 是否为恢复注册
   string previous_worker_id = 8; // 上一个 Worker ID (用于恢复)
+  string daemon_id = 9; // Required stable daemon identity (from daemon config)
+  uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
 }
 
 message RegisterWorkerResponse {
@@ -128,6 +190,8 @@ message WorkerHeartbeatRequest {
   repeated string registered_artifact_ids = 6; // 本地注册的 Artifact 列表（内容寻址ID）
   int64 last_successful_sync = 7; // 最后成功同步时间戳
   ConnectionStatus global_store_status = 8; // 从worker角度看的连接状态
+  optional string daemon_id = 9; // Optional for sanity-check logging
+  optional uint64 capability_flags = 10; // Bitset of WorkerCapabilityFlag values
 }
 
 message WorkerHeartbeatResponse {
@@ -153,6 +217,7 @@ message UnregisterWorkerResponse {
 // 查询活跃Worker
 message ListActiveWorkersRequest {
   bool include_unavailable = 1; // 是否包含不接受新请求的 Worker
+  uint64 required_capability_flags = 2; // Bitset of WorkerCapabilityFlag values
 }
 
 message ListActiveWorkersResponse {
@@ -170,8 +235,67 @@ message ListActiveWorkersResponse {
     // HA fields
     uint64 state_version = 10; // 当前状态版本
     ConnectionStatus status = 11; // 连接状态
+    string daemon_id = 12; // Stable daemon identity
+    uint64 capability_flags = 13; // Bitset of WorkerCapabilityFlag values
   }
   repeated WorkerInfo workers = 1;
+}
+
+// ========== Instance registry ==========
+
+message RegisterInstanceRequest {
+  string instance_id = 1;
+  string daemon_id = 2;
+  string engine = 3;
+  optional string worker_id = 4;
+  string signals_endpoint = 5;
+  map<string, string> labels = 6;
+  uint64 capability_flags = 7; // Bitset of InstanceCapabilityFlag values
+}
+
+message RegisterInstanceResponse {
+  Status status = 1;
+  string instance_id = 2;
+  uint32 heartbeat_interval_ms = 3;
+}
+
+message InstanceHeartbeatRequest {
+  string instance_id = 1;
+  optional string worker_id = 2;
+  optional uint64 capability_flags = 3; // Bitset of InstanceCapabilityFlag values
+}
+
+message InstanceHeartbeatResponse {
+  Status status = 1;
+}
+
+message UnregisterInstanceRequest {
+  string instance_id = 1;
+  bool is_graceful_shutdown = 2;
+}
+
+message UnregisterInstanceResponse {
+  Status status = 1;
+}
+
+message ListActiveInstancesRequest {
+  bool include_unavailable = 1;
+  uint64 required_capability_flags = 2; // Bitset of InstanceCapabilityFlag values
+}
+
+message ListActiveInstancesResponse {
+  message InstanceInfo {
+    string instance_id = 1;
+    string daemon_id = 2;
+    string worker_id = 3;
+    string engine = 4;
+    string signals_endpoint = 5;
+    google.protobuf.Timestamp last_heartbeat_ts = 6;
+    map<string, string> labels = 7;
+    ConnectionStatus status = 8;
+    uint64 capability_flags = 9; // Bitset of InstanceCapabilityFlag values
+  }
+  repeated InstanceInfo instances = 1;
 }
 
 // ========== State Synchronization Messages ==========
@@ -240,10 +364,7 @@ message GetArtifactInfoByIdRequest {
   string artifact_id = 1; // "mi2:..."
   google.protobuf.BoolValue include_replicas = 2;
   bool include_leaves = 3;
-  oneof space {
-    bool canonical = 4;
-    string view_id = 5;
-  }
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 4;
   repeated uint64 leaf_idxs = 6;
   bool include_view_meta = 7;
 }
@@ -253,8 +374,12 @@ message GetArtifactInfoByIdResponse {
   repeated tensorcast.common.v1.MemoryInfo replicas = 2; // All replicas under the content ID
   repeated Leaf leaves = 3;
   ViewMeta view_meta = 4;
+  // Missing *byte* coverage in the requested HashSpaceRef byte stream (units: bytes).
+  // Missing Merkle leaf digests MUST be reported via `partial_leaf_coverage` (units: leaf indices), not here.
   repeated PartialCoverageDetail partial_coverage = 5;
   tensorcast.common.v1.ArtifactDescriptor descriptor = 6;
+  // Missing Merkle leaf digests when `include_leaves=true` (units: leaf indices).
+  repeated PartialLeafCoverageDetail partial_leaf_coverage = 7;
 }
 
 message Leaf {
@@ -271,12 +396,34 @@ message ViewMeta {
 
 message UpdateArtifactViewStateRequest {
   string artifact_id = 1;
-  VariantUpsert variant = 2;
+  optional ViewUpsert view = 2;
   repeated LeafWrite leaf_writes = 3;
+  repeated PieceProofDigestWrite proof_digests = 4;
 }
 
 message UpdateArtifactViewStateResponse {
   Status status = 1;
+}
+
+message ListViewsRequest {
+  string artifact_id = 1;
+  tensorcast.common.v1.Pagination pagination = 2;
+}
+
+message ViewInfo {
+  string view_id = 1;
+  string view_spec_json = 2;
+  uint64 view_size = 3;
+  string view_data_hash = 4;
+  google.protobuf.Timestamp verified_at = 5;
+  CanonicalCoverage canonical_coverage = 6;
+  repeated Range canonical_ranges = 7;
+}
+
+message ListViewsResponse {
+  Status status = 1;
+  repeated ViewInfo views = 2;
+  tensorcast.common.v1.PageInfo page_info = 3;
 }
 
 message CanonicalCoverage {
@@ -284,37 +431,239 @@ message CanonicalCoverage {
   uint64 covered_bytes = 2;
 }
 
-message VariantUpsert {
+message ViewUpsert {
   string view_id = 1;
   string view_spec_json = 2;
   uint64 view_size = 3;
   string view_data_hash = 4;
   google.protobuf.Timestamp verified_at = 5;
   CanonicalCoverage canonical_coverage = 6;
+  repeated Range canonical_ranges = 7;
 }
 
-enum ByteSpaceKind {
-  BYTE_SPACE_KIND_UNSPECIFIED = 0;
-  BYTE_SPACE_KIND_CANONICAL = 1;
-  BYTE_SPACE_KIND_VARIANT = 2;
+message PieceProofDigestWrite {
+  // Piece view identity (content-addressed view id).
+  string view_id = 1;
+  // Tensor name from the canonical index.
+  string tensor_name = 2;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 3;
+  // Tensor-local proof chunk index.
+  uint64 proof_chunk_idx = 4;
+  // Raw 32-byte SHA-256 digest.
+  bytes digest = 5;
+}
+
+message TensorProofCommitmentWrite {
+  // Tensor name from the canonical index.
+  string tensor_name = 1;
+  // Tensor-local proof chunk index.
+  uint64 proof_chunk_idx = 2;
+  // Raw 32-byte SHA-256 digest.
+  bytes digest = 3;
+}
+
+message WriteTensorProofCommitmentsRequest {
+  string mi2_id = 1;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 2;
+  repeated TensorProofCommitmentWrite commitments = 3;
+}
+
+message WriteTensorProofCommitmentsResponse {
+  Status status = 1;
+  uint32 inserted = 2;
+}
+
+message CheckProofCommitmentsMatchRequest {
+  string assembly_id = 1;
+  string mi2_id = 2;
+  // Proof schema version (e.g. "v1").
+  string proof_schema_version = 3;
+  // Tensor names to compare (must be non-empty).
+  repeated string tensor_names = 4;
+}
+
+message CheckProofCommitmentsMatchResponse {
+  Status status = 1;
+  bool match = 2;
+}
+
+// ========== Layout v2 ==========
+
+message GetLayoutSpecRequest {
+  string layout_id = 1;
+}
+
+message GetLayoutSpecResponse {
+  Status status = 1;
+  tensorcast.layout.v1.LayoutSpecRecord record = 2;
+}
+
+message PutLayoutSpecRequest {
+  tensorcast.layout.v1.LayoutSpec layout = 1;
+  // Optional audit JSON form (not hashed).
+  string layout_json = 2;
+}
+
+message PutLayoutSpecResponse {
+  Status status = 1;
+  string layout_id = 2;
+}
+
+message AssemblyLayoutBinding {
+  string assembly_id = 1;
+  string layout_id = 2;
+  uint64 binding_version = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message GetAssemblyLayoutBindingRequest {
+  string assembly_id = 1;
+}
+
+message GetAssemblyLayoutBindingResponse {
+  Status status = 1;
+  AssemblyLayoutBinding binding = 2;
+}
+
+message UpdateAssemblyLayoutBindingRequest {
+  string assembly_id = 1;
+  string layout_id = 2;
+  // CAS for safe concurrent updates.
+  // - Create: expected_binding_version = 0
+  // - Update: expected_binding_version = current binding_version
+  uint64 expected_binding_version = 3;
+}
+
+message UpdateAssemblyLayoutBindingResponse {
+  Status status = 1;
+  AssemblyLayoutBinding binding = 2;
+}
+
+message AttachLayoutToArtifactRequest {
+  string mi2_id = 1;
+  string layout_id = 2;
+}
+
+message AttachLayoutToArtifactResponse {
+  Status status = 1;
+}
+
+message ListArtifactLayoutsRequest {
+  string mi2_id = 1;
+}
+
+message ListArtifactLayoutsResponse {
+  Status status = 1;
+  repeated string layout_ids = 2;
+}
+
+message AssemblyRuntimePolicy {
+  string assembly_id = 1;
+  uint64 policy_version = 2;
+  string policy_json = 3;
+  google.protobuf.Timestamp updated_at = 4;
+}
+
+message GetAssemblyRuntimePolicyRequest {
+  string assembly_id = 1;
+}
+
+message GetAssemblyRuntimePolicyResponse {
+  Status status = 1;
+  AssemblyRuntimePolicy policy = 2;
+}
+
+message UpdateAssemblyRuntimePolicyRequest {
+  string assembly_id = 1;
+  string policy_json = 2;
+  // CAS for safe concurrent updates.
+  // - Create: expected_policy_version = 0
+  // - Update: expected_policy_version = current policy_version
+  uint64 expected_policy_version = 3;
+}
+
+message UpdateAssemblyRuntimePolicyResponse {
+  Status status = 1;
+  AssemblyRuntimePolicy policy = 2;
 }
 
 message LeafWrite {
-  ByteSpaceKind space_kind = 1;
-  string space_id = 2;
-  uint64 leaf_idx = 3;
-  bytes digest = 4;
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  uint64 leaf_idx = 2;
+  bytes digest = 3;
 }
 
 message Range {
+  // Byte offset in the hash-space byte stream (units: bytes).
   uint64 off = 1;
+  // Byte length in the hash-space byte stream (units: bytes).
   uint64 len = 2;
 }
 
 message PartialCoverageDetail {
-  ByteSpaceKind space_kind = 1;
-  string space_id = 2;
-  repeated Range missing_ranges = 3;
+  // Hash-space anchor for the byte stream whose *byte coverage* is missing.
+  //
+  // IMPORTANT:
+  // - `missing_ranges` is expressed in byte offsets/lengths (units: bytes) in this hash-space byte stream.
+  // - It MUST NOT be used to represent missing Merkle leaf digests (use PartialLeafCoverageDetail instead).
+  // - Leaf indices are not byte offsets; there is no stable conversion without the hashing schema.
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  // Missing byte ranges in the hash-space byte stream (units: bytes).
+  repeated Range missing_ranges = 2;
+}
+
+// A contiguous range in Merkle leaf index space.
+message LeafIndexRange {
+  // First missing leaf index (inclusive).
+  uint64 start = 1;
+  // Number of consecutive missing leaf indices (>= 1).
+  //
+  // NOTE: Leaf indices are NOT byte offsets. Do not treat `start/count` as byte ranges.
+  uint64 count = 2;
+}
+
+// Missing Merkle leaf digests for a requested HashSpaceRef.
+message PartialLeafCoverageDetail {
+  // Hash-space anchor for the leaves being queried.
+  //
+  // This message represents missing Merkle leaf digests (units: leaf indices) for the given hash-space.
+  // Do not report missing leaves by overloading PartialCoverageDetail.missing_ranges.
+  tensorcast.common.v1.HashSpaceRef hash_space = 1;
+  // Missing ranges in leaf index space (units: leaf indices).
+  repeated LeafIndexRange missing_leaf_ranges = 2;
+}
+
+enum ArtifactBindingKind {
+  ARTIFACT_BINDING_KIND_UNSPECIFIED = 0;
+  ARTIFACT_BINDING_KIND_SEAL = 1;
+}
+
+message ArtifactBinding {
+  string from_artifact_id = 1;
+  string to_artifact_id = 2;
+  ArtifactBindingKind kind = 3;
+  google.protobuf.Timestamp created_at = 4;
+}
+
+message GetArtifactBindingRequest {
+  string artifact_id = 1;
+}
+
+message GetArtifactBindingResponse {
+  Status status = 1;
+  ArtifactBinding binding = 2;
+}
+
+message UpsertArtifactBindingRequest {
+  ArtifactBinding binding = 1;
+}
+
+message UpsertArtifactBindingResponse {
+  Status status = 1;
+  ArtifactBinding binding = 2;
+  bool created = 3;
 }
 
 // Get artifact index request
@@ -399,6 +748,31 @@ message UnregisterReplicaByWorkerResponse {
   Status status = 1;
 }
 
+message MarkReplicaUnavailableRequest {
+  string artifact_id = 1;
+  string replica_id = 2;
+  optional string reason = 3;
+  optional string operation_id = 4;
+}
+
+message MarkReplicaUnavailableResponse {
+  Status status = 1;
+  bool updated = 2;
+}
+
+message WaitReplicaDrainRequest {
+  string replica_id = 1;
+  uint32 timeout_ms = 2;
+  optional string operation_id = 3;
+}
+
+message WaitReplicaDrainResponse {
+  Status status = 1;
+  bool drained = 2;
+  uint32 current_requests = 3;
+  optional uint64 oldest_transport_age_ms = 4;
+}
+
 // MemoryInfo moved to common
 
 // MemoryInfoList removed with legacy ListReplicas
@@ -410,6 +784,7 @@ message RequestReplicaTransportRequest {
   string source_node_id = 4;
   string source_address = 5;
   uint32 source_port = 6;
+  tensorcast.common.v1.ByteSpaceRef requested_byte_space = 7;
 }
 
 message RequestReplicaTransportResponse {

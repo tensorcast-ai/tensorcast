@@ -9,6 +9,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from tensorcast.api._config import PlanType
+from tensorcast.api.errors import ArtifactError, ArtifactStatusCode
 from tensorcast.types import ServerConfig
 
 TensorDict = Mapping[str, torch.Tensor]
@@ -17,41 +18,6 @@ SpanAttributeValue = bool | int | float | str
 
 
 FallbackPreference = Literal["auto", "local", "p2p", "disk"]
-
-ArtifactStatusCode = Literal[
-    "OK",
-    "CANCELLED",
-    "UNKNOWN",
-    "INVALID_ARGUMENT",
-    "DEADLINE_EXCEEDED",
-    "NOT_FOUND",
-    "ALREADY_EXISTS",
-    "PERMISSION_DENIED",
-    "RESOURCE_EXHAUSTED",
-    "FAILED_PRECONDITION",
-    "ABORTED",
-    "OUT_OF_RANGE",
-    "UNIMPLEMENTED",
-    "INTERNAL",
-    "UNAVAILABLE",
-    "DATA_LOSS",
-    "UNAUTHENTICATED",
-]
-
-
-class ArtifactError(RuntimeError):
-    """Structured exception surfaced by Store verbs."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: ArtifactStatusCode,
-        retryable: bool,
-    ) -> None:
-        super().__init__(message)
-        self.status_code: ArtifactStatusCode = status_code
-        self.retryable = bool(retryable)
 
 
 @dataclass(frozen=True)

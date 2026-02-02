@@ -45,11 +45,13 @@ Non-Goals
 - Ingestion:
   - `tc.register(tensors, *, key=None, artifact_id=None, options=None, ttl_ms=None)` / `register_async(...)`.
   - `tc.put(tensors, *, key=None, artifact_id=None, options=None, device=None)` / `put_async(...)`.
-  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None)`.
+  - `tc.register_view(tensors, *, key=None, artifact_id=None, slices=None, transpose=None, view_id=None, placement=None, ttl_ms=None, allow_partial=False, options=None, canonical_index_bytes=None, registration_kind=None)`.
+  - `tc.register_piece(tensors, *, assembly_id, key=None, slices=None, canonical_index_bytes=None, placement=None, ttl_ms=None, options=None)`.
 - Region & lifecycle (advanced):
   - `tc.register_vram_region(device_id, base_ptr, size_bytes, ttl_ms, name=None) -> VramRegionHandle`.
   - `tc.unregister_vram_region(region_id, *, force=None) -> bool`.
   - `tc.deregister_artifact(artifact_id, *, wait=True, drain_timeout_s=None, extend_ttl_ms=None, device_id=None) -> DeregisterArtifactOutcome`.
+  - `tc.seal_assembly(assembly_id, *, publish_canonical=True, timeout_s=120.0)`.
 
 Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_into` (sync/async); `store()` remains for advanced callers but is not required for common flows.
 
@@ -60,7 +62,7 @@ Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_i
 - Symmetry convenience: `.tensor_into(name, target_tensor, device=None)` streams a single tensor directly into the provided buffer without requiring placeholders for every tensor in the artifact.
 - Materialization (async): `.tensor_async(name, device)`, `.tensor_dict_async(device, names=None)`.
 - Views/composition: `.view(slices=None, transpose=None, names=None)`, `.subset(names)`, `.slice({...})`, `.view_builder()`.
-- Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=...) -> tuple[Artifact, PrefetchTicket]` so callers can opt into ticket-based fallbacks via a cloned handle.
+- Performance helpers: `.batch(device=...) -> BatchContext`, `.prefetch(device=..., ctx=None) -> Operation[PrefetchedReplica]` for daemon-owned cache warm with unified `status/wait/cancel` semantics.
 - Policy override: `.with_fallback(FallbackOptions(...))`.
 - Serialization (process-local): `.to_dict()`, `.from_dict(data, store)`.
 
@@ -86,7 +88,7 @@ All retrieval flows pass through `MaterializationPipeline` with canonical index 
 - Lazy views: chaining `.view().slice().transpose()` builds view specs only; no RPCs or data transfer occur until `.tensor*`/`.tensor_dict*`/`.exists()`.
 - Single-process Store: all functional helpers delegate to the process Store (singleton); initialization flows through `StoreRuntimeContext` with `get_daemon_client`.
 - View composition: uses `ViewSpecComposer` and `ViewMetadataCache`; derived handles keep parent hints and share caches.
-- Prefetch: returns `(handle_clone, PrefetchTicket)`; the clone carries `replica_uuid` via `FallbackOptions` while the original handle stays untouched. Tickets expose `wait()`/`cancel()` for staged replicas.
+- Prefetch: returns an `Operation[PrefetchedReplica]` with daemon-side operation tracking and operation-scoped wait/cancel. The on-wire `replica_uuid` is treated as an operation id (not replica identity).
 - Region-backed registration: unchanged semantics per [region-backed](../architecture/api/region-backed.md); clearly scoped as an advanced lifecycle path.
 - Error surfaces: constructing an `Artifact` handle never raises `NOT_FOUND`; `ArtifactError` is raised on materialization (`tensor*`, `tensor_dict*`, `tensor_dict_into`, `tensor_into`) or explicit checks (`exists()`) when identity/metadata resolution fails.
 
@@ -130,10 +132,9 @@ None. No persistent schema or proto schema changes are required; reuse existing 
 # References
 
 - [api-design](../architecture/api/api-design.md)
-- 0016-artifact-view-v1.md
+- [artifact-views-and-retrieval](../architecture/artifact-views-and-retrieval.md)
 - [region-backed](../architecture/api/region-backed.md)
-- 0036-02-artifact-handle-core.md
-- 0036-03-lazy-artifact-handle.md
-- 0036-04-disk-artifact-variant.md
+- [materialization-flow](../architecture/api/materialization-flow.md)
+- [api-design](../architecture/api/api-design.md)
 - 0037-store-py-refactor.md
 - `tensorcast/api/store/__init__.py`, `tensorcast/api/store/artifact.py`, `tensorcast/startup.py`

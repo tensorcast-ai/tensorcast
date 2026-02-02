@@ -43,8 +43,6 @@ sudo apt install -y software-properties-common libxml2 libstdc++-12-dev gcc-13 g
 
 ### Build
 
-If Bazel fails to download LLVM, run `bash tools/download_and_set_local_llvm.sh`.
-
 ```bash
 # Generate Python stubs via Buf and build C++ headers via Bazel
 bash tools/build_proto_python.sh
@@ -55,6 +53,17 @@ uv sync --all-extras --all-groups --verbose
 # Build C++ core + Python extension
 BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
 ```
+
+#### Troubleshoot
+
+- If Bazel fails to download LLVM, run `bash tools/download_and_set_local_llvm.sh`.
+
+- If Bazel hits missing header errors like `fatal error: absl/log/log.h: No such file or directory`, the repo-root `external/` symlink is likely stale. Fix it with:
+  ```bash
+  rm -f external && ln -s $(bazel info output_base)/external external
+  ```
+
+- If importing `tensorcast._C` fails with `cannot allocate memory in static TLS block`, rebuild on the latest `main` (TensorCast disables jemalloc initial-exec TLS to make `dlopen()` safe). As a temporary workaround for older builds, run with `GLIBC_TUNABLES=glibc.rtld.optional_static_tls=32768`.
 
 ### Run services (local)
 

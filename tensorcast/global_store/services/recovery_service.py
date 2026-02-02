@@ -9,13 +9,11 @@ Handles state recovery after failures, worker rediscovery, and state synchroniza
 import time
 from uuid import UUID, uuid4
 
-from tensorcast.global_store.exceptions import NotFoundError
+from tensorcast.global_store.exceptions import NotFoundError, ValidationError
 from tensorcast.global_store.metrics import observe_state_sync
-from tensorcast.global_store.models import Replica, Worker
-from tensorcast.global_store.repositories import (
-    ReplicaRepository,
-    WorkerRepository,
-)
+from tensorcast.global_store.models import ByteSpaceKind, ByteSpaceRef, Replica, Worker
+from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
+from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.logger import init_logger
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
@@ -32,9 +30,11 @@ class RecoveryService:
         self,
         worker_repository: WorkerRepository,
         replica_repository: ReplicaRepository,
+        worker_service: WorkerService,
     ):
         self.worker_repository = worker_repository
         self.replica_repository = replica_repository
+        self.worker_service = worker_service
 
         # Recovery state tracking
         self.recovery_in_progress = False
@@ -115,15 +115,22 @@ class RecoveryService:
             Tuple of (registration_success, state_sync_required)
         """
         try:
-            # If previous worker ID provided, set worker_id and clean up old state
-            if previous_worker_id:
-                worker.worker_id = previous_worker_id
-                self._cleanup_previous_worker_state(
-                    previous_worker_id, worker.worker_id
-                )
+            daemon_id = (worker.daemon_id or "").strip()
+            if not daemon_id:
+                raise ValidationError("daemon_id is required")
 
-            # Register new worker
-            registered_worker = self.worker_repository.create_or_update(worker)
+            if previous_worker_id:
+                previous = self.worker_repository.find_by_id(
+                    previous_worker_id, include_inactive=True
+                )
+                if previous and (previous.daemon_id or "").strip() != daemon_id:
+                    raise ValidationError("previous_worker_id does not match daemon_id")
+
+            registered_worker = self.worker_service.register_worker(worker)
+            if previous_worker_id and previous_worker_id != registered_worker.worker_id:
+                self._cleanup_previous_worker_state(
+                    previous_worker_id, registered_worker.worker_id
+                )
 
             # Ensure persisted state version is initialized
             self.worker_repository.ensure_state_version(registered_worker.worker_id)
@@ -488,6 +495,17 @@ class RecoveryService:
             remote_memory_keys=replica.remote_memory_keys,
             buffer_sizes=replica.buffer_sizes,
         )
+        if replica.byte_space.kind == ByteSpaceKind.VIEW:
+            memory_info.byte_space.CopyFrom(
+                common_pb2.ByteSpaceRef(
+                    kind=common_pb2.BYTE_SPACE_KIND_VIEW,
+                    id=replica.byte_space.id or "",
+                )
+            )
+        else:
+            memory_info.byte_space.CopyFrom(
+                common_pb2.ByteSpaceRef(kind=common_pb2.BYTE_SPACE_KIND_CANONICAL)
+            )
         stats = common_pb2.ReplicaStats(
             max_concurrency=replica.max_concurrency,
             current_requests=replica.current_requests,
@@ -529,11 +547,25 @@ class RecoveryService:
         else:
             dom_mem_type = "DISK"
 
+        byte_space = ByteSpaceRef.canonical()
+        if (
+            hasattr(proto_replica.memory_info, "byte_space")
+            and proto_replica.memory_info.HasField("byte_space")
+            and (
+                proto_replica.memory_info.byte_space.kind
+                == common_pb2.BYTE_SPACE_KIND_VIEW
+            )
+        ):
+            view_id = proto_replica.memory_info.byte_space.id.strip()
+            if view_id:
+                byte_space = ByteSpaceRef.view(view_id)
+
         return Replica(
             replica_id=UUID(proto_replica.ref.replica_id)
             if proto_replica.ref.replica_id
             else uuid4(),
             artifact_id=proto_replica.ref.artifact_id,
+            byte_space=byte_space,
             node_id=proto_replica.memory_info.node_id,
             node_address=proto_replica.memory_info.node_address,
             node_port=proto_replica.memory_info.node_port,
@@ -550,7 +582,7 @@ class RecoveryService:
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
         """Compute checksum of replica state for consistency checking."""
-        entries: list[tuple[str, str, str, int, int, str, bool]] = []
+        entries: list[tuple[str, str, str, str, int, int, str, bool]] = []
         for replica in replicas:
             mem_type = "DISK"
             device_id = 0
@@ -560,9 +592,11 @@ class RecoveryService:
             elif replica.memory_type.value == "RAM":
                 mem_type = "RAM"
                 device_id = 0
+            view_id = replica.byte_space.id or ""
             entries.append(
                 (
                     replica.artifact_id,
+                    view_id,
                     replica.node_id or "",
                     replica.node_address or "",
                     replica.node_port or 0,
@@ -573,12 +607,12 @@ class RecoveryService:
             )
 
         # Sort replicas by a stable key for consistent checksum
-        entries.sort(key=lambda e: (e[0], e[5], e[4]))
+        entries.sort(key=lambda e: (e[0], e[1], e[6], e[5]))
 
         # Create string representation of state
         state_parts = [
-            f"{artifact_id}:{node_id}:{node_address}:{node_port}:{device_id}:{memory_type}:{1 if available else 0};"
-            for artifact_id, node_id, node_address, node_port, device_id, memory_type, available in entries
+            f"{artifact_id}:{view_id}:{node_id}:{node_address}:{node_port}:{device_id}:{memory_type}:{1 if available else 0};"
+            for artifact_id, view_id, node_id, node_address, node_port, device_id, memory_type, available in entries
         ]
         state_str = "".join(state_parts)
 

@@ -304,12 +304,13 @@ py::dict tensor_transform_plan_to_dict(const TensorTransformPlan& plan) {
   return out;
 }
 
-py::dict selection_range_to_dict(const tensorcast::store::loader::SelectionPlan::Range& range) {
+py::dict selection_segment_to_dict(const tensorcast::store::loader::ByteRangeSegment& segment) {
   py::dict out;
-  out["kind"] = range.kind == tensorcast::store::loader::SelectionPlan::Range::Kind::kData ? "data" : "pad";
-  out["src_offset"] = py::int_(range.src_offset);
-  out["dst_offset"] = py::int_(range.dst_offset);
-  out["length"] = py::int_(range.length);
+  out["kind"] = segment.kind == tensorcast::store::loader::ByteRangeSegment::Kind::kData ? "data" : "pad";
+  out["src_offset"] = py::int_(segment.src_offset);
+  out["dst_offset"] = py::int_(segment.dst_offset);
+  out["length"] = py::int_(segment.length);
+  out["source_index"] = py::int_(segment.source_index);
   return out;
 }
 
@@ -329,12 +330,12 @@ py::dict compute_view_registration_plan_wrapper(py::bytes canonical_index_bytes,
   forward["is_identity"] = plan.forward.is_identity;
   forward["view_size_bytes"] = py::int_(plan.forward.view_size_bytes);
   forward["view_index_json"] = py::bytes(plan.forward.view_index_json);
-  forward["selection_total_bytes"] = py::int_(plan.forward.selection.total_bytes);
+  forward["selection_total_bytes"] = py::int_(plan.forward.selection.map.total_bytes);
   forward["selection_is_contiguous"] = plan.forward.selection.is_contiguous;
   forward["selection_is_segment_aligned"] = plan.forward.selection.is_segment_aligned;
   py::list selection_ranges;
-  for (const auto& range : plan.forward.selection.ranges) {
-    selection_ranges.append(selection_range_to_dict(range));
+  for (const auto& segment : plan.forward.selection.map.segments) {
+    selection_ranges.append(selection_segment_to_dict(segment));
   }
   forward["selection_ranges"] = selection_ranges;
   result["forward"] = forward;
@@ -359,6 +360,36 @@ py::dict compute_view_registration_plan_wrapper(py::bytes canonical_index_bytes,
   inverse["tensors"] = inverse_tensors;
   result["inverse_transform"] = inverse;
 
+  return result;
+}
+
+py::dict compute_view_index_bytes_wrapper(
+    py::bytes canonical_index_bytes,
+    const py::dict& spec_dict,
+    const py::object& subset_names_obj) {
+  const std::string canonical_index_json = canonical_index_bytes.cast<std::string>();
+  ViewSpec spec = build_view_spec_from_py(spec_dict);
+
+  std::vector<std::string> subset_names;
+  if (!subset_names_obj.is_none()) {
+    py::list names_list = subset_names_obj.cast<py::list>();
+    subset_names.reserve(names_list.size());
+    for (py::handle handle : names_list) {
+      subset_names.push_back(handle.cast<std::string>());
+    }
+  }
+
+  absl::StatusOr<tensorcast::store::loader::ViewPlan> plan_or =
+      ViewPlanner::compute_view_plan(canonical_index_json, spec, subset_names);
+  if (!plan_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, plan_or.status().ToString());
+  }
+  const auto& plan = *plan_or;
+
+  py::dict result;
+  result["view_index_bytes"] = py::bytes(plan.view_index_json);
+  result["view_size_bytes"] = py::int_(plan.view_size_bytes);
+  result["is_identity"] = plan.is_identity;
   return result;
 }
 
@@ -949,7 +980,34 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("canonical_index_json"),
           py::arg("view_ops"),
           "Compute bidirectional view registration plan using the core ViewPlanner")
-      .def("restore_tensors", &tensorcast::checkpoint::restore_tensors, "Restore a state dict")
+      .def(
+          "compute_view_index_bytes",
+          &compute_view_index_bytes_wrapper,
+          py::arg("canonical_index_bytes"),
+          py::arg("normalized_ops"),
+          py::arg("subset_names") = py::none(),
+          "Compute packed view index bytes using the core ViewPlanner")
+      .def(
+          "restore_tensors",
+          &tensorcast::checkpoint::restore_tensors,
+          py::arg("meta_state_dict"),
+          py::arg("memory_base_address"),
+          py::arg("tensor_device_offsets"),
+          py::arg("from_ipc_shm"),
+          py::arg("lease_token") = std::string(),
+          py::arg("local_handle_socket_path") = std::string(),
+          "Restore a state dict")
+      .def(
+          "restore_tensors_from_cpu_fd_with_lease",
+          &tensorcast::checkpoint::restore_tensors_from_cpu_fd_with_lease,
+          py::arg("meta_state_dict"),
+          py::arg("fd"),
+          py::arg("size_bytes"),
+          py::arg("offset_bytes"),
+          py::arg("tensor_device_offsets"),
+          py::arg("lease_token"),
+          py::arg("local_handle_socket_path"),
+          "Restore a CPU state dict from a memfd mapping and bind daemon handle lease lifetime")
       .def(
           "restore_tensors_from_disk",
           &tensorcast::checkpoint::restore_tensors_from_disk,

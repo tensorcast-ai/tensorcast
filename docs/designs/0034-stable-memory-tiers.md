@@ -6,7 +6,12 @@ areas: ["core", "daemon", "global_store"]
 related_code:
   - "core/store/replica/*"
   - "daemon/runtime/*"
+  - "daemon/state/retention_registry.{h,cc}"
   - "tensorcast/global_store/*"
+  - "tensorcast/retention/__init__.py"
+  - "proto/tensorcast/common/v1/capability_token.proto"
+  - "proto/tensorcast/daemon/v2/store_daemon.proto"
+  - "proto/tensorcast/config/v1/daemon_config.proto"
   - "schema.sql"
 links:
   design: ./0022-distributed-preemptible-memory.md
@@ -30,7 +35,7 @@ Building on the UMA preemptible mechanism described in `docs/internals/preemptib
 
 ### Global Store / daemon coordination
 
-- `daemon/worker_lifecycle_manager.cc:122-150` only fills `get_mem_pool_size()` / `get_available_memory()` when registering a worker, and heartbeats only report a single `mem_pool_available_size`, so there is no way to communicate stable vs. preemptible capacity.
+- `daemon/ha/worker_lifecycle_manager.cc:122-150` only fills `get_mem_pool_size()` / `get_available_memory()` when registering a worker, and heartbeats only report a single `mem_pool_available_size`, so there is no way to communicate stable vs. preemptible capacity.
 - The `workers` table inside `schema.sql` only contains `mem_pool_total_size` / `mem_pool_available_size`, and the `chunk_directory` table only has an integer `chunk_state` (0=HOT...4=EVICTED). There is no understanding of leases or memory tiers.
 - The Global Store Python services (`tensorcast/global_store/services/worker_service.py`, `tensorcast/global_store/repositories/chunk_directory_repository.py`) are built around those fields and lack any `MemoryTierStatus` or lease-related RPCs.
 
@@ -158,6 +163,99 @@ All interfaces and fields must keep these prefixes. Avoid ambiguous names such a
 3. When chunks are released (export complete, replica unloaded, etc.), `release_stable_lease` returns the same number of bytes to the `MemoryTierBudget` and updates UMA. Budget changes are propagated to the Global Store in the next `MemoryTierStatus`.
 4. This makes the stable pool the combination of "available budget + leased chunks" instead of anonymous allocations that cannot be bound.
 5. Stable capacity is driven entirely by the `stable_bytes` configuration; we no longer infer it from current free memory. If `uma_cpu_capacity_bytes` is smaller than the configured value, bootstrap fails and asks operators to lower the config or free host DRAM.
+
+## Retention handles (daemon-scoped, control-plane retention refs)
+
+TensorCast needs a way for control-plane components (queue brokers, controllers, node agents) to keep a daemon-owned
+payload rematerializable for a bounded time **without PID coupling**. A *retention handle* is the platform primitive
+for this: a daemon-issued, renewable + releasable reference whose renew/release authority is carried only by an
+unforgeable capability token.
+
+Retention handles are enabled/disabled by `DaemonConfig.retention_handles.enabled` and require configured capability
+token keys (`DaemonConfig.capability_tokens`).
+
+This is intentionally separate from data-plane materialization: retention handles adjust *retention intent* for an
+already-known selection; they do not move bytes.
+
+### V1 definition (required)
+
+In v1, "a rematerialization path exists" means:
+
+- **Issuer-local and policy-scoped**: the issuing daemon can provide at least one serving path for the referenced
+  `ArtifactSelection` from its own StoreEngine, consistent with the provided `StorePolicy`.
+- **Stable-DRAM anchored (v1)**: the intended path is a daemon-owned CPU replica held in the stable tier (UMA stable
+  leases / stable cache admission). This is not a cluster-wide durability guarantee.
+
+Acquire semantics boundary (required):
+
+> `AcquireRetentionHandle` / `RenewRetentionHandle` / `ReleaseRetentionHandle` are control-plane only and MUST NOT
+> trigger payload materialization, transfer, or registration. They only adjust retention intent for an already-known
+> selection.
+
+### API (RPC + SDK)
+
+- Daemon RPCs: `AcquireRetentionHandle` / `RenewRetentionHandle` / `ReleaseRetentionHandle` in
+  `proto/tensorcast/daemon/v2/store_daemon.proto`.
+- Python SDK helpers: `tensorcast.retention.acquire_retention_handle(...)`,
+  `tensorcast.retention.renew_retention_handle(...)`, `tensorcast.retention.release_retention_handle(...)`.
+  - `CallContext` is client-side only (deadlines/timeouts); it is not part of the retention RPC request payload.
+
+Request requirements (v1):
+
+- `ArtifactSelection` MUST include `artifact_id` and MUST include selection fingerprints
+  (`logical_layout_hash`, `selection_hash`), since the daemon keys downgrade-on-last-release by canonical selection
+  identity.
+- `ttl_ms=0` means "use the daemon default TTL" (`DaemonConfig.retention_handles.default_ttl`).
+  - The issuer clamps effective TTL to `DaemonConfig.retention_handles.max_ttl`.
+  - If `StorePolicy` carries a stable-retention TTL, the effective TTL is also clamped to that policy TTL.
+
+`RetentionHandle` is represented (SDK-level) as:
+
+- `handle_id` (debuggable id)
+- `expires_at_ms`
+- `capability_token` (required for renew/release; MUST use the unified capability token envelope described in
+  `docs/designs/0055-programmable-framework.md`; requires `DaemonConfig.capability_tokens` to be configured)
+- `charged_bytes` (authoritative bytes charged for retention/accounting)
+- optional `diagnostics` (admission/skip reason, tier status)
+
+### Key properties (normative)
+
+- **Issuer-scoped**: bound to one issuer daemon (`daemon_id`).
+- **Time-bounded**: handles MUST expire; renewals MUST be bounded by caller deadlines.
+- **TTL caps (required)**: issuer MUST clamp requested TTL to a configured maximum
+  (`DaemonConfig.retention_handles.max_ttl`).
+- **Idempotent release**: repeated release MUST be safe.
+- **Downgrade on last release (required)**: when the last handle for a canonicalized selection identity is released or
+  expires, the daemon MUST reduce effective stable retention intent so stable bytes become reclaimable under pressure.
+
+### Error model (normative)
+
+- `AcquireRetentionHandle`
+  - `RESOURCE_EXHAUSTED`: cannot admit under current tier budgets/policies.
+  - `FAILED_PRECONDITION`: retention handles disabled/unconfigured, or selection/policy invalid, or selection cannot be
+    made rematerializable under v1 rules (e.g., policy does not allow local stable DRAM retention).
+  - `UNAVAILABLE`: issuer not able to serve control-plane requests (starting, fenced, shutting down).
+- `RenewRetentionHandle`
+  - `FAILED_PRECONDITION`: token invalid/expired/unknown (non-retryable; callers treat as "path lost").
+  - `UNAVAILABLE` / `DEADLINE_EXCEEDED`: transient issuer unreachability (retryable within bounded deadlines).
+- `ReleaseRetentionHandle`
+  - MUST be idempotent and safe to retry; repeated release MUST NOT return an error.
+  - SHOULD treat "unknown handle" as already-released (success), so cleanup is safely retryable. The RPC response may
+    return `released=false` for already-released handles without raising an error.
+
+### Implementation sketch (daemon)
+
+The daemon maintains a local `RetentionRegistry` that:
+
+- tracks active handles and aggregates them into an effective retention intent per canonical selection identity
+  (refcount + max expiry + policy rank),
+- enforces stable admission by charging against `MemoryTierBudget` and applying stable retention policy,
+- expresses expiry + cleanup using the daemon's Lease/Guard/Finalizer discipline (`SessionLifecycleManager`):
+  - `DeadlineGuard(expires_at)` retires handles,
+  - idempotent finalizers decrement refs and trigger downgrade-on-last-release logic.
+
+Important boundary (required): retention handles MUST NOT introduce a second "pinned memory" concept. They express
+stable-tier intent over UMA-managed CPU replicas; pinned pools remain data-plane resources.
 
 ## Preemptible strategy
 
@@ -306,7 +404,7 @@ CREATE INDEX IF NOT EXISTS idx_memory_tier_leases_node_artifact ON memory_tier_l
 | Loader / strategy | `core/store/materialization/planning/chunk_aware_strategy.cc` | Replace the hard-coded `preemptible_ratio` with `MemoryTierConfig` logic; skip `mark_cpu_preemptible` when disabled. |
 | Replica controller | `core/store/replica/replica_load_controller.cc` | Read the new config, gate `enable_preemptible_memory`, and support the `Keep`/`StableOnly` branch when invoking `post_gpu_load_policy`. |
 | UMA ledger | `core/store/replica/unified_memory_authority.{h,cc}` | Extend `ChunkRecord` with `StableLease` / `Resident` states; `mark_cpu_chunks_preemptible` obeys the config; `post_gpu_load_policy` gets the new branch. |
-| Daemon → GS heartbeat | `daemon/worker_lifecycle_manager.cc` | Heartbeats include stable/preemptible capacity and the config switch; call the new `MemoryTierService` RPC. |
+| Daemon → GS heartbeat | `daemon/ha/worker_lifecycle_manager.cc` | Heartbeats include stable/preemptible capacity and the config switch; call the new `MemoryTierService` RPC. |
 | Global Store schema | `schema.sql`, `tensorcast/global_store/services/worker_service.py`, `repositories/*` | Extend the `workers` table, add `memory_tier_snapshots` / `memory_tier_leases` tables, and update repositories/services + gRPC surface. |
 | Telemetry & control plane | `tensorcast/global_store/services/memory_tier_service.py` (new) | Implement `PublishMemoryTierStatus`, `RequestMemoryTierLease`, `AcknowledgeMemoryTierLease`, `RevokeMemoryTierLease`, `ListOutstandingLeases`, aligned with the DuckDB schema. |
 | Configuration system | `proto/tensorcast/config/v1/daemon_config.proto`, `core/common/config/daemon_config_io.cc`, `tensorcast/global_store/config/settings.py` | Define the `memory_tiers` fields in the unified config, update parsing/validation to follow design 0004. |

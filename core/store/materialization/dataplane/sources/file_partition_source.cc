@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/file_partition_source.h"
 
@@ -224,7 +224,7 @@ absl::StatusOr<size_t> FilePartitionSource::read_at(uint64_t offset, void* dst, 
 
     size_t bytes_read = *read_result;
     if (bytes_read == 0) {
-      break; // Unexpected EOF
+      return absl::DataLossError("FilePartitionSource short read before expected EOF");
     }
 
     total_read += bytes_read;
@@ -235,6 +235,9 @@ absl::StatusOr<size_t> FilePartitionSource::read_at(uint64_t offset, void* dst, 
     }
   }
 
+  if (total_read != bytes_to_read) {
+    return absl::DataLossError("FilePartitionSource short read before expected EOF");
+  }
   return total_read;
 }
 

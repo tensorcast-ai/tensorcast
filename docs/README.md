@@ -16,6 +16,8 @@ Understand how TensorCast works:
 - **[Component Interactions](architecture/README.md)** - How components work together
 - **[API Design](architecture/api/README.md)** - SDK surface and internal API flows
 - **[High Availability Design](architecture/high-availability-design.md)** - HA architecture deep-dive
+- **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
+- **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
 
 ## 🔧 Component Development
 
@@ -26,6 +28,7 @@ Guides for developing specific components:
 - **[Adding New Metrics](internals/adding-metrics.md)** - How to create and expose metrics
 - **[tensor_dict_into Dataflow](internals/tensor_dict_into_dataflow.md)** - Legacy vs region-backed into paths
 - **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
+- **[Byte-Range Mapping and Execution](internals/byte-range-mapping-and-execution.md)** - Unified byte-range executor semantics
 
 ## ⚙️ Core Modules (C++)
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 #include <algorithm>
@@ -90,6 +90,10 @@ class MockSeekableSource : public SeekableSource {
     for (size_t i = 0; i < total_size_; ++i) {
       data_[i] = static_cast<char>('B' + (i % 26));
     }
+  }
+
+  [[nodiscard]] uint64_t total_bytes() const override {
+    return total_size_;
   }
 
   absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
@@ -674,6 +678,10 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
      public:
       explicit TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
 
+      [[nodiscard]] uint64_t total_bytes() const override {
+        return data_.size();
+      }
+
       absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
         return read_at(offset_, dst, max_bytes);
       }
@@ -731,6 +739,10 @@ TEST_CASE("Concurrent pump_ranges with positioned writes", "[pump][concurrent]")
     class TestSeekableSource : public SeekableSource {
      public:
       explicit TestSeekableSource(const std::vector<uint8_t>& data) : data_(data) {}
+
+      [[nodiscard]] uint64_t total_bytes() const override {
+        return data_.size();
+      }
 
       absl::StatusOr<size_t> read(void* dst, size_t max_bytes) override {
         return read_at(offset_, dst, max_bytes);

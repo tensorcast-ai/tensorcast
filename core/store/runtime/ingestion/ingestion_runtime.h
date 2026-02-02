@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -7,6 +7,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -14,6 +15,7 @@
 #include "core/store/runtime/ingestion/materialization_facade.h"
 #include "core/store/runtime/ingestion_events.h"
 #include "core/store/runtime/replica/replica_runtime.h"
+#include "core/store/seal_assembly_result.h"
 #include "core/store/store_engine_options.h"
 
 namespace tensorcast::store::runtime {
@@ -49,8 +51,7 @@ class IngestionRuntime {
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
-      gsl::not_null<void*> target_ptr,
-      uint64_t total_size,
+      const loading::IntoTargetLayout& target_layout,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints);
@@ -67,9 +68,24 @@ class IngestionRuntime {
       const loading::ReplicaTarget& target,
       const loading::MaterializeHints& hints);
 
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
+      std::string_view assembly_id,
+      std::string_view target_artifact_id,
+      std::string_view view_id,
+      std::string_view view_spec_json,
+      const DeviceKey& target_device,
+      loading::TransformPlacement placement,
+      const std::vector<std::string>* allowed_view_ids = nullptr);
+
   absl::Status register_replica_with_global_store(
       const loading::ReplicaKey& key,
       std::string_view artifact_id_override);
+
+  absl::StatusOr<SealAssemblyResult> seal_assembly(
+      std::string_view assembly_id,
+      bool publish_canonical,
+      ingestion::MaterializationFacade::SealProgressCallback progress_cb = {},
+      const std::vector<std::string>* allowed_view_ids = nullptr);
 
  private:
   Config config_;

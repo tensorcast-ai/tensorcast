@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 
@@ -24,14 +25,30 @@ from tensorcast.api._region_cache import (
 )
 from tensorcast.api._register import RegistrationResult, _register_artifact_core
 from tensorcast.api._runtime import require_runtime
-from tensorcast.api.store.artifact import Artifact, ArtifactDescriptor, TensorMeta
+from tensorcast.api.context import CallContext
+from tensorcast.api.operation import (
+    DaemonGlobalStoreOperation,
+    Operation,
+    OperationError,
+    OperationStatus,
+    OperationTimeoutError,
+    PollingOperation,
+)
+from tensorcast.api.store.artifact import (
+    Artifact,
+    ArtifactDescriptor,
+    PlacementPin,
+    PrefetchedReplica,
+    TensorMeta,
+)
 from tensorcast.api.store.async_ops import ArtifactFuture
 from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
-    PrefetchTicket,
 )
+from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import (
@@ -57,9 +74,51 @@ from tensorcast.api.store.types import (
     TensorDict,
 )
 from tensorcast.api.store.views import TransformPlacement, ViewOrchestrator
+from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
 from tensorcast.daemon_ctl import get_daemon_client
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.types import DeregisterArtifactOutcome, VramRegionHandle
+from tensorcast.types import (
+    ArtifactDescriptor as TypedArtifactDescriptor,
+)
+from tensorcast.types import (
+    DeregisterArtifactOutcome,
+    SealAssemblyResult,
+    VramRegionHandle,
+)
+
+
+def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2:
+        return ArtifactIdKind.MI2
+    if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID:
+        return ArtifactIdKind.CGID
+    inferred = infer_artifact_id_kind(artifact_id)
+    return inferred or ArtifactIdKind.MI2
+
+
+def _parse_artifact_ref(
+    ref: str | None,
+    *,
+    artifact_id: str | None,
+    key: str | None,
+    disk_path: str | None,
+) -> tuple[str | None, str | None, str | None]:
+    if ref is None:
+        return artifact_id, key, disk_path
+    if artifact_id or key or disk_path:
+        raise ValueError("ref cannot be combined with artifact_id, key, or disk_path")
+    ref_value = str(ref)
+    if not ref_value:
+        raise ValueError("ref must be non-empty")
+    if ref_value.startswith(("mi2:", "cgid:")):
+        return ref_value, None, None
+    if ref_value.startswith("disk:"):
+        disk_value = ref_value[len("disk:") :]
+        if not disk_value:
+            raise ValueError("disk: ref must include a path")
+        return None, None, disk_value
+    return None, ref_value, None
 
 
 class Store:
@@ -173,6 +232,8 @@ class Store:
         ttl_ms: int | None = None,
         allow_partial: bool = False,
         options: RegisterArtifactOptions | None = None,
+        canonical_index_bytes: bytes | None = None,
+        registration_kind: str | int | None = None,
     ) -> RegisteredArtifact:
         return self._registration.register_view(
             tensors,
@@ -184,6 +245,32 @@ class Store:
             placement=placement,
             ttl_ms=ttl_ms,
             allow_partial=allow_partial,
+            options=options,
+            canonical_index_bytes=canonical_index_bytes,
+            registration_kind=registration_kind,
+            resolver=self._views.resolve_view_inputs,
+        )
+
+    def register_piece(
+        self,
+        tensors: TensorDict,
+        *,
+        assembly_id: str,
+        key: str | None = None,
+        slices: Mapping[str, Sequence[object]] | None = None,
+        canonical_index_bytes: bytes | None = None,
+        placement: str | None = None,
+        ttl_ms: int | None = None,
+        options: RegisterArtifactOptions | None = None,
+    ) -> RegisteredArtifact:
+        return self._registration.register_piece(
+            tensors,
+            assembly_id=assembly_id,
+            key=key,
+            slices=slices,
+            canonical_index_bytes=canonical_index_bytes,
+            placement=placement,
+            ttl_ms=ttl_ms,
             options=options,
             resolver=self._views.resolve_view_inputs,
         )
@@ -241,6 +328,83 @@ class Store:
         )
         return self._persistence_status_from_proto(resp)
 
+    def seal_assembly(
+        self,
+        assembly_id: str,
+        *,
+        publish_canonical: bool = True,
+        wait: bool = True,
+        layout_id: str | None = None,
+        timeout_s: float = 120.0,
+        ctx: CallContext | None = None,
+    ) -> SealAssemblyResult | Operation[SealAssemblyResult]:
+        if publish_canonical is False:
+            # Legacy synchronous path (operation-based sealing always publishes canonical).
+            return self._runtime.ensure_client().seal_assembly(
+                assembly_id,
+                publish_canonical=False,
+                timeout_s=timeout_s,
+            )
+
+        op = self.seal_assembly_operation(
+            assembly_id,
+            layout_id=layout_id,
+            ctx=ctx,
+        )
+        if wait:
+            return op.wait(timeout_s=timeout_s)
+        return op
+
+    def seal_assembly_operation(
+        self,
+        assembly_id: str,
+        *,
+        layout_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[SealAssemblyResult]:
+        start_resp = self._runtime.ensure_client().start_seal_assembly(
+            assembly_id=assembly_id,
+            layout_id=layout_id,
+        )
+        operation_id = start_resp.operation.operation_id
+        context: dict[str, str] = {"assembly_id": assembly_id}
+        if layout_id:
+            context["layout_id"] = str(layout_id)
+
+        def _decode(resp) -> SealAssemblyResult:
+            payload = store_daemon_pb2.SealAssemblyResult()
+            if not resp.status.result.Unpack(payload):
+                raise ArtifactError(
+                    f"Unexpected seal assembly result type (assembly_id={assembly_id})",
+                    status_code="INTERNAL",
+                    retryable=False,
+                )
+            artifact = payload.artifact
+            descriptor = TypedArtifactDescriptor(
+                artifact_id=str(artifact.artifact_id),
+                index_multihash=str(artifact.index_multihash or "") or None,
+                data_multihash=str(artifact.data_multihash or "") or None,
+                schema_version=str(artifact.schema_version or "") or None,
+                encoding=str(artifact.encoding or "") or None,
+                total_size=int(artifact.total_size),
+                id_kind=_artifact_id_kind_from_proto(
+                    artifact.id_kind, artifact.artifact_id
+                ),
+            )
+            return SealAssemblyResult(
+                sealed_artifact_id=descriptor.artifact_id,
+                descriptor=descriptor,
+                already_sealed=False,
+            )
+
+        return DaemonGlobalStoreOperation(
+            operation_id=operation_id,
+            runtime_ref=weakref.ref(self._runtime),
+            ctx=ctx,
+            context=context,
+            result_factory=_decode,
+        )
+
     def _persistence_status_from_proto(
         self, resp: store_daemon_pb2.QueryPersistenceStatusResponse
     ) -> PersistenceStatusResult:
@@ -271,17 +435,139 @@ class Store:
             shards=tuple(shards),
         )
 
+    def persistence_operation(
+        self,
+        *,
+        task_id: str | None = None,
+        artifact_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> Operation[PersistenceStatusResult]:
+        op_id = task_id or f"persist:{artifact_id or ''}"
+        created_at = time.monotonic()
+
+        def _ctx_remaining_timeout_s() -> float | None:
+            if ctx is None or ctx.deadline_ms is None:
+                return None
+            remaining = (float(ctx.deadline_ms) / 1000.0) - (
+                time.monotonic() - created_at
+            )
+            return max(0.0, remaining)
+
+        def _query() -> PersistenceStatusResult:
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                raise OperationTimeoutError(
+                    "Operation deadline exceeded (ctx.deadline_ms)",
+                    retryable=True,
+                )
+            resp = self._runtime.ensure_client().query_persistence_status(
+                task_id=task_id,
+                artifact_id=artifact_id,
+                timeout_s=timeout_s if timeout_s is not None else 10.0,
+            )
+            return self._persistence_status_from_proto(resp)
+
+        def _status() -> OperationStatus:
+            timeout_s = _ctx_remaining_timeout_s()
+            if timeout_s is not None and timeout_s <= 0:
+                return OperationStatus(
+                    state="degraded",
+                    message="CallContext deadline exceeded",
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message="CallContext deadline exceeded",
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
+            try:
+                result = _query()
+            except OperationTimeoutError as exc:
+                return OperationStatus(
+                    state="degraded",
+                    message=str(exc),
+                    progress=0.0,
+                    as_of_ms=int(time.time() * 1000),
+                    error=OperationError(
+                        status_code="DEADLINE_EXCEEDED",
+                        message=str(exc),
+                        retryable=True,
+                        context={
+                            "task_id": task_id or "",
+                            "artifact_id": artifact_id or "",
+                        },
+                    ),
+                )
+            state: str
+            if result.state in {"pending", "running", "unknown"}:
+                state = "running"
+            elif result.state == "success":
+                state = "success"
+            elif result.state == "failed":
+                state = "failed"
+            elif result.state == "degraded":
+                state = "degraded"
+            else:
+                state = "running"
+            error: OperationError | None = None
+            if state in {"failed", "degraded"}:
+                message = (
+                    result.last_error
+                    or result.degraded_reason
+                    or "persistence degraded"
+                )
+                error = OperationError(
+                    status_code="INTERNAL"
+                    if state == "failed"
+                    else "DEADLINE_EXCEEDED",
+                    message=message,
+                    retryable=True,
+                    context={
+                        "task_id": result.task_id,
+                        "artifact_id": result.artifact_id,
+                    },
+                )
+            return OperationStatus(
+                state=state,  # type: ignore[arg-type]
+                message=result.degraded_reason or None,
+                progress=float(result.progress),
+                as_of_ms=int(time.time() * 1000),
+                error=error,
+            )
+
+        def _result() -> PersistenceStatusResult:
+            return _query()
+
+        return PollingOperation(
+            operation_id=op_id,
+            status_fn=_status,
+            result_fn=_result,
+            ctx=ctx,
+        )
+
     # ------------------------------------------------------------------
     # Retrieval APIs
     # ------------------------------------------------------------------
     def artifact(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
         disk_path: str | None = None,
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
+        artifact_id, key, disk_path = _parse_artifact_ref(
+            ref,
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+        )
         effective_fallback = FallbackOptions.parse(fallback)
         if disk_path and effective_fallback is None:
             effective_fallback = FallbackOptions.for_disk(str(disk_path))
@@ -295,6 +581,7 @@ class Store:
 
     async def artifact_async(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
@@ -302,6 +589,7 @@ class Store:
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
+            ref,
             artifact_id=artifact_id,
             key=key,
             disk_path=disk_path,
@@ -366,6 +654,8 @@ class Store:
         drain_timeout_s: float | None = None,
         extend_ttl_ms: int | None = None,
         device_id: int | None = None,
+        byte_space: common_pb2.ByteSpaceRef | None = None,
+        operation_id: str | None = None,
     ) -> DeregisterArtifactOutcome:
         client = self._runtime.ensure_client()
         drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
@@ -375,6 +665,8 @@ class Store:
             drain_timeout_ms=drain_ms,
             extend_ttl_ms=extend_ttl_ms,
             device_id=device_id,
+            byte_space=byte_space,
+            operation_id=operation_id,
         )
         self._runtime.invalidate_artifact(artifact_id, key=None, reason="deregister")
         return outcome
@@ -542,6 +834,8 @@ def register_view(
     ttl_ms: int | None = None,
     allow_partial: bool = False,
     options: RegisterArtifactOptions | None = None,
+    canonical_index_bytes: bytes | None = None,
+    registration_kind: str | int | None = None,
 ) -> RegisteredArtifact:
     return _coerce_store().register_view(
         tensors,
@@ -553,6 +847,31 @@ def register_view(
         placement=placement,
         ttl_ms=ttl_ms,
         allow_partial=allow_partial,
+        options=options,
+        canonical_index_bytes=canonical_index_bytes,
+        registration_kind=registration_kind,
+    )
+
+
+def register_piece(
+    tensors: TensorDict,
+    *,
+    assembly_id: str,
+    key: str | None = None,
+    slices: Mapping[str, Sequence[object]] | None = None,
+    canonical_index_bytes: bytes | None = None,
+    placement: str | None = None,
+    ttl_ms: int | None = None,
+    options: RegisterArtifactOptions | None = None,
+) -> RegisteredArtifact:
+    return _coerce_store().register_piece(
+        tensors,
+        assembly_id=assembly_id,
+        key=key,
+        slices=slices,
+        canonical_index_bytes=canonical_index_bytes,
+        placement=placement,
+        ttl_ms=ttl_ms,
         options=options,
     )
 
@@ -585,6 +904,8 @@ def deregister_artifact(
     drain_timeout_s: float | None = None,
     extend_ttl_ms: int | None = None,
     device_id: int | None = None,
+    byte_space: common_pb2.ByteSpaceRef | None = None,
+    operation_id: str | None = None,
 ) -> DeregisterArtifactOutcome:
     return _coerce_store().deregister_artifact(
         artifact_id,
@@ -592,6 +913,8 @@ def deregister_artifact(
         drain_timeout_s=drain_timeout_s,
         extend_ttl_ms=extend_ttl_ms,
         device_id=device_id,
+        byte_space=byte_space,
+        operation_id=operation_id,
     )
 
 
@@ -641,14 +964,43 @@ def query_persistence_status(
     )
 
 
+def seal_assembly(
+    assembly_id: str,
+    *,
+    publish_canonical: bool = True,
+    wait: bool = True,
+    layout_id: str | None = None,
+    timeout_s: float = 120.0,
+    ctx: CallContext | None = None,
+) -> SealAssemblyResult | Operation[SealAssemblyResult]:
+    return _coerce_store().seal_assembly(
+        assembly_id,
+        publish_canonical=publish_canonical,
+        wait=wait,
+        layout_id=layout_id,
+        timeout_s=timeout_s,
+        ctx=ctx,
+    )
+
+
 def artifact(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return _coerce_store().artifact(
+    store = _coerce_store()
+    if ref is None:
+        return store.artifact(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return store.artifact(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
@@ -657,13 +1009,23 @@ def artifact(
 
 
 async def artifact_async(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
     disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return await _coerce_store().artifact_async(
+    store = _coerce_store()
+    if ref is None:
+        return await store.artifact_async(
+            artifact_id=artifact_id,
+            key=key,
+            disk_path=disk_path,
+            fallback=fallback,
+        )
+    return await store.artifact_async(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
         disk_path=disk_path,
@@ -683,11 +1045,15 @@ __all__ = [
     "ArtifactStatusCode",
     "CanonicalIndex",
     "CanonicalIndexEntry",
+    "DeferredCommitResult",
+    "DeferredLoader",
+    "InplaceSlot",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",
     "MaterializationBatcher",
-    "PrefetchTicket",
+    "PlacementPin",
+    "PrefetchedReplica",
     "RegisteredArtifact",
     "ReplicaInfo",
     "RetryPolicy",
@@ -711,9 +1077,11 @@ __all__ = [
     "put_async",
     "query_persistence_status",
     "register_view",
+    "register_piece",
     "register_vram_region",
     "unregister_vram_region",
     "deregister_artifact",
+    "seal_assembly",
     "get_daemon_client",
     "require_runtime",
     "_register_artifact_core",

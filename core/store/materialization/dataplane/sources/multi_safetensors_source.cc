@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/sources/multi_safetensors_source.h"
 
@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
@@ -49,6 +50,15 @@ MultiSafetensorsSource::~MultiSafetensorsSource() {
       s.fd = -1;
     }
   }
+}
+
+uint64_t MultiSafetensorsSource::total_bytes() const {
+  auto* self = const_cast<MultiSafetensorsSource*>(this);
+  if (auto st = self->OpenFiles(); !st.ok()) {
+    LOG(WARNING) << "MultiSafetensorsSource: OpenFiles failed in total_bytes: " << st;
+    return 0;
+  }
+  return total_size_;
 }
 
 absl::Status MultiSafetensorsSource::OpenFiles() {
@@ -147,12 +157,15 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read(void* dst, size_t max_bytes)
       return got.status();
     }
     if (*got == 0) {
-      break;
+      return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
     }
     total += *got;
     off += *got;
   }
   current_offset_ = off;
+  if (total != to_read) {
+    return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
+  }
   return total;
 }
 
@@ -184,10 +197,13 @@ absl::StatusOr<size_t> MultiSafetensorsSource::read_at(uint64_t offset, void* ds
       return got.status();
     }
     if (*got == 0) {
-      break;
+      return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
     }
     total += *got;
     off += *got;
+  }
+  if (total != to_read) {
+    return absl::DataLossError("MultiSafetensorsSource short read before expected EOF");
   }
   return total;
 }

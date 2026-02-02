@@ -44,7 +44,7 @@ transport:
   // Numeric defaults applied
   REQUIRE(cfg.transport().tcp_conn_count() == 4);
   REQUIRE(cfg.transport().connect_timeout_sec() == 10);
-  REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.transport().so_reuseport() == false);
 }
 
 TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
@@ -62,5 +62,5 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   // Defaults
   REQUIRE(cfg.stager().buffers_per_flow() == 4);
   REQUIRE(cfg.transport().tcp_tos() == 0);
-  REQUIRE(cfg.transport().so_reuseport() == true);
+  REQUIRE(cfg.transport().so_reuseport() == false);
 }

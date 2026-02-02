@@ -68,9 +68,36 @@ def restore_tensors(
     memory_base_address: Mapping[int | torch.device, int],
     tensor_device_offsets: Mapping[int | torch.device, Mapping[str, int]],
     from_ipc_shm: bool,
+    lease_token: bytes | None = None,
+    local_handle_socket_path: str | None = None,
 ) -> dict[str, torch.Tensor]:
     return _load_c_ext().restore_tensors(
-        meta_state_dict, memory_base_address, tensor_device_offsets, from_ipc_shm
+        meta_state_dict,
+        memory_base_address,
+        tensor_device_offsets,
+        from_ipc_shm,
+        lease_token or b"",
+        local_handle_socket_path or "",
+    )
+
+
+def restore_tensors_from_cpu_fd_with_lease(
+    meta_state_dict: Mapping[str, tuple[Sequence[int], Sequence[int], str, int]],
+    fd: int,
+    size_bytes: int,
+    offset_bytes: int,
+    tensor_device_offsets: Mapping[str, int],
+    lease_token: bytes,
+    local_handle_socket_path: str,
+) -> dict[str, torch.Tensor]:
+    return _load_c_ext().restore_tensors_from_cpu_fd_with_lease(
+        meta_state_dict,
+        int(fd),
+        int(size_bytes),
+        int(offset_bytes),
+        tensor_device_offsets,
+        lease_token,
+        local_handle_socket_path,
     )
 
 
@@ -86,6 +113,17 @@ def compute_view_registration_plan(
 ) -> Mapping[str, Any]:
     return _load_c_ext().compute_view_registration_plan(
         canonical_index_bytes, normalized_ops
+    )
+
+
+def compute_view_index_bytes(
+    canonical_index_bytes: bytes,
+    normalized_ops: Mapping[str, Any],
+    subset_names: Sequence[str] | None = None,
+) -> Mapping[str, Any]:
+    payload = list(subset_names) if subset_names is not None else None
+    return _load_c_ext().compute_view_index_bytes(
+        canonical_index_bytes, normalized_ops, payload
     )
 
 
@@ -125,6 +163,7 @@ def save_model_to_disk(
 __all__ = [
     "build_canonical_index_from_safetensors",
     "collect_tensor_storage_graph",
+    "compute_view_index_bytes",
     "compute_view_registration_plan",
     "get_c_ext",
     "get_cuda_memory_handle",
@@ -133,6 +172,7 @@ __all__ = [
     "get_device_uuid_map",
     "inspect_or_generate_descriptor",
     "restore_tensors",
+    "restore_tensors_from_cpu_fd_with_lease",
     "restore_tensors_from_disk",
     "save_model_to_disk",
 ]

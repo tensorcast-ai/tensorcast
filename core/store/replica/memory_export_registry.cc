@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/replica/memory_export_registry.h"
 
@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string_view>
 
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "core/communicator/engine/engine.h"
 #include "core/store/replica/transfer_constants.h"
@@ -17,6 +18,13 @@ namespace tensorcast::store::replica {
 namespace {
 inline const char* loc_str(common::memory::MemoryLocation loc) {
   return (loc == common::memory::MemoryLocation::GPU) ? "gpu" : "cpu";
+}
+
+std::string format_tensor_key(const loading::ReplicaKey& key, std::string_view suffix) {
+  if (!key.view_id.has_value() || key.view_id->empty()) {
+    return absl::StrCat(key.artifact_id, "_", suffix);
+  }
+  return absl::StrCat(key.artifact_id, "_view_", *key.view_id, "_", suffix);
 }
 } // namespace
 
@@ -162,7 +170,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
             absl::StrFormat("Offset %llu exceeds artifact size %llu", va_off, info.artifact_size));
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(base.get()) + va_off);
-      auto tensor_key = absl::StrFormat("%s_CPU_chunk_%zu", key.artifact_id, range_idx++);
+      auto tensor_key = format_tensor_key(key, absl::StrCat("CPU_chunk_", range_idx++));
       tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
       // Avoid registering an MR for VS logical windows; CPU path will be staged for TCP
       opts.register_mr = false;
@@ -243,7 +251,7 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
             absl::StrFormat("Offset %llu exceeds artifact size %llu", off, info.artifact_size));
       }
       const uint64_t addr = reinterpret_cast<uint64_t>(static_cast<char*>(gpu_ptr.get()) + off);
-      auto tensor_key = absl::StrFormat("%s_GPU_chunk_%zu", key.artifact_id, range_idx++);
+      auto tensor_key = format_tensor_key(key, absl::StrCat("GPU_chunk_", range_idx++));
       tensorcast::communicator::engine::Communicator::RegisterTensorOptions opts;
       opts.register_mr = comm_engine.is_rdma_enabled();
       opts.needs_staging =

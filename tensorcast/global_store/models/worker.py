@@ -28,6 +28,7 @@ class Worker:
 
     # Identity
     worker_id: str = ""
+    daemon_id: str = ""
     node_id: str = ""
 
     # Network
@@ -41,6 +42,9 @@ class Worker:
 
     # Status
     accepting_new_requests: bool = True
+
+    # Capabilities (bitset)
+    capability_flags: int = 0
 
     # Timestamps
     registered_at: Optional[datetime] = None

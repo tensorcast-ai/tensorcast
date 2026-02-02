@@ -210,16 +210,25 @@ absl::StatusOr<int> StreamingPinnedBuffer::get_free_chunk() {
   // Wait for a free chunk to become available
   absl::Time wait_start;
   absl::Time next_log;
+  bool wait_started = false;
   bool waiting_logged = false;
   while (free_queue_.empty() && !production_complete_) {
     const absl::Time now = absl::Now();
-    if (!waiting_logged) {
+    // Avoid log spam in steady-state backpressure scenarios where waits are on the
+    // order of microseconds. Only start logging if the wait becomes noticeable.
+    constexpr absl::Duration kLogAfter = absl::Milliseconds(100);
+    if (!wait_started) {
+      wait_started = true;
       wait_start = now;
-      next_log = now + absl::Seconds(5);
+      next_log = now + kLogAfter;
+    }
+
+    if (!waiting_logged && now >= next_log) {
       LOG(WARNING) << "StreamingPinnedBuffer capacity exhausted (num_chunks=" << num_chunks_
                    << ", chunk_size=" << chunk_size_ << ") — waiting for consumer to return staging buffers";
       waiting_logged = true;
-    } else if (now >= next_log) {
+      next_log = now + absl::Seconds(5);
+    } else if (waiting_logged && now >= next_log) {
       LOG(WARNING) << "StreamingPinnedBuffer still waiting for free chunk after "
                    << absl::FormatDuration(now - wait_start) << " (produced=" << chunks_produced_
                    << ", consumed=" << chunks_consumed_ << ")";

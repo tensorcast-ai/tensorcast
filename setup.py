@@ -215,32 +215,84 @@ if BAZEL_EXE is None:
 def ensure_external_symlink() -> None:
     """Ensure repo-root 'external' symlink points to Bazel output_base/external.
 
-    This mirrors the instruction in README to run:
-      ln -s $(bazel info output_base)/external external
+    TensorCast's native extension build includes headers directly from Bazel's
+    external repository cache. If the repo-root `external/` symlink is missing
+    or stale (e.g., when Bazel's output_base moves), the build can fail with
+    missing headers like `absl/log/log.h`.
     """
     try:
         root_dir: Path = get_root_dir()
         link_path: Path = root_dir / "external"
 
+        def infer_output_base_from_bazel_symlinks() -> Path | None:
+            bazel_bin = root_dir / "bazel-bin"
+            if not bazel_bin.exists() and not bazel_bin.is_symlink():
+                return None
+
+            try:
+                if bazel_bin.is_symlink():
+                    target = Path(os.readlink(bazel_bin))
+                    if not target.is_absolute():
+                        target = (bazel_bin.parent / target).resolve()
+                else:
+                    target = bazel_bin.resolve()
+            except OSError:
+                return None
+
+            parts = target.parts
+            if "execroot" not in parts:
+                return None
+
+            execroot_idx = parts.index("execroot")
+            return Path(*parts[:execroot_idx])
+
+        output_base_path = infer_output_base_from_bazel_symlinks()
+        if output_base_path is not None:
+            inferred_external = output_base_path / "external"
+            # Bazel's convenience symlinks (bazel-bin/bazel-out/...) can become stale
+            # when the output_base is relocated. If the inferred output_base doesn't
+            # exist anymore, fall back to `bazel info output_base`.
+            if not output_base_path.exists() or not inferred_external.exists():
+                output_base_path = None
+        if output_base_path is None and BAZEL_EXE is not None:
+            output_base_path = Path(
+                subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
+            )
+
+        if output_base_path is None:
+            return
+
+        target_path = output_base_path / "external"
+
+        if link_path.is_symlink():
+            current_target = Path(os.readlink(link_path))
+            if not current_target.is_absolute():
+                current_target = (link_path.parent / current_target).resolve()
+
+            expected = target_path.resolve() if target_path.exists() else target_path
+            current = current_target.resolve() if current_target.exists() else current_target
+            if current == expected:
+                return
+
+            link_path.unlink()
+            os.symlink(str(target_path), str(link_path))
+            print(f"Updated symlink: {link_path} -> {target_path}")
+            return
+
         if link_path.exists():
+            print(
+                f"Warning: {link_path} exists but is not a symlink; please remove it and retry "
+                "so it can be recreated as a symlink to Bazel's external deps."
+            )
             return
 
-        if BAZEL_EXE is None:
-            return
-
-        output_base = (
-            subprocess.check_output([BAZEL_EXE, "info", "output_base"]).decode("utf-8").strip()
-        )
-        target_path = Path(output_base) / "external"
-
-        # Create the symlink
         os.symlink(str(target_path), str(link_path))
         print(f"Created symlink: {link_path} -> {target_path}")
     except Exception as e:
         # Non-fatal: print guidance and continue
         print(f"Warning: Failed to create 'external' symlink automatically: {e}")
         print("You can create it manually with:")
-        print("  ln -s $(bazel info output_base)/external external")
+        print("  rm -f external && ln -s $(bazel info output_base)/external external")
 
 
 def build_checkpoint_runtime_and_daemon(
@@ -487,6 +539,7 @@ class BuildExtensionCommand(BuildExtension):
             develop=True,
             use_remote=USE_REMOTE,
         )
+        ensure_external_symlink()
         copy_checkpoint_extension_lib()
         BuildExtension.run(self)
         copy_extensions()

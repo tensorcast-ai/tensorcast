@@ -1,10 +1,14 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/view_utils.h"
 
 #include <algorithm>
+#include <string_view>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/status/status.h"
+#include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::store::view {
@@ -37,6 +41,73 @@ std::string build_view_spec_json(const loader::ViewSpec& spec) {
   nlohmann::json root;
   root["tensors"] = std::move(tensors);
   return root.dump();
+}
+
+absl::StatusOr<loader::ViewSpec> parse_view_spec_json(std::string_view view_spec_json) {
+  if (view_spec_json.empty()) {
+    return absl::InvalidArgumentError("view_spec_json must not be empty");
+  }
+  nlohmann::json root;
+  try {
+    root = nlohmann::json::parse(view_spec_json, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse view_spec_json: ", e.what()));
+  }
+  if (!root.is_object()) {
+    return absl::InvalidArgumentError("view_spec_json must be an object");
+  }
+  const auto tensors_it = root.find("tensors");
+  if (tensors_it == root.end() || !tensors_it->is_object()) {
+    return absl::InvalidArgumentError("view_spec_json.tensors must be an object");
+  }
+
+  loader::ViewSpec spec;
+  for (auto it = tensors_it->begin(); it != tensors_it->end(); ++it) {
+    if (!it.value().is_object()) {
+      return absl::InvalidArgumentError(absl::StrCat("view_spec_json tensor entry must be object for ", it.key()));
+    }
+    const auto ops_it = it.value().find("ops");
+    if (ops_it == it.value().end() || !ops_it->is_array()) {
+      return absl::InvalidArgumentError(absl::StrCat("view_spec_json tensor ops must be array for ", it.key()));
+    }
+    loader::TensorViewOps ops;
+    ops.ops.reserve(ops_it->size());
+    for (const auto& op_json : *ops_it) {
+      if (!op_json.is_object()) {
+        return absl::InvalidArgumentError(absl::StrCat("view_spec_json op must be object for ", it.key()));
+      }
+      const auto type_it = op_json.find("type");
+      if (type_it == op_json.end() || !type_it->is_string()) {
+        return absl::InvalidArgumentError(absl::StrCat("view_spec_json op type must be string for ", it.key()));
+      }
+      const std::string type = type_it->get<std::string>();
+      if (type == "narrow") {
+        if (!op_json.contains("dim") || !op_json.contains("start") || !op_json.contains("length")) {
+          return absl::InvalidArgumentError(absl::StrCat("view_spec_json narrow op missing fields for ", it.key()));
+        }
+        loader::NarrowOp narrow{
+            .dim = static_cast<int32_t>(op_json.at("dim").get<int64_t>()),
+            .start = op_json.at("start").get<int64_t>(),
+            .length = static_cast<uint64_t>(op_json.at("length").get<int64_t>()),
+        };
+        ops.ops.push_back(loader::ViewOp::Narrow(narrow));
+      } else if (type == "transpose") {
+        if (!op_json.contains("dim0") || !op_json.contains("dim1")) {
+          return absl::InvalidArgumentError(absl::StrCat("view_spec_json transpose op missing fields for ", it.key()));
+        }
+        loader::TransposeOp transpose{
+            .dim0 = static_cast<int32_t>(op_json.at("dim0").get<int64_t>()),
+            .dim1 = static_cast<int32_t>(op_json.at("dim1").get<int64_t>()),
+        };
+        ops.ops.push_back(loader::ViewOp::Transpose(transpose));
+      } else {
+        return absl::InvalidArgumentError(
+            absl::StrCat("view_spec_json op type unsupported for ", it.key(), ": ", type));
+      }
+    }
+    spec.tensors.emplace(it.key(), std::move(ops));
+  }
+  return spec;
 }
 
 uint64_t align_up(uint64_t value, uint64_t align) {
