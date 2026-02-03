@@ -39,6 +39,7 @@
 #include "core/store/materialization/dataplane/sources/byte_range_program.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
+#include "core/store/materialization/dataplane/sources/source_window_scheduler.h"
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
@@ -791,32 +792,53 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("materialize_into_target view size does not match target layout size");
   }
 
-  auto plan_key = [&]() -> std::string {
-    auto mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+  auto index_hash = [](std::string_view index_json) -> std::string {
+    auto mh_or = common::compute_index_multihash(std::optional<std::string>(index_json), "");
     if (mh_or.ok()) {
-      return absl::StrCat(generation, ":", *mh_or);
+      return *mh_or;
     }
-    const size_t fallback_hash = std::hash<std::string_view>{}(canonical_index_json);
-    return absl::StrCat(generation, ":raw:", fallback_hash);
-  }();
+    const size_t fallback_hash = std::hash<std::string_view>{}(index_json);
+    return absl::StrCat("raw:", fallback_hash);
+  };
 
-  std::shared_ptr<loader::ByteRangeMap> map_ptr;
-  {
-    absl::MutexLock lock(&byte_range_map_mu_);
-    auto it = byte_range_map_cache_.find(plan_key);
-    if (it != byte_range_map_cache_.end()) {
-      map_ptr = it->second;
+  const std::optional<std::string_view> source_index_json =
+      (hints.disk_metadata && hints.disk_metadata->source_index_json.has_value())
+      ? std::optional<std::string_view>(*hints.disk_metadata->source_index_json)
+      : std::nullopt;
+
+  auto get_map_ptr = [&](bool use_source_layout) -> absl::StatusOr<std::shared_ptr<loader::ByteRangeMap>> {
+    const std::string canonical_hash = index_hash(canonical_index_json);
+    std::string plan_key = absl::StrCat(generation, ":canon:", canonical_hash);
+    if (use_source_layout && source_index_json.has_value()) {
+      plan_key = absl::StrCat(plan_key, ":src:", index_hash(*source_index_json));
     }
-  }
-  if (!map_ptr) {
-    auto map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+
+    std::shared_ptr<loader::ByteRangeMap> map_ptr;
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      auto it = byte_range_map_cache_.find(plan_key);
+      if (it != byte_range_map_cache_.end()) {
+        return it->second;
+      }
+    }
+
+    absl::StatusOr<loader::ByteRangeMap> map_or;
+    if (use_source_layout && source_index_json.has_value()) {
+      map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
+          canonical_index_json, *source_index_json, canonical_total_size);
+    } else {
+      map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+    }
     if (!map_or.ok()) {
       return map_or.status();
     }
     map_ptr = std::make_shared<loader::ByteRangeMap>(std::move(*map_or));
-    absl::MutexLock lock(&byte_range_map_mu_);
-    byte_range_map_cache_.emplace(plan_key, map_ptr);
-  }
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      byte_range_map_cache_.emplace(plan_key, map_ptr);
+    }
+    return map_ptr;
+  };
 
   auto run_source =
       [&](std::unique_ptr<IArtifactLoader> loader,
@@ -830,45 +852,62 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return source_or.status();
     }
 
-    loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_into_target");
-    auto program_or = compiler.Compile(*map_ptr);
-    if (!program_or.ok()) {
-      return program_or.status();
+    const bool use_source_layout =
+        (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
+    auto map_ptr_or = get_map_ptr(use_source_layout);
+    if (!map_ptr_or.ok()) {
+      return map_ptr_or.status();
     }
+    auto map_ptr = *map_ptr_or;
+
+    loader::ByteRangeMap effective_map = *map_ptr;
+    bool composed_view = false;
+    if (view_plan.has_value() && !view_plan->is_identity && use_source_layout) {
+      auto composed_or = loader::compose_byte_range_maps(view_plan->selection.map, *map_ptr);
+      if (!composed_or.ok()) {
+        return composed_or.status();
+      }
+      effective_map = std::move(*composed_or);
+      composed_view = true;
+    }
+
+    std::shared_ptr<loader::SeekableSource> base_source = std::move(*source_or);
     std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-    sources.emplace_back(std::move(*source_or));
-    loader::ByteRangeMappedSource::Options map_opts{
-        .path = "materialize_into_target",
-        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-    };
-    auto mapped_or =
-        loader::ByteRangeMappedSource::Create(*map_ptr, *program_or, std::move(sources), std::move(map_opts));
-    if (!mapped_or.ok()) {
-      return mapped_or.status();
-    }
-    std::unique_ptr<loader::SeekableSource> plan_source = std::move(*mapped_or);
-    if (view_plan.has_value() && !view_plan->is_identity) {
-      plan_source =
-          loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
-    }
-    if (!plan_source) {
-      return absl::InternalError("materialize_into_target failed to build view plan source");
+    sources.emplace_back(base_source);
+
+    const bool source_ordered = use_source_layout && config_.options->byte_mapping.disk_source_ordered_read;
+    std::unique_ptr<loader::SeekableSource> plan_source;
+    if (!source_ordered) {
+      loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_into_target");
+      auto program_or = compiler.Compile(effective_map);
+      if (!program_or.ok()) {
+        return program_or.status();
+      }
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "materialize_into_target",
+          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+      };
+      auto mapped_or =
+          loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
+      if (!mapped_or.ok()) {
+        return mapped_or.status();
+      }
+      plan_source = std::move(*mapped_or);
+      if (view_plan.has_value() && !view_plan->is_identity && !composed_view) {
+        plan_source =
+            loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
+      }
+      if (!plan_source) {
+        return absl::InternalError("materialize_into_target failed to build view plan source");
+      }
     }
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
     if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
       return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
     }
-    const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
-    auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-        /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
     const std::chrono::milliseconds timeout =
         hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
-    auto init_spb_status = session_spb->initialize(timeout);
-    if (!init_spb_status.ok()) {
-      return init_spb_status;
-    }
-    loader::StreamingBufferAdapter adapter(session_spb);
 
     std::vector<loader::TargetStorage> storages;
     storages.reserve(target_layout.storages.size());
@@ -899,15 +938,47 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
     const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
                                                            : std::max(1, config_.num_threads);
-    auto pump_status = loader::pump_ranges(
-        *plan_source,
-        sink,
-        adapter,
-        absl::MakeSpan(ranges),
-        concurrency,
-        config_.runtime_context->async_runtime()->blocking_executor());
-    if (!pump_status.ok()) {
-      return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
+    if (source_ordered) {
+      const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
+      const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
+      loader::SourceWindowScheduler::Options sched_opts{
+          .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+          .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+          .prefetch_depth = config_.options->byte_mapping.disk_source_prefetch_depth,
+          .window_cap_bytes = window_cap_bytes,
+          .path = "materialize_into_target",
+      };
+      loader::SourceWindowScheduler scheduler(std::move(sched_opts));
+      auto exec_status = scheduler.Execute(
+          effective_map,
+          sources,
+          sink,
+          config_.runtime_context->pinned_buffer_pool(),
+          timeout,
+          /*use_pinned_buffers=*/true);
+      if (!exec_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_into_target source-ordered execution failed: ", exec_status.message()));
+      }
+    } else {
+      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+          /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+      auto init_spb_status = session_spb->initialize(timeout);
+      if (!init_spb_status.ok()) {
+        return init_spb_status;
+      }
+      loader::StreamingBufferAdapter adapter(session_spb);
+      auto pump_status = loader::pump_ranges(
+          *plan_source,
+          sink,
+          adapter,
+          absl::MakeSpan(ranges),
+          concurrency,
+          config_.runtime_context->async_runtime()->blocking_executor());
+      if (!pump_status.ok()) {
+        return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
+      }
     }
     auto close_status = sink.close();
     if (!close_status.ok()) {

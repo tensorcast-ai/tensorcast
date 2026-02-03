@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -32,6 +32,8 @@ struct DiskSourceMetadata {
   std::optional<std::string> schema_version;
   std::optional<std::string> existing_index_multihash;
   std::optional<std::string> existing_data_multihash;
+  std::optional<std::string> source_index_json;
+  std::optional<uint64_t> source_total_size_bytes;
 };
 
 struct P2PSourceMetadata {

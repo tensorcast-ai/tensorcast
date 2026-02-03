@@ -132,6 +132,10 @@ message Engine {
     uint32 strided_max_amplification = 6;
     uint64 strided_block_target_bytes = 7;
     uint64 strided_block_max_bytes = 8;
+    optional bool disk_source_ordered_read = 9;
+    uint64 disk_source_merge_max_gap_bytes = 10;
+    uint32 disk_source_merge_max_amplification = 11;
+    uint32 disk_source_prefetch_depth = 12;
   }
   ByteMapping byte_mapping = 13;
 }

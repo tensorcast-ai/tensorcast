@@ -299,10 +299,14 @@ import tensorcast as tc
 model = build_model_on_meta_device()
 artifact = tc.from_disk("/models/llama-7b")  # or: tc.artifact("llama-7b") for key lookup
 
-with artifact.deferred_loader(device="cuda:0", packing="byte_space") as loader:
+# For publishable byte-space packing, the view selection must be known up-front so offsets are stable.
+# (Per-tensor slice arguments would be order-dependent and are intentionally disallowed in this mode.)
+artifact_tp = artifact.view(slices=slices_tp)  # e.g., per-rank tensor-parallel shards
+
+with artifact_tp.deferred_loader(device="cuda:0", packing="byte_space") as loader:
     # slot is a stable VRAM layout bound into the model.
     for name, param in model.named_parameters():
-        param.data = loader.tensor(name, slice=(0, slice(rank_start, rank_start + rank_size)))
+        param.data = loader.tensor(name)
 
     slot = loader.commit()
 
@@ -315,7 +319,7 @@ slot.publish_replica()
 
 ```python
 slot.swap(
-    "llama-7b-v2",  # Artifact | str ref (ref parses like tc.artifact(ref))
+    "llama-7b-v2",  # Artifact | str ref; swap reuses the slot's selection (including view slices)
     publish=True,  # = publish_replica() after overwrite
     wait=True,
     drain_timeout_s=30.0,

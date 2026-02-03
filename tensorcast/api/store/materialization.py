@@ -1092,9 +1092,9 @@ class MaterializationPipeline:
                 == store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
             ):
                 elem_bytes = int(tensor.element_size())
-                if entry.segment_offset != entry.storage_offset * elem_bytes:
+                if entry.segment_offset % elem_bytes != 0:
                     raise ArtifactError(
-                        "Canonical layout is not COALESCED; region-backed get_into requires coalesced offsets",
+                        "Canonical layout segment_offset must be element-size aligned",
                         status_code="INVALID_ARGUMENT",
                         retryable=False,
                     )
@@ -1295,6 +1295,7 @@ class MaterializationPipeline:
         effective_prefer = fallback.prefer if fallback is not None else "auto"
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         disk_path: str | None = None
+        verify_checksums = True
         if fallback is not None:
             if fallback.prefer == "p2p":
                 preference = (
@@ -1305,6 +1306,7 @@ class MaterializationPipeline:
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
             disk_path = fallback.disk_path
+            verify_checksums = bool(fallback.verify_checksums)
         if (
             disk_path
             and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
@@ -1332,6 +1334,7 @@ class MaterializationPipeline:
                 preference=preference,
                 source_policy=source_policy,
                 disk_path=disk_path,
+                verify_checksums=verify_checksums,
                 tensor_names=region_layout.selection_names,
                 view=view,
                 view_id=view_id if view is None else None,
@@ -1687,10 +1690,6 @@ class MaterializationPipeline:
             if not allow_disk:
                 disallowed_sources.add(
                     store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
-                )
-            if requested_disk:
-                disallowed_sources.add(
-                    store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA
                 )
             if disallowed_sources and result.source in disallowed_sources:
                 source_label = _source_label(result.source) or "non-disk"

@@ -86,9 +86,11 @@ struct DiskMetadata {
   bool descriptor_present{false};
   std::optional<std::string> schema_version;
   std::optional<std::string> canonical_index_json;
+  std::optional<std::string> source_index_json;
   std::optional<std::string> index_multihash;
   std::optional<std::string> data_multihash;
   std::optional<uint64_t> logical_total_size;
+  std::optional<uint64_t> source_total_size_bytes;
   std::optional<bool> is_safetensors;
 };
 

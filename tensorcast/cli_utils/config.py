@@ -194,6 +194,10 @@ def build_embedded_daemon_config(
     cfg.engine.byte_mapping.strided_max_amplification = 8
     cfg.engine.byte_mapping.strided_block_target_bytes = 16 * 1024 * 1024
     cfg.engine.byte_mapping.strided_block_max_bytes = 64 * 1024 * 1024
+    cfg.engine.byte_mapping.disk_source_ordered_read = True
+    cfg.engine.byte_mapping.disk_source_merge_max_gap_bytes = 256 * 1024
+    cfg.engine.byte_mapping.disk_source_merge_max_amplification = 4
+    cfg.engine.byte_mapping.disk_source_prefetch_depth = 2
 
     cfg.pinned_memory.allocation_timeout.FromSeconds(30)
     cfg.pinned_memory.classes.add(

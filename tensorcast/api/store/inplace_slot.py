@@ -305,6 +305,8 @@ class InplaceSlot:
         view_spec_proto = None
         if resolved._view_spec is not None and not resolved._view_spec.is_identity:
             view_spec_proto = resolved._view_spec.proto
+        elif self._view_spec is not None and self._view_spec.tensors:
+            view_spec_proto = self._view_spec
         selection_order = self._selection_names if self._selection_names else None
         view_index_hint = None
         if selection_order is None and resolved._view_metadata is not None:
@@ -343,6 +345,11 @@ class InplaceSlot:
         preference, source_policy, disk_path = self._resolve_source_policy(
             resolved._fallback
         )
+        verify_checksums = (
+            True
+            if resolved._fallback is None
+            else bool(resolved._fallback.verify_checksums)
+        )
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
         try:
@@ -353,6 +360,7 @@ class InplaceSlot:
                 preference=preference,
                 source_policy=source_policy,
                 disk_path=disk_path,
+                verify_checksums=verify_checksums,
                 tensor_names=region_layout.selection_names,
                 view=view_spec_proto,
                 view_id=region_layout.view_id if view_spec_proto is None else None,

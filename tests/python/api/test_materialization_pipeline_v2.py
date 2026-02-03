@@ -177,6 +177,7 @@ def _make_payload(
     gate: threading.Event | None = None,
     on_iter: Callable[[], None] | None = None,
     generation: int | None = None,
+    source: store_daemon_pb2.MaterializationSource | None = None,
 ) -> MaterializationPayload:
     descriptors: list[TensorPayloadDescriptor] = []
     index: dict[str, list[object]] = {}
@@ -219,7 +220,7 @@ def _make_payload(
         disk_path=None,
         view_index_bytes=None,
         view_data_hash=None,
-        source=None,
+        source=source,
         device_uuid=None,
         generation=generation,
     )
@@ -328,6 +329,26 @@ def test_disk_fallback_verify_flag_passed():
     runtime.close()
 
     assert captured["verify_checksums"] is False
+
+
+def test_disk_fallback_allows_local_replica_source():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+
+    def fake_materialize(**_kwargs):
+        return _make_payload(
+            {"a": torch.ones(1)},
+            replica_uuid="local",
+            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_LOCAL_REPLICA,
+        )
+
+    pipeline.set_materialize_fn(fake_materialize)
+    fallback = FallbackOptions.for_disk("/tmp/artifact", verify=False)
+    result = pipeline.get(artifact_id="aid", fallback=fallback)
+    runtime.close()
+
+    assert torch.equal(result["a"], torch.ones(1))
 
 
 def test_disk_path_hint_prefers_disk_without_fallback():

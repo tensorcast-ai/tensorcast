@@ -542,10 +542,10 @@ class DaemonGlobalStoreOperation(Operation[T]):
             except grpc.RpcError as exc:
                 code = exc.code()
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    error = OperationTimeoutError(
+                    timeout_error = OperationTimeoutError(
                         "Operation wait timeout expired", retryable=True
                     )
-                    _raise_api_error(error, cause=exc)
+                    _raise_api_error(timeout_error, cause=exc)
                 error = ArtifactError(
                     _format_rpc_message("WaitOperation", exc),
                     status_code=_coerce_grpc_status_code(code),

@@ -98,6 +98,7 @@ sc_cc_library(
     hdrs = ["metadata/safetensors_util.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":canonical_index",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
     ],
@@ -192,6 +193,21 @@ sc_cc_library(
         ":source",
         "//core/store/materialization/contracts:byte_range_map",
         "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "source_window_scheduler",
+    srcs = ["sources/source_window_scheduler.cc"],
+    hdrs = ["sources/source_window_scheduler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sink",
+        ":source",
+        "//core/common:streaming_pinned_buffer_lib",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -542,6 +558,27 @@ cc_test(
     srcs = ["sources/tests/multi_safetensors_source_test.cc"],
     deps = [
         ":multi_safetensors_source",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "byte_range_map_builder_test",
+    srcs = ["sources/tests/byte_range_map_builder_test.cc"],
+    deps = [
+        ":byte_range_map_builder",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "source_window_scheduler_test",
+    srcs = ["sources/tests/source_window_scheduler_test.cc"],
+    deps = [
+        ":source_window_scheduler",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

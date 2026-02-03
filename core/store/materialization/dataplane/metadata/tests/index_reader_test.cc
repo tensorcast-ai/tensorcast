@@ -110,6 +110,15 @@ TEST_CASE("IndexReader builds canonical index from safetensors files", "[index_r
   CHECK(info.is_safetensors);
   CHECK(info.total_size_bytes == 48);
   CHECK_FALSE(info.canonical_index_json.empty());
+  REQUIRE(info.source_index_json.has_value());
+  CHECK(info.source_total_size_bytes == 48);
+
+  nlohmann::json canonical = nlohmann::json::parse(info.canonical_index_json);
+  nlohmann::json source = nlohmann::json::parse(*info.source_index_json);
+  CHECK(canonical["bias"][0] == 0);
+  CHECK(canonical["weights"][0] == 16);
+  CHECK(source["weights"][0] == 0);
+  CHECK(source["bias"][0] == 32);
 
   // Ensure build_from_safetensors works when invoked directly.
   std::vector<fs::path> files{dir / "part0.safetensors", dir / "part1.safetensors"};
@@ -117,6 +126,8 @@ TEST_CASE("IndexReader builds canonical index from safetensors files", "[index_r
   REQUIRE(st_info_or.ok());
   CHECK(st_info_or->is_safetensors);
   CHECK(st_info_or->total_size_bytes == 48);
+  REQUIRE(st_info_or->source_index_json.has_value());
+  CHECK(st_info_or->source_total_size_bytes == 48);
 
   fs::remove_all(dir);
 }

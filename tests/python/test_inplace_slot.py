@@ -14,9 +14,9 @@ import torch
 import tensorcast.api.store as store_mod
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import ArtifactError, Store
+from tensorcast.api.store import deferred_loader as deferred_loader_mod
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store import deferred_loader as deferred_loader_mod
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
 
@@ -78,7 +78,9 @@ class FakeSlotClient:
         )
         return VramRegionHandle(region_id="region:slot", ttl_ms=ttl_ms)
 
-    def unregister_vram_region(self, region_id: str, *, force: bool | None = None) -> bool:
+    def unregister_vram_region(
+        self, region_id: str, *, force: bool | None = None
+    ) -> bool:
         self.unregister_calls.append(region_id)
         return True
 
@@ -164,8 +166,12 @@ def test_inplace_slot_swap_preserves_data_ptr(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
-    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
+    )
 
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")
@@ -182,6 +188,43 @@ def test_inplace_slot_swap_preserves_data_ptr(
     assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
 
 
+def test_inplace_slot_swap_reuses_slot_view_spec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _skip_if_no_cuda()
+    index_bytes = _make_index_bytes()
+    client = FakeSlotClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "mi2:artifact-1", index_bytes)
+    _cache_index(runtime, "mi2:artifact-2", index_bytes)
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
+    )
+
+    artifact1 = store.artifact(artifact_id="mi2:artifact-1")
+    artifact2 = store.artifact(artifact_id="mi2:artifact-2")
+
+    slices = {"alpha": (slice(0, 2),)}
+    artifact_view = artifact1.view(slices=slices)
+
+    with artifact_view.deferred_loader(device="cuda:0", packing="byte_space") as loader:
+        ptrs = {}
+        for name in ("alpha", "beta"):
+            tensor = loader.tensor(name)
+            ptrs[name] = tensor.data_ptr()
+        slot = loader.commit()
+
+    slot.swap(artifact2, publish=False)
+
+    assert slot.artifact_id == "mi2:artifact-2"
+    assert slot.tensors["alpha"].data_ptr() == ptrs["alpha"]
+    assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
+
+
 def test_publish_failure_keeps_slot_clean_and_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -193,8 +236,12 @@ def test_publish_failure_keeps_slot_clean_and_retry(
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
-    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
+    )
 
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")

@@ -46,7 +46,9 @@ std::filesystem::path test_tmpdir() {
 }
 
 std::filesystem::path ensure_dir(std::filesystem::path path) {
-  std::filesystem::create_directories(path);
+  if (!path.empty()) {
+    std::filesystem::create_directories(path);
+  }
   return path;
 }
 
@@ -183,6 +185,27 @@ TEST_CASE("ResolveArtifactFromDisk enforces shared root and missing paths", "[da
   auto missing_status = ok_fix.controller.resolve_artifact_from_disk(ok_rctx, req, missing_resp);
   REQUIRE_FALSE(missing_status.ok());
   REQUIRE(missing_status.error_code() == grpc::StatusCode::NOT_FOUND);
+}
+
+TEST_CASE("ResolveArtifactFromDisk allows absolute paths when storage root is empty", "[daemon][disk][resolve]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_root_empty";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  ResolveFixture fix(std::filesystem::path{});
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest req;
+  req.set_disk_path(artifact_dir.string());
+  ResolveArtifactFromDiskResponse resp;
+  auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE_FALSE(resp.artifact_id().empty());
+  REQUIRE_FALSE(resp.canonical_index_bytes().empty());
 }
 
 TEST_CASE(

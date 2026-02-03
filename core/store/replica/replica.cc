@@ -5,6 +5,8 @@
 #include <chrono>
 #include <memory>
 #include <numeric>
+#include <optional>
+#include <string_view>
 #include <variant>
 
 #include "absl/functional/overload.h"
@@ -16,13 +18,49 @@
 #include "core/store/materialization/dataplane/contracts/loader.h"
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 #include "core/store/materialization/dataplane/loaders/p2p_loader.h"
+#include "core/store/materialization/dataplane/sources/byte_range_map_builder.h"
+#include "core/store/materialization/dataplane/sources/byte_range_mapped_source.h"
+#include "core/store/materialization/dataplane/sources/byte_range_program.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
 #include "core/store/replica/replica_load_controller.h"
+#include "nlohmann/json.hpp"
 
 namespace tensorcast::store::replica {
 
 using common::memory::MemoryLocation;
+
+namespace {
+
+std::optional<uint64_t> compute_total_size_from_index(std::string_view index_json) {
+  if (index_json.empty()) {
+    return std::nullopt;
+  }
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(index_json, nullptr, true);
+    if (!parsed.is_object()) {
+      return std::nullopt;
+    }
+    uint64_t total_size = 0;
+    for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+      const auto& arr = it.value();
+      if (!arr.is_array() || arr.size() < 2) {
+        continue;
+      }
+      uint64_t offset = arr[0].get<uint64_t>();
+      uint64_t size = arr[1].get<uint64_t>();
+      total_size = std::max<uint64_t>(total_size, offset + size);
+    }
+    if (total_size == 0) {
+      return std::nullopt;
+    }
+    return total_size;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+} // namespace
 
 //--------------------------------------------------------------------------
 // Static Factory: create()
@@ -106,12 +144,18 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
   // Optional view plan overrides the effective replica size.
   std::optional<loader::ViewPlan> view_plan = std::move(config.view_plan);
   uint64_t effective_size = loader_size;
+  std::optional<uint64_t> canonical_total_size;
+  if (config.canonical_index_json.has_value()) {
+    canonical_total_size = compute_total_size_from_index(*config.canonical_index_json);
+  }
   if (view_plan.has_value()) {
     effective_size = view_plan->view_size_bytes;
     if (effective_size == 0) {
       return absl::FailedPreconditionError(
           absl::StrCat("Replica ", config.artifact_identifier, " view plan resolved size is 0."));
     }
+  } else if (canonical_total_size.has_value() && config.source_index_json.has_value()) {
+    effective_size = *canonical_total_size;
   }
 
   // Also check against optional expected size in config (after applying view overrides)
@@ -165,6 +209,8 @@ absl::StatusOr<std::unique_ptr<Replica>> Replica::create(ReplicaConfig config) {
       config.async_runtime,
       source_type,
       std::move(view_plan),
+      std::move(config.canonical_index_json),
+      std::move(config.source_index_json),
       config.transform_placement,
       config.byte_mapping_config));
   return replica_ptr;
@@ -181,6 +227,8 @@ Replica::Replica(
     gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
     common::memory::MemoryLocation source_type,
     std::optional<loader::ViewPlan> view_plan,
+    std::optional<std::string> canonical_index_json,
+    std::optional<std::string> source_index_json,
     loading::TransformPlacement transform_placement,
     StoreEngineOptions::ByteMappingConfig byte_mapping_config)
     : key_(std::move(key)),
@@ -189,6 +237,8 @@ Replica::Replica(
       async_runtime_(std::move(async_runtime)),
       original_source_type_(source_type),
       view_plan_(std::move(view_plan)),
+      canonical_index_json_(std::move(canonical_index_json)),
+      source_index_json_(std::move(source_index_json)),
       transform_placement_(transform_placement),
       byte_mapping_config_(std::move(byte_mapping_config)) {}
 
@@ -331,8 +381,53 @@ folly::SemiFuture<absl::Status> Replica::ensure_loaded_async(
       return ready_signal->subscribe();
     }
     std::unique_ptr<loader::SeekableSource> source_ptr = std::move(*src_or);
+    bool composed_view = false;
+    if (canonical_index_json_.has_value() && source_index_json_.has_value()) {
+      auto canonical_total_size = compute_total_size_from_index(*canonical_index_json_);
+      if (!canonical_total_size.has_value()) {
+        ready_signal->set_value(absl::FailedPreconditionError("canonical index total_size is unavailable"));
+        return ready_signal->subscribe();
+      }
+      auto map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
+          *canonical_index_json_, *source_index_json_, *canonical_total_size);
+      if (!map_or.ok()) {
+        ready_signal->set_value(map_or.status());
+        return ready_signal->subscribe();
+      }
+      loader::ByteRangeMap effective_map = std::move(*map_or);
+      if (view_plan_.has_value() && !view_plan_->is_identity) {
+        auto composed_or = loader::compose_byte_range_maps(view_plan_->selection.map, effective_map);
+        if (!composed_or.ok()) {
+          ready_signal->set_value(composed_or.status());
+          return ready_signal->subscribe();
+        }
+        effective_map = std::move(*composed_or);
+        composed_view = true;
+      }
+      loader::ByteRangeCompiler compiler(byte_mapping_config_, "replica_disk_canonicalize");
+      auto program_or = compiler.Compile(effective_map);
+      if (!program_or.ok()) {
+        ready_signal->set_value(program_or.status());
+        return ready_signal->subscribe();
+      }
+      std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+      sources.emplace_back(std::move(source_ptr));
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "replica_disk_canonicalize",
+          .enable_direct_write_at = byte_mapping_config_.enable_direct_write_at,
+      };
+      auto mapped_or =
+          loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
+      if (!mapped_or.ok()) {
+        ready_signal->set_value(mapped_or.status());
+        return ready_signal->subscribe();
+      }
+      source_ptr = std::move(*mapped_or);
+    }
     if (view_plan_.has_value() && !view_plan_->is_identity) {
-      source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
+      if (!composed_view) {
+        source_ptr = loader::make_view_plan_source(std::move(source_ptr), view_plan_->selection, byte_mapping_config_);
+      }
     }
     std::function<absl::Status()> post_load_fn;
     if (view_plan_.has_value() && !view_plan_->is_identity && view_plan_->transform.requires_materialization &&

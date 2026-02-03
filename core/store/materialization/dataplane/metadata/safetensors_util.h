@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -23,7 +23,7 @@ struct SafetensorsHeaderInfo {
 // This function reads the 8-byte header length and validates it
 absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd);
 
-// Build RFC-0007 v2 canonical index JSON bytes from a set of .safetensors files.
+// Build RFC-0007 v2 source index JSON bytes from a set of .safetensors files.
 // The resulting JSON has sorted outer keys and fixed inner field order:
 // [offset, size, shape, stride, dtype, storage_offset]
 // - offset: base_offset + data_offsets[0], where base_offset is accumulated payload size across files
@@ -32,6 +32,11 @@ absl::StatusOr<SafetensorsHeaderInfo> ParseSafetensorsHeader(int fd);
 // - stride: row-major stride derived from shape
 // - dtype: mapped torch dtype string (e.g., "torch.float16")
 // - storage_offset: always 0 for safetensors headers
+absl::StatusOr<std::string> BuildSourceIndexFromSafetensors(const std::vector<std::filesystem::path>& files);
+
+// Build canonical (coalesced) RFC-0007 v2 index JSON bytes from .safetensors files.
+// Canonical offsets are derived from sorted tensor names and alignment; they do NOT
+// depend on source payload offsets.
 absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files);
 
 } // namespace tensorcast::store::loader

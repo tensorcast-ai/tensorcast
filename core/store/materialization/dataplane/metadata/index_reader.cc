@@ -21,12 +21,12 @@
 namespace tensorcast::store::loader {
 namespace {
 
-uint64_t compute_total_size_bytes(const std::string& canonical_index_json) {
-  if (canonical_index_json.empty()) {
+uint64_t compute_total_size_bytes(std::string_view index_json) {
+  if (index_json.empty()) {
     return 0;
   }
   try {
-    const nlohmann::json idx = nlohmann::json::parse(canonical_index_json, nullptr, true);
+    const nlohmann::json idx = nlohmann::json::parse(index_json, nullptr, true);
     uint64_t total_size = 0;
     for (auto it = idx.begin(); it != idx.end(); ++it) {
       const auto& arr = it.value();
@@ -81,11 +81,16 @@ absl::StatusOr<std::string> load_tensor_index_cbor(const std::filesystem::path& 
 IndexInfo make_index_info(
     std::string canonical_json,
     bool is_safetensors,
-    std::optional<std::string_view> existing_index_multihash) {
+    std::optional<std::string_view> existing_index_multihash,
+    std::optional<std::string> source_json = std::nullopt) {
   IndexInfo info;
   info.is_safetensors = is_safetensors;
   info.total_size_bytes = compute_total_size_bytes(canonical_json);
   info.canonical_index_json = std::move(canonical_json);
+  if (source_json.has_value() && !source_json->empty()) {
+    info.source_total_size_bytes = compute_total_size_bytes(*source_json);
+    info.source_index_json = std::move(source_json);
+  }
   if (existing_index_multihash.has_value() && !existing_index_multihash->empty()) {
     info.index_multihash = std::string(*existing_index_multihash);
   } else {
@@ -139,12 +144,22 @@ absl::StatusOr<IndexInfo> build_from_safetensors(
   if (safetensor_files.empty()) {
     return absl::NotFoundError("No safetensors files provided");
   }
-  auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(safetensor_files);
-  if (!index_bytes_or.ok()) {
-    LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
-    return index_bytes_or.status();
+  auto source_bytes_or = loader::BuildSourceIndexFromSafetensors(safetensor_files);
+  if (!source_bytes_or.ok()) {
+    LOG(WARNING) << "Failed to build source index from safetensors: " << source_bytes_or.status();
+    return source_bytes_or.status();
   }
-  return make_index_info(std::move(index_bytes_or).value(), /*is_safetensors=*/true, existing_index_multihash);
+  auto canonical_bytes_or =
+      loader::build_coalesced_canonical_index_from_source_index_json(*source_bytes_or, /*align_bytes=*/8);
+  if (!canonical_bytes_or.ok()) {
+    LOG(WARNING) << "Failed to build canonical index from safetensors: " << canonical_bytes_or.status();
+    return canonical_bytes_or.status();
+  }
+  return make_index_info(
+      std::move(canonical_bytes_or).value(),
+      /*is_safetensors=*/true,
+      existing_index_multihash,
+      std::move(source_bytes_or).value());
 }
 
 absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& artifact_path, int target_device_id) {
