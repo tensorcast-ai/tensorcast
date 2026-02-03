@@ -15,8 +15,8 @@ import tensorcast.api.store as store_mod
 from tensorcast._c_ext import build_canonical_index_from_safetensors
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import ArtifactError, Store
-from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store import deferred_loader as deferred_loader_mod
+from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
 from tests.python.utils.artifact_utils import create_dummy_safetensors
@@ -201,39 +201,15 @@ def store_and_client_safetensors(
         runtime.executor.shutdown(wait=False)
 
 
-@pytest.fixture
-def store_and_client_safetensors(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[tuple[Store, FakeDeferredClient]]:
-    _skip_if_no_cuda()
-    storage_root = tmp_path / "models"
-    storage_root.mkdir(parents=True, exist_ok=True)
-    artifact_id = "st_simple"
-    create_dummy_safetensors(storage_root, artifact_id)
-    index_path = storage_root / artifact_id / "tensor_index.json"
-    if index_path.exists():
-        index_path.unlink()
-    index_bytes = build_canonical_index_from_safetensors(str(storage_root / artifact_id))
-    client = FakeDeferredClient(index_bytes)
-    runtime = FakeRuntime(client)
-    store = Store("fake://daemon", runtime=runtime)
-    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
-    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
-    try:
-        yield store, client
-    finally:
-        runtime.executor.shutdown(wait=False)
-
-
 def test_deferred_loader_invalid_slice_raises(
     store_and_client: tuple[Store, FakeDeferredClient],
 ) -> None:
     store, _ = store_and_client
     artifact = store.artifact(artifact_id="artifact-1")
-    with artifact.deferred_loader(device="cuda:0") as loader:
-        with pytest.raises(ArtifactError):
-            loader.tensor("alpha", slice=slice(5, 6))
+    with artifact.deferred_loader(device="cuda:0") as loader, pytest.raises(
+        ArtifactError
+    ):
+        loader.tensor("alpha", slice=slice(5, 6))
 
 
 def test_deferred_loader_commit_preserves_order(

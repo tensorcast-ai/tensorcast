@@ -300,6 +300,18 @@ absl::StatusOr<components::KeyMappingSwapResult> MetadataGateway::swap_key_mappi
   return (*client_or)->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
 }
 
+absl::StatusOr<components::KeyMappingSwapResult> MetadataGateway::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  auto client_or = get_connected_client();
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
+}
+
 absl::Status MetadataGateway::revoke_key_mapping(std::string_view key) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {

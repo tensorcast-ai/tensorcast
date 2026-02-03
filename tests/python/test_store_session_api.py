@@ -7,7 +7,7 @@ import concurrent.futures
 import json
 import threading
 import time
-from dataclasses import dataclass, replace, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence, cast
 
@@ -54,7 +54,7 @@ class FakeHandle:
 
 @dataclass
 class FakeDaemonCtl:
-    resolves: dict[str, str | None]
+    resolves: dict[str, tuple[str | None, str | None] | str | None]
     materialized_by_id: dict[str, MaterializationPayload] = field(default_factory=dict)
     cache_ttl_seconds: int = 0
 
@@ -73,9 +73,16 @@ class FakeDaemonCtl:
 
     def resolve_key_mapping(self, key: str) -> daemon_ctl.KeyMappingResolution:
         self.resolve_calls.append(key)
-        artifact_id = self.resolves.get(key)
+        resolved = self.resolves.get(key)
+        artifact_id: str | None
+        disk_path: str | None
+        if isinstance(resolved, tuple):
+            artifact_id, disk_path = resolved
+        else:
+            artifact_id, disk_path = resolved, None
         return daemon_ctl.KeyMappingResolution(
             artifact_id=artifact_id or "",
+            used_disk_path=disk_path or "",
             generation=0,
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )

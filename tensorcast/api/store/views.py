@@ -112,9 +112,11 @@ class ViewOrchestrator:
         cached_entry: ArtifactCacheEntry | None = None
         if resolved_artifact_id is None:
             assert resolved_key is not None
-            resolved_artifact_id = self._runtime.resolve_key_mapping_cached(
-                key=resolved_key
-            )
+            resolved = self._runtime.resolve_key_mapping_cached(key=resolved_key)
+            if isinstance(resolved, tuple):
+                resolved_artifact_id = resolved[0]
+            else:
+                resolved_artifact_id = resolved
             if not resolved_artifact_id:
                 raise ArtifactError(
                     f"Artifact key '{resolved_key}' is not mapped",

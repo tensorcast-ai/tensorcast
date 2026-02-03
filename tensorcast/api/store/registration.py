@@ -652,13 +652,14 @@ class RegistrationPipeline:
         artifact_id: str | None,
     ) -> None:
         try:
-            mapped_id, _ = self._runtime.ensure_client().resolve_key_mapping(key)
+            mapping = self._runtime.ensure_client().resolve_key_mapping(key)
         except grpc.RpcError as exc:
             if exc.code() == grpc.StatusCode.NOT_FOUND:
                 return
             raise_mapped_registration_error(exc)
         except Exception as exc:  # noqa: BLE001
             raise_mapped_registration_error(exc)
+        mapped_id = mapping.artifact_id
         if not mapped_id:
             return
         if artifact_id and mapped_id == artifact_id:
