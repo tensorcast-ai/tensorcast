@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -13,7 +14,11 @@ from typing import TypedDict
 import torch
 from opentelemetry.trace import Status, StatusCode
 
-from tensorcast._c_ext import compute_view_index_bytes
+from tensorcast._c_ext import (
+    compute_view_index_bytes,
+    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
+)
 from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._config import GetArtifactOptions, RegionBackedMode
@@ -30,6 +35,7 @@ from tensorcast.api.store.common import (
     canonical_index_to_bytes,
     validate_targets,
 )
+from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import (
     compute_retry_delay,
     map_materialization_error,
@@ -101,6 +107,60 @@ def _build_source_policy(
     policy.allow_p2p = bool(allow_p2p)
     policy.allow_disk = bool(allow_disk)
     return policy
+
+
+def _register_target_regions(
+    runtime: StoreRuntimeContext,
+    *,
+    target: Mapping[str, torch.Tensor],
+    device_id: int,
+) -> tuple[str, ...]:
+    ttl_ms = 0
+    client = runtime.ensure_client()
+    bases = collect_storage_bases(target)
+    region_ids: list[str] = []
+    try:
+        for base_ptr, nbytes in sorted(bases.items()):
+            base_ptr_value = int(base_ptr)
+            size_value = int(nbytes)
+            base_offset = 0
+            try:
+                handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+                    int(device_id), base_ptr_value
+                )
+            except Exception:  # noqa: BLE001
+                handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
+                base_offset = 0
+            if base_offset:
+                base_ptr_value -= int(base_offset)
+                size_value += int(base_offset)
+            handle = client.register_vram_region(
+                device_id=int(device_id),
+                size_bytes=int(size_value),
+                ttl_ms=int(ttl_ms),
+                cuda_ipc_handle=handle_bytes,
+                region_name=None,
+            )
+            region_cache.register_region(
+                region_id=handle.region_id,
+                device_id=int(device_id),
+                base_ptr=int(base_ptr_value),
+                size_bytes=int(size_value),
+                ttl_ms=int(ttl_ms),
+            )
+            region_ids.append(handle.region_id)
+    except Exception as exc:  # noqa: BLE001
+        for region_id in region_ids:
+            with contextlib.suppress(Exception):
+                client.unregister_vram_region(region_id)
+            with contextlib.suppress(Exception):
+                region_cache.unregister_region(region_id)
+        raise ArtifactError(
+            "Target tensors are not eligible for region-backed operations",
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        ) from exc
+    return tuple(region_ids)
 
 
 class FallbackResolver:
@@ -1281,17 +1341,6 @@ class MaterializationPipeline:
             )
             self._runtime.cache_artifact_index(cache_entry)
 
-        region_layout = self._build_region_backed_layout(
-            canonical_index=canonical_index,
-            canonical_index_bytes=canonical_bytes,
-            target=target,
-            device_id=device_id,
-            tensor_names=tensor_names,
-            view_spec=view,
-            view_id=view_id,
-            view_index_hint=view_index_hint,
-        )
-
         effective_prefer = fallback.prefer if fallback is not None else "auto"
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         disk_path: str | None = None
@@ -1324,48 +1373,95 @@ class MaterializationPipeline:
         )
 
         client = self._runtime.ensure_client()
-        if mark_started is not None:
-            mark_started()
-        try:
-            response = client.materialize_into_target_v2(
-                artifact_id=artifact_id,
-                target_layout=region_layout.layout,
-                device_uuid=device_uuid_for(device_id),
-                preference=preference,
-                source_policy=source_policy,
-                disk_path=disk_path,
-                verify_checksums=verify_checksums,
-                tensor_names=region_layout.selection_names,
-                view=view,
-                view_id=view_id if view is None else None,
-                view_subset_hash=region_layout.view_subset_hash,
-                placement=placement,
-            )
-        except Exception as exc:  # noqa: BLE001
-            error = map_materialization_error(exc)
-            if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+        started = False
+        attempt = 0
+        while attempt < 2:
+            try:
+                region_layout = self._build_region_backed_layout(
+                    canonical_index=canonical_index,
+                    canonical_index_bytes=canonical_bytes,
+                    target=target,
+                    device_id=device_id,
+                    tensor_names=tensor_names,
+                    view_spec=view,
+                    view_id=view_id,
+                    view_index_hint=view_index_hint,
+                )
+            except ArtifactError as exc:
+                message = str(exc)
+                if (
+                    attempt == 0
+                    and exc.status_code == "FAILED_PRECONDITION"
+                    and "No registered region covers the target tensors" in message
+                ):
+                    _register_target_regions(
+                        self._runtime, target=target, device_id=device_id
+                    )
+                    attempt += 1
+                    continue
+                raise
+
+            if mark_started is not None and not started:
+                mark_started()
+                started = True
+            try:
+                response = client.materialize_into_target_v2(
+                    artifact_id=artifact_id,
+                    target_layout=region_layout.layout,
+                    device_uuid=device_uuid_for(device_id),
+                    preference=preference,
+                    source_policy=source_policy,
+                    disk_path=disk_path,
+                    verify_checksums=verify_checksums,
+                    tensor_names=region_layout.selection_names,
+                    view=view,
+                    view_id=view_id if view is None else None,
+                    view_subset_hash=region_layout.view_subset_hash,
+                    placement=placement,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error = map_materialization_error(exc)
+                if attempt == 0 and error.status_code in {
+                    "DATA_LOSS",
+                    "FAILED_PRECONDITION",
+                    "NOT_FOUND",
+                }:
+                    for region_id in region_layout.region_ids:
+                        region_cache.unregister_region(region_id)
+                    _register_target_regions(
+                        self._runtime, target=target, device_id=device_id
+                    )
+                    attempt += 1
+                    continue
+                if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+                    for region_id in region_layout.region_ids:
+                        region_cache.unregister_region(region_id)
+                raise ArtifactError(
+                    str(error),
+                    status_code=error.status_code,
+                    retryable=False,
+                ) from exc
+            if (
+                response.status
+                != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+            ):
                 for region_id in region_layout.region_ids:
                     region_cache.unregister_region(region_id)
-            raise ArtifactError(
-                str(error),
-                status_code=error.status_code,
-                retryable=False,
-            ) from exc
-        if (
-            response.status
-            != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            for region_id in region_layout.region_ids:
-                region_cache.unregister_region(region_id)
-            raise ArtifactError(
-                "MaterializeIntoTarget returned non-success status",
-                status_code="DATA_LOSS",
-                retryable=False,
+                raise ArtifactError(
+                    "MaterializeIntoTarget returned non-success status",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_verification_skipped(
+                self._runtime.daemon_endpoint
             )
-        store_metrics.record_region_backed_verification_skipped(
-            self._runtime.daemon_endpoint
+            return None
+
+        raise ArtifactError(
+            "MaterializeIntoTarget retry failed to produce a response",
+            status_code="DATA_LOSS",
+            retryable=False,
         )
-        return None
 
     def _maybe_region_backed_into(
         self,

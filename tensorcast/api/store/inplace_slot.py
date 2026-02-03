@@ -10,9 +10,11 @@ from typing import TYPE_CHECKING, Mapping, Sequence
 import torch
 
 from tensorcast.api import _metrics as store_metrics
+from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
 from tensorcast.api.store.materialization import _build_source_policy
+from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
 from tensorcast.common.selection_identity import (
@@ -65,6 +67,10 @@ def _selection_publishable(
 ) -> bool:
     subset_hash = view_subset_hash or b""
     return not selection_names and subset_hash == b""
+
+
+def _is_region_error(error: ArtifactError) -> bool:
+    return error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION", "NOT_FOUND"}
 
 
 class InplaceSlot:
@@ -203,7 +209,13 @@ class InplaceSlot:
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
-    def publish_replica(self, *, ctx: CallContext | None = None) -> None:
+    def publish_replica(
+        self,
+        *,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
+        ctx: CallContext | None = None,
+    ) -> None:
         self._ensure_open()
         if self._dirty:
             raise ArtifactError(
@@ -235,6 +247,8 @@ class InplaceSlot:
             resp = client.publish_target_replica(
                 target_write_token=self._target_write_token,
                 byte_space=self.byte_space,
+                ttl_ms=ttl_ms,
+                owner_pid=owner_pid,
                 operation_id=operation_id,
                 timeout_s=timeout_s if timeout_s is not None else 60.0,
             )
@@ -283,6 +297,9 @@ class InplaceSlot:
         wait: bool = True,
         drain_timeout_s: float | None = None,
         ctx: CallContext | None = None,
+        operation_id: str | None = None,
+        publish_ttl_ms: int | None = None,
+        publish_owner_pid: int | None = None,
     ) -> None:
         self._ensure_open()
         resolved = self._resolve_artifact(artifact)
@@ -311,29 +328,7 @@ class InplaceSlot:
         view_index_hint = None
         if selection_order is None and resolved._view_metadata is not None:
             view_index_hint = resolved._view_metadata.view_index_bytes
-        region_layout = pipeline._build_region_backed_layout(
-            canonical_index=canonical_index,
-            canonical_index_bytes=canonical_index_bytes,
-            target=self._tensors,
-            device_id=self._device_id,
-            tensor_names=selection_order,
-            view_spec=view_spec_proto,
-            view_id=None,
-            view_index_hint=view_index_hint,
-            selection_order=selection_order,
-        )
-        self._ensure_layout_match(region_layout)
-        if publish and not _selection_publishable(
-            selection_names=region_layout.selection_names,
-            view_subset_hash=region_layout.view_subset_hash,
-        ):
-            raise ArtifactError(
-                "Slot selection is not publishable (packed or subset)",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-
-        operation_id = uuid.uuid4().hex
+        operation_id = operation_id or uuid.uuid4().hex
         if self._published_lease_id is not None:
             self._retire_published(
                 operation_id=operation_id,
@@ -352,37 +347,77 @@ class InplaceSlot:
         )
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
-        try:
-            response = client.materialize_into_target_v2(
-                artifact_id=artifact_id,
-                target_layout=region_layout.layout,
-                device_uuid=device_uuid_for(self._device_id),
-                preference=preference,
-                source_policy=source_policy,
-                disk_path=disk_path,
-                verify_checksums=verify_checksums,
-                tensor_names=region_layout.selection_names,
-                view=view_spec_proto,
-                view_id=region_layout.view_id if view_spec_proto is None else None,
-                view_subset_hash=region_layout.view_subset_hash,
-                operation_id=operation_id,
+        publish_checked = False
+        attempt = 0
+        response = None
+        region_layout = None
+        while attempt < 2:
+            region_layout = pipeline._build_region_backed_layout(
+                canonical_index=canonical_index,
+                canonical_index_bytes=canonical_index_bytes,
+                target=self._tensors,
+                device_id=self._device_id,
+                tensor_names=selection_order,
+                view_spec=view_spec_proto,
+                view_id=None,
+                view_index_hint=view_index_hint,
+                selection_order=selection_order,
             )
-        except Exception as exc:  # noqa: BLE001
-            self._dirty = True
-            error = map_materialization_error(exc)
-            raise ArtifactError(
-                str(error),
-                status_code=error.status_code,
-                retryable=False,
-            ) from exc
+            self._ensure_layout_match(region_layout)
+            if publish and not publish_checked:
+                if not _selection_publishable(
+                    selection_names=region_layout.selection_names,
+                    view_subset_hash=region_layout.view_subset_hash,
+                ):
+                    raise ArtifactError(
+                        "Slot selection is not publishable (packed or subset)",
+                        status_code="FAILED_PRECONDITION",
+                        retryable=False,
+                    )
+                publish_checked = True
+            try:
+                response = client.materialize_into_target_v2(
+                    artifact_id=artifact_id,
+                    target_layout=region_layout.layout,
+                    device_uuid=device_uuid_for(self._device_id),
+                    preference=preference,
+                    source_policy=source_policy,
+                    disk_path=disk_path,
+                    verify_checksums=verify_checksums,
+                    tensor_names=region_layout.selection_names,
+                    view=view_spec_proto,
+                    view_id=region_layout.view_id if view_spec_proto is None else None,
+                    view_subset_hash=region_layout.view_subset_hash,
+                    operation_id=operation_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._dirty = True
+                error = map_materialization_error(exc)
+                if attempt == 0 and _is_region_error(error):
+                    self._refresh_regions()
+                    attempt += 1
+                    continue
+                raise ArtifactError(
+                    str(error),
+                    status_code=error.status_code,
+                    retryable=False,
+                ) from exc
 
-        if (
-            response.status
-            != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
+            if (
+                response.status
+                != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+            ):
+                self._dirty = True
+                raise ArtifactError(
+                    "MaterializeIntoTarget returned non-success status",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            break
+        if response is None or region_layout is None:
             self._dirty = True
             raise ArtifactError(
-                "MaterializeIntoTarget returned non-success status",
+                "MaterializeIntoTarget retry failed to produce a response",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
@@ -402,7 +437,12 @@ class InplaceSlot:
 
         if publish:
             try:
-                self._publish_with_operation_id(operation_id, ctx=ctx)
+                self._publish_with_operation_id(
+                    operation_id,
+                    ctx=ctx,
+                    ttl_ms=publish_ttl_ms,
+                    owner_pid=publish_owner_pid,
+                )
             except ArtifactError:
                 raise
 
@@ -476,6 +516,30 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
+
+    def _refresh_regions(self) -> None:
+        stale_ids = tuple(self._region_ids)
+        if not stale_ids and self._region_id:
+            stale_ids = (self._region_id,)
+        self._release_regions()
+        for region_id in stale_ids:
+            if not region_id:
+                continue
+            with contextlib.suppress(Exception):
+                region_cache.unregister_region(region_id)
+        ttl_ms = 0
+        bases = collect_storage_bases(self._tensors)
+        new_ids: list[str] = []
+        for base_ptr, nbytes in sorted(bases.items()):
+            handle = self._store.register_vram_region(
+                device_id=self._device_id,
+                base_ptr=base_ptr,
+                size_bytes=nbytes,
+                ttl_ms=int(ttl_ms),
+            )
+            new_ids.append(handle.region_id)
+        self._region_ids = tuple(new_ids)
+        self._region_id = None
 
     def _resolve_source_policy(
         self, fallback: FallbackOptions | None
@@ -554,6 +618,8 @@ class InplaceSlot:
         self,
         operation_id: str,
         *,
+        ttl_ms: int | None = None,
+        owner_pid: int | None = None,
         ctx: CallContext | None,
     ) -> None:
         if not self._target_write_token:
@@ -568,6 +634,8 @@ class InplaceSlot:
             resp = client.publish_target_replica(
                 target_write_token=self._target_write_token,
                 byte_space=self.byte_space,
+                ttl_ms=ttl_ms,
+                owner_pid=owner_pid,
                 operation_id=operation_id,
                 timeout_s=timeout_s if timeout_s is not None else 60.0,
             )

@@ -3075,18 +3075,77 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 return global_store_pb2.ResolveKeyMappingResponse(
                     status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
+            cache_ttl_seconds = 30
+            kind = (row.get("kind") or "IMMUTABLE").upper()
+            if kind == "ALIAS":
+                cache_ttl_seconds = 0
+            else:
+                ttl_seconds = row.get("ttl_seconds")
+                if ttl_seconds is not None:
+                    cache_ttl_seconds = max(0, int(ttl_seconds))
             return global_store_pb2.ResolveKeyMappingResponse(
                 status=global_store_pb2.Status.STATUS_OK,
                 artifact_id=row.get("artifact_id", ""),
                 replica_uuid=row.get("replica_uuid", "") or "",
                 daemon_address=row.get("daemon_address", "") or "",
                 disk_path=row.get("disk_path", "") or "",
+                generation=int(row.get("generation", 0) or 0),
+                cache_ttl_seconds=int(cache_ttl_seconds),
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Error in ResolveKeyMapping")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return global_store_pb2.ResolveKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def SwapKeyMapping(
+        self,
+        request: global_store_pb2.SwapKeyMappingRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.SwapKeyMappingResponse:
+        try:
+            key = request.key.strip()
+            new_artifact_id = request.new_artifact_id.strip()
+            if not key or not new_artifact_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("key and new_artifact_id are required")
+                return global_store_pb2.SwapKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            expected_artifact_id = (
+                request.expected_artifact_id.strip()
+                if request.expected_artifact_id
+                else None
+            )
+            expected_generation = (
+                int(request.expected_generation)
+                if request.HasField("expected_generation")
+                else None
+            )
+            result = self.key_mapping_repository.swap(
+                key=key,
+                new_artifact_id=new_artifact_id,
+                expected_artifact_id=expected_artifact_id,
+                expected_generation=expected_generation,
+            )
+            if not result.get("ok"):
+                return global_store_pb2.SwapKeyMappingResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR,
+                    artifact_id=result.get("artifact_id", "") or "",
+                    generation=int(result.get("generation", 0) or 0),
+                )
+            return global_store_pb2.SwapKeyMappingResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                artifact_id=result.get("artifact_id", "") or "",
+                generation=int(result.get("generation", 0) or 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in SwapKeyMapping")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.SwapKeyMappingResponse(
                 status=global_store_pb2.Status.STATUS_ERROR
             )
 

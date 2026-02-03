@@ -330,6 +330,10 @@ def shutdown() -> None:
         return
     ctx.close()
     _current_ctx = None
+    with contextlib.suppress(Exception):
+        from tensorcast.observability.otel import shutdown_otel
+
+        shutdown_otel()
 
 
 def init_from_client_config(config_path: str | Path | None) -> None:

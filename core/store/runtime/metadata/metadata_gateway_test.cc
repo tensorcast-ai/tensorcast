@@ -441,6 +441,14 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("upsert_key_mapping not used in tests");
   }
 
+  absl::StatusOr<tensorcast::store::components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>) override {
+    return absl::UnimplementedError("swap_key_mapping not used in tests");
+  }
+
   absl::Status revoke_key_mapping(std::string_view) override {
     return absl::UnimplementedError("revoke_key_mapping not used in tests");
   }

@@ -17,6 +17,8 @@ related_code:
 
 Define a single, artifact-first Python SDK surface that is easy to learn, consistent, and free of redundant entry points. The SDK assumes one daemon per process and exposes functional helpers plus a single **retrieval** handle type (`Artifact`). Retrieval flows are handle-driven; legacy eager verbs (`get`, `get_into`, `get_view`, etc.) will be removed after the migration in favor of `artifact(...).tensor_*`. Ingestion remains explicit via `register`/`put` and view registration. For client-owned inplace binding (vLLM-style meta-init and weight swap), the SDK additionally exposes `DeferredLoader` and `InplaceSlot` via `Artifact.deferred_loader(...)`. Region-backed flows stay available but clearly separated as lifecycle utilities.
 
+Update (2026-02-03): the preferred inplace-update surface is now `Binding` (`Artifact.bind` / `bind_into`); `DeferredLoader`/`InplaceSlot` remain available for advanced workflows. See `docs/designs/0063-binding-first-inplace-updates.md`.
+
 # Goals / Non-Goals
 
 Goals

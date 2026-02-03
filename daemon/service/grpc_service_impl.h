@@ -218,6 +218,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::ResolveKeyMappingRequest* req,
       v2::ResolveKeyMappingResponse* resp) override;
+  grpc::Status SwapKeyMapping(
+      grpc::ServerContext* ctx,
+      const v2::SwapKeyMappingRequest* req,
+      v2::SwapKeyMappingResponse* resp) override;
 
   grpc::Status GetArtifactIndexById(
       grpc::ServerContext* ctx,

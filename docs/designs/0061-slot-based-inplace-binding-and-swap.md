@@ -39,6 +39,9 @@ layout** (coalesced storages + offsets + tensor views). The slot can be filled (
 over time while keeping PyTorch tensor storage pointers stable. This enables vLLM-style meta-init and supports **safe
 inplace swap** of model weights on a single GPU allocation without rebuilding the model or reallocating weights.
 
+Update (2026-02-03): `Binding` is now the primary user-facing API for inplace updates; `InplaceSlot` is retained as an
+internal/advanced implementation detail. See `docs/designs/0063-binding-first-inplace-updates.md`.
+
 This design makes inplace swap **cluster-safe**:
 
 - The old published replica becomes immediately **non-exportable** (cannot be used for P2P) before bytes are overwritten.

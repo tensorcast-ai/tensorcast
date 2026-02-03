@@ -23,7 +23,7 @@ from tensorcast.types import VramRegionHandle
 
 def _skip_if_no_cuda() -> None:
     if not torch.cuda.is_available():
-        pytest.skip("CUDA not available - inplace slot tests require CUDA tensors")
+        pytest.skip("CUDA not available - binding tests require CUDA tensors")
 
 
 def _make_index_bytes() -> bytes:
@@ -44,7 +44,7 @@ def _make_index_bytes() -> bytes:
     return json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
 
-class FakeSlotClient:
+class FakeBindingClient:
     def __init__(self, index_bytes: bytes) -> None:
         self._index_bytes = index_bytes
         self.materialize_calls: list[dict[str, Any]] = []
@@ -52,8 +52,10 @@ class FakeSlotClient:
         self.retire_calls: list[dict[str, Any]] = []
         self.register_calls: list[dict[str, Any]] = []
         self.unregister_calls: list[str] = []
-        self.publish_failures = 0
+        self.swap_key_calls: list[dict[str, Any]] = []
+        self.keepalive_calls: list[tuple[str, int, int]] = []
         self._token_counter = 0
+        self._key_state: dict[str, tuple[str, int]] = {}
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -76,11 +78,9 @@ class FakeSlotClient:
                 "region_name": region_name,
             }
         )
-        return VramRegionHandle(region_id="region:slot", ttl_ms=ttl_ms)
+        return VramRegionHandle(region_id="region:binding", ttl_ms=ttl_ms)
 
-    def unregister_vram_region(
-        self, region_id: str, *, force: bool | None = None
-    ) -> bool:
+    def unregister_vram_region(self, region_id: str, *, force: bool | None = None) -> bool:
         self.unregister_calls.append(region_id)
         return True
 
@@ -95,31 +95,59 @@ class FakeSlotClient:
 
     def publish_target_replica(self, **kwargs: Any) -> Any:
         self.publish_calls.append(kwargs)
-        if self.publish_failures > 0:
-            self.publish_failures -= 1
-            raise ArtifactError(
-                "publish failed",
-                status_code="UNAVAILABLE",
-                retryable=True,
-            )
         return types.SimpleNamespace(lease_id="lease-1", replica_id="replica-1")
 
     def retire_published_replica(self, **kwargs: Any) -> Any:
         self.retire_calls.append(kwargs)
         return types.SimpleNamespace(drained=True, removed=True)
 
+    def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:
+        self.keepalive_calls.append((registration_id, ttl_ms, epoch))
+        return True
+
+    def swap_key_mapping(
+        self,
+        *,
+        key: str,
+        new_artifact_id: str,
+        expected_artifact_id: str | None = None,
+        expected_generation: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> Any:
+        self.swap_key_calls.append(
+            {
+                "key": key,
+                "new_artifact_id": new_artifact_id,
+                "expected_artifact_id": expected_artifact_id,
+                "expected_generation": expected_generation,
+                "operation_id": operation_id,
+                "timeout_s": timeout_s,
+            }
+        )
+        current_id, generation = self._key_state.get(key, ("", 0))
+        if expected_artifact_id and expected_artifact_id != current_id:
+            return types.SimpleNamespace(ok=False, artifact_id=current_id, generation=generation)
+        if expected_generation is not None and expected_generation != generation:
+            return types.SimpleNamespace(ok=False, artifact_id=current_id, generation=generation)
+        if current_id == new_artifact_id:
+            return types.SimpleNamespace(ok=True, artifact_id=current_id, generation=generation)
+        generation += 1
+        self._key_state[key] = (new_artifact_id, generation)
+        return types.SimpleNamespace(ok=True, artifact_id=new_artifact_id, generation=generation)
+
 
 class FakeRuntime:
     _DEFAULT_LEASE_TTL_MS = 600_000
 
-    def __init__(self, client: FakeSlotClient) -> None:
+    def __init__(self, client: FakeBindingClient) -> None:
         self._client = client
         self.daemon_endpoint = "fake://daemon"
         self.closed = False
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         self._cache: dict[str, ArtifactCacheEntry] = {}
 
-    def ensure_client(self) -> FakeSlotClient:
+    def ensure_client(self) -> FakeBindingClient:
         return self._client
 
     def track_future(self, future: concurrent.futures.Future[object]) -> None:
@@ -131,7 +159,7 @@ class FakeRuntime:
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._cache[entry.artifact_id] = entry
 
-    def invalidate_artifact(self, *args: object, **kwargs: object) -> None:
+    def invalidate_artifact(self, *_args: object, **_kwargs: object) -> None:
         return None
 
 
@@ -156,142 +184,80 @@ def _cache_index(runtime: FakeRuntime, artifact_id: str, index_bytes: bytes) -> 
     runtime.cache_artifact_index(entry)
 
 
-def test_inplace_slot_swap_preserves_data_ptr(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _setup_store(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeRuntime, FakeBindingClient]:
     _skip_if_no_cuda()
     index_bytes = _make_index_bytes()
-    client = FakeSlotClient(index_bytes)
+    client = FakeBindingClient(index_bytes)
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     _cache_index(runtime, "artifact-1", index_bytes)
     _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
+    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
         lambda *args, **kwargs: (b"fake-handle", 0),
     )
-    monkeypatch.setattr(
-        store_mod,
-        "get_cuda_memory_handle_with_offset",
-        lambda *args, **kwargs: (b"fake-handle", 0),
-    )
-    monkeypatch.setattr(
-        store_mod,
-        "get_cuda_memory_handle_with_offset",
-        lambda *args, **kwargs: (b"fake-handle", 0),
-    )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
+    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    return store, runtime, client
 
+
+def test_binding_swap_preserves_data_ptr(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")
 
-    with artifact1.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        tensor_alpha = loader.tensor("alpha")
-        tensor_beta = loader.tensor("beta")
-        ptrs = {"alpha": tensor_alpha.data_ptr(), "beta": tensor_beta.data_ptr()}
-        slot = loader.commit()
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    ptrs = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
 
-    slot.swap(artifact2, publish=False)
+    binding.swap(artifact2)
 
-    assert slot.tensors["alpha"].data_ptr() == ptrs["alpha"]
-    assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
+    assert binding.tensors["alpha"].data_ptr() == ptrs["alpha"]
+    assert binding.tensors["beta"].data_ptr() == ptrs["beta"]
 
 
-def test_inplace_slot_swap_reuses_slot_view_spec(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _skip_if_no_cuda()
-    index_bytes = _make_index_bytes()
-    client = FakeSlotClient(index_bytes)
-    runtime = FakeRuntime(client)
-    store = Store("fake://daemon", runtime=runtime)
-    _cache_index(runtime, "mi2:artifact-1", index_bytes)
-    _cache_index(runtime, "mi2:artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
-
-    artifact1 = store.artifact(artifact_id="mi2:artifact-1")
-    artifact2 = store.artifact(artifact_id="mi2:artifact-2")
+def test_binding_view_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
 
     slices = {"alpha": (slice(0, 2),)}
-    artifact_view = artifact1.view(slices=slices)
+    view = artifact1.view(slices=slices)
+    binding = view.bind(device="cuda:0", packing="byte_space")
+    selection_before = binding.selection
 
-    with artifact_view.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        ptrs = {}
-        for name in ("alpha", "beta"):
-            tensor = loader.tensor(name)
-            ptrs[name] = tensor.data_ptr()
-        slot = loader.commit()
+    binding.swap(artifact2)
 
-    slot.swap(artifact2, publish=False)
-
-    assert slot.artifact_id == "mi2:artifact-2"
-    assert slot.tensors["alpha"].data_ptr() == ptrs["alpha"]
-    assert slot.tensors["beta"].data_ptr() == ptrs["beta"]
+    selection_after = binding.selection
+    assert selection_before.view_id == selection_after.view_id
+    assert selection_before.selection_hash == selection_after.selection_hash
 
 
-def test_publish_failure_keeps_slot_clean_and_retry(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _skip_if_no_cuda()
-    index_bytes = _make_index_bytes()
-    client = FakeSlotClient(index_bytes)
-    client.publish_failures = 1
-    runtime = FakeRuntime(client)
-    store = Store("fake://daemon", runtime=runtime)
-    _cache_index(runtime, "artifact-1", index_bytes)
-    _cache_index(runtime, "artifact-2", index_bytes)
-    monkeypatch.setattr(
-        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
-    )
-    monkeypatch.setattr(
-        deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
-    )
+def test_binding_publishability_gating(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _runtime, _client = _setup_store(monkeypatch)
+    artifact = store.artifact(artifact_id="artifact-1")
+    with pytest.raises(ArtifactError) as excinfo:
+        _ = artifact.bind(device="cuda:0", packing="append", publish=True)
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"
 
+
+def test_binding_activation_cas(monkeypatch: pytest.MonkeyPatch) -> None:
+    store, _runtime, client = _setup_store(monkeypatch)
     artifact1 = store.artifact(artifact_id="artifact-1")
     artifact2 = store.artifact(artifact_id="artifact-2")
 
-    with artifact1.deferred_loader(device="cuda:0", packing="byte_space") as loader:
-        _ = loader.tensor("alpha")
-        _ = loader.tensor("beta")
-        slot = loader.commit()
+    binding = artifact1.bind(device="cuda:0", packing="byte_space")
+    binding.swap(
+        artifact2,
+        activate_key="model:latest",
+        expected_active_artifact_id="",
+    )
+    assert client.swap_key_calls
 
-    with pytest.raises(ArtifactError):
-        slot.swap(artifact2, publish=True)
-
-    assert slot.dirty is False
-    assert slot.published_lease_id is None
-
-    slot.publish_replica()
-    assert slot.published_lease_id == "lease-1"
-    assert len(client.publish_calls) == 2
-
-
-def test_artifact_ref_parsing() -> None:
-    index_bytes = _make_index_bytes()
-    client = FakeSlotClient(index_bytes)
-    runtime = FakeRuntime(client)
-    store = Store("fake://daemon", runtime=runtime)
-
-    artifact = store.artifact(ref="llama")
-    assert artifact.key == "llama"
-
-    artifact_id = store.artifact(ref="mi2:abc123").artifact_id
-    assert artifact_id == "mi2:abc123"
-
-    with pytest.raises(ValueError):
-        store.artifact(ref="disk:")
-    with pytest.raises(ValueError):
-        store.artifact(ref="llama", key="other")
-    with pytest.raises(ValueError):
-        store.artifact(ref="")
+    with pytest.raises(ArtifactError) as excinfo:
+        binding.swap(
+            artifact1,
+            activate_key="model:latest",
+            expected_active_artifact_id="artifact-1",
+        )
+    assert excinfo.value.status_code == "FAILED_PRECONDITION"

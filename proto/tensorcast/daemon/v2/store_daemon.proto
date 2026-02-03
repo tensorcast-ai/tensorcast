@@ -74,6 +74,8 @@ service StoreDaemonService {
   rpc PublishReplicaKey(PublishReplicaKeyRequest) returns (PublishReplicaKeyResponse) {}
   // Resolve a human-friendly key to an artifact id and optional disk hint.
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  // Swap a key mapping to a new artifact id with optional CAS guardrails.
+  rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Fetch canonical tensor index bytes by artifact_id.
   rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
   // Seal an assembly (cgid) into a stable mi2 identity.
@@ -1119,6 +1121,21 @@ message ResolveKeyMappingRequest {
 message ResolveKeyMappingResponse {
   string artifact_id = 1;
   string used_disk_path = 2;
+  uint64 generation = 3;
+  uint32 cache_ttl_seconds = 4;
+}
+
+message SwapKeyMappingRequest {
+  string key = 1;
+  string new_artifact_id = 2;
+  string expected_artifact_id = 3;
+  optional uint64 expected_generation = 4;
+  string operation_id = 5;
+}
+message SwapKeyMappingResponse {
+  bool ok = 1;
+  string artifact_id = 2;
+  uint64 generation = 3;
 }
 
 message GetArtifactIndexByIdRequest {

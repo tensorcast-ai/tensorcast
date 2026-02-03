@@ -2081,6 +2081,8 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
       .daemon_address = response.daemon_address(),
       .disk_path = response.disk_path(),
   };
+  out.generation = response.generation();
+  out.cache_ttl_seconds = response.cache_ttl_seconds();
   return out;
 }
 
@@ -2111,6 +2113,39 @@ absl::Status GlobalStoreClient::upsert_key_mapping(
     return absl::AlreadyExistsError("key mapping conflict or error");
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<KeyMappingSwapResult> GlobalStoreClient::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  global_store::SwapKeyMappingRequest request;
+  request.set_key(std::string(key));
+  request.set_new_artifact_id(std::string(new_artifact_id));
+  if (expected_artifact_id.has_value()) {
+    request.set_expected_artifact_id(std::string(*expected_artifact_id));
+  }
+  if (expected_generation.has_value()) {
+    request.set_expected_generation(*expected_generation);
+  }
+
+  global_store::SwapKeyMappingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->SwapKeyMapping(ctx, req, resp); },
+      "SwapKeyMapping");
+  if (!status.ok()) {
+    return status;
+  }
+
+  KeyMappingSwapResult result{
+      .ok = response.status() == global_store::STATUS_OK,
+      .artifact_id = response.artifact_id(),
+      .generation = response.generation(),
+  };
+  return result;
 }
 
 absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {

@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """OpenTelemetry initialization for TensorCast (Python Global Store and clients).
 
@@ -14,6 +14,8 @@ Environment knobs (standard OTel):
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import logging
 import os
 import threading
@@ -59,6 +61,9 @@ _OTEL_INITIALIZED = False
 _GRPC_INSTRUMENTED = False
 _GRPC_AIO_INSTRUMENTED = False
 _METRICS_INITIALIZED = False
+_ATEXIT_REGISTERED = False
+_TRACE_PROVIDER: TracerProvider | None = None
+_METER_PROVIDER: MeterProvider | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +104,7 @@ def _instrument_grpc() -> None:
 def _setup_metrics_provider(resource: Resource) -> None:
     """Install a MeterProvider that exports metrics via OTLP."""
 
-    global _METRICS_INITIALIZED
+    global _METRICS_INITIALIZED, _METER_PROVIDER
     if _METRICS_INITIALIZED:
         return
     try:
@@ -107,6 +112,7 @@ def _setup_metrics_provider(resource: Resource) -> None:
         reader = PeriodicExportingMetricReader(metric_exporter)
         provider = MeterProvider(resource=resource, metric_readers=[reader])
         set_meter_provider(provider)
+        _METER_PROVIDER = provider
         _METRICS_INITIALIZED = True
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Failed to initialise OpenTelemetry metrics") from exc
@@ -165,7 +171,12 @@ def setup_otel(service_default: str, role: str) -> bool:
     # Sampler built from env via helper (Python SDK doesn't expose a helper)
 
     # Idempotent installation and instrumentation
-    global _OTEL_INITIALIZED, _GRPC_INSTRUMENTED, _GRPC_AIO_INSTRUMENTED
+    global \
+        _OTEL_INITIALIZED, \
+        _GRPC_INSTRUMENTED, \
+        _GRPC_AIO_INSTRUMENTED, \
+        _ATEXIT_REGISTERED, \
+        _TRACE_PROVIDER
     with _INIT_LOCK:
         if not _OTEL_INITIALIZED:
             # Build resource with service name and custom attributes.
@@ -207,8 +218,12 @@ def setup_otel(service_default: str, role: str) -> bool:
                 provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
 
             trace.set_tracer_provider(provider)
+            _TRACE_PROVIDER = provider
             _setup_metrics_provider(resource)
             _OTEL_INITIALIZED = True
+            if not _ATEXIT_REGISTERED:
+                atexit.register(shutdown_otel)
+                _ATEXIT_REGISTERED = True
 
         # Instrument both sync and asyncio gRPC
         _instrument_grpc()
@@ -219,7 +234,7 @@ def setup_otel(service_default: str, role: str) -> bool:
 # New: setup OTel directly from Observability proto (no environment required)
 def setup_otel_from_observability(obs: commonpb.Observability, role: str) -> bool:
     # Idempotent
-    global _OTEL_INITIALIZED
+    global _OTEL_INITIALIZED, _ATEXIT_REGISTERED, _TRACE_PROVIDER
     with _INIT_LOCK:
         if _OTEL_INITIALIZED:
             return True
@@ -281,10 +296,30 @@ def setup_otel_from_observability(obs: commonpb.Observability, role: str) -> boo
         provider.add_span_processor(BatchSpanProcessor(exporter))
 
         trace.set_tracer_provider(provider)
+        _TRACE_PROVIDER = provider
         _setup_metrics_provider(resource)
         _instrument_grpc()
         _OTEL_INITIALIZED = True
+        if not _ATEXIT_REGISTERED:
+            atexit.register(shutdown_otel)
+            _ATEXIT_REGISTERED = True
         return True
+
+
+def shutdown_otel() -> None:
+    """Best-effort shutdown to stop exporter background threads."""
+    global _TRACE_PROVIDER, _METER_PROVIDER
+    with _INIT_LOCK:
+        trace_provider = _TRACE_PROVIDER
+        meter_provider = _METER_PROVIDER
+        _TRACE_PROVIDER = None
+        _METER_PROVIDER = None
+    if trace_provider is not None:
+        with contextlib.suppress(Exception):
+            trace_provider.shutdown()
+    if meter_provider is not None:
+        with contextlib.suppress(Exception):
+            meter_provider.shutdown()
 
 
 def _has_active_sdk_provider() -> bool:

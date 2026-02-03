@@ -97,6 +97,45 @@ TEST_CASE("IpcRegionRegistry TTL refresh and sweep", "[daemon][region]") {
   REQUIRE(expired[0].region_id == region_id);
 }
 
+TEST_CASE("IpcRegionRegistry ttl_ms=0 disables expiry", "[daemon][region]") {
+  IpcRegionRegistry reg(
+      IpcRegionRegistry::Options{
+          .capacity = 16,
+          .max_ttl = absl::Milliseconds(200),
+      });
+
+  IpcRegionRegistry::RegisterParams params;
+  params.device_id = 0;
+  params.owner_pid = 22;
+  params.size_bytes = 4096;
+  params.ttl_ms = 0;
+  params.handle_bytes = "h";
+
+  auto d_or = reg.register_region(params);
+  REQUIRE(d_or.ok());
+  const std::string region_id = d_or->region_id;
+  REQUIRE(d_or->ttl_ms == 0);
+  REQUIRE(d_or->expires_at == absl::InfiniteFuture());
+
+  // Keepalive bumps should not enable expiry when ttl_ms=0.
+  REQUIRE(reg.refresh_ttl(region_id, 150));
+  auto d2_or = reg.describe(region_id);
+  REQUIRE(d2_or.ok());
+  REQUIRE(d2_or->ttl_ms == 0);
+  REQUIRE(d2_or->expires_at == absl::InfiniteFuture());
+
+  // Acquire/release should preserve infinite expiry.
+  auto acq_or = reg.acquire(region_id, params.owner_pid);
+  REQUIRE(acq_or.ok());
+  REQUIRE(acq_or->ttl_ms == 0);
+  REQUIRE(acq_or->expires_at == absl::InfiniteFuture());
+  REQUIRE(reg.release(region_id).ok());
+
+  // Sweeps should never expire the region by time.
+  auto expired = reg.sweep_expired(absl::Now() + absl::Hours(24));
+  REQUIRE(expired.empty());
+}
+
 TEST_CASE("IpcRegionRegistry poison blocks acquire", "[daemon][region]") {
   IpcRegionRegistry reg(IpcRegionRegistry::Options{});
   IpcRegionRegistry::RegisterParams params;

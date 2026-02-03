@@ -19,8 +19,8 @@ namespace tensorcast::daemon {
 
 // IpcRegionRegistry tracks CUDA IPC memory regions that can be reused across
 // Lease-In-Place registrations. Regions are owned by a single process (PID) and
-// have a TTL to allow automatic cleanup when clients crash or forget to
-// unregister.
+// optionally have a TTL for automatic cleanup. When ttl_ms==0, the region does
+// not time-expire and relies on explicit unregister + PID-exit cleanup.
 class IpcRegionRegistry {
  public:
   struct Options {
@@ -66,6 +66,10 @@ class IpcRegionRegistry {
 
   // Remove regions whose expiry is before |now| and return their descriptors.
   std::vector<RegionDescriptor> sweep_expired(absl::Time now);
+
+  // Best-effort cleanup for when the owning process exits. Removes all regions
+  // whose owner_pid matches |owner_pid| and returns their descriptors.
+  std::vector<RegionDescriptor> handle_pid_exit(int owner_pid);
 
   // Retrieve the raw CUDA handle bytes for a region.
   absl::StatusOr<std::string> get_handle_bytes(const std::string& region_id) const;

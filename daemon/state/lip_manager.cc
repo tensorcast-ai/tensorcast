@@ -558,9 +558,13 @@ absl::Status LipManager::keepalive_lease(
     if (it->second.owner_pid != owner_pid)
       return absl::PermissionDeniedError("owner_pid mismatch");
     it->second.epoch = epoch;
-    extend = ttl_ms > 0 ? ttl_ms : (it->second.ttl_ms > 0 ? it->second.ttl_ms : 600000U);
+    extend = ttl_ms;
     it->second.ttl_ms = extend;
-    it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(extend);
+    if (extend == 0) {
+      it->second.expiry = std::chrono::steady_clock::time_point{};
+    } else {
+      it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(extend);
+    }
     storages = it->second.storages;
   }
   if (region_registry_ != nullptr && extend > 0) {
@@ -1142,8 +1146,12 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   lease.id_kind = out.id_kind;
   lease.device_id = device_id;
   lease.owner_pid = owner_pid;
-  lease.ttl_ms = ttl_ms > 0 ? ttl_ms : 600000U; // default 10 minutes
-  lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(lease.ttl_ms);
+  lease.ttl_ms = ttl_ms;
+  if (ttl_ms == 0) {
+    lease.expiry = std::chrono::steady_clock::time_point{};
+  } else {
+    lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  }
   lease.epoch = epoch;
   lease.total_size = total_size;
   lease.index_data = canonical_index_json;
@@ -1371,8 +1379,12 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
   lease.id_kind = common::ArtifactIdKind::kCgid;
   lease.device_id = device_id;
   lease.owner_pid = owner_pid;
-  lease.ttl_ms = ttl_ms > 0 ? ttl_ms : 600000U; // default 10 minutes
-  lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(lease.ttl_ms);
+  lease.ttl_ms = ttl_ms;
+  if (ttl_ms == 0) {
+    lease.expiry = std::chrono::steady_clock::time_point{};
+  } else {
+    lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  }
   lease.epoch = epoch;
   lease.total_size = total_size;
   lease.index_data.clear();

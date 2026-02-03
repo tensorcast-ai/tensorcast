@@ -11,7 +11,10 @@ from collections.abc import Callable, Mapping, Sequence
 
 import torch
 
-from tensorcast._c_ext import get_cuda_memory_handle
+from tensorcast._c_ext import (
+    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
+)
 from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
 from tensorcast.api._materialize import (
     MaterializationPayload,
@@ -46,6 +49,7 @@ from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
 )
+from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.inplace_slot import InplaceSlot
@@ -618,10 +622,22 @@ class Store:
         name: str | None = None,
     ) -> VramRegionHandle:
         client = self._runtime.ensure_client()
-        handle_bytes = get_cuda_memory_handle(int(device_id), int(base_ptr))
+        base_ptr_value = int(base_ptr)
+        size_value = int(size_bytes)
+        base_offset = 0
+        try:
+            handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+                int(device_id), base_ptr_value
+            )
+        except Exception:  # noqa: BLE001
+            handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
+            base_offset = 0
+        if base_offset:
+            base_ptr_value -= int(base_offset)
+            size_value += int(base_offset)
         handle = client.register_vram_region(
             device_id=int(device_id),
-            size_bytes=int(size_bytes),
+            size_bytes=int(size_value),
             ttl_ms=int(ttl_ms),
             cuda_ipc_handle=handle_bytes,
             region_name=name,
@@ -630,8 +646,8 @@ class Store:
             _cache_register_region(
                 region_id=handle.region_id,
                 device_id=int(device_id),
-                base_ptr=int(base_ptr),
-                size_bytes=int(size_bytes),
+                base_ptr=int(base_ptr_value),
+                size_bytes=int(size_value),
                 ttl_ms=int(ttl_ms),
             )
         return handle
@@ -1043,6 +1059,7 @@ __all__ = [
     "ArtifactError",
     "ArtifactFuture",
     "ArtifactStatusCode",
+    "Binding",
     "CanonicalIndex",
     "CanonicalIndexEntry",
     "DeferredCommitResult",

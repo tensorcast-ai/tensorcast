@@ -295,10 +295,16 @@ class StoreRuntimeContext:
                 return cached.artifact_id, cached.disk_path
             if cached is not None:
                 del self._key_cache[key]
-        artifact_id, disk_path = self.ensure_client().resolve_key_mapping(key)
-        resolved_id = artifact_id or None
-        resolved_path = disk_path or None
-        self.cache_key_mapping(key, artifact_id=resolved_id, disk_path=resolved_path)
+        mapping = self.ensure_client().resolve_key_mapping(key)
+        resolved_id = mapping.artifact_id or None
+        resolved_path = mapping.used_disk_path or None
+        ttl_override = float(mapping.cache_ttl_seconds)
+        self.cache_key_mapping(
+            key,
+            artifact_id=resolved_id,
+            disk_path=resolved_path,
+            ttl_override=ttl_override,
+        )
         return resolved_id, resolved_path
 
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:

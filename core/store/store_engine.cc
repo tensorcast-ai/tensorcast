@@ -620,6 +620,14 @@ absl::StatusOr<components::KeyMapping> StoreEngine::resolve_key_mapping(std::str
   return metadata_gateway_->resolve_key_mapping(key);
 }
 
+absl::StatusOr<components::KeyMappingSwapResult> StoreEngine::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  return metadata_gateway_->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
+}
+
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
   return metadata_gateway_->get_canonical_index(artifact_id);
 }
