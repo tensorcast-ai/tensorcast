@@ -1,7 +1,7 @@
 ---
 slug: 0055-programmable-framework
 title: Programmable API Design (Artifact-First) (Design)
-description: Extend the existing Artifact/Store handle API with programmable control-plane primitives (context, operations, plans) while preserving TensorCast’s single data-plane and consistency model.
+description: Extend the existing Artifact/Store handle API with programmable control-plane primitives (context, operations, plans) while preserving TensorCast’s single data-plane and consistency model, and define the missing execution/runtime layers needed for LLM applications (controller execution, app/instance agents, signals, and engine-agnostic KV-cache integration).
 status: implemented
 areas:
   - sdk
@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-02-01
+last_updated: 2026-02-03
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -42,6 +42,7 @@ related_docs:
   - docs/internals/model-loading.md
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0004-unified-runtime-config.md
+  - docs/designs/0017-client-generated-artifact-id.md
   - docs/designs/0011-unified-session-lifecycle-leases.md
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/designs/0039-artifact-first-sdk.md
@@ -54,6 +55,7 @@ links:
   dependencies:
     - ./0001-docs-system-design.md
     - ./0004-unified-runtime-config.md
+    - ./0017-client-generated-artifact-id.md
   schema: ../../schema.sql
 ---
 
@@ -71,6 +73,13 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 - `Plan`: a composable orchestration IR that dispatches actions across daemons and instances via node-local agents/engine adapters (no “shipping arbitrary Python” like Ray).
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
+
+**2026-02-03 update (Phase-6+ extensions)**: the original 0055 implementation delivered the core SDK primitives (context/operation/plan spec, node agent execution, engine adapter capabilities). To support LLM applications that want to **actively manage runtime tensors** (especially KV cache) as part of application logic (e.g., ToT rebalancing/migration), this design is extended to include:
+
+- a **required** cluster-level **Controller execution layer** for `Plan.run()` dispatch across workers/instances,
+- a **TensorCast App Daemon / Instance Agent** that lives with the LLM application/engine and exposes a node-local safety boundary,
+- a concrete, cacheable **`TensorCastSignals`** API for load/health/capacity signals,
+- and an engine-agnostic **HiCache-style KV cache integration contract** (prefix-hash keys → opaque KV blobs), suitable for integrating with inference engines like SGLang without understanding their internal KV layout or radix structures.
 
 ---
 
@@ -124,6 +133,7 @@ Key constraints observed in the current repo that shape this design:
 - [Core Concepts](#core-concepts)
 - [Entry Points](#entry-points)
 - [Public API Surface](#public-api-surface)
+  - [AppContext / App Driver](#appcontext--app-driver)
   - [CallContext](#callcontext)
   - [Operation](#operation)
   - [Artifact Enhancements](#artifact-enhancements)
@@ -133,6 +143,7 @@ Key constraints observed in the current repo that shape this design:
   - [Transforms (Reshard / KV Layout)](#transforms-reshard--kv-layout)
   - [Signals (Control-Loop Inputs)](#signals-control-loop-inputs)
   - [Domain Helpers: weights / kvcache](#domain-helpers-weights--kvcache)
+  - [LLM Integration: SGLang / HiCache KV cache](#llm-integration-sglang--hicache-kv-cache)
 - [Feature Mapping (Legacy → Programmable)](#feature-mapping-legacy--programmable)
 - [Contracts and Invariants](#contracts-and-invariants)
 - [Error, Retry, Deadline, Cancel Semantics](#error-retry-deadline-cancel-semantics)
@@ -226,7 +237,10 @@ We standardize two hashes (see `docs/architecture/api/region-backed.md` for cano
 
 2) **`selection_hash`** (selection identity on top of the base)  
    Identity of “which bytes to produce”: resolved `view_id` (if any) + subset identity (sorted/unique `tensor_names`
-   and/or `view_subset_hash` as raw digest bytes) + placement (when relevant).
+   and/or `view_subset_hash` as raw digest bytes). This MUST exclude any placement/target binding.
+
+**Rule (required):** placement (tier/device) is part of `ReplicaKey` (cache entity identity) and part of the
+action-level idempotency fingerprint, but it MUST NOT be part of `selection_hash`.
 
 **Design rule:** any joinable or retryable action MUST derive its stable fingerprint from `(logical_layout_hash,
 selection_hash)` (or an equivalent legacy tuple that is provably collision-free). It MUST NOT include any physical
@@ -349,18 +363,66 @@ For remote `into(...)` operations, targets cannot be raw `torch.Tensor` across m
 
 Programmability must respect the existing TensorCast process/runtime boundaries:
 
-- **Controller (central, optional)**: slow control loops and plan construction only.
-- **Node Agent (node-local sidecar/service)**: executes daemon-only actions on the target node’s daemon and reconciles
-  state (prefetch/pin/unpin, plan execution).
-- **Engine Adapter (in-process)**: executes actions requiring process context (region-backed `into`, LIP registration,
-  buffer resolution, engine signals).
+- **Global Store (central, required)**: metadata & coordination (worker/instance registry, placement, durability, durable key mapping).
+- **Controller (central, required)**: executes `PlanSpec` (DAG scheduling + dispatch), provides `TensorCastSignals`, and offers a stable control-plane API for application-driven orchestration.
+- **Store Daemon / Worker (node-local, required)**: daemon-owned data plane (`StoreEngine`, replica lifecycles, P2P transfers, placement pins).
+- **App Daemon / Instance Agent (in the application/engine process; required for engine integration)**: node-local boundary for engine-owned actions; registers engine instances; exposes the Node Agent RPC surface; owns engine-specific adapters (targets, transforms, KV-cache hooks).
+- **Engine Adapter (in-process)**: executes process-context actions (target resolution, transforms, region-backed `into`, LIP registration, engine signals, engine-specific KV-cache hooks).
+- **Node Agent (RPC surface, node-local)**: an RPC contract implemented by the App Daemon (LLM engines) or a sidecar (non-engine workloads). The Controller dispatches instance-scoped plan steps to Node Agents.
+
+#### Reference topology (LLM app integration; Phase-6+)
+
+This diagram shows the minimal production topology needed to run application-authored plans from an LLM app (e.g., a ToT scheduler), while preserving TensorCast’s existing data plane.
+
+```mermaid
+flowchart LR
+  subgraph APP["LLM App (ToT)"]
+    SCHED["ToT Scheduler / Rebalancer"]
+    APPCTX["TensorCast App Runtime (client)"]
+    SCHED --> APPCTX
+  end
+
+  subgraph CP["TensorCast Control Plane"]
+    CTL["Controller<br/>(Plan execution + Signals)"]
+    GS["Global Store<br/>(metadata + registry)"]
+    CTL <--> |registry/placement/ops| GS
+  end
+
+  subgraph NODEA["Worker Node A"]
+    DA["Store Daemon A (Worker)"]
+    IA["SGLang Instance A"]
+    AGA["TensorCast Instance Agent A<br/>(NodeAgent + EngineAdapter)"]
+    IA <--> |engine hooks / targets| AGA
+    IA <--> |"HiCache backend (optional)"| DA
+    DA --> |WorkerHeartbeat| GS
+    AGA --> |RegisterInstance / Heartbeat| GS
+  end
+
+  subgraph NODEB["Worker Node B"]
+    DB["Store Daemon B (Worker)"]
+    IB["SGLang Instance B"]
+    AGB["TensorCast Instance Agent B<br/>(NodeAgent + EngineAdapter)"]
+    IB <--> |engine hooks / targets| AGB
+    IB <--> |"HiCache backend (optional)"| DB
+    DB --> |WorkerHeartbeat| GS
+    AGB --> |RegisterInstance / Heartbeat| GS
+  end
+
+  APPCTX --> |Submit Plan / Query Signals| CTL
+  CTL --> |Dispatch worker steps| DA
+  CTL --> |Dispatch worker steps| DB
+  CTL --> |Dispatch instance steps| AGA
+  CTL --> |Dispatch instance steps| AGB
+  DA <--> |RDMA/MTCP P2P data plane| DB
+```
 
 Remote-safety rules:
 
 - Any action requiring PID/IPC/region references MUST run via the Engine Adapter on the target instance.
 - Any daemon-owned action that should be safe under retries and should not couple to a PID MUST run in `NO_LEASE` mode
   (see Prefetch/Pinning).
-- Controllers must not directly call PID/IPC-binding RPCs across nodes; they dispatch `Plan` steps to node agents.
+- Controllers must not directly call PID/IPC-binding RPCs across nodes; they dispatch instance-scoped plan steps to Node Agents, which enforce process-context safety.
+- Application logic (e.g., LLM schedulers) must not assume engine-internal semantic mappings (request → KV blobs) live in TensorCast core. Those mappings are surfaced through engine-specific adapters hosted in the App Daemon / Instance Agent.
 
 ---
 
@@ -375,6 +437,8 @@ Remote-safety rules:
 
 ### New (additive)
 
+- `tensorcast.init_app(...) -> AppContext` (Phase-6+; required for controller-run plans and signals)
+- `tensorcast.app() -> AppContext` (get the active app runtime)
 - `tensorcast.context(...) -> CallContext`
 - `tensorcast.plan(ctx: CallContext) -> Plan`
 - `tensorcast.signals() -> TensorCastSignals`
@@ -385,7 +449,12 @@ Example:
 ```python
 import tensorcast
 
-tensorcast.init(mode="connect", address="127.0.0.1:50051")
+# Connect the LLM app (driver) to the TensorCast control plane (Controller + Global Store).
+tensorcast.init_app(
+    mode="connect",
+    controller_address="127.0.0.1:50052",
+    global_store_address="127.0.0.1:50051",
+)
 
 ctx = tensorcast.context(
     qos="realtime",
@@ -395,7 +464,7 @@ ctx = tensorcast.context(
 
 art = tensorcast.artifact(key="/prod/weights/llama/v7", fallback="p2p")
 
-# Issue (non-blocking):
+# Issue (non-blocking) a daemon-owned warm replica on some worker:
 op = art.prefetch(device="cuda:0", ctx=ctx)  # Operation[PrefetchedReplica]
 
 # Blocking wait:
@@ -405,6 +474,108 @@ replica = op.result(timeout_s=60.0)
 ---
 
 ## Public API Surface
+
+### AppContext / App Driver
+
+To make programmable orchestration usable from **external applications** (not just from within a Store Daemon), TensorCast requires a long-lived application runtime.
+
+`AppContext` is the application-facing runtime that connects an LLM app (or any application) to the TensorCast **control plane** (Controller + Global Store) and optionally hosts an **Instance Agent** (NodeAgent + Engine Adapter) when running inside an engine process.
+
+Why this exists:
+
+- `Plan.run()` must execute through a **cluster-level Controller**, not inside a random daemon process.
+- LLM applications need a stable way to **discover workers/instances**, pull **signals**, and **dispatch** plan steps.
+- Engine integrations (SGLang, vLLM, training runtimes) require a **node-local safety boundary** to resolve targets and interact with PID/IPC resources.
+
+Minimal surface (Phase-6+; names are normative, fields are indicative):
+
+```python
+class AppDriverError(Exception): ...
+
+class AppContext:
+    app_id: str
+    controller_address: str
+    global_store_address: str
+
+    def signals(self) -> "TensorCastSignals": ...
+    def plan(self, ctx: "CallContext") -> "Plan": ...
+    def close(self) -> None: ...
+
+def init_app(
+    *,
+    mode: str,  # "connect" | "agent"
+    controller_address: str,
+    global_store_address: str,
+    app_id: str | None = None,
+    # Agent mode only (when the app process is also an engine instance):
+    instance_id: str | None = None,
+    daemon_id: str | None = None,
+    engine: str | None = None,
+    node_agent_listen_address: str | None = None,
+    engine_adapter: "EngineAdapter | None" = None,
+    labels: Mapping[str, str] | None = None,
+) -> AppContext: ...
+
+def app() -> AppContext: ...
+```
+
+**Modes**
+
+- `mode="connect"`: control-plane client only (typical for schedulers/controllers living outside the engine processes).
+- `mode="agent"`: additionally starts a node-local Instance Agent (implements `NodeAgentService`) and registers/heartbeats an `Instance` into Global Store for controller dispatch.
+
+**Process-global default**
+
+- `tensorcast.init_app(...)` installs a process-global `AppContext`.
+- `tensorcast.plan(ctx)` and `tensorcast.signals()` use the active `AppContext` implicitly.
+
+**Instance Agent registration contract (normative; Phase-6+)**
+
+When running in `mode="agent"`, the App Daemon / Instance Agent:
+
+- MUST register itself into the Global Store instance registry (`RegisterInstance`) with:
+  - stable `instance_id` (config-derived; not a network address),
+  - stable `daemon_id` of the co-located Store Daemon worker (config-derived),
+  - `engine` string (e.g., `"sglang"`),
+  - a routable `node_agent_endpoint` (new; required for Controller dispatch),
+  - optional `signals_endpoint` (engine-owned execution signals; advisory),
+  - optional `labels` and capability flags.
+- MUST send periodic heartbeats (`InstanceHeartbeat`) and MUST be marked unavailable when heartbeats are stale.
+- SHOULD unregister on graceful shutdown (`UnregisterInstance`), but correctness must not depend on clean shutdown.
+
+This makes instance-scoped plan steps routable without the application manually wiring addresses.
+
+#### Terminology: Worker vs Instance vs Instance Agent (Phase-6+)
+
+These concepts intentionally separate **data-plane storage** from **engine execution**:
+
+- **Worker**: a Store Daemon process registered in Global Store (worker registry). A Worker owns TensorCast’s data plane:
+  replica lifecycles, memory tiers, and P2P transfers. Worker identity is stabilized by `daemon_id` (HA-safe) and it
+  reports storage-centric signals (e.g., `mem_pool_available_size`).
+- **Instance**: an engine process identity registered in Global Store (instance registry). An Instance exists so plans
+  can target **engine-local actions** (transforms, target resolution, KV-cache flush/prefetch, execution signals) that
+  cannot safely be done by a Store Daemon alone.
+- **Instance Agent**: a node-local RPC surface (`NodeAgentService`) that lives with the engine (in-process or sidecar)
+  and enforces the process-context safety boundary. It hosts an Engine Adapter (including KV-cache hooks) and is the
+  Controller’s dispatch endpoint for instance-scoped steps.
+
+Relationship and cardinality:
+
+- A Worker and an Instance are often **co-located** on the same machine, but they are not the same process and not the
+  same identity.
+- A single Worker (Store Daemon) may host **multiple Instances** (e.g., multiple SGLang serving processes), and an
+  Instance may be pinned to a specific co-located `daemon_id` for locality.
+- Plans target Workers for **storage actions** (`prefetch`, `pin_device_residency`) and target Instances for
+  **engine actions** (`transform_into`, `kvcache_*`).
+
+#### Lifecycle: where does the Instance Agent run?
+
+- The Instance Agent SHOULD be started together with the inference engine process (e.g., as part of SGLang startup) so
+  instance identity and engine hooks are available for the lifetime of the serving instance.
+- Deployments MAY run the Instance Agent as a sidecar as long as it can safely access the engine process context it
+  needs (shared memory, RPC hooks, model registry). If it cannot, it MUST be in-process.
+- When the engine process is scaled up/down, the Instance Agent follows the same lifecycle and updates the Global Store
+  instance registry via `RegisterInstance`/`InstanceHeartbeat`/`UnregisterInstance`.
 
 ### CallContext
 
@@ -597,7 +768,12 @@ class Artifact:
         Semantics:
         - Daemon-owned residency (VRAM/DRAM is owned by the daemon).
         - Defaults to `NO_LEASE` (does not create PID UseLeases; does not mint IPC handle leases).
-        - GPU-only: CPU prefetch is rejected because it requires PID-bound handle leases.
+        - CPU/DRAM prefetch is allowed under `NO_LEASE` because `prefetch` does not export any CPU memfd / IPC handle
+          to the caller. Any API that returns a handle (`mem_handle`) remains PID/lease-bound and is separate from
+          daemon-owned warm replicas.
+        - `device` may refer to:
+          - GPU VRAM (e.g., `"cuda:0"` or `0`), or
+          - daemon-owned host DRAM (e.g., `"dram"`, `"cpu"`, or `-1`).
         - Uses a deterministic **operation id** (sent as `replica_uuid`) when `ctx.idempotency_key` is provided.
         - Cache identity follows StoreEngine `ReplicaKey` (engine dedup is `ReplicaKey`-based; operation ids are not).
         - Prefetch does not imply pinning. To keep a replica resident, callers must use `pin_device_residency(...)`.
@@ -723,8 +899,7 @@ Naming note: `Plan` here is orchestration IR, distinct from the existing `PlanTy
 
 - Avoids “distributed Python execution” complexity.
 - Supports at-least-once semantics with idempotent action submission (Phase-0 retries are user-driven).
-- Central/controller can build a plan; Phase-0 can execute worker/daemon steps via daemon RPCs, while instance/engine
-  steps require node-local agents / engine adapters.
+- A cluster-level **Controller** can build and execute a plan: worker steps run on Store Daemons, and instance steps run via Node Agents / Engine Adapters.
 
 #### Plan is a serializable IR (normative)
 
@@ -734,11 +909,11 @@ For long-term correctness, `Plan` MUST be serializable and versioned (proto pref
 - retries and at-least-once execution remain safe under partial failures
 - plan steps can be audited and replayed (without “shipping arbitrary Python”)
 
-**Implementation note (2026-01-23)**: The PlanSpec proto
-(`proto/tensorcast/plan/v1/plan.proto`) and `Plan.to_spec()` return a versioned IR.
-Node-local execution via the Node Agent supports worker steps and instance
-steps (`transform_into`, `transform_register`) through the engine adapter
-registry.
+**Implementation note (2026-02-03)**:
+
+- `PlanSpec` proto (`proto/tensorcast/plan/v1/plan.proto`) and `Plan.to_spec()` provide a versioned, deterministic IR.
+- A Node Agent implementation exists for node-local execution and Engine Adapter dispatch.
+- **Phase-6+ requirement**: production plan execution is performed by a **cluster-level Controller** that dispatches steps to Store Daemons and Node Agents. SDK `Plan.run()` becomes a thin client wrapper around controller execution.
 
 #### Node identity: Worker vs Instance
 
@@ -819,10 +994,21 @@ class PlanFailedError(ArtifactError):
 @dataclass(frozen=True, slots=True)
 class PlanStepResult:
     step_id: str
-    target_id: str  # daemon_id (stable)
+    target_id: str  # daemon_id or instance_id (stable)
     action: str
     status: OperationStatus
     value: Any | None = None
+
+@dataclass(frozen=True, slots=True)
+class BatchItemFailure:
+    artifact_id: str
+    status: OperationStatus
+
+@dataclass(frozen=True, slots=True)
+class PrefetchManyResult:
+    succeeded_artifact_ids: tuple[str, ...]
+    missing_artifact_ids: tuple[str, ...]
+    failures: tuple[BatchItemFailure, ...]
 
 @dataclass(frozen=True, slots=True)
 class PlanResult:
@@ -847,6 +1033,14 @@ class WorkerStepBuilder:
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef["PrefetchedReplica"]: ...
 
+    def prefetch_many(
+        self,
+        arts: Sequence["Artifact"],
+        *,
+        device: str | int,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["PrefetchManyResult"]: ...
+
     def pin_device_residency(
         self,
         art: "Artifact",
@@ -864,6 +1058,135 @@ class WorkerStepBuilder:
     ) -> PlanStepRef[None]: ...
 ```
 
+#### Instance steps (engine-owned; via Node Agent)
+
+Instance steps are dispatched by the Controller to the target instance’s Node Agent, which calls the engine adapter.
+
+```python
+class InstanceStepBuilder:
+    def transform_register(
+        self,
+        src: "Artifact",
+        *,
+        spec: TransformSpec,
+        out_key: str,
+        policy: "StorePolicy | None" = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["Artifact"]: ...
+
+    def transform_into(
+        self,
+        src: "Artifact",
+        *,
+        spec: TransformSpec,
+        target: TargetSpec,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef[None]: ...
+
+    def kvcache_key_set(
+        self,
+        *,
+        request_id: str,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["KvKeySet"]: ...
+
+    def kvcache_flush(
+        self,
+        *,
+        request_id: str,
+        key_set: "KvKeySet | None" = None,
+        ttl_ms: int | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["KvFlushResult"]: ...
+
+    def kvcache_prefetch(
+        self,
+        *,
+        key_set: "KvKeySet",
+        request_id: str | None = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["KvPrefetchResult"]: ...
+
+    def kvcache_evict_local(
+        self,
+        *,
+        request_id: str | None = None,
+        key_set: "KvKeySet | None" = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
+    ) -> PlanStepRef["KvBatchResult"]: ...
+```
+
+##### KV cache instance actions (Phase-6+; normative semantics)
+
+`kvcache_*` actions are designed to mirror SGLang+Mooncake/HiCache’s real constraints:
+
+- KV state is **page-fragmented** into tens/hundreds of independent blobs per request.
+- The inference engine is the only source of truth for request→token→page-key mapping.
+- Cross-instance migration requires an explicit “publish barrier” and batch-first IO.
+
+**`kvcache_key_set(request_id)` — read-only mapping / inspection**
+
+- **Purpose**: return the engine-defined key set (`KvKeySet`) describing the request’s current KV coverage on this
+  instance (page keys, including K/V split where applicable), plus sizing hints (`total_bytes_estimate`, `hit_len`).
+- **Side effects**: none. MUST NOT write to the shared backend and MUST NOT mutate engine state.
+- **Use cases**:
+  - admission checks (“is this request worth migrating?” / “how big is the KV?”)
+  - debugging / observability (what keys does the engine believe correspond to this request?)
+- **Limitations**: this does **not** guarantee that the referenced blobs currently exist in the shared backend or that
+  they have sufficient TTL for migration.
+
+**`kvcache_flush(request_id, ttl_ms=..., key_set=None)` — publish barrier + TTL**
+
+`kvcache_flush` is the correctness-critical step for migration/prefix reuse across instances.
+
+It MUST perform all of the following:
+
+1. **Snapshot** the request’s KV state on the source instance and obtain a canonical `KvKeySet` for that snapshot.
+   - If `key_set` is provided, the implementation MUST use it as the intended snapshot.
+   - If `key_set` is not provided, the implementation MUST compute it (equivalent to `kvcache_key_set`, but bound to
+     the flush barrier so the returned set corresponds to what was published).
+2. **Ensure backend visibility** for every blob in the snapshot key set:
+   - perform a batch existence check,
+   - write only missing blobs (page-level) using PutIfAbsent/JoinIfMatch rules,
+   - never overwrite on mismatch (must fail fast with `FAILED_PRECONDITION`).
+3. **Apply retention intent**:
+   - if `ttl_ms` is provided, the implementation MUST ensure the backend retains blobs for at least `ttl_ms` from “now”
+     using a monotonic TTL rule (`expires_at = max(expires_at, now+ttl_ms)`).
+
+Return value:
+
+- `KvFlushResult.key_set` MUST be the exact key set the flush operated on (the recommended input to subsequent
+  `prefetch_many` / `kvcache_prefetch`).
+- `KvFlushResult.put` MUST include per-blob outcomes (success/missing/failure) so the application can make an informed
+  decision on retry vs proceed.
+
+Why flush returns `key_set` (and why “flush first” is often preferable to “key_set first”):
+
+- `kvcache_key_set` is **read-only**; it cannot guarantee backend existence nor set TTL.
+- Between a standalone `kvcache_key_set` and a later flush/prefetch, the request may advance (new pages), causing the
+  key set to change; flush acts as a barrier whose returned key set corresponds to what was (or is intended to be)
+  published.
+- In migration flows, you almost always need to call flush anyway; returning the `key_set` from flush avoids an extra
+  roundtrip and avoids races.
+
+**`kvcache_prefetch(key_set, request_id=None)` — engine warm / rehydrate**
+
+- **Purpose**: pre-warm the target engine instance so the KV described by `key_set` becomes usable for decoding
+  (rehydrate radix nodes/pages, populate engine-local caches, etc.).
+- **Inputs**:
+  - `key_set` is REQUIRED. The target instance may not have any local request object yet, so `request_id` is only a tag.
+- **Backend interaction**: the engine adapter SHOULD use batch reads. It may rely on a prior worker-level
+  `prefetch_many` (bytes already local) or fetch directly on demand.
+- **Return value**: MUST surface per-blob results in `KvPrefetchResult.get` and MUST NOT be a silent no-op.
+
+**`kvcache_evict_local(request_id=None, key_set=None)` — local reclaim**
+
+- **Purpose**: reclaim engine-local memory/state (avoid OOM, shrink per-instance footprint).
+- **Scope**: MUST NOT delete shared backend blobs. This is purely local to the target instance.
+- **Selector**:
+  - `request_id` is used when the request is known locally (typical).
+  - `key_set` allows reclaim by explicit keys when request objects are not available.
+
 #### Execution
 
 `Plan.run()` enforces:
@@ -872,6 +1195,20 @@ class WorkerStepBuilder:
 - deadline propagation
 - action-level idempotency derived from `(ctx.idempotency_key, action_name, (logical_layout_hash, selection_hash), device/tier, target identity)`
 - atomic success reporting: `PlanResult.ok` is `True` only if all steps succeed
+
+##### Controller-run execution (Phase-6+; required)
+
+For LLM applications, `Plan.run()` MUST be executed by the **Controller** (not inside a daemon process, and not by the application directly calling a random set of daemons).
+
+Normative execution shape:
+
+1. The SDK serializes `Plan` to `PlanSpec` and submits it to `ControllerService.ExecutePlan(...)`.
+2. The Controller schedules the DAG and dispatches each runnable step to its target:
+   - **Worker steps** → target Store Daemon (resolved by `daemon_id` via Global Store worker registry).
+   - **Instance steps** → target Node Agent (resolved by `instance_id` via Global Store instance registry), which then calls the Engine Adapter.
+3. The Controller aggregates per-step statuses into `PlanResult` and returns (or streams) results to the caller.
+
+Local-only execution (calling daemons directly from the SDK) may remain for tests and single-node debugging, but it is insufficient for application-driven orchestration that depends on instance-scoped actions and engine adapters.
 
 #### Failure, retry, and partial success (Phase-0)
 
@@ -964,6 +1301,7 @@ class InstanceStepBuilder:
         spec: TransformSpec,
         out_key: str,
         policy: "StorePolicy | None" = None,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef["Artifact"]: ...
 ```
 
@@ -976,7 +1314,8 @@ class InstanceStepBuilder:
         src: "Artifact",
         *,
         spec: TransformSpec,
-        targets: TargetSpec,
+        target: TargetSpec,
+        depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[None]: ...
 ```
 
@@ -1027,6 +1366,12 @@ Semantics:
 - **Authority**: canonical for TensorCast-owned state (worker availability, loaded replicas, store capacity).
 - **Intended use**: correctness-sensitive placement decisions and safe optimization (e.g., “pick a healthy worker with enough free mem”).
 
+Phase-6+ implementation requirements (to support application schedulers, e.g., ToT rebalancing):
+
+- `TensorCastSignals` MUST be callable from `AppContext` and SHOULD be served by the Controller (or a shared Signals service) to centralize caching and staleness enforcement.
+- `WorkerStatus.mem_pool_total_size` and `WorkerStatus.mem_pool_available_size` SHOULD be sourced from Global Store worker heartbeats (i.e., `ListActiveWorkers` / cached registry), avoiding per-call daemon RPCs.
+- For scheduling convenience, implementations SHOULD expose `available_memory_bytes := mem_pool_available_size` (exact alias) to avoid ambiguous “available_memory” naming across systems.
+
 ```python
 from dataclasses import dataclass
 
@@ -1063,8 +1408,13 @@ class TensorCastSignals:
     ) -> SignalSnapshot[list[LoadedReplica]]: ...
 
     def list_instances(
-        self, *, labels=None, ctx: CallContext | None = None
-    ) -> SignalSnapshot[list[Instance]]: ...  # future
+        self,
+        *,
+        include_unavailable: bool = False,
+        required_capability_flags: int = 0,
+        labels: Mapping[str, str] | None = None,
+        ctx: CallContext | None = None,
+    ) -> SignalSnapshot[list[Instance]]: ...
 ```
 
 #### ExecutionSignals (engine-owned via adapter) (Phase-2+; recommended)
@@ -1191,9 +1541,26 @@ hot.tensor_dict_into(target=params_tensors, device="cuda:0", ctx=ctx)
 
 #### kvcache
 
+`kvcache` is intentionally split into two related (but distinct) concerns:
+
+1. **HiCache-style KV blobs (SGLang / Mooncake-like)**: KV state is represented as **opaque blobs** keyed by an
+   engine-defined deterministic key (e.g., chained prefix hash). In TensorCast this maps naturally to **CGID artifacts**
+   (`artifact_id="cgid:kvcache~..."`).
+2. **Structured KV tensors**: KV is represented as a tensor dict (e.g., `k`, `v`, pages) where TensorCast can express
+   views/deltas/transforms. This is useful for workflows that explicitly operate on KV tensors (reshaping, slicing,
+   layout transforms), but it is not required for the HiCache blob integration.
+
 ```python
 # tensorcast/api/domain/kvcache.py (new module)
-def key_to_str(key: "KvCacheKey") -> str: ...
+def blob_cgid_artifact_id(
+    *,
+    namespace: str,
+    engine: str,
+    model_id: str,
+    kv_layout_hash: str,
+    engine_key_enc: str,
+) -> str:
+    """Return the canonical CGID artifact_id for an engine-defined KV blob."""
 
 def delta(
     art: "Artifact",
@@ -1203,7 +1570,7 @@ def delta(
     start: int,
     length: int,
 ) -> "Artifact":
-    """Return a delta view via slices/subset suitable for into()."""
+    """Return a delta view via slices/subset suitable for into() (structured KV tensors only)."""
 ```
 
 Control plane (optional) returns keys/handles, not new objects:
@@ -1213,11 +1580,332 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class KvLookupHit:
-    key: "KvCacheKey" | None
+    artifact_id: str | None  # recommended: "cgid:kvcache~..."
     hit_len: int
     locations: list[Worker]  # sources, optional
     est_fetch_ms_p90: float | None
 ```
+
+### LLM Integration: SGLang / HiCache KV cache
+
+This section extends the programmable framework to support **application-driven runtime KV cache management** in LLM inference engines, with SGLang as the concrete motivating case.
+
+#### Motivation (ToT rebalancing / request migration)
+
+An LLM application may decide to rebalance an in-flight request from Instance A to Instance B. To avoid re-prefill and to minimize tail latency, the app wants to **proactively transfer** (or pre-warm) the request’s KV cache state on the target side before reissuing the request.
+
+This requires two things:
+
+1. A **shared KV-cache backend** so instances can store and retrieve KV blobs across machines (prefix reuse, prefill-decode split, migration pre-warm).
+2. A way for the application to reference the KV cache state of a request in a stable, portable way **without TensorCast understanding the engine’s internal KV layout or radix structures**.
+
+#### Design goals (normative)
+
+- TensorCast MUST remain **engine-agnostic** about KV-cache internal organization (Radix trees, paged allocators, etc.).
+- The integration MUST be expressible as a mapping from **engine-defined keys** → **opaque KV blobs** (bytes), similar to Mooncake’s role in SGLang.
+- The programmable API MUST expose enough semantics for applications to:
+  - map a request (or token prefix) to a set of KV-cache keys,
+  - and orchestrate flush/prefetch/replication across instances/workers using `Plan`.
+
+#### Key model: deterministic, engine-defined cache keys
+
+TensorCast treats KV cache as artifacts, but the **identity** for KV cache is not content-addressed (`mi2:`). Instead, KV cache identity is **engine-defined** and deterministic given:
+
+- model identity (model/version/weights layout),
+- KV layout version (schema / page size),
+- and the engine’s key function (e.g., SGLang’s chained prefix hash).
+
+Recommended key encoding (string form; MUST be collision-safe across models/layouts):
+
+```
+cgid:kvcache~<namespace>~<engine>~<model_id>~<kv_layout_hash>~<engine_key_enc>
+```
+
+Where:
+
+- This leverages the existing **Client‑Generated Artifact ID (CGID)** identity kind (`docs/designs/0017-client-generated-artifact-id.md`) so KV cache blobs can be registered/materialized without content hashing, while still using TensorCast’s existing transport and replica tracking.
+- All segments MUST be encoded using only RFC 3986 unreserved characters (`[-._~A-Za-z0-9]`). If an engine key contains other characters, it MUST be encoded (recommended: hex or base64url without padding) into `<engine_key_enc>`.
+- `<engine_key_enc>` is treated as **opaque** by TensorCast.
+- For SGLang, `<engine_key_enc>` SHOULD be the same chained prefix-hash key used by HiCache backends, including any required TP/PP rank suffixes and “K/V kind” suffixes (e.g., `_k` / `_v`) after applying the encoding rule above.
+
+Note: engines may also use a more human-readable “logical key” (e.g., `kvcache://...`) internally, but TensorCast’s canonical on-wire identity for KV blobs SHOULD be the `cgid:` form above.
+
+#### Blob granularity (SGLang + Mooncake)
+
+SGLang’s HiCache / Mooncake-style KV backend is **page-level and highly fragmented**:
+
+- **Page-level**: KV is stored per page (default `page_size_tokens = 16`, configurable).
+- **Per-page key**: each page has its own deterministic hash key (the “engine key”).
+- **K/V split (typical MHA models)**: for a page key `H`, the backend stores **two blobs**:
+  - `H..._k` for K
+  - `H..._v` for V
+  (Some MLA variants may differ.)
+- **All layers in one blob**: a single blob contains that page’s KV for **all transformer layers** using an
+  engine-defined “page_first” layout for IO efficiency.
+
+Implication (required): a single request commonly corresponds to **dozens to hundreds** of independent blobs (e.g.,
+1024 tokens → 64 pages → ~128 blobs for MHA), so orchestration must be **batch-first**.
+
+#### Shared backend: HiCache KV blobs via CGID artifacts (Phase-6+; required for SGLang)
+
+To make the above key model usable across machines, TensorCast exposes a Mooncake-like backend by representing each KV
+blob as a **CGID artifact** (`artifact_id="cgid:kvcache~..."`). This keeps TensorCast engine-agnostic: it stores and
+moves **opaque bytes**, and relies on the engine’s deterministic key generation for prefix reuse.
+
+Because KV is page-fragmented, **batch operations are required in Phase-6** (not an optimization):
+
+- **Inputs/outputs**: `(cache_key: str) -> (opaque bytes)`; TensorCast does not parse KV layout.
+- **Core operations** (batch-oriented for throughput):
+  - `batch_exists(keys) -> list[bool]`
+  - `batch_get_into(keys, dst_buffers) -> results`
+  - `batch_put_from(keys, src_buffers) -> results`
+- **Topology**: Store Daemons act as the data nodes (own the KV blobs in DRAM/VRAM tiers); the Controller (or a sharded catalog service) tracks key placement, TTL, and routing hints.
+- **Data plane**: KV blobs move via the existing TensorCast P2P stack (RDMA/MTCP) when cross-node replication/fetch is required.
+- **Semantics**: the backend is *semantic-free*; prefix reuse is achieved entirely by the engine’s deterministic key generation (e.g., chained prefix hashes), not by TensorCast interpreting token semantics.
+
+This backend can be exposed to engines as an implementation of their “KV cache storage interface” (e.g., SGLang HiCache L3). From the engine’s perspective, it is just a `key -> blob` store with batching.
+
+#### KV blob artifact schema (required)
+
+Even though TensorCast treats KV payloads as “opaque bytes”, it still needs a stable tensor schema for transport and
+selection identity:
+
+- Each `cgid:kvcache~...` artifact MUST contain exactly one tensor named `blob`.
+- `blob.dtype == uint8` and `blob.shape == [byte_length]` (1D byte vector).
+- `kv_layout_hash` (in the artifact id) MUST fully determine the byte-length and layout expectations for the engine.
+
+#### Immutability and conflict writes (required)
+
+Correctness requires that a `(namespace, engine, model_id, kv_layout_hash, engine_key_enc)` identifies **one immutable
+blob**. CGID is not content-addressed, so TensorCast MUST define explicit conflict rules:
+
+- Writes to `cgid:kvcache~...` MUST be **PutIfAbsent / JoinIfMatch**:
+  - If the blob does not exist, write succeeds and establishes the blob’s invariants.
+  - If the blob exists, re-writing is allowed only as **JoinIfMatch** (no byte changes).
+  - Any mismatch MUST fail fast with `FAILED_PRECONDITION` (never overwrite).
+- “Match” MUST check at least:
+  - `kv_layout_hash` (already embedded in `artifact_id`),
+  - `byte_length` (from the `blob` tensor index),
+  - and a caller-supplied fast payload digest (recommended: `xxhash64` or `sha256` of the `blob` bytes).
+
+Implementation note: the payload digest can be attached as replica metadata (e.g., `MemoryInfo.verification_json`) and
+enforced either by the Store Daemon on join, or by the Global Store on replica registration for `cgid:kvcache~...`.
+
+#### Eviction and TTL (required)
+
+Eviction must distinguish **engine-local memory safety** from **shared backend retention**:
+
+- **Local eviction (required)**: `kvcache_evict_local` frees engine-local KV state to avoid OOM. It MUST NOT delete
+  shared blobs; it only affects the target instance’s internal caches/state.
+- **Backend retention (required)**: shared blobs must not grow without bound. Phase-6 MUST support TTL/LRU style
+  retention in the backend (Store Daemons), with safe semantics for concurrent readers.
+- **TTL conflict rule (required)**: TTL updates MUST be monotonic-increasing (`expires_at = max(expires_at, new_expires_at)`);
+  TTL MUST NOT be shortened via “update TTL”. Forced deletion is a separate explicit action and is best-effort.
+
+#### Why both `on_worker().prefetch(...)` and `on_instance().kvcache_prefetch(...)`?
+
+These two actions warm **different layers** and are independently optional:
+
+- `plan.on_worker(worker).prefetch(...)` / `plan.on_worker(worker).prefetch_many(...)` warms the **TensorCast data
+  plane**: it ensures the KV blob bytes are resident on the target Worker’s Store Daemon (on a chosen device/tier).
+  This is engine-agnostic and uses TensorCast P2P to move bytes.
+- `plan.on_instance(inst).kvcache_prefetch(key_set=..., request_id=...)` warms the **engine execution plane**: it asks
+  the engine to make the KV usable for inference (e.g., rehydrate internal KV structures, populate radix nodes/pages, or
+  warm an engine-local cache). This is engine-specific and implemented by the EngineKvCacheAdapter.
+
+Why do both? In many deployments, doing both reduces tail latency:
+
+1. Prefetching blobs to the target Worker makes subsequent engine fetches local (no cross-node network hop).
+2. Engine prefetch turns blobs into “ready-to-decode” internal state before the request is reassigned.
+
+When you might do only one:
+
+- Only `on_worker().prefetch(...)`: you want to warm the data plane, but you do not (or cannot) touch engine internal
+  state. The engine may still lazily load when decoding starts.
+- Only `on_instance().kvcache_prefetch(key_set=...)`: the engine adapter can itself fetch blobs (and may internally call
+  `Artifact.prefetch` / `get_into`) so explicit worker prefetch is redundant.
+
+Design rule: TensorCast does not require “two prefetches”; it exposes two layers so applications and engine adapters
+can choose the appropriate warm strategy.
+
+#### Engine adapter contract (required)
+
+Because request→token→KV mapping is owned by the inference engine, TensorCast core does not (and must not) implement that mapping. Instead, the **App Daemon / Instance Agent** hosts an engine-specific adapter that can surface request-level mapping at the level of **cache keys**.
+
+Minimal interface (conceptual; implement in engine integration packages such as `tensorcast-sglang`):
+
+```python
+from dataclasses import dataclass
+from typing import Sequence
+
+@dataclass(frozen=True, slots=True)
+class KvBlobRef:
+    engine_key_enc: str
+    artifact_id: str            # recommended: "cgid:kvcache~..."
+    size_bytes_estimate: int | None = None
+
+@dataclass(frozen=True, slots=True)
+class KvBlobFailure:
+    artifact_id: str
+    status_code: str
+    message: str
+    retryable: bool
+
+@dataclass(frozen=True, slots=True)
+class KvBatchResult:
+    total: int
+    succeeded: int
+    missing_artifact_ids: tuple[str, ...] = ()
+    failures: tuple[KvBlobFailure, ...] = ()
+
+@dataclass(frozen=True, slots=True)
+class KvKeySet:
+    request_id: str
+    namespace: str
+    engine: str           # e.g. "sglang"
+    model_id: str
+    kv_layout_hash: str   # layout/schema versioning (not bytes)
+    blobs: tuple[KvBlobRef, ...]  # ordered (prefix order); each blob remains opaque to TensorCast core
+    hit_len: int | None = None      # optional: token length covered by keys
+    total_bytes_estimate: int | None = None
+
+@dataclass(frozen=True, slots=True)
+class KvFlushResult:
+    key_set: KvKeySet
+    put: KvBatchResult
+
+@dataclass(frozen=True, slots=True)
+class KvPrefetchResult:
+    key_set: KvKeySet
+    get: KvBatchResult
+
+class EngineKvCacheAdapter:
+    def kv_key_set(self, request_id: str) -> KvKeySet: ...
+    def kv_flush(
+        self,
+        request_id: str,
+        *,
+        key_set: KvKeySet | None = None,
+        ttl_ms: int | None = None,
+        ctx: CallContext | None = None,
+    ) -> KvFlushResult: ...
+    def kv_prefetch(
+        self,
+        *,
+        key_set: KvKeySet,
+        request_id: str | None = None,
+        ctx: CallContext | None = None,
+    ) -> KvPrefetchResult: ...
+    def kv_evict_local(
+        self,
+        *,
+        request_id: str | None = None,
+        key_set: KvKeySet | None = None,
+        ctx: CallContext | None = None,
+    ) -> KvBatchResult: ...
+```
+
+Notes:
+
+- `KvKeySet` is the only semantic contract TensorCast needs for orchestration; the KV blob bytes remain opaque.
+- Engines may compute keys from token ids (deterministic) and/or export them from internal cache structures; both are valid.
+- `kv_key_set(...)` SHOULD be fast and side-effect-free; it is intended for app-level scheduling decisions (e.g., “do we have enough memory to pre-warm this request?”).
+- `kv_flush(...)` MUST be batch-first: it SHOULD perform a batch existence check and only write missing blobs, using the
+  PutIfAbsent/JoinIfMatch conflict rules above. It MUST return per-blob success/failure in `KvFlushResult.put`.
+- `kv_prefetch(...)` MUST take an explicit `KvKeySet` for cross-instance prewarm (it must not rely on `request_id`
+  existing locally on the target instance). It MUST surface per-blob outcomes in `KvPrefetchResult.get` and MUST NOT be
+  a silent no-op.
+- `kv_evict_local(...)` is engine-local only: it MUST reclaim local memory/state without deleting shared blobs.
+
+#### Plan integration: “flush + prefetch” for migration (Phase-6+)
+
+To support ToT-style rebalance, the Plan surface needs a way to:
+
+1. ensure the source instance has flushed the request KV blobs into the shared backend, and
+2. (optionally) prefetch the KV blobs on the target side before reissuing the request.
+
+This is expressed as **instance-scoped steps**, because both flush and prefetch touch engine-owned state:
+
+- `InstanceStepBuilder.kvcache_key_set(request_id=...)` (optional; returns `KvKeySet` for sizing/inspection)
+- `InstanceStepBuilder.kvcache_flush(request_id=...)` (source instance)
+- `InstanceStepBuilder.kvcache_prefetch(key_set=..., request_id=...)` (target instance; optional engine warm)
+- `InstanceStepBuilder.kvcache_evict_local(...)` (any instance; reclaim engine-local memory)
+
+These steps are executed by the target instance’s Node Agent, which calls the engine adapter.
+
+Example (rebalance pre-warm; pseudo code):
+
+```python
+import tensorcast as tc
+
+tc.init_app(
+    mode="connect",
+    controller_address="127.0.0.1:50052",
+    global_store_address="127.0.0.1:50051",
+)
+
+ctx = tc.context(request_id="kv-transfer-001", qos="realtime", deadline_ms=50)
+signals = tc.signals()
+
+src_inst = ...  # Instance(id="inst-A", ...)
+dst_inst = ...  # Instance(id="inst-B", ...)
+dst_worker = ...  # Worker hosting dst_inst
+
+# 1) Flush on source (writes missing page blobs; returns the key set).
+flush = tc.plan(ctx)
+flush_ref = flush.on_instance(src_inst).kvcache_flush(request_id="rid-123", ttl_ms=60_000)
+flush_res = flush.run(concurrency=16, raise_on_error=True)
+flush_out = flush_res.step(flush_ref).value  # KvFlushResult
+key_set = flush_out.key_set
+
+# 2) Warm the target worker/instance using the flushed key set.
+warm = tc.plan(ctx)
+arts = [tc.artifact(artifact_id=b.artifact_id, fallback="p2p") for b in key_set.blobs]
+warm.on_worker(dst_worker).prefetch_many(arts, device="dram")
+warm.on_instance(dst_inst).kvcache_prefetch(key_set=key_set, request_id="rid-123")  # optional engine warm
+warm.run(concurrency=16, raise_on_error=True)
+```
+
+This is intentionally similar to the minimal pseudo code used in ToT schedulers: the application controls when KV is flushed/prefetched, but TensorCast does not need to understand the engine’s KV layout.
+
+Example (rebalance with sizing + daemon warm; pseudo code):
+
+```python
+import tensorcast as tc
+
+ctx = tc.context(request_id="kv-inspect-001", qos="realtime", deadline_ms=50)
+signals = tc.signals()
+
+src_inst = ...  # Instance(id="inst-A", ...)
+dst_inst = ...  # Instance(id="inst-B", ...)
+dst_worker = ...  # Worker hosting dst_inst
+
+# 1) Ask the source instance to return the KV key set (and size estimate).
+inspect = tc.plan(ctx)
+key_ref = inspect.on_instance(src_inst).kvcache_key_set(request_id="rid-123")
+inspect_res = inspect.run()
+key_set = inspect_res.step(key_ref).value  # KvKeySet
+
+# 2) Use TensorCastSignals for a simple admission check (worker memory).
+st = signals.get_worker_status(dst_worker).value
+free_bytes = st.mem_pool_available_size or 0
+need_bytes = key_set.total_bytes_estimate or sum(
+    b.size_bytes_estimate or 0 for b in key_set.blobs
+)
+if free_bytes < need_bytes:
+    raise RuntimeError("Not enough free memory to pre-warm KV")
+
+# 3) Warm the target Store Daemon by prefetching the CGID KV artifacts.
+#    This moves bytes via the TensorCast data plane, without engine-specific KV semantics.
+#    If the engine adapter already performs blob fetches inside `kvcache_prefetch`, this step can be skipped.
+warm = tc.plan(ctx)
+arts = [tc.artifact(artifact_id=b.artifact_id, fallback="p2p") for b in key_set.blobs]
+warm.on_worker(dst_worker).prefetch_many(arts, device="dram")
+warm.on_instance(dst_inst).kvcache_prefetch(key_set=key_set, request_id="rid-123")  # optional engine warm
+warm.run(concurrency=16, raise_on_error=True)
+```
+
+Note: this uses two plans because plan specs are static IR; step outputs are currently returned to the caller, not fed as inputs to later steps in the same plan.
 
 ---
 
@@ -1331,6 +2019,71 @@ If no idempotency key is provided:
 
 This design assumes proto can evolve. The following are required to make the user-facing contracts real (`NO_LEASE`,
 operation-scoped wait/cancel, placement pins, and stable daemon identity).
+
+### ControllerService (Phase-6+; required)
+
+To execute application-authored plans (`Plan.run()`) in a cluster (and to serve `TensorCastSignals`), TensorCast requires a cluster-level Controller gRPC surface.
+
+Normative requirements:
+
+- The Controller MUST accept a versioned `PlanSpec` and execute it using the worker/instance registries in Global Store.
+- The Controller MUST dispatch:
+  - worker steps to Store Daemons (by `daemon_id`),
+  - instance steps to Node Agents (by `instance_id`).
+- The Controller SHOULD expose a signals API (or delegate to a dedicated Signals service) so applications do not need to query Global Store/daemons directly.
+- Execution MUST follow the `CallContext` deadline/idempotency rules in this document.
+
+Execution semantics (Phase-6+; required):
+
+- **DAG scheduling**: the Controller owns dependency resolution and bounded concurrency, dispatching only runnable steps.
+- **At-least-once step dispatch**: a step may be dispatched more than once across retries/timeouts. Step implementations MUST be safe under retries via action-level idempotency.
+- **Idempotency scope**:
+  - per-step idempotency is derived from `(ctx.idempotency_key, action_name, canonical_inputs, target_identity)` as defined earlier,
+  - plan-level idempotency SHOULD be derived from `(plan_id, ctx.idempotency_key)` so a client retry of `ExecutePlan` returns the same `PlanResult` (or an equivalent completed snapshot) when possible.
+- **Result shape**: the Controller MUST return per-step `OperationStatus` and SHOULD return typed step outputs (`Any`) for actions that produce values (e.g., `transform_register` returns an `Artifact`, `kvcache_key_set` returns `KvKeySet`).
+- **Cancellation**: Phase-6 MAY omit an explicit cancel RPC. If omitted, the controller still performs best-effort in-process cancellation when a deadline expires or the client disconnects. Phase-7+ SHOULD add `CancelPlan(plan_id, request_id)` or adopt a `Operation[PlanResult]` record in `tensorcast.operation.v1`.
+
+Suggested proto shape (illustrative; exact naming is not normative):
+
+- `proto/tensorcast/controller/v1/controller.proto`
+  - `rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse)`
+  - `rpc GetSignalsSnapshot(GetSignalsSnapshotRequest) returns (GetSignalsSnapshotResponse)` (or split into ListWorkers/GetWorkerStatus/etc.)
+
+Illustrative request/response (shape only):
+
+```proto
+syntax = "proto3";
+
+package tensorcast.controller.v1;
+
+import "tensorcast/plan/v1/plan.proto";
+import "tensorcast/node_agent/v1/node_agent.proto";
+import "google/protobuf/any.proto";
+
+service ControllerService {
+  rpc ExecutePlan(ExecutePlanRequest) returns (ExecutePlanResponse) {}
+}
+
+message ExecutePlanRequest {
+  tensorcast.plan.v1.PlanSpec plan = 1;
+  uint32 max_concurrency = 2;
+  bool dry_run = 3;
+}
+
+message StepResult {
+  string step_id = 1;
+  string target_id = 2;         // daemon_id or instance_id
+  string action = 3;
+  tensorcast.node_agent.v1.OperationStatus status = 4;
+  google.protobuf.Any value = 5; // optional typed output
+}
+
+message ExecutePlanResponse {
+  string request_id = 1;
+  bool ok = 2;
+  repeated StepResult steps = 3;
+}
+```
 
 ### StoreDaemonService (additive)
 
@@ -1446,6 +2199,28 @@ Node-local execution is provided by:
 - `tensorcast/node_agent/executor.py` + `tensorcast/node_agent/server.py`
 - `tensorcast/engine_adapter` (transform registry + target capability enforcement)
 
+Phase-6+ extensions (required for LLM integrations):
+
+- The Node Agent surface MUST support **instance-scoped engine actions** (e.g., KV-cache flush/prefetch) without requiring the Controller to “ship code”.
+- The Node Agent surface SHOULD evolve from “execute whole plan” to “execute step / execute plan fragment” so the Controller can own DAG scheduling globally and agents remain strictly node-local executors.
+- The Node Agent surface SHOULD support **read-only introspection actions** that return typed values for application scheduling (e.g., `kvcache_key_set` returning `KvKeySet` with `total_bytes_estimate`), either via:
+  - extending `StepResult` with an optional `Any value`, or
+  - adding a dedicated RPC (e.g., `GetKvCacheKeySet`) with the same `CallContext` and staleness/deadline rules.
+
+Illustrative `node_agent.proto` extension (shape only):
+
+```proto
+import "google/protobuf/any.proto";
+
+message StepResult {
+  string step_id = 1;
+  string target_id = 2;
+  string action = 3;
+  OperationStatus status = 4;
+  google.protobuf.Any value = 5; // optional typed output
+}
+```
+
 ### PlanSpec (Phase-4; implemented)
 
 `PlanSpec` is defined in `proto/tensorcast/plan/v1/plan.proto` and embeds
@@ -1459,6 +2234,73 @@ Node-local execution is provided by:
 - Engine adapters MUST expose a target-minting surface that returns a `TargetSpec` with a capability token
   (instance-scoped, time-bounded). Controllers must not mint targets directly.
 
+Phase-6+ extensions (LLM KV cache):
+
+- Worker-scoped actions SHOULD include **batch prefetch** to avoid step-per-blob overhead for page-fragmented KV:
+  - `prefetch_many` (materialize many selections on a worker/device; returns a batched result)
+- `PlanAction` SHOULD be extended with instance-scoped KV-cache actions:
+  - `kvcache_key_set` (source instance; return `KvKeySet` for scheduling/inspection)
+  - `kvcache_flush` (source instance; ensure missing KV blobs are written; returns `KvFlushResult`)
+  - `kvcache_prefetch` (target instance; optional engine warm using an explicit `KvKeySet`)
+  - `kvcache_evict_local` (any instance; reclaim engine-local memory)
+- These KV actions MUST be executed by the instance’s Node Agent and implemented via engine adapters (TensorCast remains KV-layout agnostic).
+
+Illustrative `plan.proto` additions (shape only; field numbers are indicative):
+
+```proto
+message PrefetchManyAction {
+  repeated tensorcast.common.v1.ArtifactSelection selections = 1;
+  int32 device_id = 2; // -1 means daemon-owned DRAM (CPU)
+}
+
+message KvKeySet {
+  repeated string artifact_ids = 1;         // recommended: "cgid:kvcache~..."
+  optional uint64 total_bytes_estimate = 2;
+  optional uint32 hit_len = 3;
+}
+
+message KvCacheKeySetAction {
+  string request_id = 1;
+}
+
+message KvCacheFlushAction {
+  oneof selector {
+    string request_id = 1;
+    KvKeySet key_set = 2;
+  }
+  optional uint64 ttl_ms = 3;
+}
+
+message KvCachePrefetchAction {
+  KvKeySet key_set = 1;
+  optional string request_id = 2; // tag only; target may not have a local request object yet
+}
+
+message KvCacheEvictLocalAction {
+  oneof selector {
+    string request_id = 1;
+    KvKeySet key_set = 2;
+  }
+}
+
+message PlanAction {
+  oneof kind {
+    // existing:
+    PrefetchAction prefetch = 1;
+    PinDeviceResidencyAction pin_device_residency = 2;
+    UnpinDeviceResidencyAction unpin_device_residency = 3;
+    TransformIntoAction transform_into = 4;
+    TransformRegisterAction transform_register = 5;
+    // new:
+    PrefetchManyAction prefetch_many = 6;
+    KvCacheKeySetAction kvcache_key_set = 10;
+    KvCacheFlushAction kvcache_flush = 11;
+    KvCachePrefetchAction kvcache_prefetch = 12;
+    KvCacheEvictLocalAction kvcache_evict_local = 13;
+  }
+}
+```
+
 ### GlobalStoreService (recommended)
 
 - Worker registration/heartbeat requires stable `daemon_id` (derived from daemon config, not from address);
@@ -1467,6 +2309,37 @@ Node-local execution is provided by:
   across HA re-registrations.
 - Instance registry exposes `RegisterInstance`, `InstanceHeartbeat`, and `ListActiveInstances` for stable
   `instance_id` discovery.
+- Instance registry MUST expose a routable `node_agent_endpoint` (new field) so the Controller can dispatch instance steps without out-of-band configuration.
+
+Illustrative `global_store.proto` additions (shape only; field numbers are indicative):
+
+```proto
+message RegisterInstanceRequest {
+  string instance_id = 1;
+  string daemon_id = 2;
+  string engine = 3;
+  optional string worker_id = 4;
+  string signals_endpoint = 5;     // execution signals endpoint (advisory)
+  map<string, string> labels = 6;
+  uint64 capability_flags = 7;
+  string node_agent_endpoint = 8;  // required for controller dispatch
+}
+
+message ListActiveInstancesResponse {
+  message InstanceInfo {
+    string instance_id = 1;
+    string daemon_id = 2;
+    string worker_id = 3;
+    string engine = 4;
+    string signals_endpoint = 5;
+    google.protobuf.Timestamp last_heartbeat_ts = 6;
+    map<string, string> labels = 7;
+    ConnectionStatus status = 8;
+    uint64 capability_flags = 9;
+    string node_agent_endpoint = 10;
+  }
+}
+```
 - Capability directory (low-frequency): worker/instance discovery includes a bounded capability bitset (routing hints
   only, not correctness) in `proto/tensorcast/global_store/v1/global_store.proto`, for example:
   - workers: `WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED`, `WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED`,
@@ -1493,6 +2366,11 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
   constraint (stable identity; address/port remain unique but are not identity).
 - Plumb `daemon_id` through `RegisterWorker`, heartbeat, and `ListActiveWorkers`, so controllers/node agents can
   reconcile worker restarts and address changes without guessing.
+
+Instance-scoped orchestration requires Global Store to persist routable instance endpoints:
+
+- Add `node_agent_endpoint` to the Global Store instance registry (`schema.sql`: `instances` table), **NOT NULL** for instances that advertise `INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED`.
+- Treat `signals_endpoint` as an engine-owned execution signals endpoint (advisory). If needed, introduce a new column name (e.g., `execution_signals_endpoint`) and keep `signals_endpoint` as a backwards-compatible alias at the API boundary.
 
 ---
 
@@ -1543,8 +2421,9 @@ from tensorcast import kvcache
 
 ctx = tensorcast.context(request_id="req-123", qos="realtime", deadline_ms=50)
 
-kv_key = kvcache.key_to_str(hit_key)
-src = tensorcast.artifact(key=kv_key, fallback="p2p")
+# `kvcache.delta(...)` operates on *structured KV tensors* (not HiCache blobs).
+# The KV artifact identity is engine/workflow-specific; assume a hit returns a stable artifact key.
+src = tensorcast.artifact(key=hit_kv_artifact_key, fallback="p2p")
 
 delta = kvcache.delta(
     src,
@@ -1632,6 +2511,17 @@ Suggested code locations:
 - Signals:
   - `tensorcast/api/signals/tensorcast.py`
   - `tensorcast/api/signals/execution.py`
+- Controller execution layer (Phase-6+; new):
+  - `proto/tensorcast/controller/v1/controller.proto`
+  - `tensorcast/controller/server.py` (gRPC surface; `ControllerService`)
+  - `tensorcast/controller/executor.py` (DAG scheduler + dispatch to daemons/node agents)
+  - `tensorcast/controller/signals_cache.py` (cached `TensorCastSignals` implementation + staleness enforcement)
+- App runtime / Instance Agent (Phase-6+; new):
+  - `tensorcast/api/app_context.py` (`AppContext`, `init_app`, lifecycle)
+  - `tensorcast/instance_agent/server.py` (implements `NodeAgentService`; wraps an Engine Adapter)
+  - `tensorcast/instance_agent/registration.py` (Global Store `RegisterInstance` + heartbeats)
+- Engine integrations (Phase-6+; new packages recommended):
+  - `tensorcast/integrations/sglang/` (SGLang engine adapter + KV cache hooks; optional HiCache backend)
 - Domain helpers:
   - `tensorcast/__init__.py` (public re-exports: `weights`, `kvcache`)
   - `tensorcast/api/domain/weights.py`
@@ -1647,13 +2537,17 @@ This design’s proposed public interfaces follow repository naming conventions:
 - Python classes use `PascalCase`: `CallContext`, `Operation`, `OperationStatus`, `OperationError`, `TimeoutErrorDetails`,
   `PrefetchedReplica`, `PlacementPin`, `TargetSpec`, `TransformSpec`, `Plan`, `PlanResult`, `PlanStepResult`,
   `PlanStepRef`, `PlanFailedError`, `SignalSnapshot`, `TensorCastSignals`, `ExecutionSignals`, `ExecutionSignalsAdapter`,
-  `InstanceProfile`, `Worker`, `Instance`.
-- Python functions/methods use `snake_case`: `tensorcast.context`, `tensorcast.plan`, `tensorcast.signals`,
-  `tensorcast.execution_signals`, `Artifact.prefetch`, `Artifact.tensor_dict_into`,
+  `InstanceProfile`, `Worker`, `Instance`, `AppContext`, `AppDriverError`, `BatchItemFailure`, `PrefetchManyResult`,
+  `KvBlobRef`, `KvBlobFailure`, `KvBatchResult`, `KvKeySet`, `KvFlushResult`, `KvPrefetchResult`.
+- Python functions/methods use `snake_case`: `tensorcast.init_app`, `tensorcast.app`, `tensorcast.context`,
+  `tensorcast.plan`, `tensorcast.signals`, `tensorcast.execution_signals`, `Artifact.prefetch`, `Artifact.tensor_dict_into`,
   `Artifact.pin_device_residency`, `Operation.status`, `Operation.wait`, `Operation.result`, `Operation.cancel`, `Plan.to_spec`,
   `Plan.run`.
-- Python functions/methods use `snake_case`: `tensorcast.signals`, `tensorcast.execution_signals` (Signals entry points).
-- Domain helper functions use `snake_case`: `weights.key`, `weights.layers`, `kvcache.key_to_str`, `kvcache.delta`.
+- Plan step builders use `snake_case`: `WorkerStepBuilder.prefetch`, `WorkerStepBuilder.pin_device_residency`,
+  `WorkerStepBuilder.prefetch_many`, `WorkerStepBuilder.unpin_device_residency`, `InstanceStepBuilder.transform_register`,
+  `InstanceStepBuilder.transform_into`, `InstanceStepBuilder.kvcache_flush`, `InstanceStepBuilder.kvcache_key_set`,
+  `InstanceStepBuilder.kvcache_prefetch`, `InstanceStepBuilder.kvcache_evict_local`.
+- Domain helper functions use `snake_case`: `weights.key`, `weights.layers`, `kvcache.blob_cgid_artifact_id`, `kvcache.delta`.
 - Protobuf RPC names remain `PascalCase` (`MaterializeReplica`, `QueryReplicaStatus`, `ReleaseReplica`); new fields use
   `snake_case` (`lease_mode`, `replica_uuid`, `lease_token`).
 
