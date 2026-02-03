@@ -32,11 +32,19 @@ absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ct
     config.streaming_buffer_chunks = std::max<size_t>(1, ctx.options->streaming_buffer_chunks);
     config.byte_mapping_config = ctx.options->byte_mapping;
   }
+  if (ctx.source_type == SourceType::kDisk) {
+    config.canonical_index_json = ctx.verification.canonical_index_json;
+    config.source_index_json = ctx.disk.source_index_json;
+  }
   config.view_id = ctx.hints.variant ? ctx.hints.variant->view_id : std::nullopt;
   config.view_plan = ctx.resolved_view_plan;
   config.transform_placement = ctx.hints.variant ? ctx.hints.variant->placement : loading::TransformPlacement::kServer;
   if (ctx.resolved_view_plan.has_value()) {
     config.expected_artifact_size = ctx.resolved_view_plan->view_size_bytes;
+  } else if (
+      ctx.source_type == SourceType::kDisk && ctx.disk.source_index_json.has_value() &&
+      ctx.verification.logical_total_size > 0) {
+    config.expected_artifact_size = ctx.verification.logical_total_size;
   } else if (ctx.source_type == SourceType::kDisk && ctx.disk.source.expected_size.has_value()) {
     config.expected_artifact_size = ctx.disk.source.expected_size;
   }

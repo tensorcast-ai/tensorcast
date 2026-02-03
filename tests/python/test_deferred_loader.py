@@ -5,18 +5,21 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import types
+from pathlib import Path
 from typing import Any, Iterator
 
 import pytest
 import torch
 
 import tensorcast.api.store as store_mod
+from tensorcast._c_ext import build_canonical_index_from_safetensors
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api.store import ArtifactError, Store
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store import deferred_loader as deferred_loader_mod
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.types import VramRegionHandle
+from tests.python.utils.artifact_utils import create_dummy_safetensors
 
 
 def _skip_if_no_cuda() -> None:
@@ -158,6 +161,31 @@ def store_and_client_empty_stride(
         runtime.executor.shutdown(wait=False)
 
 
+@pytest.fixture
+def store_and_client_safetensors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[tuple[Store, FakeDeferredClient]]:
+    _skip_if_no_cuda()
+    storage_root = tmp_path / "models"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    artifact_id = "st_simple"
+    create_dummy_safetensors(storage_root, artifact_id)
+    index_path = storage_root / artifact_id / "tensor_index.json"
+    if index_path.exists():
+        index_path.unlink()
+    index_bytes = build_canonical_index_from_safetensors(str(storage_root / artifact_id))
+    client = FakeDeferredClient(index_bytes)
+    runtime = FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
+    try:
+        yield store, client
+    finally:
+        runtime.executor.shutdown(wait=False)
+
+
 def test_deferred_loader_invalid_slice_raises(
     store_and_client: tuple[Store, FakeDeferredClient],
 ) -> None:
@@ -211,6 +239,31 @@ def test_deferred_loader_byte_space_full_selection_has_empty_selection(
         assert arena is not None
         assert tensor_alpha.data_ptr() == arena.data_ptr() + loader._offsets["alpha"]
         assert tensor_beta.data_ptr() == arena.data_ptr() + loader._offsets["beta"]
+        slot = loader.commit()
+
+    assert len(client.materialize_calls) == 1
+    call = client.materialize_calls[0]
+    assert tuple(call["tensor_names"]) == ()
+    assert call["view_subset_hash"] == b""
+    layout = call["target_layout"]
+    assert (
+        layout.index_kind
+        == store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED
+    )
+    commit_result = slot.commit_result
+    assert commit_result.tensor_names == ()
+    assert commit_result.view_subset_hash == b""
+
+
+def test_deferred_loader_byte_space_safetensors_index(
+    store_and_client_safetensors: tuple[Store, FakeDeferredClient],
+) -> None:
+    store, client = store_and_client_safetensors
+    artifact = store.artifact(artifact_id="artifact-st")
+
+    with artifact.deferred_loader(device="cuda:0", packing="byte_space") as loader:
+        tensor = loader.tensor("t")
+        assert tensor.is_cuda
         slot = loader.commit()
 
     assert len(client.materialize_calls) == 1

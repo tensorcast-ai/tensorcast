@@ -1036,27 +1036,50 @@ absl::StatusOr<std::string> resolve_layout_json(
   if (!v1_resp.view_index_json().empty()) {
     return v1_resp.view_index_json();
   }
-  if (!v2_req.artifact_id().empty()) {
-    return engine.get_canonical_index_by_id(v2_req.artifact_id());
-  }
-  if (!v1_resp.artifact_id().empty()) {
-    return engine.get_canonical_index_by_id(v1_resp.artifact_id());
-  }
+  const std::string& artifact_id = !v2_req.artifact_id().empty() ? v2_req.artifact_id() : v1_resp.artifact_id();
+  std::string disk_path;
   if (!v1_resp.disk_path().empty()) {
-    auto local_or = store::loader::read_from_artifact_dir(v1_resp.disk_path(), /*target_device_id=*/0);
+    disk_path = v1_resp.disk_path();
+  } else if (v2_req.has_disk_fallback() && !v2_req.disk_fallback().disk_path().empty()) {
+    disk_path = v2_req.disk_fallback().disk_path();
+  }
+
+  auto read_from_disk = [&]() -> absl::StatusOr<std::string> {
+    if (disk_path.empty()) {
+      return absl::NotFoundError("disk_path is empty");
+    }
+    auto local_or = store::loader::read_from_artifact_dir(disk_path, /*target_device_id=*/0);
     if (!local_or.ok()) {
       return local_or.status();
     }
     return local_or->canonical_index_json;
-  }
-  if (v2_req.has_disk_fallback() && !v2_req.disk_fallback().disk_path().empty()) {
-    auto local_or = store::loader::read_from_artifact_dir(v2_req.disk_fallback().disk_path(), /*target_device_id=*/0);
-    if (!local_or.ok()) {
-      return local_or.status();
+  };
+
+  if (artifact_id.empty()) {
+    if (!disk_path.empty()) {
+      return read_from_disk();
     }
-    return local_or->canonical_index_json;
+    return absl::NotFoundError("canonical index JSON unavailable for materialization response");
   }
-  return absl::NotFoundError("canonical index JSON unavailable for materialization response");
+
+  // Local disk artifacts often use a path-like artifact_id. Prefer disk index planning in that case,
+  // and fall back to disk if the Global Store lookup fails (e.g., local-only mode).
+  if (!disk_path.empty() && common::infer_artifact_id_kind(artifact_id) == common::ArtifactIdKind::kUnspecified) {
+    return read_from_disk();
+  }
+
+  auto index_or = engine.get_canonical_index_by_id(artifact_id);
+  if (index_or.ok()) {
+    return std::move(index_or).value();
+  }
+  if (!disk_path.empty()) {
+    auto disk_or = read_from_disk();
+    if (disk_or.ok()) {
+      return std::move(disk_or).value();
+    }
+    return disk_or.status();
+  }
+  return index_or.status();
 }
 
 absl::StatusOr<std::string> resolve_layout_json_by_key(
@@ -1261,20 +1284,31 @@ grpc::Status MaterializationController::materialize_replica(
       return to_grpc_status(descriptor_or.status());
     }
     descriptor_meta = *descriptor_or;
-    if (verify_checksums && !descriptor_meta.found) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "artifact_descriptor.json required when verify_checksums=true"};
-    }
     if (verify_checksums) {
       auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
       if (!index_or.ok()) {
         resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
         return to_grpc_status(index_or.status());
       }
-      auto validation_status = validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
-      if (!validation_status.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(validation_status);
+
+      // Safetensors directories commonly omit artifact_descriptor.json. In that case we cannot
+      // verify checksums, so we warn and continue with verification disabled.
+      if (!descriptor_meta.found && index_or->is_safetensors) {
+        LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing for safetensors at "
+                     << normalized_disk_path->string() << "; skipping descriptor validation";
+        verify_checksums = false;
+        span->SetAttribute("tc.store.verify_checksums", verify_checksums);
+      } else {
+        if (!descriptor_meta.found) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return {StatusCode::FAILED_PRECONDITION, "artifact_descriptor.json required when verify_checksums=true"};
+        }
+        auto validation_status =
+            validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
+        if (!validation_status.ok()) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return to_grpc_status(validation_status);
+        }
       }
       disk_index = std::move(*index_or);
     } else if (prefer_disk) {
@@ -1292,11 +1326,17 @@ grpc::Status MaterializationController::materialize_replica(
     metadata.data_multihash = descriptor_meta.data_multihash;
     if (disk_index.has_value()) {
       metadata.canonical_index_json = disk_index->canonical_index_json;
+      if (disk_index->source_index_json.has_value()) {
+        metadata.source_index_json = disk_index->source_index_json;
+      }
       if (!disk_index->index_multihash.empty()) {
         metadata.index_multihash = disk_index->index_multihash;
       }
       if (disk_index->total_size_bytes > 0) {
         metadata.logical_total_size = disk_index->total_size_bytes;
+      }
+      if (disk_index->source_total_size_bytes > 0) {
+        metadata.source_total_size_bytes = disk_index->source_total_size_bytes;
       }
       metadata.is_safetensors = disk_index->is_safetensors;
     }
@@ -1356,19 +1396,51 @@ grpc::Status MaterializationController::materialize_replica(
 
   switch (req.view_identity_case()) {
     case v2::MaterializeReplicaRequest::kView: {
-      if (!has_artifact) {
-        return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id for canonical planning"};
+      if (!has_artifact && !has_disk) {
+        return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id or disk_path for canonical planning"};
       }
       auto spec_or = convert_view_spec(req.view());
       if (!spec_or.ok()) {
         return to_grpc_status(spec_or.status());
       }
       view_spec = std::move(*spec_or);
-      auto index_or = d_.engine.get_canonical_index_by_id(index_source_artifact_id);
+      auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
+        if (!normalized_disk_path.has_value()) {
+          return absl::FailedPreconditionError("disk_path required for disk-backed view planning");
+        }
+        if (disk_index.has_value() && !disk_index->canonical_index_json.empty()) {
+          return disk_index->canonical_index_json;
+        }
+        auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+        if (!idx_status.ok()) {
+          return idx_status;
+        }
+        auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
+        if (!local_or.ok()) {
+          return local_or.status();
+        }
+        return local_or->canonical_index_json;
+      };
+
+      const bool prefer_disk_index = has_disk &&
+          (!d_.global_store_client || !d_.global_store_client->is_connected() ||
+           common::infer_artifact_id_kind(index_source_artifact_id) == common::ArtifactIdKind::kUnspecified);
+
+      absl::StatusOr<std::string> index_or = prefer_disk_index
+          ? read_canonical_from_disk()
+          : d_.engine.get_canonical_index_by_id(index_source_artifact_id);
+      if (!index_or.ok() && has_disk && !prefer_disk_index) {
+        // If the canonical lookup fails (e.g., local-only daemon without Global Store), use the disk index when
+        // present.
+        auto disk_or = read_canonical_from_disk();
+        if (disk_or.ok()) {
+          index_or = std::move(disk_or);
+        }
+      }
       if (!index_or.ok()) {
         return to_grpc_status(index_or.status());
       }
-      canonical_index_json = std::move(*index_or);
+      canonical_index_json = std::move(index_or).value();
       auto plan_or = store::StoreEngine::compute_view_plan(*canonical_index_json, *view_spec);
       if (!plan_or.ok()) {
         return to_grpc_status(plan_or.status());
@@ -2027,6 +2099,23 @@ grpc::Status MaterializationController::materialize_into_target(
         "error", "disk_fallback_empty", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return {StatusCode::INVALID_ARGUMENT, "disk_fallback.disk_path must not be empty"};
   }
+
+  std::optional<std::filesystem::path> normalized_disk_path;
+  if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
+    if (!effective_policy.allow_disk) {
+      record_materialize_into_target(
+          "error", "disk_fallback_disallowed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
+    }
+    auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
+    if (!normalized_or.ok()) {
+      record_disk_path_denied();
+      record_materialize_into_target(
+          "error", "disk_fallback_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(normalized_or.status());
+    }
+    normalized_disk_path = *normalized_or;
+  }
   if (!req.has_target_layout()) {
     record_materialize_into_target(
         "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -2140,7 +2229,33 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  auto canonical_json_or = d_.engine.get_canonical_index_by_id(req.artifact_id());
+  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
+    if (!normalized_disk_path.has_value()) {
+      return absl::FailedPreconditionError("disk_fallback.disk_path required when Global Store is unavailable");
+    }
+    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+    if (!idx_status.ok()) {
+      return idx_status;
+    }
+    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device.ordinal);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  };
+
+  const bool prefer_disk_index = normalized_disk_path.has_value() &&
+      (!d_.global_store_client || !d_.global_store_client->is_connected() ||
+       common::infer_artifact_id_kind(resolved_artifact_id) == common::ArtifactIdKind::kUnspecified);
+  absl::StatusOr<std::string> canonical_json_or =
+      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(resolved_artifact_id);
+  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
+    // Allow local disk materialization even when Global Store is disabled/unreachable.
+    auto disk_or = read_canonical_from_disk();
+    if (disk_or.ok()) {
+      canonical_json_or = std::move(disk_or);
+    }
+  }
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -2278,7 +2393,7 @@ grpc::Status MaterializationController::materialize_into_target(
   }
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
-    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *resolved_view_id);
+    auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
     if (view_meta_or.ok()) {
       view_data_hash = view_meta_or->view_data_hash;
     } else {
@@ -2629,20 +2744,8 @@ grpc::Status MaterializationController::materialize_into_target(
 
   store::loading::MaterializeHints hints;
   hints.artifact_id = resolved_artifact_id;
-  if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
-    if (!effective_policy.allow_disk) {
-      record_materialize_into_target(
-          "error", "disk_fallback_disallowed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
-    }
-    auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
-    if (!normalized_or.ok()) {
-      record_disk_path_denied();
-      record_materialize_into_target(
-          "error", "disk_fallback_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(normalized_or.status());
-    }
-    hints.disk_path = normalized_or->string();
+  if (normalized_disk_path.has_value()) {
+    hints.disk_path = normalized_disk_path->string();
   }
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;

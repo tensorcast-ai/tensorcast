@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -17,6 +17,8 @@ struct IndexInfo {
   std::string index_multihash;
   uint64_t total_size_bytes{0};
   bool is_safetensors{false};
+  std::optional<std::string> source_index_json;
+  uint64_t source_total_size_bytes{0};
 };
 
 absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& artifact_path, int target_device_id);

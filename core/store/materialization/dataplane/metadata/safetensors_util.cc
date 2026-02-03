@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 
@@ -11,12 +11,13 @@
 #include <cerrno>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <map>
 #include <string>
 #include <vector>
 
 #include "absl/status/status.h"
-#include "absl/strings/str_format.h"
+#include "core/store/materialization/dataplane/metadata/canonical_index.h"
 // Use nlohmann/json for header parsing and canonical index serialization
 #include <nlohmann/json.hpp>
 
@@ -96,7 +97,7 @@ std::vector<int64_t> compute_row_major_stride(const std::vector<int64_t>& shape)
 }
 } // namespace
 
-absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
+absl::StatusOr<std::string> BuildSourceIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
   using nlohmann::json;
   if (files.empty()) {
     return absl::InvalidArgumentError("No safetensors files provided");
@@ -121,7 +122,7 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
   for (const auto& p : paths) {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0) {
-      return absl::ErrnoToStatus(errno, absl::StrFormat("Failed to open %s", p.string()));
+      return absl::ErrnoToStatus(errno, std::format("Failed to open {}", p.string()));
     }
     auto header_info = ParseSafetensorsHeader(fd);
     if (!header_info.ok()) {
@@ -200,6 +201,14 @@ absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector
     out[name].push_back(e.storage_offset);
   }
   return out.dump();
+}
+
+absl::StatusOr<std::string> BuildCanonicalIndexFromSafetensors(const std::vector<std::filesystem::path>& files) {
+  auto source_or = BuildSourceIndexFromSafetensors(files);
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+  return build_coalesced_canonical_index_from_source_index_json(*source_or, /*align_bytes=*/8);
 }
 
 } // namespace tensorcast::store::loader

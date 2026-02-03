@@ -694,6 +694,17 @@ int main(int argc, char** argv) {
     if (bm.strided_block_max_bytes() > 0) {
       opts.byte_mapping.strided_block_max_bytes = bm.strided_block_max_bytes();
     }
+    opts.byte_mapping.disk_source_ordered_read =
+        bm.has_disk_source_ordered_read() ? bm.disk_source_ordered_read() : true;
+    if (bm.disk_source_merge_max_gap_bytes() > 0) {
+      opts.byte_mapping.disk_source_merge_max_gap_bytes = bm.disk_source_merge_max_gap_bytes();
+    }
+    if (bm.disk_source_merge_max_amplification() > 0) {
+      opts.byte_mapping.disk_source_merge_max_amplification = bm.disk_source_merge_max_amplification();
+    }
+    if (bm.disk_source_prefetch_depth() > 0) {
+      opts.byte_mapping.disk_source_prefetch_depth = bm.disk_source_prefetch_depth();
+    }
   }
 
   if (opts.cpu_shared_memory_enabled) {

@@ -219,6 +219,8 @@ class Replica {
       gsl::not_null<std::shared_ptr<common::AsyncRuntime>> async_runtime,
       common::memory::MemoryLocation source_type,
       std::optional<loader::ViewPlan> view_plan,
+      std::optional<std::string> canonical_index_json,
+      std::optional<std::string> source_index_json,
       loading::TransformPlacement transform_placement,
       StoreEngineOptions::ByteMappingConfig byte_mapping_config);
 
@@ -237,6 +239,8 @@ class Replica {
 
   // Optional view execution plan when this replica represents a variant byte space.
   const std::optional<loader::ViewPlan> view_plan_;
+  const std::optional<std::string> canonical_index_json_;
+  const std::optional<std::string> source_index_json_;
   const loading::TransformPlacement transform_placement_;
   const StoreEngineOptions::ByteMappingConfig byte_mapping_config_;
 

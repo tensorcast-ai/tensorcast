@@ -568,6 +568,7 @@ class DaemonCtl:
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         disk_path: str | None = None,
+        verify_checksums: bool = True,
         tensor_names: Sequence[str] | None = None,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
@@ -610,7 +611,7 @@ class DaemonCtl:
                 request.source_policy.CopyFrom(source_policy)
             if disk_path:
                 request.disk_fallback.disk_path = disk_path
-                request.disk_fallback.verify_checksums = True
+                request.disk_fallback.verify_checksums = bool(verify_checksums)
             if view_subset_hash is not None:
                 request.view_subset_hash = bytes(view_subset_hash)
             if view is not None:

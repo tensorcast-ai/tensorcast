@@ -117,6 +117,10 @@ struct StoreEngineOptions {
     uint32_t strided_max_amplification{8};
     uint64_t strided_block_target_bytes{16ULL * 1024 * 1024};
     uint64_t strided_block_max_bytes{64ULL * 1024 * 1024};
+    bool disk_source_ordered_read{true};
+    uint64_t disk_source_merge_max_gap_bytes{256ULL * 1024};
+    uint32_t disk_source_merge_max_amplification{4};
+    uint32_t disk_source_prefetch_depth{2};
   };
 
   ByteMappingConfig byte_mapping{};

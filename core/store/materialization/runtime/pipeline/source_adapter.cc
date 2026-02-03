@@ -111,6 +111,8 @@ absl::Status DiskSourceAdapter::prepare(const loading::DiskSource& source, Inges
     metadata.schema_version = disk_metadata.schema_version;
     metadata.existing_index_multihash = disk_metadata.index_multihash;
     metadata.existing_data_multihash = disk_metadata.data_multihash;
+    metadata.source_index_json = disk_metadata.source_index_json;
+    metadata.source_total_size_bytes = disk_metadata.source_total_size_bytes;
   } else {
     const auto descriptor_path = artifact_path / "artifact_descriptor.json";
     std::error_code descriptor_error;

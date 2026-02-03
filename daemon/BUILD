@@ -794,6 +794,16 @@ cc_test(
 )
 
 cc_test(
+    name = "path_utils_test",
+    srcs = ["util/path_utils_test.cc"],
+    deps = [
+        ":path_utils_lib",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "session_lifecycle_test",
     srcs = ["state/session_lifecycle_test.cc"],
     deps = [

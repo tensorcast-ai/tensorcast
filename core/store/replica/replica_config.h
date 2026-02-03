@@ -70,6 +70,10 @@ struct ReplicaConfig {
   std::optional<std::string> view_id = std::nullopt;
   // - View execution plan metadata for variant-aware replicas
   std::optional<loader::ViewPlan> view_plan;
+  // - Canonical index bytes (for disk source canonicalization)
+  std::optional<std::string> canonical_index_json;
+  // - Source layout index bytes (for disk source canonicalization)
+  std::optional<std::string> source_index_json;
   // - Byte-range mapping config (strided thresholds, cache sizing)
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
   // - Transform placement preference (server/client)

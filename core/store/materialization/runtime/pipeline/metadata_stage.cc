@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <vector>
 
 #include "absl/log/log.h"
@@ -34,6 +35,34 @@ void update_logical_size(uint64_t candidate, VerificationState& verification) {
   verification.logical_total_size = std::max<uint64_t>(verification.logical_total_size, candidate);
 }
 
+std::optional<uint64_t> compute_total_size_from_index(std::string_view index_json) {
+  if (index_json.empty()) {
+    return std::nullopt;
+  }
+  try {
+    nlohmann::json parsed = nlohmann::json::parse(index_json, nullptr, true);
+    if (!parsed.is_object()) {
+      return std::nullopt;
+    }
+    uint64_t total_size = 0;
+    for (auto it = parsed.begin(); it != parsed.end(); ++it) {
+      const auto& arr = it.value();
+      if (!arr.is_array() || arr.size() < 2) {
+        continue;
+      }
+      uint64_t offset = arr[0].get<uint64_t>();
+      uint64_t size = arr[1].get<uint64_t>();
+      total_size = std::max<uint64_t>(total_size, offset + size);
+    }
+    if (total_size == 0) {
+      return std::nullopt;
+    }
+    return total_size;
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
 absl::Status process_disk_canonical_index(IngestionContext& ctx) {
   auto& verification = ctx.verification;
   const auto& disk = ctx.disk;
@@ -51,6 +80,12 @@ absl::Status process_disk_canonical_index(IngestionContext& ctx) {
       }
       if (info.is_safetensors) {
         ctx.disk.is_safetensors = true;
+      }
+      if (info.source_index_json.has_value()) {
+        ctx.disk.source_index_json = info.source_index_json;
+      }
+      if (info.source_total_size_bytes > 0) {
+        ctx.disk.source_total_size_bytes = info.source_total_size_bytes;
       }
     } else if (!absl::IsNotFound(index_info_or.status())) {
       LOG(WARNING) << "Failed to resolve canonical index for '" << disk.artifact_path.string()
@@ -131,12 +166,21 @@ absl::Status build_canonical_index_for_safetensors(IngestionContext& ctx) {
     return absl::OkStatus();
   }
 
-  auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(safetensor_files);
-  if (!index_bytes_or.ok()) {
-    return index_bytes_or.status();
+  auto source_bytes_or = loader::BuildSourceIndexFromSafetensors(safetensor_files);
+  if (!source_bytes_or.ok()) {
+    return source_bytes_or.status();
+  }
+  auto canonical_bytes_or =
+      loader::build_coalesced_canonical_index_from_source_index_json(*source_bytes_or, /*align_bytes=*/8);
+  if (!canonical_bytes_or.ok()) {
+    return canonical_bytes_or.status();
   }
 
-  verification.canonical_index_json = index_bytes_or.value();
+  verification.canonical_index_json = canonical_bytes_or.value();
+  ctx.disk.source_index_json = source_bytes_or.value();
+  if (auto total_or = compute_total_size_from_index(*source_bytes_or); total_or.has_value()) {
+    ctx.disk.source_total_size_bytes = *total_or;
+  }
   if (!verification.computed_index_multihash.has_value()) {
     auto index_mh_or =
         common::compute_index_multihash(std::optional<std::string>(*verification.canonical_index_json), "");
@@ -232,6 +276,12 @@ absl::Status MetadataStage::process(IngestionContext& ctx) {
     }
     if (disk_metadata.logical_total_size.has_value()) {
       update_logical_size(*disk_metadata.logical_total_size, ctx.verification);
+    }
+    if (disk_metadata.source_index_json.has_value()) {
+      ctx.disk.source_index_json = disk_metadata.source_index_json;
+    }
+    if (disk_metadata.source_total_size_bytes.has_value()) {
+      ctx.disk.source_total_size_bytes = disk_metadata.source_total_size_bytes;
     }
   }
 

@@ -201,6 +201,14 @@ def _normalize_defaults_inplace(msg: cfg_pb.DaemonConfig) -> None:
         bm.strided_block_target_bytes = 16 * 1024 * 1024
     if bm.strided_block_max_bytes == 0:
         bm.strided_block_max_bytes = 64 * 1024 * 1024
+    if not bm.HasField("disk_source_ordered_read"):
+        bm.disk_source_ordered_read = True
+    if bm.disk_source_merge_max_gap_bytes == 0:
+        bm.disk_source_merge_max_gap_bytes = 256 * 1024
+    if bm.disk_source_merge_max_amplification == 0:
+        bm.disk_source_merge_max_amplification = 4
+    if bm.disk_source_prefetch_depth == 0:
+        bm.disk_source_prefetch_depth = 2
 
     retention_handles = msg.retention_handles
     if not retention_handles.HasField("default_ttl"):

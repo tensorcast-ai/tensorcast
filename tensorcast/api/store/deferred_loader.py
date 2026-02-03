@@ -518,6 +518,7 @@ class DeferredLoader:
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         disk_path: str | None = None
+        verify_checksums = True
         effective_prefer = (
             self._fallback.prefer if self._fallback is not None else "auto"
         )
@@ -531,6 +532,7 @@ class DeferredLoader:
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
             disk_path = self._fallback.disk_path
+            verify_checksums = bool(self._fallback.verify_checksums)
         if (
             disk_path
             and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
@@ -557,6 +559,7 @@ class DeferredLoader:
                 preference=preference,
                 source_policy=source_policy,
                 disk_path=disk_path,
+                verify_checksums=verify_checksums,
                 tensor_names=region_layout.selection_names,
                 view=view_spec_proto,
                 view_id=region_layout.view_id if view_spec_proto is None else None,
@@ -687,13 +690,14 @@ class DeferredLoader:
             )
         composed_spec = self._compose_view_spec()
         view_spec_proto = composed_spec.proto if composed_spec else None
-        index_bytes: bytes
-        if self._view_index_hint is not None:
-            index_bytes = self._view_index_hint
-        elif view_spec_proto is None or not view_spec_proto.tensors:
-            index_bytes = canonical_index_bytes
-        else:
-            normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+        selected_names = [entry.name for entry in self._base_index.entries]
+        canonical_names = set(self._canonical_entries_by_name)
+        subset_payload: list[str] | None = None
+        if canonical_names and set(selected_names) != canonical_names:
+            subset_payload = selected_names
+
+        normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+        if view_spec_proto is not None and view_spec_proto.tensors:
             for name, ops in view_spec_proto.tensors.items():
                 op_list: list[dict[str, int | str]] = []
                 for op in ops.ops:
@@ -716,8 +720,13 @@ class DeferredLoader:
                         )
                 if op_list:
                     normalized_ops[str(name)] = op_list
+
+        index_bytes: bytes
+        if not normalized_ops and subset_payload is None:
+            index_bytes = canonical_index_bytes
+        else:
             view_payload = compute_view_index_bytes(
-                canonical_index_bytes, normalized_ops, None
+                canonical_index_bytes, normalized_ops, subset_payload
             )
             index_bytes = bytes(view_payload["view_index_bytes"])
         view_index = canonical_index_from_bytes(index_bytes)

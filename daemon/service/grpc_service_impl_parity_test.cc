@@ -109,6 +109,22 @@ TEST_CASE("MaterializeReplica enforces shared storage root", "[daemon][parity]")
   REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+TEST_CASE("MaterializeReplica allows absolute paths when storage root is empty", "[daemon][parity]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
+  auto opts = make_daemon_options();
+  opts.storage_path.clear();
+  auto harness = make_harness(engine, opts);
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
+  req.set_disk_path((std::filesystem::temp_directory_path() / "absolute_path_ok").string());
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
+  grpc::ServerContext ctx;
+  auto st = svc.MaterializeReplica(&ctx, &req, &resp);
+  REQUIRE(st.error_code() != grpc::StatusCode::INVALID_ARGUMENT);
+}
+
 TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());

@@ -359,6 +359,18 @@ void normalize_defaults(tcfg::DaemonConfig* cfg) {
   if (bm->strided_block_max_bytes() == 0) {
     bm->set_strided_block_max_bytes(64ULL * 1024 * 1024);
   }
+  if (!bm->has_disk_source_ordered_read()) {
+    bm->set_disk_source_ordered_read(true);
+  }
+  if (bm->disk_source_merge_max_gap_bytes() == 0) {
+    bm->set_disk_source_merge_max_gap_bytes(256ULL * 1024);
+  }
+  if (bm->disk_source_merge_max_amplification() == 0) {
+    bm->set_disk_source_merge_max_amplification(4);
+  }
+  if (bm->disk_source_prefetch_depth() == 0) {
+    bm->set_disk_source_prefetch_depth(2);
+  }
 
   if (cfg->has_pinned_memory()) {
     auto* pm = cfg->mutable_pinned_memory();
