@@ -289,6 +289,11 @@ enum ViewRegistrationKind {
   VIEW_REGISTRATION_KIND_PIECE = 2;
 }
 
+message DiskFallbackHint {
+  string disk_path = 1;
+  bool verify_checksums = 2;
+}
+
 message TensorPayloadDescriptor {
   string name = 1;
   repeated int64 shape = 2;
@@ -374,8 +379,7 @@ message ReplicaOperationStatus {
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   optional string artifact_id = 1;
-  reserved 2;
-  reserved "disk_fallback";
+  DiskFallbackHint disk_fallback = 2;
 
   string replica_uuid = 3;
   string device_uuid = 4;
@@ -392,8 +396,9 @@ message MaterializeReplicaRequest {
   repeated string tensor_names = 10;
   bytes view_subset_hash = 11;
 
-  reserved 12, 13;
-  reserved "verify_checksums", "disk_path";
+  // Legacy disk fallback fields; prefer disk_fallback instead.
+  optional bool verify_checksums = 12;
+  optional string disk_path = 13;
 
   oneof view_identity {
     tensorcast.common.v1.ViewSpec view = 1001;
@@ -467,8 +472,7 @@ message MaterializeIntoMappedTargetRequest {
     string artifact_id = 1;
     string key = 2;
   }
-  reserved 3;
-  reserved "disk_fallback";
+  DiskFallbackHint disk_fallback = 3;
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
@@ -496,8 +500,7 @@ message MaterializeIntoTargetRequest {
     string artifact_id = 1;
     string key = 2;
   }
-  reserved 3;
-  reserved "disk_fallback";
+  DiskFallbackHint disk_fallback = 3;
 
   TargetLayout target_layout = 4;
   int32 pid = 5;

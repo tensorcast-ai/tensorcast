@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -40,6 +41,7 @@
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
@@ -544,6 +546,84 @@ absl::StatusOr<CanonicalIndexTable> parse_canonical_index(std::string_view index
   return table;
 }
 
+struct MappedTensorSpec {
+  std::vector<int64_t> shape;
+  std::vector<int64_t> stride;
+  std::string dtype;
+  uint64_t storage_offset{0};
+  uint64_t logical_length{0};
+  uint64_t element_size{0};
+};
+
+struct RangeSpec {
+  bool has_range{false};
+  int32_t dim{0};
+  int64_t start{0};
+  int64_t end{0};
+};
+
+struct ViewNarrowSpec {
+  int32_t dim{0};
+  int64_t start{0};
+  int64_t end{0};
+};
+
+absl::StatusOr<uint64_t> dtype_element_size(std::string_view dtype) {
+  static const absl::flat_hash_map<std::string_view, uint64_t> kSizeMap = {
+      {"torch.float16", 2},
+      {"torch.bfloat16", 2},
+      {"torch.float32", 4},
+      {"torch.float64", 8},
+      {"torch.int8", 1},
+      {"torch.uint8", 1},
+      {"torch.int16", 2},
+      {"torch.int32", 4},
+      {"torch.int64", 8},
+      {"torch.bool", 1},
+      {"torch.float", 4},
+      {"torch.double", 8},
+  };
+  auto it = kSizeMap.find(dtype);
+  if (it == kSizeMap.end()) {
+    return absl::InvalidArgumentError(absl::StrCat("unsupported dtype: ", dtype));
+  }
+  return it->second;
+}
+
+absl::StatusOr<uint64_t> product_dims(absl::Span<const int64_t> dims) {
+  uint64_t acc = 1;
+  for (int64_t dim : dims) {
+    if (dim <= 0) {
+      return absl::InvalidArgumentError("shape dims must be positive");
+    }
+    if (acc > std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(dim)) {
+      return absl::OutOfRangeError("shape size overflow");
+    }
+    acc *= static_cast<uint64_t>(dim);
+  }
+  return acc;
+}
+
+std::vector<int64_t> compute_compact_stride(const std::vector<int64_t>& shape) {
+  if (shape.empty()) {
+    return {};
+  }
+  std::vector<int64_t> stride(shape.size());
+  int64_t acc = 1;
+  for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
+    stride[static_cast<size_t>(i)] = acc;
+    acc *= shape[static_cast<size_t>(i)];
+  }
+  return stride;
+}
+
+bool is_contiguous(const std::vector<int64_t>& shape, const std::vector<int64_t>& stride) {
+  if (shape.empty()) {
+    return stride.empty();
+  }
+  return stride == compute_compact_stride(shape);
+}
+
 struct TargetOffsetEntry {
   std::string name;
   std::string storage_id;
@@ -839,6 +919,24 @@ store::loading::TransformPlacement resolve_placement(
 
 store::loading::TransformPlacement resolve_placement(
     const v2::MaterializeIntoTargetRequest& req,
+    const std::optional<ViewSpec>& spec) {
+  switch (req.placement()) {
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
+      return store::loading::TransformPlacement::kServer;
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
+      return store::loading::TransformPlacement::kClient;
+    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
+    default:
+      break;
+  }
+  if (spec.has_value() && spec_includes_transpose(*spec)) {
+    return store::loading::TransformPlacement::kClient;
+  }
+  return store::loading::TransformPlacement::kServer;
+}
+
+store::loading::TransformPlacement resolve_placement(
+    const v2::MaterializeIntoMappedTargetRequest& req,
     const std::optional<ViewSpec>& spec) {
   switch (req.placement()) {
     case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
@@ -2922,6 +3020,983 @@ grpc::Status MaterializationController::materialize_into_target(
         VLOG(1) << "MaterializeIntoTarget: failed to serialize target_write scope: " << scope_or.status();
       }
     }
+  }
+  record_materialize_into_target("ok", "ok", resp.source());
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status MaterializationController::materialize_into_mapped_target(
+    RpcContext& rctx,
+    const v2::MaterializeIntoMappedTargetRequest& req,
+    v2::MaterializeIntoTargetResponse& resp) {
+  auto& span = rctx.span();
+  if (rctx.allow_high_card_attrs() && req.has_operation_id()) {
+    span->SetAttribute("tc.operation.id", req.operation_id());
+  }
+  if (d_.shutdown_signal.is_shutting_down()) {
+    record_materialize_into_target(
+        "error", "unavailable", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+
+  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  ResolvedSourcePolicy effective_policy = policy;
+  absl::Status policy_status = validate_source_policy(effective_policy);
+  if (!policy_status.ok()) {
+    record_materialize_into_target(
+        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(policy_status);
+  }
+  if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
+    record_materialize_into_target(
+        "error", "non_loopback_peer", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::PERMISSION_DENIED, "MaterializeIntoMappedTarget is local-only (loopback/UDS)"};
+  }
+
+  const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
+  const bool has_key = req.has_key() && !req.key().empty();
+  if (has_key) {
+    record_materialize_into_target(
+        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "key-based requests not supported for MaterializeIntoMappedTarget"};
+  }
+  if (!has_artifact_id) {
+    record_materialize_into_target(
+        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required for MaterializeIntoMappedTarget"};
+  }
+
+  std::string resolved_artifact_id = req.artifact_id();
+  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
+  if (!binding_or.ok()) {
+    record_materialize_into_target(
+        "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(binding_or.status());
+  }
+  if (binding_or->has_value()) {
+    resolved_artifact_id = binding_or->value();
+  }
+  if (req.has_disk_fallback() && req.disk_fallback().disk_path().empty()) {
+    record_materialize_into_target(
+        "error", "disk_fallback_empty", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "disk_fallback.disk_path must not be empty"};
+  }
+
+  std::optional<std::filesystem::path> normalized_disk_path;
+  if (req.has_disk_fallback() && !req.disk_fallback().disk_path().empty()) {
+    if (!effective_policy.allow_disk) {
+      record_materialize_into_target(
+          "error", "disk_fallback_disallowed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "disk fallback requested but source_policy disallows disk"};
+    }
+    auto normalized_or = normalize_disk_path(req.disk_fallback().disk_path(), storage_path_);
+    if (!normalized_or.ok()) {
+      record_disk_path_denied();
+      record_materialize_into_target(
+          "error", "disk_fallback_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(normalized_or.status());
+    }
+    normalized_disk_path = *normalized_or;
+  }
+  if (!req.has_target_layout()) {
+    record_materialize_into_target(
+        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
+  }
+  if (req.device_uuid().empty()) {
+    record_materialize_into_target(
+        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "device_uuid is required"};
+  }
+  if (req.pid() <= 0) {
+    record_materialize_into_target(
+        "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "pid is required for MaterializeIntoMappedTarget"};
+  }
+  if (!req.has_copy_plan() || req.copy_plan().entries_size() == 0) {
+    record_materialize_into_target(
+        "error", "mapping_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "copy_plan is required for mapped binding"};
+  }
+  if (req.copy_plan().version() != 1) {
+    record_materialize_into_target(
+        "error", "mapping_version", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "unsupported copy_plan version"};
+  }
+
+  const auto& layout = req.target_layout();
+  if (layout.layout_kind() != v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED) {
+    record_materialize_into_target(
+        "error", "layout_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "Only LAYOUT_KIND_COALESCED_UNSPECIFIED is supported"};
+  }
+  if (layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS) {
+    record_materialize_into_target(
+        "error", "tensor_spec_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "Mapped binding requires TENSOR_SPEC_KIND_OFFSETS"};
+  }
+  if (layout.storages_size() == 0) {
+    record_materialize_into_target(
+        "error", "storage_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout must include at least one storage entry"};
+  }
+
+  const auto device = d_.devices.From(v2::DeviceType::DEVICE_TYPE_GPU, req.device_uuid(), std::nullopt);
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_source_case() != v2::StorageEntry::kVramRegionId) {
+      record_materialize_into_target(
+          "error", "storage_not_region", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "Target storage must reference a vram_region_id"};
+    }
+    if (storage.device_id() != device.ordinal) {
+      record_materialize_into_target(
+          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage.device_id does not match device_uuid"};
+    }
+  }
+
+  auto offsets_or = resolve_target_offsets(layout);
+  if (!offsets_or.ok()) {
+    record_materialize_into_target(
+        "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(offsets_or.status());
+  }
+  const auto& offsets = *offsets_or;
+  if (offsets.empty()) {
+    record_materialize_into_target(
+        "error", "offsets_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
+  }
+
+  absl::flat_hash_map<std::string, TargetOffsetEntry> offsets_by_name;
+  offsets_by_name.reserve(offsets.size());
+  for (const auto& entry : offsets) {
+    if (entry.name.empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
+    }
+    if (offsets_by_name.contains(entry.name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
+    }
+    offsets_by_name.emplace(entry.name, entry);
+  }
+
+  absl::flat_hash_map<std::string, MappedTensorSpec> dst_specs;
+  dst_specs.reserve(req.dst_tensors_size());
+  for (const auto& spec : req.dst_tensors()) {
+    if (spec.name().empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors include empty tensor name"};
+    }
+    if (dst_specs.contains(spec.name())) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors include duplicate tensor name"};
+    }
+    if (spec.shape_size() != spec.stride_size()) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors shape/stride size mismatch"};
+    }
+    auto elem_or = dtype_element_size(spec.dtype());
+    if (!elem_or.ok()) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(elem_or.status());
+    }
+    std::vector<int64_t> shape;
+    shape.reserve(spec.shape_size());
+    for (const auto& dim : spec.shape()) {
+      shape.push_back(dim);
+    }
+    std::vector<int64_t> stride;
+    stride.reserve(spec.stride_size());
+    for (const auto& dim : spec.stride()) {
+      stride.push_back(dim);
+    }
+    if (!is_contiguous(shape, stride)) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors must be contiguous"};
+    }
+    if (spec.storage_offset() != 0) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors storage_offset must be 0"};
+    }
+    uint64_t expected_bytes = *elem_or;
+    if (!shape.empty()) {
+      auto count_or = product_dims(shape);
+      if (!count_or.ok()) {
+        record_materialize_into_target(
+            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(count_or.status());
+      }
+      expected_bytes = (*count_or) * (*elem_or);
+    }
+    if (expected_bytes != spec.logical_length()) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors logical_length mismatch"};
+    }
+    dst_specs.emplace(
+        spec.name(),
+        MappedTensorSpec{
+            .shape = std::move(shape),
+            .stride = std::move(stride),
+            .dtype = spec.dtype(),
+            .storage_offset = spec.storage_offset(),
+            .logical_length = spec.logical_length(),
+            .element_size = *elem_or,
+        });
+  }
+
+  if (dst_specs.empty()) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "dst_tensors must be non-empty"};
+  }
+
+  if (offsets_by_name.size() != dst_specs.size()) {
+    record_materialize_into_target(
+        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "dst_tensors must match target_layout offsets"};
+  }
+  for (const auto& [name, _] : dst_specs) {
+    if (!offsets_by_name.contains(name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "dst_tensors must match target_layout offsets"};
+    }
+  }
+
+  absl::flat_hash_set<std::string> mapped_dst_names;
+  mapped_dst_names.reserve(req.copy_plan().entries_size());
+  for (const auto& entry : req.copy_plan().entries()) {
+    if (entry.dst_name().empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing dst_name"};
+    }
+    mapped_dst_names.insert(entry.dst_name());
+  }
+  if (mapped_dst_names.size() != dst_specs.size()) {
+    record_materialize_into_target(
+        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "copy_plan must cover every dst tensor"};
+  }
+
+  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
+    if (!normalized_disk_path.has_value()) {
+      return absl::FailedPreconditionError("disk_fallback.disk_path required when Global Store is unavailable");
+    }
+    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+    if (!idx_status.ok()) {
+      return idx_status;
+    }
+    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device.ordinal);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  };
+
+  const bool prefer_disk_index = normalized_disk_path.has_value() &&
+      (!d_.global_store_client || !d_.global_store_client->is_connected() ||
+       common::infer_artifact_id_kind(resolved_artifact_id) == common::ArtifactIdKind::kUnspecified);
+  absl::StatusOr<std::string> canonical_json_or =
+      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(resolved_artifact_id);
+  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
+    auto disk_or = read_canonical_from_disk();
+    if (disk_or.ok()) {
+      canonical_json_or = std::move(disk_or);
+    }
+  }
+  if (!canonical_json_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_json_or.status());
+  }
+  std::optional<ViewSpec> view_spec;
+  std::optional<std::string> request_view_id;
+  bool view_id_requested = false;
+
+  switch (req.view_identity_case()) {
+    case v2::MaterializeIntoMappedTargetRequest::kView: {
+      auto spec_or = convert_view_spec(req.view());
+      if (!spec_or.ok()) {
+        return to_grpc_status(spec_or.status());
+      }
+      view_spec = std::move(*spec_or);
+      break;
+    }
+    case v2::MaterializeIntoMappedTargetRequest::kViewId: {
+      if (!req.view_id().empty()) {
+        view_id_requested = true;
+        request_view_id = req.view_id();
+      }
+      break;
+    }
+    case v2::MaterializeIntoMappedTargetRequest::VIEW_IDENTITY_NOT_SET:
+      break;
+  }
+
+  if (view_id_requested && request_view_id.has_value()) {
+    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *request_view_id);
+    if (!view_meta_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(view_meta_or.status());
+    }
+    auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
+    if (!spec_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(spec_or.status());
+    }
+    view_spec = std::move(*spec_or);
+  }
+
+  absl::flat_hash_map<std::string, ViewNarrowSpec> view_narrows;
+  if (view_spec.has_value()) {
+    for (const auto& [tensor_name, ops] : view_spec->tensors) {
+      bool saw_narrow = false;
+      for (const auto& op : ops.ops) {
+        if (op.kind == ViewOp::Kind::kTranspose) {
+          record_materialize_into_target(
+              "error", "view_transpose", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+          return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support transpose views"};
+        }
+        if (op.kind == ViewOp::Kind::kNarrow) {
+          if (saw_narrow) {
+            record_materialize_into_target(
+                "error", "view_narrow", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+            return {StatusCode::INVALID_ARGUMENT, "mapped binding supports one narrow per tensor"};
+          }
+          saw_narrow = true;
+          view_narrows.emplace(
+              tensor_name,
+              ViewNarrowSpec{
+                  .dim = op.narrow.dim,
+                  .start = op.narrow.start,
+                  .end = static_cast<int64_t>(op.narrow.start + op.narrow.length),
+              });
+        }
+      }
+    }
+  }
+
+  std::optional<store::loader::ViewPlan> view_plan;
+  if (view_spec.has_value()) {
+    auto plan_or = store::StoreEngine::compute_view_plan(*canonical_json_or, *view_spec);
+    if (!plan_or.ok()) {
+      record_materialize_into_target(
+          "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(plan_or.status());
+    }
+    view_plan = std::move(*plan_or);
+  }
+
+  std::string source_index_json = *canonical_json_or;
+  if (view_plan.has_value() && !view_plan->is_identity) {
+    source_index_json = view_plan->view_index_json;
+  }
+  auto source_table_or = parse_canonical_index(source_index_json);
+  if (!source_table_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(source_table_or.status());
+  }
+  const CanonicalIndexTable& source_table = *source_table_or;
+
+  struct StorageRange {
+    std::string storage_id;
+    uint64_t base_offset{0};
+    uint64_t length{0};
+  };
+
+  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
+  storage_ranges.reserve(layout.storages_size());
+  uint64_t range_cursor = 0;
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_id().empty()) {
+      record_materialize_into_target(
+          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
+    }
+    if (storage.storage_length() == 0) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
+    }
+    if (storage_ranges.contains(storage.storage_id())) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
+    }
+    StorageRange range;
+    range.storage_id = storage.storage_id();
+    range.base_offset = range_cursor;
+    range.length = storage.storage_length();
+    storage_ranges.emplace(range.storage_id, range);
+    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
+    }
+    range_cursor += storage.storage_length();
+  }
+  const uint64_t logical_total_size = range_cursor;
+
+  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
+  dst_base_offsets.reserve(offsets_by_name.size());
+  for (const auto& [name, entry] : offsets_by_name) {
+    const auto range_it = storage_ranges.find(entry.storage_id);
+    if (range_it == storage_ranges.end()) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
+    }
+    const auto& range = range_it->second;
+    if (entry.storage_offset + entry.logical_length > range.length) {
+      record_materialize_into_target(
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
+    }
+    const auto& spec = dst_specs.at(name);
+    if (entry.logical_length != spec.logical_length) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
+    }
+    if (entry.storage_offset != spec.storage_offset * spec.element_size) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
+    }
+    dst_base_offsets.emplace(name, range.base_offset + entry.storage_offset);
+  }
+
+  struct SegmentWithIndex {
+    store::loader::ByteRangeSegment seg;
+    int entry_index{0};
+  };
+
+  std::vector<SegmentWithIndex> mapped_segments;
+  mapped_segments.reserve(req.copy_plan().entries_size());
+
+  absl::flat_hash_map<std::string, int32_t> dst_dim_by_name;
+  absl::flat_hash_map<std::string, std::vector<std::tuple<int64_t, int64_t, int>>> dst_intervals;
+
+  uint64_t total_bytes_copied = 0;
+
+  const auto build_range = [](const v2::CopyPlanRange& range) -> RangeSpec {
+    return RangeSpec{
+        .has_range = true,
+        .dim = static_cast<int32_t>(range.dim()),
+        .start = range.start(),
+        .end = range.end(),
+    };
+  };
+
+  const auto validate_and_build_segments = [&](int idx,
+                                               const v2::CopyPlanEntry& entry,
+                                               const CanonicalIndexEntry& src_entry,
+                                               const MappedTensorSpec& dst_spec,
+                                               uint64_t dst_base_offset,
+                                               RangeSpec src_range,
+                                               RangeSpec dst_range) -> absl::Status {
+    auto elem_or = dtype_element_size(src_entry.dtype);
+    if (!elem_or.ok()) {
+      return elem_or.status();
+    }
+    const uint64_t src_elem_size = *elem_or;
+    if (src_entry.dtype != dst_spec.dtype) {
+      return absl::InvalidArgumentError(
+          std::format(
+              "copy_plan entry {} dtype mismatch: {}({}) -> {}({})",
+              idx,
+              entry.ckpt_name(),
+              src_entry.dtype,
+              entry.dst_name(),
+              dst_spec.dtype));
+    }
+    if (!is_contiguous(src_entry.shape, src_entry.stride)) {
+      return absl::InvalidArgumentError(
+          std::format("copy_plan entry {} source '{}' must be contiguous", idx, entry.ckpt_name()));
+    }
+    if (!is_contiguous(dst_spec.shape, dst_spec.stride)) {
+      return absl::InvalidArgumentError(
+          std::format("copy_plan entry {} target '{}' must be contiguous", idx, entry.dst_name()));
+    }
+
+    if (src_entry.shape.empty()) {
+      if (src_range.has_range) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} source scalar must use full range", idx));
+      }
+    }
+    if (dst_spec.shape.empty()) {
+      if (dst_range.has_range) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} target scalar must use full range", idx));
+      }
+    }
+
+    int32_t dim = 0;
+    bool dim_set = false;
+    if (src_range.has_range) {
+      dim = src_range.dim;
+      dim_set = true;
+    }
+    if (dst_range.has_range) {
+      if (dim_set && dim != dst_range.dim) {
+        return absl::InvalidArgumentError(
+            std::format("copy_plan entry {} range dim mismatch ({} vs {})", idx, dim, dst_range.dim));
+      }
+      dim = dst_range.dim;
+      dim_set = true;
+    }
+    if (!dim_set) {
+      dim = 0;
+    }
+    if (dim < 0 || dim > 1) {
+      return absl::InvalidArgumentError(std::format("copy_plan entry {} dim must be 0 or 1 (got {})", idx, dim));
+    }
+
+    const auto normalize_range =
+        [&](const std::vector<int64_t>& shape, RangeSpec& range, std::string_view role) -> absl::Status {
+      if (shape.empty()) {
+        return absl::OkStatus();
+      }
+      if (dim >= static_cast<int32_t>(shape.size())) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} dim {} out of range", idx, role, dim));
+      }
+      if (!range.has_range) {
+        range.has_range = true;
+        range.dim = dim;
+        range.start = 0;
+        range.end = shape[static_cast<size_t>(dim)];
+        return absl::OkStatus();
+      }
+      if (range.dim != dim) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} dim mismatch", idx, role));
+      }
+      if (range.start < 0 || range.end <= range.start) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} range invalid", idx, role));
+      }
+      if (range.end > shape[static_cast<size_t>(dim)]) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} range out of bounds", idx, role));
+      }
+      return absl::OkStatus();
+    };
+
+    auto src_shape = src_entry.shape;
+    auto dst_shape = dst_spec.shape;
+    auto src_stride = src_entry.stride;
+    auto dst_stride = dst_spec.stride;
+    if (src_shape.empty()) {
+      src_shape = {1};
+      src_stride = {1};
+    }
+    if (dst_shape.empty()) {
+      dst_shape = {1};
+      dst_stride = {1};
+    }
+
+    if (view_narrows.contains(entry.ckpt_name())) {
+      const auto& narrow = view_narrows.at(entry.ckpt_name());
+      if (!src_range.has_range || src_range.dim != narrow.dim) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} source range required for view narrow", idx));
+      }
+      if (src_range.start < narrow.start || src_range.end > narrow.end) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} source range outside view bounds", idx));
+      }
+      src_range.start -= narrow.start;
+      src_range.end -= narrow.start;
+    }
+
+    if (!src_shape.empty()) {
+      auto st = normalize_range(src_shape, src_range, "source");
+      if (!st.ok()) {
+        return st;
+      }
+    }
+    if (!dst_shape.empty()) {
+      auto st = normalize_range(dst_shape, dst_range, "target");
+      if (!st.ok()) {
+        return st;
+      }
+    }
+
+    if (!src_shape.empty() && !dst_shape.empty()) {
+      for (size_t i = 0; i < src_shape.size(); ++i) {
+        if (static_cast<int32_t>(i) == dim) {
+          continue;
+        }
+        if (i >= dst_shape.size() || src_shape[i] != dst_shape[i]) {
+          return absl::InvalidArgumentError(
+              std::format("copy_plan entry {} shape mismatch for {}", idx, entry.dst_name()));
+        }
+      }
+    }
+
+    auto src_count_or = product_dims(src_shape);
+    if (!src_count_or.ok()) {
+      return src_count_or.status();
+    }
+    auto dst_count_or = product_dims(dst_shape);
+    if (!dst_count_or.ok()) {
+      return dst_count_or.status();
+    }
+    uint64_t src_elements = src_shape.empty() ? 1 : *src_count_or;
+    uint64_t dst_elements = dst_shape.empty() ? 1 : *dst_count_or;
+
+    uint64_t src_slice_elements = src_elements;
+    if (!src_shape.empty()) {
+      uint64_t slice_dim = static_cast<uint64_t>(src_range.end - src_range.start);
+      auto tail_or = product_dims(absl::Span<const int64_t>(src_shape).subspan(dim + 1));
+      if (!tail_or.ok()) {
+        return tail_or.status();
+      }
+      uint64_t tail = *tail_or;
+      if (dim == 0) {
+        src_slice_elements = slice_dim * tail;
+      } else {
+        src_slice_elements = slice_dim * tail * static_cast<uint64_t>(src_shape.front());
+      }
+    }
+
+    uint64_t dst_slice_elements = dst_elements;
+    if (!dst_shape.empty()) {
+      uint64_t slice_dim = static_cast<uint64_t>(dst_range.end - dst_range.start);
+      auto tail_or = product_dims(absl::Span<const int64_t>(dst_shape).subspan(dim + 1));
+      if (!tail_or.ok()) {
+        return tail_or.status();
+      }
+      uint64_t tail = *tail_or;
+      if (dim == 0) {
+        dst_slice_elements = slice_dim * tail;
+      } else {
+        dst_slice_elements = slice_dim * tail * static_cast<uint64_t>(dst_shape.front());
+      }
+    }
+
+    if (src_slice_elements != dst_slice_elements) {
+      return absl::InvalidArgumentError(std::format("copy_plan entry {} element count mismatch", idx));
+    }
+
+    auto record_interval = [&](const std::string& name, const RangeSpec& range) -> absl::Status {
+      auto it = dst_dim_by_name.find(name);
+      if (it == dst_dim_by_name.end()) {
+        dst_dim_by_name.emplace(name, range.dim);
+      } else if (it->second != range.dim) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} mixes slice dims for {}", idx, name));
+      }
+      auto& intervals = dst_intervals[name];
+      intervals.emplace_back(range.start, range.end, idx);
+      return absl::OkStatus();
+    };
+    RangeSpec record_range = dst_range;
+    if (!record_range.has_range) {
+      record_range.has_range = true;
+      record_range.dim = dim;
+      record_range.start = 0;
+      record_range.end = dst_shape[static_cast<size_t>(dim)];
+    }
+    auto st = record_interval(entry.dst_name(), record_range);
+    if (!st.ok()) {
+      return st;
+    }
+
+    const uint64_t src_base_offset = src_entry.logical_offset + src_entry.storage_offset * src_elem_size;
+    const uint64_t dst_base_offset_bytes = dst_base_offset;
+
+    const auto tail_or = product_dims(absl::Span<const int64_t>(src_shape).subspan(dim + 1));
+    if (!tail_or.ok()) {
+      return tail_or.status();
+    }
+    uint64_t row_elems = *tail_or;
+    if (src_shape.empty()) {
+      row_elems = 1;
+    }
+
+    if (dim == 0 || src_shape.empty()) {
+      uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
+      uint64_t src_offset_elems = static_cast<uint64_t>(src_range.start) * src_stride[0];
+      uint64_t dst_offset_elems = static_cast<uint64_t>(dst_range.start) * dst_stride[0];
+      store::loader::ByteRangeSegment seg;
+      seg.kind = store::loader::ByteRangeSegment::Kind::kData;
+      seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
+      seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
+      seg.length = length_elems * src_elem_size;
+      seg.source_index = 0;
+      mapped_segments.push_back(SegmentWithIndex{.seg = seg, .entry_index = idx});
+      total_bytes_copied += seg.length;
+      return absl::OkStatus();
+    }
+
+    if (dim == 1) {
+      if (src_shape.size() < 2 || dst_shape.size() < 2) {
+        return absl::InvalidArgumentError(std::format("copy_plan entry {} dim1 requires at least 2D tensors", idx));
+      }
+      uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
+      int64_t outer = src_shape.front();
+      for (int64_t row = 0; row < outer; ++row) {
+        uint64_t src_offset_elems =
+            static_cast<uint64_t>(row) * src_stride[0] + static_cast<uint64_t>(src_range.start) * src_stride[1];
+        uint64_t dst_offset_elems =
+            static_cast<uint64_t>(row) * dst_stride[0] + static_cast<uint64_t>(dst_range.start) * dst_stride[1];
+        store::loader::ByteRangeSegment seg;
+        seg.kind = store::loader::ByteRangeSegment::Kind::kData;
+        seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
+        seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
+        seg.length = length_elems * src_elem_size;
+        seg.source_index = 0;
+        mapped_segments.push_back(SegmentWithIndex{.seg = seg, .entry_index = idx});
+        total_bytes_copied += seg.length;
+      }
+      return absl::OkStatus();
+    }
+
+    return absl::InvalidArgumentError("copy_plan dim must be 0 or 1");
+  };
+
+  int entry_index = 0;
+  for (const auto& entry : req.copy_plan().entries()) {
+    if (entry.ckpt_name().empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing ckpt_name"};
+    }
+    if (entry.dst_name().empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing dst_name"};
+    }
+    auto src_it = source_table.entries.find(entry.ckpt_name());
+    if (src_it == source_table.entries.end()) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan references unknown source tensor"};
+    }
+    auto dst_it = dst_specs.find(entry.dst_name());
+    if (dst_it == dst_specs.end()) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan references unknown destination tensor"};
+    }
+
+    RangeSpec src_range;
+    if (entry.has_ckpt_range()) {
+      src_range = build_range(entry.ckpt_range());
+    }
+    RangeSpec dst_range;
+    if (entry.has_dst_range()) {
+      dst_range = build_range(entry.dst_range());
+    }
+
+    auto st = validate_and_build_segments(
+        entry_index,
+        entry,
+        src_it->second,
+        dst_it->second,
+        dst_base_offsets.at(entry.dst_name()),
+        src_range,
+        dst_range);
+    if (!st.ok()) {
+      record_materialize_into_target(
+          "error", "mapping_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return to_grpc_status(st);
+    }
+    ++entry_index;
+  }
+
+  for (const auto& [name, intervals] : dst_intervals) {
+    const auto& spec = dst_specs.at(name);
+    int32_t dim = 0;
+    auto dim_it = dst_dim_by_name.find(name);
+    if (dim_it != dst_dim_by_name.end()) {
+      dim = dim_it->second;
+    }
+    if (spec.shape.empty()) {
+      if (intervals.size() != 1) {
+        return {StatusCode::INVALID_ARGUMENT, "copy_plan must include one entry for scalar dst"};
+      }
+      const auto& interval = intervals.front();
+      if (std::get<0>(interval) != 0 || std::get<1>(interval) != 1) {
+        return {StatusCode::INVALID_ARGUMENT, "copy_plan scalar dst must cover full range"};
+      }
+      continue;
+    }
+    if (dim < 0 || dim >= static_cast<int32_t>(spec.shape.size())) {
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan dim out of range for dst tensor"};
+    }
+    std::vector<std::tuple<int64_t, int64_t, int>> sorted = intervals;
+    std::sort(
+        sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
+    int64_t cursor = 0;
+    for (const auto& interval : sorted) {
+      const int64_t start = std::get<0>(interval);
+      const int64_t end = std::get<1>(interval);
+      if (start < cursor) {
+        return {StatusCode::INVALID_ARGUMENT, "copy_plan has overlapping dst ranges"};
+      }
+      if (start != cursor) {
+        return {StatusCode::INVALID_ARGUMENT, "copy_plan has gaps in dst ranges"};
+      }
+      cursor = end;
+    }
+    if (cursor != spec.shape[static_cast<size_t>(dim)]) {
+      return {StatusCode::INVALID_ARGUMENT, "copy_plan does not cover full dst range"};
+    }
+  }
+
+  store::loader::ByteRangeMap map;
+  map.total_bytes = logical_total_size;
+  map.num_sources = 1;
+  map.segments.reserve(mapped_segments.size());
+  for (const auto& entry : mapped_segments) {
+    map.segments.push_back(entry.seg);
+  }
+
+  struct RegionReleaseGuard {
+    IpcRegionRegistry& registry;
+    std::vector<std::string>& region_ids;
+    bool active{true};
+
+    ~RegionReleaseGuard() {
+      if (active) {
+        for (const auto& region_id : region_ids) {
+          (void)registry.release(region_id);
+        }
+      }
+    }
+  };
+
+  struct RegionMapping {
+    IpcRegionRegistry::RegionDescriptor desc;
+    std::unique_ptr<cuda::IpcMapping> mapping;
+  };
+
+  absl::flat_hash_map<std::string, RegionMapping> region_map;
+  region_map.reserve(layout.storages_size());
+  std::vector<std::string> acquired_regions;
+  acquired_regions.reserve(layout.storages_size());
+  RegionReleaseGuard guard{d_.regions, acquired_regions, true};
+
+  std::vector<store::loading::IntoTargetStorage> target_storages;
+  target_storages.reserve(layout.storages_size());
+  for (const auto& storage : layout.storages()) {
+    auto it = region_map.find(storage.vram_region_id());
+    if (it == region_map.end()) {
+      auto region_desc_or = d_.regions.acquire(storage.vram_region_id(), req.pid());
+      if (!region_desc_or.ok()) {
+        const absl::Status& st = region_desc_or.status();
+        const bool poisoned = absl::IsFailedPrecondition(st) && st.message() == "region is poisoned";
+        record_materialize_into_target(
+            "error",
+            poisoned ? "region_poisoned" : "region_missing",
+            v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(st);
+      }
+      auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
+      if (!handle_or.ok()) {
+        record_materialize_into_target(
+            "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(handle_or.status());
+      }
+      auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
+      if (!map_or.ok()) {
+        record_materialize_into_target(
+            "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return to_grpc_status(map_or.status());
+      }
+      RegionMapping mapping{.desc = *region_desc_or, .mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or))};
+      auto [inserted_it, _] = region_map.emplace(storage.vram_region_id(), std::move(mapping));
+      it = inserted_it;
+      acquired_regions.push_back(storage.vram_region_id());
+    }
+    const auto& region_desc = it->second.desc;
+    if (region_desc.device_id != storage.device_id()) {
+      record_materialize_into_target(
+          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
+    }
+    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
+    if (region_end > region_desc.size_bytes) {
+      record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
+    }
+    void* region_base_ptr =
+        static_cast<uint8_t*>(it->second.mapping->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
+    target_storages.push_back(
+        store::loading::IntoTargetStorage{
+            .base_ptr = gsl::not_null<void*>{region_base_ptr},
+            .length = storage.storage_length(),
+        });
+  }
+
+  store::loading::MaterializeHints hints;
+  hints.artifact_id = resolved_artifact_id;
+  if (normalized_disk_path.has_value()) {
+    hints.disk_path = normalized_disk_path->string();
+  }
+  hints.source_preference = to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = effective_policy.allow_p2p;
+  hints.allow_disk = effective_policy.allow_disk;
+  hints.verify = store::loading::MaterializeHints::Verify::NONE;
+
+  if (view_plan.has_value()) {
+    if (view_plan->transform.requires_materialization) {
+      return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
+    }
+    store::loading::VariantIdentity variant;
+    variant.canonical_artifact_id = resolved_artifact_id;
+    if (view_spec.has_value()) {
+      variant.view_spec = view_spec;
+    }
+    variant.cached_plan = view_plan;
+    variant.canonical_index_json = *canonical_json_or;
+    variant.placement = resolve_placement(req, view_spec);
+    hints.variant = std::move(variant);
+  }
+
+  store::loading::IntoTargetLayout target_layout;
+  target_layout.storages = std::move(target_storages);
+  target_layout.total_size = logical_total_size;
+
+  const uint64_t generation = compute_generation_from_index(*canonical_json_or);
+  auto result_or =
+      d_.engine.materialize_mapped_into_target(device, target_layout, map, *canonical_json_or, generation, hints);
+  if (!result_or.ok()) {
+    if (absl::IsDataLoss(result_or.status())) {
+      for (const auto& region_id : acquired_regions) {
+        d_.regions.mark_poisoned(region_id).IgnoreError();
+      }
+      record_materialize_into_target(
+          "error", "transfer_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    } else {
+      record_materialize_into_target(
+          "error", "transfer_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    }
+    return to_grpc_status(result_or.status());
+  }
+
+  resp.set_artifact_id(resolved_artifact_id);
+  resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  resp.set_source(to_proto_source(result_or->source));
+  resp.set_canonical_index_bytes(*canonical_json_or);
+  if (view_plan.has_value() && !view_plan->is_identity) {
+    resp.set_view_index_bytes(view_plan->view_index_json);
+  }
+  resp.set_generation(generation);
+  if (rctx.allow_high_card_attrs()) {
+    span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
+    span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(total_bytes_copied));
   }
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();

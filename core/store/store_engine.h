@@ -100,6 +100,14 @@ class StoreEngine {
       const loading::MaterializeHints& hints = {},
       std::optional<loading::DiskSource> disk_source = std::nullopt);
 
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints = {});
+
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
       std::string_view target_artifact_id,
