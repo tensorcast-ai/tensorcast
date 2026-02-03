@@ -13,6 +13,11 @@ from tensorcast.api import _metrics as store_metrics
 from tensorcast.api import _region_cache as region_cache
 from tensorcast.api._device import device_uuid_for
 from tensorcast.api.context import CallContext
+from tensorcast.api.store.mapped_binding import (
+    CopyPlanEntry,
+    validate_copy_plan,
+    view_narrow_ranges,
+)
 from tensorcast.api.store.materialization import _build_source_policy
 from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import map_materialization_error
@@ -93,6 +98,7 @@ class InplaceSlot:
         artifact_id: str,
         canonical_index_bytes: bytes,
         target_write_token: bytes | None,
+        copy_plan: Sequence[CopyPlanEntry] | None = None,
     ) -> None:
         if not tensors:
             raise ArtifactError(
@@ -123,6 +129,7 @@ class InplaceSlot:
         self._target_write_token = (
             bytes(target_write_token) if target_write_token else None
         )
+        self._copy_plan = tuple(copy_plan) if copy_plan is not None else None
 
         self._selection_names = tuple(region_layout.selection_names)
         self._view_id = _normalize_view_id(region_layout.view_id)
@@ -302,6 +309,12 @@ class InplaceSlot:
         publish_owner_pid: int | None = None,
     ) -> None:
         self._ensure_open()
+        if publish and self._copy_plan is not None:
+            raise ArtifactError(
+                "publish is not supported for mapped binding in v1",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         resolved = self._resolve_artifact(artifact)
         store, _, pipeline = resolved._require_components()
         if store is not self._store:
@@ -319,6 +332,121 @@ class InplaceSlot:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
+
+        if self._copy_plan is not None:
+            view_narrows = view_narrow_ranges(resolved._view_spec)
+            validate_copy_plan(
+                plan=self._copy_plan,
+                canonical_index=canonical_index,
+                target_tensors=self._tensors,
+                view_narrows=view_narrows,
+                require_full_coverage=True,
+            )
+            view_spec_proto = None
+            if resolved._view_spec is not None and not resolved._view_spec.is_identity:
+                view_spec_proto = resolved._view_spec.proto
+            elif self._view_spec is not None and self._view_spec.tensors:
+                view_spec_proto = self._view_spec
+
+            selection_order = self._selection_names if self._selection_names else None
+            operation_id = operation_id or uuid.uuid4().hex
+            if self._published_lease_id is not None:
+                self._retire_published(
+                    operation_id=operation_id,
+                    wait=wait,
+                    drain_timeout_s=drain_timeout_s,
+                    ctx=ctx,
+                )
+
+            preference, source_policy, disk_path = self._resolve_source_policy(
+                resolved._fallback
+            )
+            verify_checksums = (
+                True
+                if resolved._fallback is None
+                else bool(resolved._fallback.verify_checksums)
+            )
+            artifact_id = resolved._ensure_identified()
+            client = self._runtime.ensure_client()
+            attempt = 0
+            response = None
+            region_layout = None
+            while attempt < 2:
+                region_layout = pipeline._build_mapped_region_backed_layout(
+                    target=self._tensors,
+                    device_id=self._device_id,
+                    selection_order=selection_order,
+                )
+                self._ensure_layout_match(region_layout)
+                try:
+                    response = client.materialize_into_mapped_target(
+                        artifact_id=artifact_id,
+                        target_layout=region_layout.layout,
+                        device_uuid=device_uuid_for(self._device_id),
+                        preference=preference,
+                        source_policy=source_policy,
+                        disk_path=disk_path,
+                        verify_checksums=verify_checksums,
+                        copy_plan=self._copy_plan,
+                        dst_tensors=self._tensors,
+                        view=view_spec_proto,
+                        operation_id=operation_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._dirty = True
+                    message = str(exc)
+                    if (
+                        "MaterializeIntoMappedTarget" in message
+                        and "not supported" in message.lower()
+                    ):
+                        raise ArtifactError(
+                            "Mapped binding is not supported by the connected StoreDaemon",
+                            status_code="FAILED_PRECONDITION",
+                            retryable=False,
+                        ) from exc
+                    error = map_materialization_error(exc)
+                    if attempt == 0 and _is_region_error(error):
+                        self._refresh_regions()
+                        attempt += 1
+                        continue
+                    raise ArtifactError(
+                        str(error),
+                        status_code=error.status_code,
+                        retryable=False,
+                    ) from exc
+
+                if (
+                    response.status
+                    != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+                ):
+                    self._dirty = True
+                    raise ArtifactError(
+                        "MaterializeIntoMappedTarget returned non-success status",
+                        status_code="DATA_LOSS",
+                        retryable=False,
+                    )
+                break
+            if response is None or region_layout is None:
+                self._dirty = True
+                raise ArtifactError(
+                    "MaterializeIntoMappedTarget retry failed to produce a response",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            store_metrics.record_region_backed_verification_skipped(
+                self._runtime.daemon_endpoint
+            )
+            self._dirty = False
+
+            self._update_state_from_layout(
+                region_layout=region_layout,
+                view_spec=view_spec_proto,
+                artifact_id=artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                target_write_token=getattr(response, "target_write_token", None),
+                fallback=resolved._fallback,
+            )
+            return
         view_spec_proto = None
         if resolved._view_spec is not None and not resolved._view_spec.is_identity:
             view_spec_proto = resolved._view_spec.proto

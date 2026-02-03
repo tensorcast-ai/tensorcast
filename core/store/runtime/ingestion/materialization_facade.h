@@ -103,6 +103,14 @@ class MaterializationFacade : public materialization::control::MaterializationBa
       uint64_t generation,
       const loading::MaterializeHints& hints);
 
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints);
+
   absl::StatusOr<loading::ReplicaHandle> ingest_from_disk(
       const std::string& artifact_identifier,
       const loading::DiskSource& source,

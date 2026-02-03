@@ -18,6 +18,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/components/worker_identity.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
@@ -83,6 +84,14 @@ class StoreEngine {
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints = {});
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
       std::string_view canonical_index_json,
       uint64_t generation,
       const loading::MaterializeHints& hints = {});

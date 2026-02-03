@@ -87,6 +87,7 @@ sc_cc_library(
     deps = [
         ":materialization_facade",
         "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/runtime/context:runtime_context",
         "//core/store/runtime/context:runtime_context_events",
         "//core/store/runtime/metadata:metadata_gateway",

@@ -9,6 +9,7 @@ import "tensorcast/operation/v1/operation.proto";
 service StoreDaemonService {
   rpc MaterializeReplica(MaterializeReplicaRequest) returns (MaterializeReplicaResponse) {}
   rpc MaterializeIntoTarget(MaterializeIntoTargetRequest) returns (MaterializeIntoTargetResponse) {}
+  rpc MaterializeIntoMappedTarget(MaterializeIntoMappedTargetRequest) returns (MaterializeIntoTargetResponse) {}
   rpc ConfirmReplica(ConfirmReplicaRequest) returns (ConfirmReplicaResponse) {}
   rpc UnloadReplica(UnloadReplicaRequest) returns (UnloadReplicaResponse) {}
 
@@ -425,6 +426,61 @@ message MaterializeReplicaResponse {
   // Legacy view metadata for compatibility with view-based callers.
   bytes view_index_json = 1001;
   string view_data_hash = 1002;
+}
+
+message CopyPlanRange {
+  int32 dim = 1;
+  int64 start = 2;
+  int64 end = 3;
+}
+
+message CopyPlanEntry {
+  string ckpt_name = 1;
+  CopyPlanRange ckpt_range = 2;
+  string dst_name = 3;
+  CopyPlanRange dst_range = 4;
+}
+
+message CopyPlan {
+  uint32 version = 1;
+  repeated CopyPlanEntry entries = 2;
+}
+
+message MappedTensorSpec {
+  string name = 1;
+  repeated int64 shape = 2;
+  repeated int64 stride = 3;
+  string dtype = 4;
+  uint64 storage_offset = 5;
+  uint64 logical_length = 6;
+}
+
+message MaterializeIntoMappedTargetRequest {
+  oneof artifact_ref {
+    string artifact_id = 1;
+    string key = 2;
+  }
+  DiskFallbackHint disk_fallback = 3;
+
+  TargetLayout target_layout = 4;
+  int32 pid = 5;
+  string device_uuid = 6;
+
+  SourcePreference preference = 7;
+  SourcePolicy source_policy = 12;
+
+  CopyPlan copy_plan = 8;
+  repeated MappedTensorSpec dst_tensors = 9;
+
+  bytes view_subset_hash = 10;
+  optional string operation_id = 11;
+
+  oneof view_identity {
+    tensorcast.common.v1.ViewSpec view = 1001;
+    string view_id = 1002;
+  }
+
+  TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetRequest {

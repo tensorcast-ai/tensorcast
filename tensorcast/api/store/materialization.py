@@ -47,6 +47,7 @@ from tensorcast.api.store.runtime import StoreRuntimeContext
 from tensorcast.api.store.types import (
     ArtifactError,
     CanonicalIndex,
+    CanonicalIndexEntry,
     FallbackOptions,
     RetryPolicy,
     SpanAttributeValue,
@@ -1299,6 +1300,229 @@ class MaterializationPipeline:
             view_id=resolved_view_id,
             selection_names=selection_names,
             view_subset_hash=view_subset_hash,
+        )
+
+    def _build_mapped_region_backed_layout(
+        self,
+        *,
+        target: Mapping[str, torch.Tensor],
+        device_id: int,
+        selection_order: Sequence[str] | None = None,
+    ) -> _RegionBackedLayout:
+        if not target:
+            raise ArtifactError(
+                "Target tensors are empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        target_names = {str(name) for name in target}
+        if selection_order is not None:
+            selection_names = tuple(str(name) for name in selection_order)
+            if not selection_names:
+                raise ArtifactError(
+                    "selection_order must not be empty when provided",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if len(set(selection_names)) != len(selection_names):
+                raise ArtifactError(
+                    "selection_order must not contain duplicates",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if set(selection_names) != target_names:
+                raise ArtifactError(
+                    "selection_order must match target tensor names",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+        else:
+            selection_names = tuple(sorted(target_names))
+
+        @dataclass
+        class _StorageGroup:
+            base_ptr: int
+            nbytes: int
+            max_used: int
+            name: str
+
+        def _storage_nbytes(tensor: torch.Tensor) -> int:
+            if hasattr(tensor, "untyped_storage"):
+                return int(tensor.untyped_storage().nbytes())
+            return int(tensor.storage().nbytes())
+
+        storage_groups: dict[int, _StorageGroup] = {}
+        for name in selection_names:
+            tensor = target.get(name)
+            if tensor is None:
+                raise ArtifactError(
+                    f"Target tensor '{name}' missing",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"Target tensor '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"Target tensor '{name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if (tensor.device.index or 0) != device_id:
+                raise ArtifactError(
+                    f"Target tensor '{name}' on cuda:{tensor.device.index or 0}, expected cuda:{device_id}",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_contiguous():
+                raise ArtifactError(
+                    f"Target tensor '{name}' is not contiguous",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if int(tensor.storage_offset()) != 0:
+                raise ArtifactError(
+                    f"Target tensor '{name}' must have storage_offset=0",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            if tensor_bytes <= 0:
+                raise ArtifactError(
+                    f"Target tensor '{name}' has empty storage",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            base_ptr = int(tensor.data_ptr())
+            group = storage_groups.get(base_ptr)
+            if group is not None:
+                raise ArtifactError(
+                    "Mapped binding does not support shared storages",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            storage_groups[base_ptr] = _StorageGroup(
+                base_ptr=base_ptr,
+                nbytes=_storage_nbytes(tensor),
+                max_used=tensor_bytes,
+                name=name,
+            )
+
+        storage_list = sorted(storage_groups.values(), key=lambda group: group.base_ptr)
+        if not storage_list:
+            raise ArtifactError(
+                "Target storages are empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        storage_specs: list[tuple[_StorageGroup, int]] = []
+        for group in storage_list:
+            length = int(group.max_used)
+            if length <= 0:
+                raise ArtifactError(
+                    "Target storage must be non-empty",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if length > group.nbytes:
+                raise ArtifactError(
+                    "Target storage exceeds backing allocation",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            storage_specs.append((group, length))
+
+        layout = store_daemon_pb2.TargetLayout(
+            layout_kind=store_daemon_pb2.TargetLayout.LAYOUT_KIND_COALESCED_UNSPECIFIED,
+            index_kind=store_daemon_pb2.TargetLayout.INDEX_KIND_CANONICAL_UNSPECIFIED,
+            tensor_spec_kind=store_daemon_pb2.TargetLayout.TENSOR_SPEC_KIND_OFFSETS,
+        )
+
+        region_ids: list[str] = []
+        storage_id_by_ptr: dict[int, str] = {}
+        for group, length in storage_specs:
+            region = region_cache.find_region_for(device_id, group.base_ptr, length)
+            if region is None:
+                raise ArtifactError(
+                    "No registered region covers the target tensors",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            region_base_offset = int(group.base_ptr) - int(region.base_ptr)
+            storage_id = f"storage:{device_id}:{group.base_ptr:x}:{length}"
+            layout.storages.add(
+                storage_id=storage_id,
+                device_id=int(device_id),
+                storage_length=int(length),
+                vram_region_id=region.region_id,
+                mapping_base_offset=int(region_base_offset),
+            )
+            storage_id_by_ptr[group.base_ptr] = storage_id
+            region_ids.append(region.region_id)
+
+        offsets: list[store_daemon_pb2.TargetTensorOffset] = []
+        for name in selection_names:
+            tensor = target[name]
+            storage_id = storage_id_by_ptr[int(tensor.data_ptr())]
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            offsets.append(
+                store_daemon_pb2.TargetTensorOffset(
+                    name=name,
+                    storage_id=storage_id,
+                    storage_offset=0,
+                    logical_length=tensor_bytes,
+                )
+            )
+        layout.offsets.extend(offsets)
+
+        storage_base_offsets: dict[str, int] = {}
+        cursor = 0
+        for storage in layout.storages:
+            storage_base_offsets[storage.storage_id] = cursor
+            cursor += int(storage.storage_length)
+        logical_total_size = cursor
+
+        index_entries: list[CanonicalIndexEntry] = []
+        for name in sorted(selection_names):
+            tensor = target[name]
+            storage_id = storage_id_by_ptr[int(tensor.data_ptr())]
+            logical_offset = storage_base_offsets[storage_id]
+            tensor_bytes = int(tensor.numel()) * int(tensor.element_size())
+            index_entries.append(
+                CanonicalIndexEntry(
+                    name=name,
+                    dtype=tensor.dtype,
+                    shape=tuple(int(v) for v in tensor.shape),
+                    stride=tuple(int(v) for v in tensor.stride()),
+                    storage_offset=int(tensor.storage_offset()),
+                    segment_offset=logical_offset,
+                    size_bytes=tensor_bytes,
+                )
+            )
+        index = CanonicalIndex(
+            entries=tuple(index_entries),
+            total_size_bytes=logical_total_size,
+            avbs_hash="",
+        )
+        index_bytes = canonical_index_to_bytes(index)
+        layout.logical_layout_hash = compute_logical_layout_hash(
+            index_bytes=index_bytes,
+            needs_view_index=False,
+        )
+
+        return _RegionBackedLayout(
+            layout=layout,
+            region_ids=tuple(region_ids),
+            logical_total_size=logical_total_size,
+            view_index_bytes=None,
+            view_id=None,
+            selection_names=selection_names,
+            view_subset_hash=None,
         )
 
     def _materialize_into_target(

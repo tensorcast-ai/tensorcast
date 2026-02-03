@@ -64,6 +64,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::MaterializeIntoTargetRequest* req,
       v2::MaterializeIntoTargetResponse* resp) override;
 
+  grpc::Status MaterializeIntoMappedTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoMappedTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
+
   grpc::Status ConfirmReplica(
       grpc::ServerContext* ctx,
       const v2::ConfirmReplicaRequest* req,
