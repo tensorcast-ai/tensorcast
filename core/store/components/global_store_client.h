@@ -124,6 +124,14 @@ struct KeyMapping {
   std::string replica_uuid;
   std::string daemon_address;
   std::string disk_path;
+  uint64_t generation{0};
+  uint32_t cache_ttl_seconds{0};
+};
+
+struct KeyMappingSwapResult {
+  bool ok{false};
+  std::string artifact_id;
+  uint64_t generation{0};
 };
 
 struct CanonicalRange {
@@ -417,6 +425,12 @@ class IGlobalStoreClient {
       std::string_view disk_path,
       absl::Duration ttl) = 0;
 
+  virtual absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
+      std::string_view key,
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id,
+      std::optional<uint64_t> expected_generation) = 0;
+
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
 
   // Memory tier RPCs (optional; default implementations return Unimplemented)
@@ -665,6 +679,12 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::string_view artifact_id,
       std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration()) override;
+
+  absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
+      std::string_view key,
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id,
+      std::optional<uint64_t> expected_generation) override;
 
   absl::Status revoke_key_mapping(std::string_view key) override;
 

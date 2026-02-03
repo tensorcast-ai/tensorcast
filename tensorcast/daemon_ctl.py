@@ -8,6 +8,7 @@ import os
 import random
 import time
 from contextlib import contextmanager, suppress
+from dataclasses import dataclass
 from datetime import timezone
 from threading import RLock
 from typing import (
@@ -66,6 +67,21 @@ logger = init_logger(__name__)
 _METRICS_LOCK: RLock = RLock()
 _METRIC_CHANNEL_REFRESHES: int = 0
 _METRIC_RPC_RETRIES: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class KeyMappingResolution:
+    artifact_id: str
+    used_disk_path: str
+    generation: int
+    cache_ttl_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class SwapKeyMappingResult:
+    ok: bool
+    artifact_id: str
+    generation: int
 
 
 def _raise_grpc_error(err: Exception, *, cause: BaseException | None) -> NoReturn:
@@ -1911,8 +1927,8 @@ class DaemonCtl:
             raise ValueError("device_id must be non-negative")
         if size_bytes <= 0:
             raise ValueError("size_bytes must be positive")
-        if ttl_ms <= 0:
-            raise ValueError("ttl_ms must be positive")
+        if ttl_ms < 0:
+            raise ValueError("ttl_ms must be non-negative (0 disables TTL)")
         if not cuda_ipc_handle:
             raise ValueError("cuda_ipc_handle must not be empty")
 
@@ -2393,11 +2409,8 @@ class DaemonCtl:
 
     def resolve_key_mapping(
         self, key: str, *, timeout_s: float = 10.0
-    ) -> tuple[str, str]:
-        """Resolve a human-friendly key to (artifact_id, used_disk_path) via daemon.
-
-        Returns a tuple (artifact_id, used_disk_path). Raises on RPC errors.
-        """
+    ) -> KeyMappingResolution:
+        """Resolve a human-friendly key via daemon."""
         if not key:
             raise ValueError("key is required")
         with self._client_span("Client/ResolveKeyMapping") as span:
@@ -2409,7 +2422,51 @@ class DaemonCtl:
                 span=span,
                 retries=1,
             )
-            return resp.artifact_id, resp.used_disk_path
+            return KeyMappingResolution(
+                artifact_id=resp.artifact_id or "",
+                used_disk_path=resp.used_disk_path or "",
+                generation=int(getattr(resp, "generation", 0) or 0),
+                cache_ttl_seconds=int(getattr(resp, "cache_ttl_seconds", 0) or 0),
+            )
+
+    def swap_key_mapping(
+        self,
+        *,
+        key: str,
+        new_artifact_id: str,
+        expected_artifact_id: str | None = None,
+        expected_generation: int | None = None,
+        operation_id: str | None = None,
+        timeout_s: float = 10.0,
+    ) -> SwapKeyMappingResult:
+        if not key:
+            raise ValueError("key is required")
+        if not new_artifact_id:
+            raise ValueError("new_artifact_id is required")
+        req = store_daemon_pb2.SwapKeyMappingRequest(
+            key=key,
+            new_artifact_id=new_artifact_id,
+        )
+        if expected_artifact_id:
+            req.expected_artifact_id = str(expected_artifact_id)
+        if expected_generation is not None:
+            req.expected_generation = int(expected_generation)
+        if operation_id:
+            req.operation_id = str(operation_id)
+
+        with self._client_span("Client/SwapKeyMapping") as span:
+            resp = self._unary_call(
+                self.stub.SwapKeyMapping,
+                req,
+                timeout=timeout_s,
+                span=span,
+                retries=1,
+            )
+            return SwapKeyMappingResult(
+                ok=bool(getattr(resp, "ok", False)),
+                artifact_id=getattr(resp, "artifact_id", "") or "",
+                generation=int(getattr(resp, "generation", 0) or 0),
+            )
 
     def get_artifact_index_by_id(
         self, artifact_id: str, *, timeout_s: float = 10.0

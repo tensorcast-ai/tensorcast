@@ -112,6 +112,8 @@ service GlobalStoreService {
   // ========== Key Mapping ==========
   // Map a human-readable key to a single artifact_id, with optional replica hints
   rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
+  // Swap a key mapping to a new artifact_id with optional CAS guardrails
+  rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
   // Resolve a key to its artifact_id and optional hints
   rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
   // Revoke an existing key mapping
@@ -1019,6 +1021,20 @@ message UpsertKeyMappingResponse {
   string conflict_reason = 2;
 }
 
+message SwapKeyMappingRequest {
+  string key = 1;
+  string new_artifact_id = 2;
+  // Optional CAS guards
+  string expected_artifact_id = 3;
+  optional uint64 expected_generation = 4;
+  string operation_id = 5;
+}
+message SwapKeyMappingResponse {
+  Status status = 1;
+  string artifact_id = 2;
+  uint64 generation = 3;
+}
+
 message ResolveKeyMappingRequest {
   string key = 1;
 }
@@ -1028,6 +1044,8 @@ message ResolveKeyMappingResponse {
   string replica_uuid = 3;
   string daemon_address = 4;
   string disk_path = 5;
+  uint64 generation = 6;
+  uint32 cache_ttl_seconds = 7;
 }
 
 message RevokeKeyMappingRequest {

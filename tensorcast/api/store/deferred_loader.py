@@ -504,18 +504,6 @@ class DeferredLoader:
                 selection_order = tuple(self._byte_space_order)
         else:
             selection_order = tuple(self._order)
-        region_layout = self._pipeline._build_region_backed_layout(
-            canonical_index=canonical_index,
-            canonical_index_bytes=canonical_index_bytes,
-            target=target,
-            device_id=self._device_id,
-            tensor_names=selection_order,
-            view_spec=view_spec_proto,
-            view_id=None,
-            view_index_hint=None,
-            selection_order=selection_order,
-        )
-
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         disk_path: str | None = None
         verify_checksums = True
@@ -551,38 +539,74 @@ class DeferredLoader:
 
         client = self._runtime.ensure_client()
         operation_id = uuid.uuid4().hex
-        try:
-            response = client.materialize_into_target_v2(
-                artifact_id=artifact_id,
-                target_layout=region_layout.layout,
-                device_uuid=device_uuid_for(self._device_id),
-                preference=preference,
-                source_policy=source_policy,
-                disk_path=disk_path,
-                verify_checksums=verify_checksums,
-                tensor_names=region_layout.selection_names,
-                view=view_spec_proto,
-                view_id=region_layout.view_id if view_spec_proto is None else None,
-                view_subset_hash=region_layout.view_subset_hash,
-                operation_id=operation_id,
+        response = None
+        region_layout = None
+        attempt = 0
+        while attempt < 2:
+            region_layout = self._pipeline._build_region_backed_layout(
+                canonical_index=canonical_index,
+                canonical_index_bytes=canonical_index_bytes,
+                target=target,
+                device_id=self._device_id,
+                tensor_names=selection_order,
+                view_spec=view_spec_proto,
+                view_id=None,
+                view_index_hint=None,
+                selection_order=selection_order,
             )
-        except Exception as exc:  # noqa: BLE001
-            error = map_materialization_error(exc)
-            if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
-                self._unregister_region()
-            raise ArtifactError(
-                str(error),
-                status_code=error.status_code,
-                retryable=False,
-            ) from exc
+            try:
+                response = client.materialize_into_target_v2(
+                    artifact_id=artifact_id,
+                    target_layout=region_layout.layout,
+                    device_uuid=device_uuid_for(self._device_id),
+                    preference=preference,
+                    source_policy=source_policy,
+                    disk_path=disk_path,
+                    verify_checksums=verify_checksums,
+                    tensor_names=region_layout.selection_names,
+                    view=view_spec_proto,
+                    view_id=region_layout.view_id if view_spec_proto is None else None,
+                    view_subset_hash=region_layout.view_subset_hash,
+                    operation_id=operation_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error = map_materialization_error(exc)
+                if (
+                    error.status_code
+                    in {
+                        "DATA_LOSS",
+                        "FAILED_PRECONDITION",
+                        "NOT_FOUND",
+                    }
+                    and attempt == 0
+                ):
+                    self._unregister_region()
+                    self._ensure_arena()
+                    attempt += 1
+                    continue
+                if error.status_code in {"DATA_LOSS", "FAILED_PRECONDITION"}:
+                    self._unregister_region()
+                raise ArtifactError(
+                    str(error),
+                    status_code=error.status_code,
+                    retryable=False,
+                ) from exc
 
-        if (
-            response.status
-            != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
+            if (
+                response.status
+                != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+            ):
+                self._unregister_region()
+                raise ArtifactError(
+                    "MaterializeIntoTarget returned non-success status",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            break
+        if response is None or region_layout is None:
             self._unregister_region()
             raise ArtifactError(
-                "MaterializeIntoTarget returned non-success status",
+                "MaterializeIntoTarget retry failed to produce a response",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
@@ -659,7 +683,7 @@ class DeferredLoader:
     def _register_region(self, arena: torch.Tensor) -> None:
         if self._region_id is not None:
             return
-        ttl_ms = self._runtime._DEFAULT_LEASE_TTL_MS
+        ttl_ms = 0
         handle = self._store.register_vram_region(
             device_id=self._device_id,
             base_ptr=int(arena.data_ptr()),

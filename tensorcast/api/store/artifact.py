@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
 
+from tensorcast.api._device import device_uuid_for, resolve_device
 from tensorcast.api._view_ops import (
     SliceSpec,
     ViewSpecBuildResult,
@@ -27,10 +28,16 @@ from tensorcast.api.operation import (
     OperationStatus,
     PollingOperation,
 )
+from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
-from tensorcast.api.store.deferred_loader import DeferredLoader
-from tensorcast.api.store.materialization import MaterializationPipeline
+from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
+from tensorcast.api.store.inplace_slot import InplaceSlot
+from tensorcast.api.store.materialization import (
+    MaterializationPipeline,
+    _build_source_policy,
+)
+from tensorcast.api.store.region_utils import collect_storage_bases
 from tensorcast.api.store.retry import (
     map_materialization_error,
     raise_mapped_materialization_error,
@@ -528,6 +535,299 @@ class Artifact:
             packing=packing,
             capacity_bytes=capacity_bytes,
         )
+
+    def bind(
+        self,
+        device: torch.device | str,
+        *,
+        packing: str = "byte_space",
+        capacity_bytes: int | None = None,
+        publish: bool = False,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        """Allocate placeholders, fill from this artifact, and return a Binding."""
+        self._require_components()
+        base_index = self._effective_index()
+        if not base_index.entries:
+            raise ArtifactError(
+                "Artifact index is empty",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        with self.deferred_loader(
+            device=device,
+            packing=packing,
+            capacity_bytes=capacity_bytes,
+        ) as loader:
+            for entry in base_index.entries:
+                loader.tensor(entry.name)
+            slot = loader.commit()
+        return Binding(slot, publish=publish, ctx=ctx)
+
+    def bind_into(
+        self,
+        target_tensors: Mapping[str, torch.Tensor],
+        *,
+        packing: str = "byte_space",
+        publish: bool = False,
+        ctx: CallContext | None = None,
+    ) -> Binding:
+        """Adopt user-owned CUDA tensors, fill once, and return a Binding."""
+        store, runtime, pipeline = self._require_components()
+        if not isinstance(target_tensors, Mapping) or not target_tensors:
+            raise ArtifactError(
+                "bind_into target_tensors must be a non-empty mapping",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        mode = str(packing).strip().lower()
+        if mode not in {"append", "plan", "byte_space"}:
+            raise ArtifactError(
+                "packing must be 'append', 'plan', or 'byte_space'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+
+        self._ensure_metadata()
+        canonical_index = self._canonical_index
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index is None or canonical_index_bytes is None:
+            raise ArtifactError(
+                "Missing canonical index for bind_into",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        effective_index = self._effective_index()
+        expected_names = [entry.name for entry in effective_index.entries]
+        target_names = [str(name) for name in target_tensors]
+        if set(target_names) != set(expected_names):
+            raise ArtifactError(
+                "bind_into target tensors must cover the artifact selection",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        first_tensor = next(iter(target_tensors.values()))
+        if not isinstance(first_tensor, torch.Tensor):
+            raise ArtifactError(
+                "bind_into targets must be torch.Tensor instances",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not first_tensor.is_cuda:
+            raise ArtifactError(
+                "bind_into requires CUDA tensors",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        device_id = resolve_device(first_tensor.device, allow_cpu=False)
+        for name, tensor in target_tensors.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"bind_into target '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"bind_into target '{name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if resolve_device(tensor.device, allow_cpu=False) != device_id:
+                raise ArtifactError(
+                    "bind_into targets must share the same CUDA device",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+
+        ttl_ms = 0
+
+        def _register_regions() -> tuple[str, ...]:
+            region_ids: list[str] = []
+            bases = collect_storage_bases(target_tensors)
+            try:
+                for base_ptr, nbytes in sorted(bases.items()):
+                    handle = store.register_vram_region(
+                        device_id=device_id,
+                        base_ptr=base_ptr,
+                        size_bytes=nbytes,
+                        ttl_ms=int(ttl_ms),
+                    )
+                    region_ids.append(handle.region_id)
+            except Exception as exc:  # noqa: BLE001
+                for region_id in region_ids:
+                    store.unregister_vram_region(region_id)
+                raise ArtifactError(
+                    "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                ) from exc
+            return tuple(region_ids)
+
+        region_ids = _register_regions()
+
+        selection_order: tuple[str, ...] | None = None
+        if mode == "byte_space":
+            canonical_names = {entry.name for entry in canonical_index.entries}
+            if set(expected_names) != canonical_names:
+                selection_order = tuple(expected_names)
+        else:
+            selection_order = tuple(target_names)
+
+        view_spec_proto = None
+        if self._view_spec is not None and not self._view_spec.is_identity:
+            view_spec_proto = self._view_spec.proto
+        view_index_hint = (
+            self._view_metadata.view_index_bytes if self._view_metadata else None
+        )
+
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        disk_path: str | None = None
+        verify_checksums = True
+        effective_prefer = (
+            self._fallback.prefer if self._fallback is not None else "auto"
+        )
+        if self._fallback is not None:
+            if self._fallback.prefer == "p2p":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+                )
+            elif self._fallback.prefer == "disk":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+                )
+            disk_path = self._fallback.disk_path
+            verify_checksums = bool(self._fallback.verify_checksums)
+        if (
+            disk_path
+            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        ):
+            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+
+        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
+        if effective_prefer == "local":
+            allow_p2p = False
+        allow_disk = effective_prefer != "local" or bool(disk_path)
+        source_policy = _build_source_policy(
+            preference=preference,
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
+        )
+
+        client = runtime.ensure_client()
+        operation_id = uuid.uuid4().hex
+        try:
+            response = None
+            region_layout = None
+            attempt = 0
+            while attempt < 2:
+                region_layout = pipeline._build_region_backed_layout(
+                    canonical_index=canonical_index,
+                    canonical_index_bytes=canonical_index_bytes,
+                    target=target_tensors,
+                    device_id=device_id,
+                    tensor_names=selection_order,
+                    view_spec=view_spec_proto,
+                    view_id=None,
+                    view_index_hint=view_index_hint,
+                    selection_order=selection_order,
+                )
+                try:
+                    response = client.materialize_into_target_v2(
+                        artifact_id=self._ensure_identified(),
+                        target_layout=region_layout.layout,
+                        device_uuid=device_uuid_for(device_id),
+                        preference=preference,
+                        source_policy=source_policy,
+                        disk_path=disk_path,
+                        verify_checksums=verify_checksums,
+                        tensor_names=region_layout.selection_names,
+                        view=view_spec_proto,
+                        view_id=region_layout.view_id
+                        if view_spec_proto is None
+                        else None,
+                        view_subset_hash=region_layout.view_subset_hash,
+                        operation_id=operation_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    error = map_materialization_error(exc)
+                    if (
+                        error.status_code
+                        in {
+                            "DATA_LOSS",
+                            "FAILED_PRECONDITION",
+                            "NOT_FOUND",
+                        }
+                        and attempt == 0
+                    ):
+                        for region_id in region_ids:
+                            store.unregister_vram_region(region_id)
+                        region_ids = _register_regions()
+                        attempt += 1
+                        continue
+                    for region_id in region_ids:
+                        store.unregister_vram_region(region_id)
+                    raise ArtifactError(
+                        str(error),
+                        status_code=error.status_code,
+                        retryable=False,
+                    ) from exc
+
+                if (
+                    response.status
+                    != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+                ):
+                    for region_id in region_ids:
+                        store.unregister_vram_region(region_id)
+                    raise ArtifactError(
+                        "MaterializeIntoTarget returned non-success status",
+                        status_code="DATA_LOSS",
+                        retryable=False,
+                    )
+                break
+
+            if response is None or region_layout is None:
+                raise ArtifactError(
+                    "MaterializeIntoTarget retry failed to produce a response",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+        except Exception:
+            for region_id in region_ids:
+                store.unregister_vram_region(region_id)
+            raise
+
+        storage_ids = tuple(
+            storage.storage_id for storage in region_layout.layout.storages
+        )
+        commit_result = DeferredCommitResult(
+            tensor_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
+            storage_ids=storage_ids,
+            logical_size_bytes=region_layout.logical_total_size,
+            published_artifact=None,
+        )
+        slot = InplaceSlot(
+            store=store,
+            runtime=runtime,
+            pipeline=pipeline,
+            tensors=target_tensors,
+            device=first_tensor.device,
+            device_id=device_id,
+            region_id=None,
+            region_layout=region_layout,
+            view_spec=view_spec_proto,
+            fallback=self._fallback,
+            commit_result=commit_result,
+            artifact_id=self._ensure_identified(),
+            canonical_index_bytes=canonical_index_bytes,
+            target_write_token=getattr(response, "target_write_token", None),
+        )
+        return Binding(slot, publish=publish, ctx=ctx)
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext

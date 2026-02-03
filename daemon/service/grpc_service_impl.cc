@@ -803,6 +803,46 @@ Status StoreDaemonServiceImpl::ResolveKeyMapping(
   const auto& m = *mapping_or;
   resp->set_artifact_id(m.artifact_id);
   resp->set_used_disk_path(m.disk_path);
+  resp->set_generation(m.generation);
+  resp->set_cache_ttl_seconds(m.cache_ttl_seconds);
+  rctx.mark_success();
+  return grpc::Status::OK;
+}
+
+Status StoreDaemonServiceImpl::SwapKeyMapping(
+    grpc::ServerContext* ctx,
+    const v2::SwapKeyMappingRequest* req,
+    v2::SwapKeyMappingResponse* resp) {
+  RpcContext rctx{"SwapKeyMapping", *ctx, opts_.allow_high_card_attrs};
+  auto& span = rctx.span();
+  span->SetAttribute("tc.key", req->key());
+  if (req->key().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
+  }
+  if (req->new_artifact_id().empty()) {
+    return {grpc::StatusCode::INVALID_ARGUMENT, "new_artifact_id is required"};
+  }
+  if (shutdown_signal_->is_shutting_down()) {
+    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
+  }
+  std::optional<std::string_view> expected_artifact_id;
+  if (!req->expected_artifact_id().empty()) {
+    expected_artifact_id = req->expected_artifact_id();
+  }
+  std::optional<uint64_t> expected_generation;
+  if (req->has_expected_generation()) {
+    expected_generation = req->expected_generation();
+  }
+
+  auto result_or =
+      engine_->swap_key_mapping(req->key(), req->new_artifact_id(), expected_artifact_id, expected_generation);
+  if (!result_or.ok()) {
+    return to_grpc_status(result_or.status());
+  }
+  const auto& result = *result_or;
+  resp->set_ok(result.ok);
+  resp->set_artifact_id(result.artifact_id);
+  resp->set_generation(result.generation);
   rctx.mark_success();
   return grpc::Status::OK;
 }
@@ -1014,9 +1054,6 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
   if (req->size_bytes() == 0) {
     return {StatusCode::INVALID_ARGUMENT, "size_bytes must be > 0"};
   }
-  if (req->ttl_ms() == 0) {
-    return {StatusCode::INVALID_ARGUMENT, "ttl_ms must be > 0"};
-  }
   if (req->cuda_ipc_handle().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "cuda_ipc_handle must not be empty"};
   }
@@ -1039,6 +1076,9 @@ Status StoreDaemonServiceImpl::RegisterVramRegion(
     return to_grpc_status(desc_or.status());
   }
   const auto& desc = *desc_or;
+  if (desc.ttl_ms == 0 && lifecycle_manager_ != nullptr) {
+    lifecycle_manager_->watch_pid(static_cast<pid_t>(desc.owner_pid));
+  }
   resp->set_region_id(desc.region_id);
   resp->set_ttl_ms(desc.ttl_ms);
   if (desc.expires_at != absl::InfiniteFuture()) {
@@ -1072,6 +1112,9 @@ Status StoreDaemonServiceImpl::UnregisterVramRegion(
     return to_grpc_status(released_or.status());
   }
   resp->set_released(*released_or);
+  if (*released_or && lifecycle_manager_ != nullptr) {
+    lifecycle_manager_->unwatch_pid(static_cast<pid_t>(req->owner_pid()));
+  }
   rctx.mark_success();
   return Status::OK;
 }

@@ -136,6 +136,11 @@ def store_and_client(
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
     monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
     try:
         yield store, client
@@ -153,6 +158,11 @@ def store_and_client_empty_stride(
     store = Store("fake://daemon", runtime=runtime)
     monkeypatch.setattr(
         store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
     )
     monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
     try:
@@ -179,6 +189,11 @@ def store_and_client_safetensors(
     runtime = FakeRuntime(client)
     store = Store("fake://daemon", runtime=runtime)
     monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
     monkeypatch.setattr(deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0")
     try:
         yield store, client

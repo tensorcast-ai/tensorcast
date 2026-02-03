@@ -61,6 +61,11 @@ class MetadataGateway {
       std::string_view artifact_id,
       std::string_view disk_path,
       absl::Duration ttl);
+  absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view key,
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id,
+      std::optional<uint64_t> expected_generation);
   absl::Status revoke_key_mapping(std::string_view key);
 
   // Registration workflow

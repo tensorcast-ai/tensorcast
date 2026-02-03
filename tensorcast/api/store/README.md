@@ -92,6 +92,20 @@ managing clients manually.
   slices) so callers do not need to restate view parameters on every swap.
 - `capacity_bytes` bounds the arena size (defaults to the base canonical/view
   total size); exceeding it raises `RESOURCE_EXHAUSTED`.
+- For most users, prefer the `Binding` API (`artifact.bind(...)` /
+  `artifact.bind_into(...)`) which hides the deferred-loader/slot mechanics.
+
+## Binding (Preferred Inplace Updates)
+
+- `artifact.bind(device=..., packing=\"byte_space\", publish=False)` allocates a
+  client-owned CUDA layout, fills it from the artifact, and returns a `Binding`
+  ready for swaps without extra ceremony.
+- `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
+  adopts **user-owned** CUDA tensors (already allocated in the current process),
+  fills them once, and returns a `Binding`.
+- `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs
+  safe retire → overwrite → optional publish, reusing the original selection
+  (including view slices) without restating them.
 
 ## Batching, Async, and Prefetch
 

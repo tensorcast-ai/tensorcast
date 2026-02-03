@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Validate daemon library environment discovery resolves required shared libs."""
 
@@ -54,12 +54,27 @@ def _collect_library_dirs(ld_library_path: str) -> tuple[Path, ...]:
     return tuple(dirs)
 
 
-def _find_missing_libraries(library_dirs: tuple[Path, ...], libs: tuple[str, ...]) -> list[str]:
-    return [
-        lib_name
-        for lib_name in libs
-        if not any((directory / lib_name).exists() for directory in library_dirs)
-    ]
+def _resolve_library_entries(
+    library_dirs: tuple[Path, ...], libs: tuple[str, ...]
+) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    missing: list[str] = []
+    for lib_name in libs:
+        if any((directory / lib_name).exists() for directory in library_dirs):
+            resolved.append(lib_name)
+            continue
+        if lib_name.startswith("libnvrtc-builtins.so."):
+            major_prefix = lib_name.rsplit(".", 1)[0]
+            candidates: list[Path] = []
+            for directory in library_dirs:
+                candidates.extend(directory.glob(f"{major_prefix}*"))
+            candidates = [candidate for candidate in candidates if candidate.is_file()]
+            if candidates:
+                candidates.sort()
+                resolved.append(str(candidates[-1]))
+                continue
+        missing.append(lib_name)
+    return resolved, missing
 
 
 def _load_shared_objects(libraries: Iterable[str]) -> list[str]:
@@ -83,13 +98,18 @@ def test_daemon_library_environment_loads_required_shared_objects(monkeypatch: p
     library_dirs = _collect_library_dirs(ld_library_path)
     assert library_dirs, "expected at least one library directory from LD_LIBRARY_PATH"
 
-    env_missing = _find_missing_libraries(library_dirs, _ENV_MANAGED_LIBRARIES)
+    resolved_env_libs, env_missing = _resolve_library_entries(
+        library_dirs, _ENV_MANAGED_LIBRARIES
+    )
     assert not env_missing, (
         "expected CUDA/Torch libraries discoverable via LD_LIBRARY_PATH, missing: "
         + ", ".join(env_missing)
     )
 
-    load_missing = _load_shared_objects(_REQUIRED_LIBRARIES)
+    resolved_load_libs, load_missing = _resolve_library_entries(
+        library_dirs, _REQUIRED_LIBRARIES
+    )
+    load_missing.extend(_load_shared_objects(resolved_load_libs))
     assert not load_missing, (
         "ldd-listed libraries failed to load by exact name, missing: "
         + ", ".join(load_missing)

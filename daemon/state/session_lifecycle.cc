@@ -496,6 +496,9 @@ void SessionLifecycleManager::handle_pid_exit(pid_t pid) {
     auto it = pid_index_.find(pid);
     if (it != pid_index_.end())
       guards = it->second;
+    // Drop any external watches for this PID. The PidMonitor will also remove
+    // the watch internally once it detects exit, but we keep bookkeeping clean.
+    external_pid_watches_.erase(pid);
     for (GuardId gid : guards) {
       auto git = guard_by_id_.find(gid);
       if (git != guard_by_id_.end()) {
@@ -534,6 +537,47 @@ void SessionLifecycleManager::handle_pid_exit(pid_t pid) {
 void SessionLifecycleManager::attach_pid_monitor(PidMonitor* mon) {
   absl::MutexLock lock(&mu_);
   monitor_ = mon;
+}
+
+void SessionLifecycleManager::watch_pid(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  PidMonitor* mon = nullptr;
+  {
+    absl::MutexLock lock(&mu_);
+    ++external_pid_watches_[pid];
+    mon = monitor_;
+  }
+  if (mon != nullptr) {
+    mon->watch(pid);
+  }
+}
+
+void SessionLifecycleManager::unwatch_pid(pid_t pid) {
+  if (pid <= 0) {
+    return;
+  }
+  PidMonitor* mon = nullptr;
+  bool should_unwatch = false;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = external_pid_watches_.find(pid);
+    if (it == external_pid_watches_.end()) {
+      return;
+    }
+    if (it->second > 1) {
+      --it->second;
+      return;
+    }
+    external_pid_watches_.erase(it);
+    // Only unwatch when no lease PID guards remain for this pid.
+    should_unwatch = (pid_index_.find(pid) == pid_index_.end());
+    mon = monitor_;
+  }
+  if (should_unwatch && mon != nullptr) {
+    mon->unwatch(pid);
+  }
 }
 
 size_t SessionLifecycleManager::use_count_for(const store::loading::ReplicaKey& key) const {
@@ -683,7 +727,10 @@ void SessionLifecycleManager::retire_lease_(LeaseId id, const char* /*reason*/) 
           if (pit != pid_index_.end()) {
             pit->second.erase(gid);
             if (pit->second.empty()) {
-              pids_to_unwatch.push_back(git->second.pid);
+              // Only unwatch if no external liveness watches remain.
+              if (!external_pid_watches_.contains(git->second.pid)) {
+                pids_to_unwatch.push_back(git->second.pid);
+              }
               pid_index_.erase(pit);
             }
           }

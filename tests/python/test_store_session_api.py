@@ -56,6 +56,7 @@ class FakeHandle:
 class FakeDaemonCtl:
     resolves: dict[str, tuple[str | None, str | None]]
     materialized_by_id: dict[str, MaterializationPayload] = field(default_factory=dict)
+    cache_ttl_seconds: int = 0
 
     def __post_init__(self) -> None:
         self.unload_calls: list[tuple[str, str]] = []
@@ -69,9 +70,15 @@ class FakeDaemonCtl:
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
 
-    def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
+    def resolve_key_mapping(self, key: str) -> daemon_ctl.KeyMappingResolution:
         self.resolve_calls.append(key)
-        return self.resolves.get(key, (None, None))
+        artifact_id, disk_path = self.resolves.get(key, (None, None))
+        return daemon_ctl.KeyMappingResolution(
+            artifact_id=artifact_id or "",
+            used_disk_path=disk_path or "",
+            generation=0,
+            cache_ttl_seconds=int(self.cache_ttl_seconds),
+        )
 
     def resolve_artifact_from_disk_v2(
         self, *, disk_path: str, verify_checksums: bool = True
@@ -349,6 +356,7 @@ def store_env(monkeypatch: pytest.MonkeyPatch) -> tuple[Store, FakeEnvironment]:
     daemon_ctl._CLIENT_ADDRESS = None
 
     client = FakeDaemonCtl(resolves={})
+    client.cache_ttl_seconds = 3600
     env = FakeEnvironment(
         client=client,
         futures=[],
@@ -650,6 +658,7 @@ def test_store_key_resolution_cache_reuses_mapping(
     monkeypatch.setenv("TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS", "3600")
 
     client = FakeDaemonCtl(resolves={})
+    client.cache_ttl_seconds = 3600
     env = FakeEnvironment(
         client=client,
         futures=[],
@@ -684,6 +693,27 @@ def test_store_key_resolution_cache_reuses_mapping(
     assert torch.allclose(first["weight"], tensor)
     assert torch.allclose(second["weight"], tensor)
     assert client.resolve_calls.count(key) == 1
+
+    store.close()
+
+
+def test_store_key_resolution_cache_ttl_zero_disables_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = FakeDaemonCtl(resolves={})
+    client.cache_ttl_seconds = 0
+
+    key = "artifact-key"
+    artifact_id_value = "mi2:test:cached"
+    client.resolves[key] = (artifact_id_value, None)
+
+    monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
+    store = store_mod.Store("fake://daemon")
+
+    store._runtime.resolve_key_mapping_cached(key=key)
+    store._runtime.resolve_key_mapping_cached(key=key)
+
+    assert client.resolve_calls.count(key) == 2
 
     store.close()
 

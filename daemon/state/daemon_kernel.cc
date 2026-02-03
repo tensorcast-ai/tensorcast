@@ -38,6 +38,9 @@ DaemonKernel::DaemonKernel(
         if (this->lifecycle_mgr_) {
           this->lifecycle_mgr_->handle_pid_exit(pid);
         }
+        if (this->region_registry_) {
+          (void)this->region_registry_->handle_pid_exit(static_cast<int>(pid));
+        }
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());

@@ -385,6 +385,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("upsert_key_mapping not supported in test stub");
   }
 
+  absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>) override {
+    return absl::UnimplementedError("swap_key_mapping not supported in test stub");
+  }
+
   absl::Status revoke_key_mapping(std::string_view) override {
     return absl::UnimplementedError("revoke_key_mapping not supported in test stub");
   }
