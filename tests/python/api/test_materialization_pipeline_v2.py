@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import threading
-import time
 from contextlib import contextmanager
 from typing import Callable
 
@@ -14,7 +13,6 @@ import torch
 
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import (
@@ -144,6 +142,12 @@ class _RuntimeStub:
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)
 
+    def get_artifact_index_by_disk_path(
+        self, disk_path: str
+    ) -> ArtifactCacheEntry | None:
+        del disk_path
+        return None
+
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
 
@@ -152,8 +156,9 @@ class _RuntimeStub:
 
     def resolve_key_mapping_cached(
         self, *, key: str
-    ) -> str | None:  # pragma: no cover - noop
-        return None
+    ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
+        del key
+        return None, None
 
     @property
     def capabilities(self) -> StoreCapabilities:
@@ -321,7 +326,7 @@ def test_disk_fallback_verify_flag_passed():
         return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions(prefer="disk", verify_checksums=False)
+    fallback = FallbackOptions.for_disk("/tmp/artifact", verify=False)
     pipeline.get(artifact_id="aid", fallback=fallback)
     runtime.close()
 
@@ -341,11 +346,43 @@ def test_disk_fallback_allows_local_replica_source():
         )
 
     pipeline.set_materialize_fn(fake_materialize)
-    fallback = FallbackOptions(prefer="disk")
+    fallback = FallbackOptions.for_disk("/tmp/artifact", verify=False)
     result = pipeline.get(artifact_id="aid", fallback=fallback)
     runtime.close()
 
     assert torch.equal(result["a"], torch.ones(1))
+
+
+def test_disk_path_hint_prefers_disk_without_fallback():
+    runtime = _RuntimeStub()
+    views = ViewOrchestrator(runtime)
+    pipeline = MaterializationPipeline(runtime, views)
+    captured: dict[str, object] = {}
+
+    def fake_materialize(**kwargs):
+        captured["preference"] = kwargs.get("preference")
+        captured["disk_path_hint"] = kwargs.get("disk_path_hint")
+        captured["artifact_id"] = kwargs.get("artifact_id")
+        return _make_payload({"a": torch.ones(1)}, replica_uuid="disk")
+
+    pipeline.set_materialize_fn(fake_materialize)
+    materialized, _ = pipeline.materialize_subset(
+        artifact_id=None,
+        key=None,
+        device=0,
+        fallback=None,
+        tensor_names=None,
+        disk_path_hint="/tmp/artifact",
+    )
+    runtime.close()
+
+    assert captured["disk_path_hint"] == "/tmp/artifact"
+    assert (
+        captured["preference"]
+        == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+    )
+    assert runtime.client.resolve_calls == [("/tmp/artifact", True)]
+    assert materialized.replica_uuid == "disk"
 
 
 def test_materialize_subset_preserves_generation():

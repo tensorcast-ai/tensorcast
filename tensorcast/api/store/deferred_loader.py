@@ -505,6 +505,8 @@ class DeferredLoader:
         else:
             selection_order = tuple(self._order)
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        disk_path: str | None = None
+        verify_checksums = True
         effective_prefer = (
             self._fallback.prefer if self._fallback is not None else "auto"
         )
@@ -517,6 +519,13 @@ class DeferredLoader:
                 preference = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
+            disk_path = self._fallback.disk_path
+            verify_checksums = bool(self._fallback.verify_checksums)
+        if (
+            disk_path
+            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        ):
+            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
         allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
         if effective_prefer == "local":
@@ -554,6 +563,8 @@ class DeferredLoader:
                     device_uuid=device_uuid_for(self._device_id),
                     preference=preference,
                     source_policy=source_policy,
+                    disk_path=disk_path,
+                    verify_checksums=verify_checksums,
                     tensor_names=region_layout.selection_names,
                     view=view_spec_proto,
                     view_id=region_layout.view_id if view_spec_proto is None else None,

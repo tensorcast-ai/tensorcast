@@ -174,16 +174,6 @@ def test_inplace_slot_swap_preserves_data_ptr(
         lambda *args, **kwargs: (b"fake-handle", 0),
     )
     monkeypatch.setattr(
-        store_mod,
-        "get_cuda_memory_handle_with_offset",
-        lambda *args, **kwargs: (b"fake-handle", 0),
-    )
-    monkeypatch.setattr(
-        store_mod,
-        "get_cuda_memory_handle_with_offset",
-        lambda *args, **kwargs: (b"fake-handle", 0),
-    )
-    monkeypatch.setattr(
         deferred_loader_mod, "device_uuid_for", lambda device_id: "gpu-0"
     )
 

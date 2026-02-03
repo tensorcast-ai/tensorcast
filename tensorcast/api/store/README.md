@@ -88,6 +88,8 @@ managing clients manually.
 - `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
   returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
   replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
+  `slot.swap(ref)` reuses the slot selection (including any `artifact.view(...)`
+  slices) so callers do not need to restate view parameters on every swap.
 - `capacity_bytes` bounds the arena size (defaults to the base canonical/view
   total size); exceeding it raises `RESOURCE_EXHAUSTED`.
 

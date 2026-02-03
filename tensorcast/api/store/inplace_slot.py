@@ -457,6 +457,12 @@ class InplaceSlot:
             )
 
         preference, source_policy = self._resolve_source_policy(resolved._fallback)
+        disk_path = None if resolved._fallback is None else resolved._fallback.disk_path
+        verify_checksums = (
+            True
+            if resolved._fallback is None
+            else bool(resolved._fallback.verify_checksums)
+        )
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
         publish_checked = False
@@ -494,6 +500,8 @@ class InplaceSlot:
                     device_uuid=device_uuid_for(self._device_id),
                     preference=preference,
                     source_policy=source_policy,
+                    disk_path=disk_path,
+                    verify_checksums=verify_checksums,
                     tensor_names=region_layout.selection_names,
                     view=view_spec_proto,
                     view_id=region_layout.view_id if view_spec_proto is None else None,

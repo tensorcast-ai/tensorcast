@@ -36,15 +36,23 @@ absl::StatusOr<std::filesystem::path> normalize_disk_path(
   if (has_storage_root && !is_absolute) {
     candidate = storage_root / candidate;
   }
+  std::filesystem::path normalized_root;
+  if (has_storage_root) {
+    std::error_code root_ec;
+    normalized_root = std::filesystem::weakly_canonical(storage_root, root_ec);
+    if (root_ec) {
+      normalized_root = storage_root.lexically_normal();
+    }
+  }
   auto normalized = std::filesystem::weakly_canonical(candidate, ec);
   if (!ec) {
-    if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
+    if (has_storage_root && !path_has_prefix(normalized, normalized_root)) {
       return absl::InvalidArgumentError(
           absl::StrCat(
               "disk_path must resolve under storage_path: ",
               normalized.string(),
               " (root=",
-              storage_root.string(),
+              normalized_root.string(),
               ")"));
     }
     return normalized;
@@ -53,10 +61,14 @@ absl::StatusOr<std::filesystem::path> normalize_disk_path(
   if (normalized.empty()) {
     return absl::ErrnoToStatus(ec.value(), "Failed to canonicalize disk_path");
   }
-  if (has_storage_root && !is_absolute && !path_has_prefix(normalized, storage_root)) {
+  if (has_storage_root && !path_has_prefix(normalized, normalized_root)) {
     return absl::InvalidArgumentError(
         absl::StrCat(
-            "disk_path must resolve under storage_path: ", normalized.string(), " (root=", storage_root.string(), ")"));
+            "disk_path must resolve under storage_path: ",
+            normalized.string(),
+            " (root=",
+            normalized_root.string(),
+            ")"));
   }
   return normalized;
 }

@@ -245,6 +245,7 @@ TEST_CASE(
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
   req.add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
