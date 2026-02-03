@@ -103,9 +103,40 @@ managing clients manually.
 - `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
   adopts **user-owned** CUDA tensors (already allocated in the current process),
   fills them once, and returns a `Binding`.
+- `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
+  executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
+  user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
+- Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
+  enforces full dst coverage with no overlaps, and is local-only (publish is rejected).
+- View compatibility for mapped binding is narrow-only: transpose/permutation views
+  are rejected and copy-plan ranges are expressed in canonical coordinates.
 - `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs
   safe retire → overwrite → optional publish, reusing the original selection
   (including view slices) without restating them.
+
+Example (vLLM-style split weight):
+
+```python
+from tensorcast.api.store import CopyPlanEntry, Range
+
+copy_plan = [
+    CopyPlanEntry(
+        ckpt_name="layers.0.mlp.gate_up_proj.weight",
+        ckpt_range=Range(dim=0, start=0, end=4096),
+        dst_name="layers.0.mlp.gate_proj.weight",
+        dst_range=Range(dim=0, start=0, end=4096),
+    ),
+    CopyPlanEntry(
+        ckpt_name="layers.0.mlp.gate_up_proj.weight",
+        ckpt_range=Range(dim=0, start=4096, end=8192),
+        dst_name="layers.0.mlp.up_proj.weight",
+        dst_range=Range(dim=0, start=0, end=4096),
+    ),
+]
+
+binding = artifact.bind_into(dst_tensors, mapping=copy_plan, packing="byte_space")
+binding.swap("model:v2")
+```
 
 ## Batching, Async, and Prefetch
 

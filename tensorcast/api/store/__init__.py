@@ -53,6 +53,12 @@ from tensorcast.api.store.binding import Binding
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.inplace_slot import InplaceSlot
+from tensorcast.api.store.mapped_binding import (
+    CopyPlan,
+    CopyPlanEntry,
+    Range,
+    TargetTensors,
+)
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import (
@@ -1062,6 +1068,8 @@ __all__ = [
     "Binding",
     "CanonicalIndex",
     "CanonicalIndexEntry",
+    "CopyPlan",
+    "CopyPlanEntry",
     "DeferredCommitResult",
     "DeferredLoader",
     "InplaceSlot",
@@ -1080,6 +1088,8 @@ __all__ = [
     "TensorMeta",
     "TensorDict",
     "TransformPlacement",
+    "Range",
+    "TargetTensors",
     "PersistenceStatusResult",
     "PersistenceShardStatus",
     "artifact",

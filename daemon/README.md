@@ -80,6 +80,7 @@ flowchart TB
 
 - Loading: `MaterializeByKey` (preferred), `MaterializeReplica`, `ConfirmReplica`, `UnloadReplica`, `WaitReplicaVerification`. Materialization responses include descriptor payloads derived from UMA view plans (offset/stride/byte-length) so exported buffer layouts match the planner.
 - Region-backed loading: `MaterializeIntoTarget` streams bytes directly into client-registered CUDA regions with a coalesced `TargetLayout`. Canonical and view-indexed byte spaces are supported (including packed subset selection via `tensor_names`/`view_subset_hash`); non-identity views must resolve a deterministic `view_id` that matches `target_layout.view_id`. The daemon validates layout/device/region constraints, maps the IPC handles (single or ordered-concatenation multi-storage), and never allocates a daemon-owned replica. Successful calls may return a `target_write_token`; `PublishTargetReplica` publishes the filled target as a routable memory replica without re-hashing GPU bytes, and `RetirePublishedReplica` performs a safe retire (GS drain + local cleanup) before overwrite with drain waits bounded by `drain_timeout_ms` across Global Store and local export drain. `DeregisterArtifact` now accepts `ByteSpaceRef` to target canonical vs view replicas explicitly.
+- Mapped region-backed loading: `MaterializeIntoMappedTarget` executes a copy plan (src range → dst range) into client-registered CUDA regions. v1 requires contiguous dst tensors, full dst coverage with no overlaps, and narrow-only views; the RPC is loopback/UDS-only and does not mint publish tokens.
 - Disk fallbacks honor `verify_checksums` on `DiskFallbackHint`/`MaterializeReplicaRequest` and propagate the flag into engine `MaterializeHints` so checksum/descriptor validation is enforced by default but can be disabled for local development.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`, `SealAssembly`.
 - Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
@@ -95,6 +96,7 @@ Contract highlights:
 - `MaterializeByKey` performs key resolution and P2P-first loading with disk fallback inside the daemon; clients do not implement fallback.
 - `MaterializeReplica` shares the same LIP fast-path semantics; same-device denial from LIP is treated as a cache miss and falls back to the engine path rather than surfacing an RPC failure.
 - `MaterializeIntoTarget` requires `artifact_id`, accepts canonical or view-indexed layouts (including subset-packed and multi-storage coalesced targets), and can optionally verify external target writes when `engine.enable_external_target_verification=true`; verification failures poison the region and return `DATA_LOSS`.
+- `MaterializeIntoMappedTarget` is a local-only RPC that validates copy-plan coverage before writing any bytes and rejects transpose/permutation views in v1.
 - Transport locks infer a unique device when `device_id` is absent; ambiguity returns `INVALID_ARGUMENT`.
 - `UnloadReplica` surfaces detailed failure reasons (state/location/release status) via gRPC status messages so clients can
   diagnose unload failures without daemon-side logs.

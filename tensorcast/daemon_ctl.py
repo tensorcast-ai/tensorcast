@@ -16,6 +16,7 @@ from typing import (
     Any,
     Iterator,
     Literal,
+    Mapping,
     NoReturn,
     Sequence,
     cast,
@@ -27,6 +28,8 @@ from opentelemetry import trace
 from opentelemetry.trace import SpanKind
 
 if TYPE_CHECKING:
+    import torch
+
     from tensorcast.api._config import StorePolicy
     from tensorcast.proto.operation.v1 import operation_pb2
 from tensorcast.error_reporting import debug_errors_enabled
@@ -665,6 +668,130 @@ class DaemonCtl:
         if not return_response:
             raise RuntimeError(
                 "materialize_into_target_v2 requires return_response=True"
+            )
+        return response
+
+    def materialize_into_mapped_target(
+        self,
+        *,
+        artifact_id: str,
+        target_layout: store_daemon_pb2.TargetLayout,
+        device_uuid: str,
+        copy_plan,
+        dst_tensors: Mapping[str, torch.Tensor],
+        preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        disk_path: str | None = None,
+        verify_checksums: bool = True,
+        view: common_pb2.ViewSpec | None = None,
+        view_id: str | None = None,
+        placement: store_daemon_pb2.TransformPlacement | None = None,
+        pid: int | None = None,
+        operation_id: str | None = None,
+        return_response: bool = True,
+    ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
+        from tensorcast.api.store.mapped_binding import normalize_copy_plan
+
+        if not artifact_id:
+            raise ValueError("artifact_id is required")
+        if not device_uuid:
+            raise ValueError("device_uuid is required")
+        if view is not None and view_id is not None:
+            raise ValueError("Specify at most one of view or view_id")
+        if not isinstance(dst_tensors, Mapping) or not dst_tensors:
+            raise ValueError("dst_tensors must be a non-empty mapping")
+        normalized_plan = normalize_copy_plan(copy_plan)
+        pid_value = self._get_effective_pid() if pid is None else int(pid)
+        with self._client_span("Client/MaterializeIntoMappedTarget") as span:
+            if preference is not None:
+                preference_value = preference
+            elif (
+                source_policy is not None
+                and source_policy.preference
+                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
+            ):
+                preference_value = source_policy.preference
+            else:
+                preference_value = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+                )
+            request = store_daemon_pb2.MaterializeIntoMappedTargetRequest(
+                artifact_id=artifact_id,
+                target_layout=target_layout,
+                device_uuid=device_uuid,
+                pid=pid_value,
+                preference=preference_value,
+            )
+            plan_proto = store_daemon_pb2.CopyPlan(version=1)
+            for entry in normalized_plan:
+                entry_proto = store_daemon_pb2.CopyPlanEntry(
+                    ckpt_name=str(entry.ckpt_name),
+                    dst_name=str(entry.dst_name),
+                )
+                if entry.ckpt_range is not None:
+                    entry_proto.ckpt_range.dim = int(entry.ckpt_range.dim)
+                    entry_proto.ckpt_range.start = int(entry.ckpt_range.start)
+                    entry_proto.ckpt_range.end = int(entry.ckpt_range.end)
+                if entry.dst_range is not None:
+                    entry_proto.dst_range.dim = int(entry.dst_range.dim)
+                    entry_proto.dst_range.start = int(entry.dst_range.start)
+                    entry_proto.dst_range.end = int(entry.dst_range.end)
+                plan_proto.entries.append(entry_proto)
+            request.copy_plan.CopyFrom(plan_proto)
+            for name, tensor in dst_tensors.items():
+                spec = store_daemon_pb2.MappedTensorSpec(
+                    name=str(name),
+                    dtype=str(tensor.dtype),
+                    storage_offset=int(tensor.storage_offset()),
+                    logical_length=int(tensor.numel()) * int(tensor.element_size()),
+                )
+                spec.shape.extend(int(v) for v in tensor.shape)
+                spec.stride.extend(int(v) for v in tensor.stride())
+                request.dst_tensors.append(spec)
+            if source_policy is not None:
+                request.source_policy.CopyFrom(source_policy)
+            if disk_path:
+                request.disk_fallback.disk_path = disk_path
+                request.disk_fallback.verify_checksums = bool(verify_checksums)
+            if view is not None:
+                request.view.CopyFrom(view)
+            elif view_id is not None:
+                request.view_id = str(view_id)
+            if placement is not None:
+                request.placement = placement
+            if operation_id:
+                request.operation_id = str(operation_id)
+            try:
+                response: store_daemon_pb2.MaterializeIntoTargetResponse = (
+                    self._unary_call(
+                        self.stub_v2.MaterializeIntoMappedTarget,
+                        request,
+                        timeout=60,
+                        span=span,
+                        retries=1,
+                    )
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                code = e.code()
+                if code == grpc.StatusCode.UNAVAILABLE:
+                    raise RuntimeError(
+                        f"Local StoreDaemon ({self.server_address}) is not available."
+                    ) from e
+                if code == grpc.StatusCode.UNIMPLEMENTED:
+                    raise RuntimeError(
+                        "MaterializeIntoMappedTarget is not supported by the connected StoreDaemon."
+                    ) from e
+                if code == grpc.StatusCode.NOT_FOUND:
+                    raise RuntimeError(
+                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                    ) from e
+                raise RuntimeError(
+                    _grpc_message(e, fallback="MaterializeIntoMappedTarget RPC failed")
+                ) from e
+        if not return_response:
+            raise RuntimeError(
+                "materialize_into_mapped_target requires return_response=True"
             )
         return response
 

@@ -135,6 +135,8 @@ graph TB
 
 - Region-backed materialization (external targets):
   - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(const DeviceKey&, const loading::IntoTargetLayout&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&)`
+  - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(const DeviceKey&, const loading::IntoTargetLayout&, const loader::ByteRangeMap&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&)`
+  - Executes a precompiled byte-range mapping (dst → src) into external target storages; v1 is used by mapped binding with narrow-only views and contiguous dst tensors.
   - Streams canonical or view-selected ByteSpaces directly into client-provided GPU storages; no daemon-owned replica is allocated.
   - `IntoTargetLayout` supports ordered-concatenation multi-storage layouts (mapped to `TargetLayoutGpuSink`), and view/subset selection uses `ViewPlanner` + `ViewPlanSource` with `MaterializeHints::variant` carrying `view_id`/`view_spec` and placement.
 

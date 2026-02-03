@@ -317,6 +317,14 @@ Status StoreDaemonServiceImpl::MaterializeIntoTarget(
   return materialization_controller_->materialize_into_target(rctx, *req, *resp);
 }
 
+Status StoreDaemonServiceImpl::MaterializeIntoMappedTarget(
+    grpc::ServerContext* ctx,
+    const v2::MaterializeIntoMappedTargetRequest* req,
+    v2::MaterializeIntoTargetResponse* resp) {
+  RpcContext rctx{"MaterializeIntoMappedTarget", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->materialize_into_mapped_target(rctx, *req, *resp);
+}
+
 Status StoreDaemonServiceImpl::ConfirmReplica(
     grpc::ServerContext* ctx,
     const v2::ConfirmReplicaRequest* req,

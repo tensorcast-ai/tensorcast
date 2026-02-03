@@ -334,6 +334,7 @@ sc_cc_library(
         "//core/common:trace_macros_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store/materialization/common:view_hash_utils",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/materialization/contracts:loading_spec",
         "//core/store/materialization/contracts:materialization_request",
         "//core/store/materialization/control:replica_registration_helper",

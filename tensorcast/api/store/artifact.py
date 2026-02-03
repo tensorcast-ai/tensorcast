@@ -33,6 +33,12 @@ from tensorcast.api.store.cache import ArtifactCacheEntry
 from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.inplace_slot import InplaceSlot
+from tensorcast.api.store.mapped_binding import (
+    CopyPlan,
+    normalize_copy_plan,
+    validate_copy_plan,
+    view_narrow_ranges,
+)
 from tensorcast.api.store.materialization import (
     MaterializationPipeline,
     _build_source_policy,
@@ -568,11 +574,20 @@ class Artifact:
         self,
         target_tensors: Mapping[str, torch.Tensor],
         *,
+        mapping: CopyPlan | None = None,
         packing: str = "byte_space",
         publish: bool = False,
         ctx: CallContext | None = None,
     ) -> Binding:
         """Adopt user-owned CUDA tensors, fill once, and return a Binding."""
+        if mapping is not None:
+            return self._bind_into_mapped(
+                target_tensors=target_tensors,
+                mapping=mapping,
+                packing=packing,
+                publish=publish,
+                ctx=ctx,
+            )
         store, runtime, pipeline = self._require_components()
         if not isinstance(target_tensors, Mapping) or not target_tensors:
             raise ArtifactError(
@@ -828,6 +843,275 @@ class Artifact:
             target_write_token=getattr(response, "target_write_token", None),
         )
         return Binding(slot, publish=publish, ctx=ctx)
+
+    def _bind_into_mapped(
+        self,
+        *,
+        target_tensors: Mapping[str, torch.Tensor],
+        mapping: CopyPlan,
+        packing: str,
+        publish: bool,
+        ctx: CallContext | None,
+    ) -> Binding:
+        store, runtime, pipeline = self._require_components()
+        if not isinstance(target_tensors, Mapping) or not target_tensors:
+            raise ArtifactError(
+                "bind_into target_tensors must be a non-empty mapping",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        mode = str(packing).strip().lower()
+        if mode != "byte_space":
+            raise ArtifactError(
+                "mapped binding requires packing='byte_space'",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if publish:
+            raise ArtifactError(
+                "publish is not supported for mapped binding in v1",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        self._ensure_metadata()
+        canonical_index = self._canonical_index
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index is None or canonical_index_bytes is None:
+            raise ArtifactError(
+                "Missing canonical index for bind_into",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        if self._view_metadata is not None and self._view_spec is None:
+            raise ArtifactError(
+                "mapped binding requires a view spec (view_id-only handles not supported)",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        copy_plan = normalize_copy_plan(mapping)
+        view_narrows = view_narrow_ranges(self._view_spec)
+        validate_copy_plan(
+            plan=copy_plan,
+            canonical_index=canonical_index,
+            target_tensors=target_tensors,
+            view_narrows=view_narrows,
+            require_full_coverage=True,
+        )
+
+        first_tensor = next(iter(target_tensors.values()))
+        if not isinstance(first_tensor, torch.Tensor):
+            raise ArtifactError(
+                "bind_into targets must be torch.Tensor instances",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if not first_tensor.is_cuda:
+            raise ArtifactError(
+                "bind_into requires CUDA tensors",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+        device_id = resolve_device(first_tensor.device, allow_cpu=False)
+        for name, tensor in target_tensors.items():
+            if not isinstance(tensor, torch.Tensor):
+                raise ArtifactError(
+                    f"bind_into target '{name}' must be a torch.Tensor",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            if not tensor.is_cuda:
+                raise ArtifactError(
+                    f"bind_into target '{name}' must be CUDA",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+            if resolve_device(tensor.device, allow_cpu=False) != device_id:
+                raise ArtifactError(
+                    "bind_into targets must share the same CUDA device",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+
+        ttl_ms = 0
+
+        def _register_regions() -> tuple[str, ...]:
+            region_ids: list[str] = []
+            bases = collect_storage_bases(target_tensors)
+            try:
+                for base_ptr, nbytes in sorted(bases.items()):
+                    handle = store.register_vram_region(
+                        device_id=device_id,
+                        base_ptr=base_ptr,
+                        size_bytes=nbytes,
+                        ttl_ms=int(ttl_ms),
+                    )
+                    region_ids.append(handle.region_id)
+            except Exception as exc:  # noqa: BLE001
+                for region_id in region_ids:
+                    store.unregister_vram_region(region_id)
+                raise ArtifactError(
+                    "bind_into requires user-owned CUDA memory (daemon-owned tensors cannot be used)",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                ) from exc
+            return tuple(region_ids)
+
+        region_ids = _register_regions()
+        selection_order = tuple(sorted(str(name) for name in target_tensors))
+
+        view_spec_proto = None
+        if self._view_spec is not None and not self._view_spec.is_identity:
+            view_spec_proto = self._view_spec.proto
+
+        preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        disk_path: str | None = None
+        verify_checksums = True
+        effective_prefer = (
+            self._fallback.prefer if self._fallback is not None else "auto"
+        )
+        if self._fallback is not None:
+            if self._fallback.prefer == "p2p":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_P2P
+                )
+            elif self._fallback.prefer == "disk":
+                preference = (
+                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+                )
+            disk_path = self._fallback.disk_path
+            verify_checksums = bool(self._fallback.verify_checksums)
+        if (
+            disk_path
+            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        ):
+            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+
+        allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
+        if effective_prefer == "local":
+            allow_p2p = False
+        allow_disk = effective_prefer != "local" or bool(disk_path)
+        source_policy = _build_source_policy(
+            preference=preference,
+            allow_p2p=allow_p2p,
+            allow_disk=allow_disk,
+        )
+
+        client = runtime.ensure_client()
+        operation_id = uuid.uuid4().hex
+        try:
+            response = None
+            region_layout = None
+            attempt = 0
+            while attempt < 2:
+                region_layout = pipeline._build_mapped_region_backed_layout(
+                    target=target_tensors,
+                    device_id=device_id,
+                    selection_order=selection_order,
+                )
+                try:
+                    response = client.materialize_into_mapped_target(
+                        artifact_id=self._ensure_identified(),
+                        target_layout=region_layout.layout,
+                        device_uuid=device_uuid_for(device_id),
+                        preference=preference,
+                        source_policy=source_policy,
+                        disk_path=disk_path,
+                        verify_checksums=verify_checksums,
+                        copy_plan=copy_plan,
+                        dst_tensors=target_tensors,
+                        view=view_spec_proto,
+                        operation_id=operation_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    message = str(exc)
+                    if (
+                        "MaterializeIntoMappedTarget" in message
+                        and "not supported" in message.lower()
+                    ):
+                        raise ArtifactError(
+                            "Mapped binding is not supported by the connected StoreDaemon",
+                            status_code="FAILED_PRECONDITION",
+                            retryable=False,
+                        ) from exc
+                    error = map_materialization_error(exc)
+                    if (
+                        error.status_code
+                        in {
+                            "DATA_LOSS",
+                            "FAILED_PRECONDITION",
+                            "NOT_FOUND",
+                        }
+                        and attempt == 0
+                    ):
+                        for region_id in region_ids:
+                            store.unregister_vram_region(region_id)
+                        region_ids = _register_regions()
+                        attempt += 1
+                        continue
+                    for region_id in region_ids:
+                        store.unregister_vram_region(region_id)
+                    raise ArtifactError(
+                        str(error),
+                        status_code=error.status_code,
+                        retryable=False,
+                    ) from exc
+
+                if (
+                    response.status
+                    != store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
+                ):
+                    for region_id in region_ids:
+                        store.unregister_vram_region(region_id)
+                    raise ArtifactError(
+                        "MaterializeIntoMappedTarget returned non-success status",
+                        status_code="DATA_LOSS",
+                        retryable=False,
+                    )
+                break
+
+            if response is None or region_layout is None:
+                raise ArtifactError(
+                    "MaterializeIntoMappedTarget retry failed to produce a response",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+        except Exception:
+            for region_id in region_ids:
+                store.unregister_vram_region(region_id)
+            raise
+
+        storage_ids = tuple(
+            storage.storage_id for storage in region_layout.layout.storages
+        )
+        commit_result = DeferredCommitResult(
+            tensor_names=region_layout.selection_names,
+            view_id=region_layout.view_id,
+            view_subset_hash=region_layout.view_subset_hash,
+            storage_ids=storage_ids,
+            logical_size_bytes=region_layout.logical_total_size,
+            published_artifact=None,
+        )
+        slot = InplaceSlot(
+            store=store,
+            runtime=runtime,
+            pipeline=pipeline,
+            tensors=target_tensors,
+            device=first_tensor.device,
+            device_id=device_id,
+            region_id=None,
+            region_layout=region_layout,
+            view_spec=view_spec_proto,
+            fallback=self._fallback,
+            commit_result=commit_result,
+            artifact_id=self._ensure_identified(),
+            canonical_index_bytes=canonical_index_bytes,
+            target_write_token=getattr(response, "target_write_token", None),
+            copy_plan=copy_plan,
+        )
+        return Binding(slot, publish=False, ctx=ctx)
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext

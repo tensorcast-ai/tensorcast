@@ -73,6 +73,11 @@ class MaterializationController {
       const v2::MaterializeIntoTargetRequest& req,
       v2::MaterializeIntoTargetResponse& resp);
 
+  grpc::Status materialize_into_mapped_target(
+      RpcContext& rctx,
+      const v2::MaterializeIntoMappedTargetRequest& req,
+      v2::MaterializeIntoTargetResponse& resp);
+
   grpc::Status publish_target_replica(
       RpcContext& rctx,
       const v2::PublishTargetReplicaRequest& req,
