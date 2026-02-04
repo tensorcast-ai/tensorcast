@@ -143,6 +143,7 @@ def init(
     show_daemon_logs: bool = True,
     global_store_mode: Literal["connect", "start", "none"] = "none",
     global_store_address: str | None = None,
+    global_store_config_path: str | None = None,
     cluster_id: str | None = None,
     allow_gs_fallback: bool = False,
     session_id: str | None = None,
@@ -171,6 +172,10 @@ def init(
             launching locally.
         global_store_mode: connect|start|none orchestration mode shared with CLI.
         global_store_address: Optional Global Store host:port to connect.
+        global_store_config_path: Optional Global Store config path used when
+            global_store_mode="start". If omitted, the Global Store launcher
+            discovers one via $TENSORCAST_GLOBAL_STORE_CONFIG or
+            examples/config/global_store_config.yaml (repo or packaged wheel).
         cluster_id: Optional cluster identity to enforce when connecting/starting GS.
         allow_gs_fallback: If True, start mode may fall back to none on GS failure.
         session_id: Optional explicit daemon session id (treated as private/ephemeral).
@@ -258,6 +263,11 @@ def init(
             session_id=session_id,
             global_store_mode=global_store_mode,
             global_store_address=global_store_address,
+            global_store_config=(
+                Path(global_store_config_path).expanduser()
+                if global_store_config_path
+                else None
+            ),
             allow_gs_fallback=allow_gs_fallback,
             cluster_id=cluster_id,
             register_current=session_id is None,
