@@ -17,12 +17,14 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
+#include "core/common/memory/memory_location.h"
 #include "core/communicator/misc/common.h"
 #include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/materialization/common/view_hash_utils.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/replica/memory_state.h"
+#include "core/store/replica/replica.h"
 #include "core/store/replica/unified_memory_authority.h"
 #include "gsl/pointers"
 
@@ -640,7 +642,35 @@ absl::StatusOr<components::KeyMappingSwapResult> StoreEngine::swap_key_mapping(
 }
 
 absl::StatusOr<std::string> StoreEngine::get_canonical_index_by_id(std::string_view artifact_id) {
-  return metadata_gateway_->get_canonical_index(artifact_id);
+  auto local_or = [&]() -> absl::StatusOr<std::string> {
+    auto keys = replica_runtime_->registry().find_by_artifact(artifact_id);
+    if (keys.empty()) {
+      return absl::NotFoundError("local canonical index not found");
+    }
+    for (const auto& key : keys) {
+      auto replica_or = replica_runtime_->registry().find(key);
+      if (!replica_or.ok()) {
+        continue;
+      }
+      const auto& canonical = (*replica_or)->canonical_index_json();
+      if (canonical.has_value() && !canonical->empty()) {
+        return *canonical;
+      }
+    }
+    return absl::NotFoundError("local canonical index not found");
+  }();
+
+  if (local_or.ok()) {
+    return *local_or;
+  }
+  auto remote_or = metadata_gateway_->get_canonical_index(artifact_id);
+  if (remote_or.ok()) {
+    return *remote_or;
+  }
+  if (absl::IsFailedPrecondition(remote_or.status())) {
+    return local_or.status();
+  }
+  return remote_or.status();
 }
 
 absl::StatusOr<components::ViewMetadata> StoreEngine::get_view_metadata(
@@ -649,12 +679,8 @@ absl::StatusOr<components::ViewMetadata> StoreEngine::get_view_metadata(
   return metadata_gateway_->get_view_metadata(artifact_id, view_id);
 }
 
-absl::Status StoreEngine::upsert_key_mapping(
-    std::string_view key,
-    std::string_view artifact_id,
-    std::string_view disk_path,
-    absl::Duration ttl) {
-  return metadata_gateway_->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+absl::Status StoreEngine::upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration ttl) {
+  return metadata_gateway_->upsert_key_mapping(key, artifact_id, ttl);
 }
 
 absl::Status StoreEngine::revoke_key_mapping(std::string_view key) {
@@ -718,6 +744,45 @@ absl::StatusOr<size_t> StoreEngine::get_device_free_memory(int device_id) const 
 
 std::vector<replica::ChunkState> StoreEngine::get_chunk_states_cpu_uma(std::string_view artifact_id) const {
   return replica_runtime_->get_chunk_states_cpu_uma(artifact_id);
+}
+
+absl::StatusOr<void*> StoreEngine::get_replica_cpu_base_ptr(std::string_view artifact_id) const {
+  auto cpu_keys = replica_runtime_->registry().find_by_artifact(artifact_id);
+  auto runtime_cpu_keys = replica_runtime_->list_device_replicas(DeviceKey{DeviceType::CPU, -1, ""});
+  loading::ReplicaKey cpu_key;
+  auto select_cpu_key = [&](const std::vector<loading::ReplicaKey>& keys) -> bool {
+    for (const auto& k : keys) {
+      if (k.device.type == DeviceType::CPU) {
+        cpu_key = k;
+        return true;
+      }
+    }
+    return false;
+  };
+
+  bool found_cpu = select_cpu_key(cpu_keys) || select_cpu_key(runtime_cpu_keys);
+  if (!found_cpu) {
+    return absl::NotFoundError(absl::StrFormat("CPU replica for artifact %s not found", artifact_id));
+  }
+
+  auto replica_or = replica_runtime_->registry().find(cpu_key);
+  if (!replica_or.ok()) {
+    if (select_cpu_key(runtime_cpu_keys)) {
+      replica_or = replica_runtime_->registry().find(cpu_key);
+    }
+    if (!replica_or.ok()) {
+      return replica_or.status();
+    }
+  }
+  auto replica = *replica_or;
+  if (replica->get_memory_state(common::memory::MemoryLocation::CPU) != replica::MemoryState::LOADED) {
+    return absl::FailedPreconditionError("CPU replica is not loaded");
+  }
+  auto ptrs = replica->get_data_pointer(common::memory::MemoryLocation::CPU);
+  if (ptrs.empty() || ptrs.front() == nullptr) {
+    return absl::FailedPreconditionError("CPU replica base pointer unavailable");
+  }
+  return ptrs.front();
 }
 
 gsl::not_null<std::shared_ptr<components::CommunicationManager>> StoreEngine::get_shared_comm_manager() const {

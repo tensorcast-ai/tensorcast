@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -17,8 +18,10 @@
 
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
+#include "core/store/testing/recording_global_store_client.h"
 #include "core/testing/common.h"
 #include "grpcpp/server_context.h"
+#include "nlohmann/json.hpp"
 
 namespace {
 
@@ -55,6 +58,25 @@ tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::pa
   tiers.stable_bytes = 64 * kChunkBytes;
   opts.memory_tier_config = tiers;
   return opts;
+}
+
+std::string read_artifact_id(const std::filesystem::path& artifact_dir) {
+  std::ifstream descriptor_in(artifact_dir / "artifact_descriptor.json");
+  nlohmann::json descriptor_json;
+  descriptor_in >> descriptor_json;
+  return descriptor_json.value("artifact_id", "");
+}
+
+void register_disk_location(
+    tensorcast::store::testing::RecordingGlobalStoreClient& client,
+    std::string_view artifact_id,
+    const std::filesystem::path& relative_path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = client.cluster_id;
+  loc.relative_path = relative_path.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  client.disk_locations.push_back(std::move(loc));
 }
 
 uint64_t count_open_fds() {
@@ -123,22 +145,29 @@ TEST_CASE("CPU memfd fails with clear error near RLIMIT_NOFILE", "[daemon][cpu_m
   const auto root = test_tmpdir();
   std::filesystem::create_directories(root);
 
-  const auto artifact_dir = root / "artifact";
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact";
+  const auto artifact_dir = root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   const auto data_path = artifact_dir / "tensor.data_0";
   REQUIRE(tensorcast::testing::create_dummy_file(data_path, 2 * kChunkBytes, 'A'));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  REQUIRE_FALSE(artifact_id.empty());
+  register_disk_location(*gs_client, artifact_id, artifact_rel);
 
   const auto socket_dir = make_socket_dir();
   const std::string socket_path = (socket_dir / "local_handle.sock").string();
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(root));
+  engine->set_global_store_client_for_testing(gs_client);
   tensorcast::daemon::DaemonOptions daemon_opts;
   daemon_opts.storage_path = root;
   daemon_opts.cpu_shared_memory_enabled = true;
   daemon_opts.local_handle_socket_path = socket_path;
-  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
   REQUIRE(harness->start().ok());
@@ -163,7 +192,7 @@ TEST_CASE("CPU memfd fails with clear error near RLIMIT_NOFILE", "[daemon][cpu_m
   }
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_disk_path(artifact_dir.string());
+  req.set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(true);

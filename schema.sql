@@ -15,6 +15,13 @@
 
 -- ===================== Global Store =====================
 
+-- Cluster info (singleton row)
+CREATE TABLE IF NOT EXISTS cluster_info (
+    singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    cluster_id TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Workers table
 CREATE TABLE IF NOT EXISTS workers (
     worker_id TEXT PRIMARY KEY,
@@ -312,7 +319,6 @@ CREATE TABLE IF NOT EXISTS key_mappings (
     artifact_id TEXT NOT NULL,
     replica_uuid TEXT NULL,
     daemon_address TEXT NULL,
-    disk_path TEXT NULL,
     ttl_seconds BIGINT NULL,
     generation BIGINT NOT NULL DEFAULT 0,
     kind TEXT NOT NULL DEFAULT 'IMMUTABLE',
@@ -321,6 +327,22 @@ CREATE TABLE IF NOT EXISTS key_mappings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_key_mappings_artifact ON key_mappings(artifact_id);
+
+-- Disk locations (durable shared-disk persistence locations)
+CREATE TABLE IF NOT EXISTS artifact_disk_locations (
+    artifact_id TEXT NOT NULL,
+    cluster_id TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    kind TEXT CHECK (kind IN ('MANAGED','IMPORTED')) NOT NULL DEFAULT 'MANAGED',
+    -- Soft delete marker for managed disk GC. Deleted entries are ignored for disk fallback.
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    deleted_at TIMESTAMP WITH TIME ZONE NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (artifact_id, cluster_id, relative_path)
+);
+CREATE INDEX IF NOT EXISTS idx_artifact_disk_locations_artifact ON artifact_disk_locations(artifact_id);
+CREATE INDEX IF NOT EXISTS idx_artifact_disk_locations_cluster ON artifact_disk_locations(cluster_id);
 
 -- View metadata anchored to artifacts (canonical or assemblies)
 CREATE TABLE IF NOT EXISTS views (

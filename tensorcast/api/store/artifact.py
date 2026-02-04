@@ -197,9 +197,9 @@ class PlacementPin:
 
 class ArtifactSerializedFallback(TypedDict):
     prefer: FallbackPreference
-    disk_path: str | None
     prefer_disk: bool | None
     allow_p2p: bool
+    allow_disk: bool
     verify_checksums: bool
     replica_uuid: str | None
 
@@ -207,7 +207,6 @@ class ArtifactSerializedFallback(TypedDict):
 class ArtifactSerialized(TypedDict):
     artifact_id: str | None
     key: str | None
-    disk_path: str | None
     fallback: ArtifactSerializedFallback | None
     canonical_index: str | None
     generation: int | None
@@ -220,11 +219,11 @@ def _fallback_to_dict(
         return None
     return {
         "prefer": fallback.prefer,
-        "disk_path": fallback.disk_path,
         "prefer_disk": (
             bool(fallback.prefer_disk) if fallback.prefer_disk is not None else None
         ),
         "allow_p2p": bool(fallback.allow_p2p),
+        "allow_disk": bool(fallback.allow_disk),
         "verify_checksums": bool(fallback.verify_checksums),
         "replica_uuid": fallback.replica_uuid,
     }
@@ -237,17 +236,15 @@ def _fallback_from_dict(
         return None
     prefer_value = data.get("prefer")
     prefer = prefer_value if isinstance(prefer_value, str) else "auto"
-    disk_path_value = data.get("disk_path")
-    disk_path = disk_path_value if isinstance(disk_path_value, str) else None
     prefer_disk_raw = data.get("prefer_disk")
     prefer_disk = prefer_disk_raw if isinstance(prefer_disk_raw, bool) else None
     replica_uuid_value = data.get("replica_uuid")
     replica_uuid = replica_uuid_value if isinstance(replica_uuid_value, str) else None
     return FallbackOptions(
         prefer=prefer,  # pyright: ignore[reportArgumentType]
-        disk_path=disk_path,
         prefer_disk=prefer_disk,
         allow_p2p=bool(data.get("allow_p2p", True)),
+        allow_disk=bool(data.get("allow_disk", True)),
         verify_checksums=bool(data.get("verify_checksums", True)),
         replica_uuid=replica_uuid,
     )
@@ -279,7 +276,6 @@ class Artifact:
         store_ref: weakref.ReferenceType["Store"],
         artifact_id: str | None = None,
         key: str | None = None,
-        disk_path: str | None = None,
         fallback: FallbackOptions | str | None = None,
         canonical_index_bytes: bytes | None = None,
         canonical_index: CanonicalIndex | None = None,
@@ -288,19 +284,16 @@ class Artifact:
         view_metadata: ViewMetadataCache | None = None,
         view_depth: int = 0,
     ) -> None:
-        identifiers = [bool(artifact_id), bool(key), bool(disk_path)]
+        identifiers = [bool(artifact_id), bool(key)]
         if sum(identifiers) == 0:
             raise ArtifactError(
-                "At least one of artifact_id, key, or disk_path is required",
+                "At least one of artifact_id or key is required",
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
         self._fallback = FallbackOptions.parse(fallback)
         self._artifact_id = artifact_id
         self._key_hint = key
-        self._disk_path_hint = disk_path or (
-            self._fallback.disk_path if self._fallback else None
-        )
         self._canonical_index_bytes = canonical_index_bytes
         self._canonical_index = canonical_index
         self._tensor_metas: dict[str, TensorMeta] | None = None
@@ -373,6 +366,7 @@ class Artifact:
         *,
         device: torch.device | str,
         names: Sequence[str] | None = None,
+        options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
         artifact_id = self._ensure_identified()
@@ -394,11 +388,11 @@ class Artifact:
             fallback=self._fallback,
             tensor_names=requested_names,
             canonical_index_hint=self._canonical_index_bytes,
-            disk_path_hint=self._disk_path_hint,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
             replica_uuid=replica_uuid,
+            options=options,
             ctx=ctx,
         )
         state: dict[str, torch.Tensor] | None = None
@@ -418,10 +412,11 @@ class Artifact:
         *,
         device: torch.device | str,
         cache: bool = True,  # cache retained for compatibility, no-op in v2
+        options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> torch.Tensor:
         _ = cache  # cache parameter is reserved for future use
-        result = self.tensor_dict(device=device, names=[name], ctx=ctx)
+        result = self.tensor_dict(device=device, names=[name], options=options, ctx=ctx)
         if name not in result:
             raise ArtifactError(
                 f"Tensor '{name}' missing from materialized payload",
@@ -435,6 +430,7 @@ class Artifact:
         target: dict[str, torch.Tensor],
         *,
         device: torch.device | str | None = None,
+        options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> None:
         artifact_id = self._ensure_identified()
@@ -455,6 +451,7 @@ class Artifact:
             key=None,
             device=device,
             fallback=self._fallback,
+            options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
@@ -468,6 +465,7 @@ class Artifact:
         target_tensor: torch.Tensor,
         *,
         device: torch.device | str | None = None,
+        options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> None:
         if not isinstance(target_tensor, torch.Tensor):
@@ -494,6 +492,7 @@ class Artifact:
             key=None,
             device=resolved_device,
             fallback=self._fallback,
+            options=options,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
@@ -700,8 +699,6 @@ class Artifact:
         )
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        disk_path: str | None = None
-        verify_checksums = True
         effective_prefer = (
             self._fallback.prefer if self._fallback is not None else "auto"
         )
@@ -714,18 +711,13 @@ class Artifact:
                 preference = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
-            disk_path = self._fallback.disk_path
-            verify_checksums = bool(self._fallback.verify_checksums)
-        if (
-            disk_path
-            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        ):
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
         allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        allow_disk = effective_prefer != "local" or bool(disk_path)
+        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
         source_policy = _build_source_policy(
             preference=preference,
             allow_p2p=allow_p2p,
@@ -757,8 +749,6 @@ class Artifact:
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
-                        disk_path=disk_path,
-                        verify_checksums=verify_checksums,
                         tensor_names=region_layout.selection_names,
                         view=view_spec_proto,
                         view_id=region_layout.view_id
@@ -967,8 +957,6 @@ class Artifact:
             view_spec_proto = self._view_spec.proto
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        disk_path: str | None = None
-        verify_checksums = True
         effective_prefer = (
             self._fallback.prefer if self._fallback is not None else "auto"
         )
@@ -981,18 +969,13 @@ class Artifact:
                 preference = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
-            disk_path = self._fallback.disk_path
-            verify_checksums = bool(self._fallback.verify_checksums)
-        if (
-            disk_path
-            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        ):
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
 
         allow_p2p = True if self._fallback is None else bool(self._fallback.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        allow_disk = effective_prefer != "local" or bool(disk_path)
+        allow_disk = True if self._fallback is None else bool(self._fallback.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
         source_policy = _build_source_policy(
             preference=preference,
             allow_p2p=allow_p2p,
@@ -1018,8 +1001,6 @@ class Artifact:
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
-                        disk_path=disk_path,
-                        verify_checksums=verify_checksums,
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
                         view=view_spec_proto,
@@ -1240,7 +1221,6 @@ class Artifact:
             fallback=self._fallback,
             tensor_names=None,
             canonical_index_hint=self._canonical_index_bytes,
-            disk_path_hint=self._disk_path_hint,
             view_spec=view_spec_proto,
             view_data_hash=view_data_hash,
             view_index_hint=view_index_hint,
@@ -1386,7 +1366,6 @@ class Artifact:
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
-            disk_path=self._disk_path_hint,
             fallback=parsed,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
@@ -1421,18 +1400,6 @@ class Artifact:
             with self._lock:
                 self._hydrate_from_cache_entry(cached)
             return True
-        disk_path_hint = self._disk_path_hint or (
-            self._fallback.disk_path if self._fallback else None
-        )
-        if disk_path_hint:
-            try:
-                disk_index = self._resolve_metadata_from_disk(runtime, disk_path_hint)
-            except ArtifactError as disk_error:
-                if disk_error.status_code != "NOT_FOUND":
-                    raise
-            else:
-                if disk_index is not None:
-                    return True
         try:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id
@@ -1452,7 +1419,6 @@ class Artifact:
                     canonical_index_bytes,
                     canonical_index,
                     generation=self._generation,
-                    disk_path=self._disk_path_hint,
                 )
         runtime.cache_artifact_index(
             ArtifactCacheEntry(
@@ -1460,7 +1426,6 @@ class Artifact:
                 canonical_index_bytes=canonical_index_bytes,
                 parsed_index=canonical_index,
                 generation=self._generation,
-                disk_path=self._disk_path_hint,
                 expires_at=time.monotonic(),
             )
         )
@@ -1484,7 +1449,6 @@ class Artifact:
         return {
             "artifact_id": self._artifact_id,
             "key": self._key_hint,
-            "disk_path": self._disk_path_hint,
             "fallback": _fallback_to_dict(self._fallback),
             "canonical_index": encoded_index,
             "generation": self._generation,
@@ -1494,7 +1458,6 @@ class Artifact:
     def from_dict(cls, data: Mapping[str, object], store: "Store") -> Artifact:
         artifact_id = data.get("artifact_id")
         key_hint = data.get("key")
-        disk_path = data.get("disk_path")
         fallback_dict = data.get("fallback")
         canonical_blob = data.get("canonical_index")
         generation = data.get("generation")
@@ -1522,7 +1485,6 @@ class Artifact:
             store_ref=weakref.ref(store),
             artifact_id=str(artifact_id) if artifact_id else None,
             key=str(key_hint) if key_hint else None,
-            disk_path=str(disk_path) if disk_path else None,
             fallback=fallback,
             canonical_index_bytes=canonical_index_bytes,
             canonical_index=canonical_index,
@@ -1601,11 +1563,7 @@ class Artifact:
             if self._artifact_id:
                 return self._artifact_id
             if self._key_hint:
-                artifact_id, disk_path = runtime.resolve_key_mapping_cached(
-                    key=self._key_hint
-                )
-                if disk_path and not self._disk_path_hint:
-                    self._disk_path_hint = disk_path
+                artifact_id = runtime.resolve_key_mapping_cached(key=self._key_hint)
                 if not artifact_id:
                     raise ArtifactError(
                         f"Artifact key '{self._key_hint}' is not mapped",
@@ -1614,133 +1572,11 @@ class Artifact:
                     )
                 self._artifact_id = artifact_id
                 return artifact_id
-            if self._disk_path_hint:
-                cached = runtime.get_artifact_index_by_disk_path(self._disk_path_hint)
-                if cached and cached.artifact_id:
-                    self._artifact_id = cached.artifact_id
-                    self._hydrate_from_cache_entry(cached)
-                    return cached.artifact_id
-                verify_checksums = True
-                if self._fallback is not None:
-                    verify_checksums = bool(self._fallback.verify_checksums)
-                try:
-                    resolved = runtime.ensure_client().resolve_artifact_from_disk_v2(
-                        disk_path=self._disk_path_hint,
-                        verify_checksums=verify_checksums,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    raise_mapped_materialization_error(exc)
-                artifact_id = getattr(resolved, "artifact_id", "") or None
-                if not artifact_id:
-                    raise ArtifactError(
-                        f"Failed to resolve artifact from disk path '{self._disk_path_hint}'",
-                        status_code="NOT_FOUND",
-                        retryable=False,
-                    )
-                disk_path = getattr(resolved, "disk_path", "") or self._disk_path_hint
-                canonical_index_bytes = bytes(
-                    getattr(resolved, "canonical_index_bytes", b"") or b""
-                )
-                generation_raw = getattr(resolved, "generation", 0)
-                generation = int(generation_raw) if generation_raw else None
-                canonical_index = None
-                if canonical_index_bytes:
-                    canonical_index = canonical_index_from_bytes(canonical_index_bytes)
-                    self._set_metadata(
-                        canonical_index_bytes,
-                        canonical_index,
-                        generation=generation,
-                        disk_path=disk_path,
-                    )
-                    runtime.cache_artifact_index(
-                        ArtifactCacheEntry(
-                            artifact_id=artifact_id,
-                            canonical_index_bytes=canonical_index_bytes,
-                            parsed_index=canonical_index,
-                            generation=generation,
-                            disk_path=disk_path,
-                            expires_at=time.monotonic(),
-                        )
-                    )
-                elif generation is not None and self._generation is None:
-                    self._generation = generation
-                self._artifact_id = artifact_id
-                if disk_path and not self._disk_path_hint:
-                    self._disk_path_hint = disk_path
-                return artifact_id
             raise ArtifactError(
                 "Artifact handle missing identity",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-
-    def _resolve_metadata_from_disk(
-        self, runtime: "StoreRuntimeContext", disk_path: str
-    ) -> CanonicalIndex | None:
-        cached = runtime.get_artifact_index_by_disk_path(disk_path)
-        if cached:
-            with self._lock:
-                self._hydrate_from_cache_entry(cached)
-                if (
-                    self._canonical_index is not None
-                    and self._canonical_index_bytes is not None
-                ):
-                    return self._canonical_index
-
-        verify_checksums = True
-        if self._fallback is not None:
-            verify_checksums = bool(self._fallback.verify_checksums)
-        try:
-            resolved = runtime.ensure_client().resolve_artifact_from_disk_v2(
-                disk_path=disk_path,
-                verify_checksums=verify_checksums,
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise_mapped_materialization_error(exc)
-
-        resolved_artifact_id = (
-            getattr(resolved, "artifact_id", "") or self._artifact_id or None
-        )
-        resolved_disk_path = getattr(resolved, "disk_path", "") or disk_path
-        canonical_index_bytes = bytes(
-            getattr(resolved, "canonical_index_bytes", b"") or b""
-        )
-        generation_raw = getattr(resolved, "generation", 0)
-        generation = int(generation_raw) if generation_raw else None
-
-        canonical_index = (
-            canonical_index_from_bytes(canonical_index_bytes)
-            if canonical_index_bytes
-            else None
-        )
-        with self._lock:
-            if resolved_artifact_id and not self._artifact_id:
-                self._artifact_id = resolved_artifact_id
-            if resolved_disk_path:
-                self._disk_path_hint = resolved_disk_path
-            if canonical_index is not None:
-                self._set_metadata(
-                    canonical_index_bytes,
-                    canonical_index,
-                    generation=self._generation or generation,
-                    disk_path=resolved_disk_path,
-                )
-            elif generation is not None and self._generation is None:
-                self._generation = generation
-
-        if canonical_index is not None and resolved_artifact_id:
-            runtime.cache_artifact_index(
-                ArtifactCacheEntry(
-                    artifact_id=resolved_artifact_id,
-                    canonical_index_bytes=canonical_index_bytes,
-                    parsed_index=canonical_index,
-                    generation=generation,
-                    disk_path=resolved_disk_path,
-                    expires_at=time.monotonic(),
-                )
-            )
-            return canonical_index
-        return None
 
     def _ensure_metadata(self) -> CanonicalIndex:
         if (
@@ -1757,9 +1593,7 @@ class Artifact:
             )
         artifact_id = self._ensure_identified()
         cache_generation: int | None = None
-        cache_disk_path: str | None = None
         generation_hint: int | None = None
-        disk_path_hint: str | None = None
         force_remote_fetch = False
         with self._lock:
             if (
@@ -1769,41 +1603,22 @@ class Artifact:
                 return self._canonical_index
             cached = runtime.get_artifact_index_cached(artifact_id)
             if cached:
-                has_disk_mismatch = bool(
-                    self._disk_path_hint
-                    and cached.disk_path
-                    and cached.disk_path != self._disk_path_hint
-                )
                 has_generation_mismatch = bool(
                     self._generation is not None
                     and cached.generation is not None
                     and cached.generation != self._generation
                 )
-                force_remote_fetch = bool(has_disk_mismatch or has_generation_mismatch)
+                force_remote_fetch = bool(has_generation_mismatch)
                 if force_remote_fetch:
                     runtime.invalidate_artifact(
                         artifact_id,
-                        reason="disk_path_mismatch"
-                        if has_disk_mismatch
-                        else "generation_mismatch",
+                        reason="generation_mismatch",
                     )
                 else:
                     self._hydrate_from_cache_entry(cached)
                     assert self._canonical_index is not None
                     return self._canonical_index
             generation_hint = self._generation
-            disk_path_hint = self._disk_path_hint or (
-                self._fallback.disk_path if self._fallback else None
-            )
-        if disk_path_hint and not force_remote_fetch:
-            try:
-                disk_index = self._resolve_metadata_from_disk(runtime, disk_path_hint)
-            except ArtifactError as disk_error:
-                if disk_error.status_code != "NOT_FOUND":
-                    raise
-            else:
-                if disk_index is not None:
-                    return disk_index
         try:
             canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
                 artifact_id
@@ -1819,29 +1634,24 @@ class Artifact:
                 result_index = self._canonical_index
                 cache_bytes = self._canonical_index_bytes or canonical_index_bytes
                 cache_generation = self._generation
-                cache_disk_path = self._disk_path_hint
             else:
                 generation_value = self._generation
                 if generation_value is None:
                     generation_value = generation_hint
-                disk_path_value = self._disk_path_hint or disk_path_hint
                 self._set_metadata(
                     canonical_index_bytes,
                     canonical_index,
                     generation=generation_value,
-                    disk_path=disk_path_value,
                 )
                 result_index = canonical_index
                 cache_bytes = canonical_index_bytes
                 cache_generation = self._generation
-                cache_disk_path = self._disk_path_hint
         runtime.cache_artifact_index(
             ArtifactCacheEntry(
                 artifact_id=artifact_id,
                 canonical_index_bytes=cache_bytes,
                 parsed_index=result_index,
                 generation=cache_generation,
-                disk_path=cache_disk_path,
                 expires_at=time.monotonic(),
             )
         )
@@ -1935,7 +1745,6 @@ class Artifact:
             store_ref=self._store_ref,
             artifact_id=self._artifact_id,
             key=self._key_hint,
-            disk_path=self._disk_path_hint,
             fallback=self._fallback,
             canonical_index_bytes=self._canonical_index_bytes,
             canonical_index=self._canonical_index,
@@ -1950,7 +1759,6 @@ class Artifact:
             entry.canonical_index_bytes,
             entry.parsed_index,
             generation=entry.generation,
-            disk_path=entry.disk_path,
         )
 
     def _set_metadata(
@@ -1959,13 +1767,10 @@ class Artifact:
         canonical_index: CanonicalIndex,
         *,
         generation: int | None,
-        disk_path: str | None,
     ) -> None:
         self._canonical_index_bytes = canonical_index_bytes
         self._canonical_index = canonical_index
         self._generation = generation
-        if disk_path and not self._disk_path_hint:
-            self._disk_path_hint = disk_path
         effective_index = (
             self._view_metadata.canonical_index
             if self._view_metadata is not None
@@ -1985,7 +1790,6 @@ class Artifact:
         canonical_index_bytes = getattr(payload, "canonical_index_bytes", b"") or b""
         view_index_bytes = getattr(payload, "view_index_bytes", b"") or b""
         generation = getattr(payload, "generation", None)
-        disk_path = getattr(payload, "disk_path", None)
 
         if canonical_index_bytes:
             canonical_index = canonical_index_from_bytes(canonical_index_bytes)
@@ -1995,7 +1799,6 @@ class Artifact:
                         canonical_index_bytes,
                         canonical_index,
                         generation=generation,
-                        disk_path=disk_path,
                     )
             runtime.cache_artifact_index(
                 ArtifactCacheEntry(
@@ -2003,7 +1806,6 @@ class Artifact:
                     canonical_index_bytes=canonical_index_bytes,
                     parsed_index=canonical_index,
                     generation=generation,
-                    disk_path=disk_path,
                     expires_at=time.monotonic(),
                 )
             )

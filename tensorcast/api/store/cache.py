@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ class ArtifactCacheEntry:
     canonical_index_bytes: bytes
     parsed_index: CanonicalIndex
     generation: int | None
-    disk_path: str | None
     expires_at: float
     hit_count: int = 0
 
@@ -79,30 +78,6 @@ class ArtifactCache:
             self._entries.move_to_end(artifact_id)
             store_metrics.increment_artifact_cache_hit(self._daemon_endpoint)
             return replace(entry)
-
-    def get_artifact_index_by_disk_path(
-        self, disk_path: str
-    ) -> ArtifactCacheEntry | None:
-        if not self.enabled or not disk_path:
-            return None
-        now = time.monotonic()
-        with self._lock:
-            for artifact_id, entry in list(self._entries.items()):
-                if entry.disk_path != disk_path:
-                    continue
-                if entry.expires_at <= now:
-                    del self._entries[artifact_id]
-                    store_metrics.increment_artifact_cache_eviction(
-                        self._daemon_endpoint, reason="ttl"
-                    )
-                    store_metrics.increment_artifact_cache_miss(self._daemon_endpoint)
-                    return None
-                entry.hit_count += 1
-                self._entries.move_to_end(artifact_id)
-                store_metrics.increment_artifact_cache_hit(self._daemon_endpoint)
-                return replace(entry)
-        store_metrics.increment_artifact_cache_miss(self._daemon_endpoint)
-        return None
 
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         if not self.enabled:

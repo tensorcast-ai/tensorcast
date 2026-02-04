@@ -3,10 +3,7 @@
 # import tensorcast as tc
 
 # path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
-# artifact = tc.from_disk(
-#     path,
-#     fallback=tc.FallbackOptions.for_disk(path, verify=False),
-# )
+# artifact = tc.from_disk(path, verify_checksums=False)
 # names = artifact.tensor_names
 
 # tensor_dict = artifact.tensor_dict(device="cuda:0")
@@ -27,7 +24,7 @@ import tensorcast as tc
 path = "/mnt/step3-alignment/inference/Qwen2-1.5B-Instruct"
 
 # HF safetensors 目录通常没有 artifact_descriptor.json；要么先 backfill，要么先关掉校验
-artifact = tc.from_disk(path, fallback=tc.FallbackOptions.for_disk(path, verify=False))
+artifact = tc.from_disk(path, verify_checksums=False)
 
 desc = artifact.describe()  # 一次拿到所有 tensor 的 shape/stride/dtype 元信息
 

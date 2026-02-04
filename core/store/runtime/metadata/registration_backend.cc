@@ -539,6 +539,9 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes,
       .byte_mapping_config = byte_mapping_config_};
+  if (!reg.view.has_value() && reg.tensor_index_data.has_value() && !reg.tensor_index_data->empty()) {
+    cfg.canonical_index_json = *reg.tensor_index_data;
+  }
   cfg.pinned_memory_timeout = pinned_memory_timeout_;
   cfg.streaming_buffer_chunks = streaming_buffer_chunks_;
   if (memory_tier_config_.has_value()) {

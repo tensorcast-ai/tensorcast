@@ -3,7 +3,7 @@
 """Repository for key -> artifact_id mappings.
 
 Schema: key_mappings(key PRIMARY KEY, artifact_id, replica_uuid, daemon_address,
-disk_path, ttl_seconds, generation, kind, created_at, updated_at)
+ttl_seconds, generation, kind, created_at, updated_at)
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ class KeyMappingRepository(BaseRepository):
         artifact_id: str,
         replica_uuid: str | None = None,
         daemon_address: str | None = None,
-        disk_path: str | None = None,
         ttl_seconds: int | None = None,
     ) -> None:
         """Create or update a key mapping.
@@ -34,24 +33,23 @@ class KeyMappingRepository(BaseRepository):
         cursor.execute(
             """
             INSERT INTO key_mappings (
-              key, artifact_id, replica_uuid, daemon_address, disk_path, ttl_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, now(), now())
+              key, artifact_id, replica_uuid, daemon_address, ttl_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, now(), now())
             ON CONFLICT (key) DO UPDATE SET
               artifact_id = EXCLUDED.artifact_id,
               replica_uuid = EXCLUDED.replica_uuid,
               daemon_address = EXCLUDED.daemon_address,
-              disk_path = EXCLUDED.disk_path,
               ttl_seconds = EXCLUDED.ttl_seconds,
               updated_at = now()
             """,
-            [key, artifact_id, replica_uuid, daemon_address, disk_path, ttl_seconds],
+            [key, artifact_id, replica_uuid, daemon_address, ttl_seconds],
         )
 
     def get(self, key: str) -> Optional[dict[str, Any]]:
         cursor = self.get_cursor()
         row = cursor.execute(
             """
-            SELECT key, artifact_id, replica_uuid, daemon_address, disk_path, ttl_seconds, generation, kind, created_at, updated_at
+            SELECT key, artifact_id, replica_uuid, daemon_address, ttl_seconds, generation, kind, created_at, updated_at
             FROM key_mappings WHERE key = ?
             """,
             [key],
@@ -63,12 +61,11 @@ class KeyMappingRepository(BaseRepository):
             "artifact_id": row[1],
             "replica_uuid": row[2],
             "daemon_address": row[3],
-            "disk_path": row[4],
-            "ttl_seconds": row[5],
-            "generation": row[6],
-            "kind": row[7],
-            "created_at": row[8],
-            "updated_at": row[9],
+            "ttl_seconds": row[4],
+            "generation": row[5],
+            "kind": row[6],
+            "created_at": row[7],
+            "updated_at": row[8],
         }
 
     def swap(

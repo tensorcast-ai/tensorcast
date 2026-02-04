@@ -63,6 +63,18 @@ std::filesystem::path ensure_dir(std::filesystem::path path) {
   return path;
 }
 
+void register_disk_location(
+    tensorcast::store::testing::RecordingGlobalStoreClient& client,
+    std::string_view artifact_id,
+    const std::filesystem::path& relative_path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = client.cluster_id;
+  loc.relative_path = relative_path.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  client.disk_locations.push_back(std::move(loc));
+}
+
 bool write_file(const std::filesystem::path& path, std::string_view payload) {
   std::ofstream out(path, std::ios::binary);
   if (!out.is_open()) {
@@ -176,7 +188,9 @@ CopyPlan make_split_plan(std::string_view src, std::string_view dst_a, std::stri
 TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemon][materialize][mapped_target]") {
   MappedFixture fix;
 
-  const auto artifact_dir = fix.storage_root / "artifact_mapped";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_mapped";
+  const auto artifact_dir = fix.storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   const std::string payload = "ABCDEFGH";
@@ -185,6 +199,7 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   const std::string canonical_index_json = R"({"src":[0,8,[8],[1],"torch.uint8",0]})";
   REQUIRE(write_file(artifact_dir / "tensor_index.json", canonical_index_json));
   fix.global_store_client->canonical_index_json = canonical_index_json;
+  register_disk_location(*fix.global_store_client, "artifact_mapped", artifact_rel);
 
   int device_count = 0;
   REQUIRE(tensorcast::cuda::get_device_count(&device_count).ok());
@@ -230,7 +245,6 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

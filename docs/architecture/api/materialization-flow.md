@@ -117,7 +117,8 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
-     disk_path, source policy allow flags, variant/view info).
+     disk_path resolved by the daemon from managed disk locations, source policy
+     allow flags, variant/view info).
    - Determine materialize mode:
      - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
      - Otherwise -> `AUTO`.

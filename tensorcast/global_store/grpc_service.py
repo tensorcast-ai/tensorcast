@@ -14,7 +14,7 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Optional, cast
 from uuid import UUID
 
@@ -47,12 +47,14 @@ from tensorcast.global_store.models import (
 )
 from tensorcast.global_store.repositories import (
     ArtifactBindingRepository,
+    ArtifactDiskLocationRepository,
     ArtifactLayoutAttachmentRepository,
     ArtifactPersistenceStatusRepository,
     ArtifactPlacementRepository,
     AssemblyLayoutBindingRepository,
     AssemblyRuntimePolicyRepository,
     ChunkDirectoryRepository,
+    ClusterInfoRepository,
     InstanceRepository,
     LayoutSpecRepository,
     LeafRepository,
@@ -141,6 +143,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         v: k for k, v in _PERSISTENCE_STATE_FROM_PROTO.items()
     }
 
+    _DISK_LOCATION_KIND_FROM_PROTO = {
+        global_store_pb2.DISK_LOCATION_KIND_UNSPECIFIED: "MANAGED",
+        global_store_pb2.DISK_LOCATION_KIND_MANAGED: "MANAGED",
+        global_store_pb2.DISK_LOCATION_KIND_IMPORTED: "IMPORTED",
+    }
+    _DISK_LOCATION_KIND_TO_PROTO = {
+        "MANAGED": global_store_pb2.DISK_LOCATION_KIND_MANAGED,
+        "IMPORTED": global_store_pb2.DISK_LOCATION_KIND_IMPORTED,
+    }
+
     def __init__(self, db_file: str | None = None):
         """
         Initialize the Global Store with DuckDB backend.
@@ -183,6 +195,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.leaf_repository = LeafRepository(self.connection)
         self.binding_repository = ArtifactBindingRepository(self.connection)
         self.key_mapping_repository = KeyMappingRepository(self.connection)
+        self.cluster_info_repository = ClusterInfoRepository(self.connection)
+        self.disk_location_repository = ArtifactDiskLocationRepository(self.connection)
         self.placement_repository = ArtifactPlacementRepository(self.connection)
         self.persistence_status_repository = ArtifactPersistenceStatusRepository(
             self.connection
@@ -233,6 +247,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
         self._initiate_startup_recovery()
 
+        self.cluster_id = self.cluster_info_repository.get_or_create_cluster_id()
+
         # Start background cleanup thread
         self._start_cleanup_thread()
         # Cleanup and optimization are now handled by a single maintenance thread
@@ -256,6 +272,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             "advertise_port": advertise_port,
             "metrics_port": metrics_port,
             "cluster_token": cluster_token,
+            "cluster_id": self.cluster_id,
             "db_file": db_file,
             "version": version,
         }
@@ -297,6 +314,17 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             if candidate.tzinfo
             else candidate.replace(tzinfo=timezone.utc)
         )
+
+    @staticmethod
+    def _is_safe_relative_path(path: str) -> bool:
+        if not path:
+            return False
+        if "\\" in path:
+            return False
+        pure = PurePosixPath(path)
+        if pure.is_absolute():
+            return False
+        return ".." not in pure.parts
 
     @staticmethod
     def _multibase_sha256_to_hex(value: str) -> str | None:
@@ -3043,7 +3071,6 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 artifact_id=artifact_id,
                 replica_uuid=(request.replica_uuid or None),
                 daemon_address=(request.daemon_address or None),
-                disk_path=(request.disk_path or None),
                 ttl_seconds=ttl_seconds,
             )
             return global_store_pb2.UpsertKeyMappingResponse(
@@ -3088,7 +3115,6 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 artifact_id=row.get("artifact_id", ""),
                 replica_uuid=row.get("replica_uuid", "") or "",
                 daemon_address=row.get("daemon_address", "") or "",
-                disk_path=row.get("disk_path", "") or "",
                 generation=int(row.get("generation", 0) or 0),
                 cache_ttl_seconds=int(cache_ttl_seconds),
             )
@@ -3858,6 +3884,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         db_file = info.get("db_file") or (
             str(self.config.db_file) if self.config.db_file else ""
         )
+        cluster_id = info.get("cluster_id") or self.cluster_id or ""
         version = info.get("version") or ""
         listen_address = (
             f"{listen_host}:{listen_port}" if listen_host and listen_port else ""
@@ -3878,6 +3905,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             metrics_port=int(metrics_port or 0),
             version=version,
             db_file=db_file or "",
+            cluster_id=cluster_id,
         )
 
     # ========== Chunk Directory Methods ==========
@@ -4082,6 +4110,113 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             status=global_store_pb2.Status.STATUS_OK
         )
 
+    # ========== Disk Locations ==========
+
+    def UpsertArtifactDiskLocation(
+        self,
+        request: global_store_pb2.UpsertArtifactDiskLocationRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.UpsertArtifactDiskLocationResponse:
+        try:
+            artifact_id = request.artifact_id.strip()
+            cluster_id = request.cluster_id.strip()
+            relative_path = request.relative_path.strip()
+            if not artifact_id or not cluster_id or not relative_path:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details(
+                    "artifact_id, cluster_id, and relative_path are required"
+                )
+                return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if cluster_id != self.cluster_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("cluster_id does not match server cluster_id")
+                return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            if not self._is_safe_relative_path(relative_path):
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("relative_path must be a safe, relative path")
+                return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            kind = self._DISK_LOCATION_KIND_FROM_PROTO.get(request.kind, "MANAGED")
+            self.disk_location_repository.upsert(
+                artifact_id=artifact_id,
+                cluster_id=cluster_id,
+                relative_path=relative_path,
+                kind=kind,
+                is_deleted=bool(request.is_deleted),
+            )
+            return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                status=global_store_pb2.Status.STATUS_OK
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in UpsertArtifactDiskLocation")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.UpsertArtifactDiskLocationResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def ListArtifactDiskLocations(
+        self,
+        request: global_store_pb2.ListArtifactDiskLocationsRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.ListArtifactDiskLocationsResponse:
+        try:
+            artifact_id = request.artifact_id.strip()
+            if not artifact_id:
+                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                context.set_details("artifact_id is required")
+                return global_store_pb2.ListArtifactDiskLocationsResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
+            include_deleted = bool(request.include_deleted)
+            rows = self.disk_location_repository.list_by_artifact(
+                artifact_id, include_deleted=include_deleted
+            )
+            locations: list[global_store_pb2.ArtifactDiskLocation] = []
+            for row in rows:
+                created = self._datetime_to_timestamp(
+                    self._coerce_db_datetime(row.get("created_at"))
+                )
+                updated = self._datetime_to_timestamp(
+                    self._coerce_db_datetime(row.get("updated_at"))
+                )
+                deleted_at = None
+                if row.get("deleted_at") is not None:
+                    deleted_at = self._datetime_to_timestamp(
+                        self._coerce_db_datetime(row.get("deleted_at"))
+                    )
+                kind = self._DISK_LOCATION_KIND_TO_PROTO.get(
+                    (row.get("kind") or "MANAGED").upper(),
+                    global_store_pb2.DISK_LOCATION_KIND_MANAGED,
+                )
+                msg = global_store_pb2.ArtifactDiskLocation(
+                    artifact_id=row.get("artifact_id", ""),
+                    cluster_id=row.get("cluster_id", ""),
+                    relative_path=row.get("relative_path", ""),
+                    kind=kind,
+                    created_at=created,
+                    updated_at=updated,
+                    is_deleted=bool(row.get("is_deleted", False)),
+                )
+                if deleted_at is not None:
+                    msg.deleted_at.CopyFrom(deleted_at)
+                locations.append(msg)
+            return global_store_pb2.ListArtifactDiskLocationsResponse(
+                status=global_store_pb2.Status.STATUS_OK, locations=locations
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Error in ListArtifactDiskLocations")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return global_store_pb2.ListArtifactDiskLocationsResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
     # ========== Helper Methods ==========
 
     def _plan_to_proto(
@@ -4281,6 +4416,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             "artifact_transports",  # Depends on artifact_replicas via replica_id FK
             "replica_counters",
             "artifact_replicas",
+            "artifact_disk_locations",
             "artifact_indices",
             "artifacts",
             "workers",

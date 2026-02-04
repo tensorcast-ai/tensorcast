@@ -35,8 +35,8 @@ class FallbackOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     prefer: FallbackPreference = "auto"
-    disk_path: str | None = None
     allow_p2p: bool = True
+    allow_disk: bool = True
     verify_checksums: bool = True
     prefer_disk: bool | None = None  # Deprecated compatibility flag
     replica_uuid: str | None = None
@@ -64,29 +64,12 @@ class FallbackOptions(BaseModel):
         normalized = "auto" if value is None else str(value).strip().lower()
         return cls._to_prefer_literal(normalized)
 
-    @field_validator("disk_path", mode="before")
-    @classmethod
-    def _normalize_disk_path(cls, value: object) -> str | None:
-        if value is None:
-            return None
-        path = str(value).strip()
-        return path or None
-
-    @classmethod
-    def for_disk(cls, path: str, *, verify: bool = True) -> "FallbackOptions":
-        return cls(
-            prefer="disk",
-            disk_path=path,
-            allow_p2p=False,
-            verify_checksums=verify,
-            prefer_disk=True,
-        )
-
     @classmethod
     def local_only(cls) -> "FallbackOptions":
         return cls(
             prefer="local",
             allow_p2p=False,
+            allow_disk=False,
             verify_checksums=True,
             prefer_disk=False,
         )
@@ -101,14 +84,12 @@ class FallbackOptions(BaseModel):
         if isinstance(value, str):
             raw = value.strip()
             if raw.lower().startswith("disk:"):
-                path = raw.split(":", 1)[1]
-                if path.strip() == "":
-                    raise ArtifactError(
-                        "Fallback string 'disk:' requires a path, e.g. 'disk:/tmp/artifacts'",
-                        status_code="INVALID_ARGUMENT",
-                        retryable=False,
-                    )
-                return cls.for_disk(path)
+                raise ArtifactError(
+                    "Fallback string 'disk:' is no longer supported; use Store.from_disk(...) to import "
+                    "and then materialize by artifact_id or key.",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
             normalized = raw.lower()
             if normalized in {"auto", "local", "p2p", "disk"}:
                 if normalized == "local":
@@ -116,14 +97,13 @@ class FallbackOptions(BaseModel):
                 if normalized == "disk":
                     return cls(
                         prefer="disk",
-                        allow_p2p=False,
                         prefer_disk=True,
                     )
                 prefer_literal = cls._to_prefer_literal(normalized)
                 return cls(prefer=prefer_literal)
         raise ArtifactError(
             "Fallback must be a FallbackOptions instance or string "
-            "('auto', 'local', 'p2p', 'disk:/path')",
+            "('auto', 'local', 'p2p', 'disk')",
             status_code="INVALID_ARGUMENT",
             retryable=False,
         )

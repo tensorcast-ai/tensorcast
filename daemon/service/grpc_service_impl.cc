@@ -763,17 +763,8 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
     return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  std::string normalized_disk_path;
-  if (!req->disk_path().empty()) {
-    auto normalized_or = normalize_disk_path(req->disk_path(), opts_.storage_path);
-    if (!normalized_or.ok()) {
-      return to_grpc_status(normalized_or.status());
-    }
-    normalized_disk_path = normalized_or->string();
-  }
-
   // Use engine's configured Global Store client for upsert.
-  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id(), normalized_disk_path);
+  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id());
   if (!up.ok()) {
     // For conflicts, return OK with ok=false for idempotency.
     if (absl::IsAlreadyExists(up)) {
@@ -810,7 +801,6 @@ Status StoreDaemonServiceImpl::ResolveKeyMapping(
   }
   const auto& m = *mapping_or;
   resp->set_artifact_id(m.artifact_id);
-  resp->set_used_disk_path(m.disk_path);
   resp->set_generation(m.generation);
   resp->set_cache_ttl_seconds(m.cache_ttl_seconds);
   rctx.mark_success();
@@ -913,7 +903,7 @@ Status StoreDaemonServiceImpl::StartPersistence(
   if (!policy_or.ok()) {
     return to_grpc_status(policy_or.status());
   }
-  auto task_or = persistence_manager_->start_task(req->artifact_id(), *policy_or);
+  auto task_or = persistence_manager_->start_task(req->artifact_id(), *policy_or, req->key_hint());
   if (!task_or.ok()) {
     return to_grpc_status(task_or.status());
   }
@@ -1146,6 +1136,7 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
   const std::string artifact_id = req->artifact_id();
+  const bool keep_shared_disk_copy = req->has_keep_shared_disk_copy() ? req->keep_shared_disk_copy() : false;
 
   auto view_id_or = parse_view_id(req->byte_space());
   if (!view_id_or.ok()) {
@@ -1224,6 +1215,97 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   for (const auto& rid : unique_regions) {
     resp->add_released_region_ids(rid);
   }
+
+  if (!keep_shared_disk_copy && !view_id.has_value()) {
+    auto append_message = [&](std::string_view msg) -> void {
+      if (!msg.empty()) {
+        if (!resp->message().empty()) {
+          resp->set_message(absl::StrCat(resp->message(), "; ", msg));
+        } else {
+          resp->set_message(std::string(msg));
+        }
+      }
+    };
+
+    if (global_store_client_ == nullptr || !global_store_client_->is_connected()) {
+      append_message("shared disk purge skipped: Global Store client unavailable");
+    } else {
+      auto cluster_or = global_store_client_->get_cluster_id();
+      if (!cluster_or.ok() || cluster_or->empty()) {
+        append_message("shared disk purge skipped: cluster_id unavailable");
+      } else {
+        const std::string& cluster_id = *cluster_or;
+        auto locs_or = global_store_client_->list_artifact_disk_locations(artifact_id, /*include_deleted=*/true);
+        if (!locs_or.ok()) {
+          append_message("shared disk purge skipped: disk locations unavailable");
+        } else {
+          const std::filesystem::path expected_prefix = std::filesystem::path("clusters") / cluster_id / "objects";
+          std::vector<std::string> managed_paths;
+          managed_paths.reserve(locs_or->size());
+          for (const auto& loc : *locs_or) {
+            if (loc.cluster_id != cluster_id) {
+              continue;
+            }
+            if (loc.kind != tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED) {
+              continue;
+            }
+            if (loc.relative_path.empty()) {
+              continue;
+            }
+            const std::filesystem::path rel(loc.relative_path);
+            if (!std::filesystem::path{rel}.has_relative_path() || rel.is_absolute()) {
+              continue;
+            }
+            // Defense-in-depth: only delete objects under the managed cluster namespace.
+            bool ok_prefix = true;
+            auto rel_it = rel.begin();
+            for (auto pre_it = expected_prefix.begin(); pre_it != expected_prefix.end(); ++pre_it, ++rel_it) {
+              if (rel_it == rel.end() || *rel_it != *pre_it) {
+                ok_prefix = false;
+                break;
+              }
+            }
+            if (!ok_prefix) {
+              continue;
+            }
+            managed_paths.push_back(loc.relative_path);
+          }
+
+          for (const auto& rel_path : managed_paths) {
+            // Tombstone first so disk fallback stops advertising the path.
+            absl::Status st = global_store_client_->upsert_artifact_disk_location(
+                artifact_id,
+                cluster_id,
+                rel_path,
+                tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED,
+                /*is_deleted=*/true);
+            if (!st.ok()) {
+              append_message(absl::StrCat("shared disk tombstone failed: ", st.message()));
+              continue;
+            }
+          }
+
+          if (opts_.storage_path.empty()) {
+            append_message("shared disk purge skipped: storage_path missing");
+          } else {
+            for (const auto& rel_path : managed_paths) {
+              auto normalized_or = normalize_disk_path(rel_path, opts_.storage_path);
+              if (!normalized_or.ok()) {
+                append_message(absl::StrCat("shared disk purge path rejected: ", normalized_or.status().message()));
+                continue;
+              }
+              std::error_code ec;
+              std::filesystem::remove_all(*normalized_or, ec);
+              if (ec) {
+                append_message(absl::StrCat("shared disk purge failed: ", ec.message()));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   rctx.mark_success();
   return grpc::Status::OK;
 }

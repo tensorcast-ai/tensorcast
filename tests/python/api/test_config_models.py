@@ -20,7 +20,7 @@ from tensorcast.api._config import (
     OverflowPolicy,
 )
 from tensorcast.api._errors import InvalidPlan
-from tensorcast.api.store.types import FallbackOptions, StoreOptions
+from tensorcast.api.store.types import ArtifactError, FallbackOptions, StoreOptions
 
 
 def test_register_options_coerce_plan_string() -> None:
@@ -212,14 +212,21 @@ def test_get_options_validate_prefer_values() -> None:
         GetArtifactOptions(prefer="bluetooth")
 
 
+def test_get_options_validate_wait_for_shared_disk_ms() -> None:
+    assert GetArtifactOptions().wait_for_shared_disk_ms == 0
+    assert GetArtifactOptions(wait_for_shared_disk_ms=123).wait_for_shared_disk_ms == 123
+    assert GetArtifactOptions(wait_for_shared_disk_ms=None).wait_for_shared_disk_ms == 0
+
+    with pytest.raises(ValidationError):
+        GetArtifactOptions(wait_for_shared_disk_ms=-1)
+
+
 def test_store_options_parse_fallback_string() -> None:
-    opts = StoreOptions(fallback="disk:/tmp/cache")
+    opts = StoreOptions(fallback="disk")
     assert isinstance(opts.fallback, FallbackOptions)
     assert opts.fallback.prefer == "disk"
-    assert opts.fallback.disk_path == "/tmp/cache"
-    # Ensure frozen model cannot be mutated
-    with pytest.raises((TypeError, ValidationError)):
-        opts.fallback.disk_path = "/other"
+    with pytest.raises(ArtifactError):
+        StoreOptions(fallback="disk:/tmp/cache")
 
 
 def test_fallback_parse_accepts_existing_instance() -> None:

@@ -56,11 +56,7 @@ class MetadataGateway {
   absl::StatusOr<std::string> get_canonical_index(std::string_view artifact_id) const;
   absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id)
       const;
-  absl::Status upsert_key_mapping(
-      std::string_view key,
-      std::string_view artifact_id,
-      std::string_view disk_path,
-      absl::Duration ttl);
+  absl::Status upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration ttl);
   absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
       std::string_view key,
       std::string_view new_artifact_id,

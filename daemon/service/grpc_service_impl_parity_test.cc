@@ -55,7 +55,7 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_disk_path("/tmp/anything");
+  req.set_artifact_id("mi2:dummy:dummy");
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
@@ -69,7 +69,7 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  // Both missing -> INVALID_ARGUMENT
+  // Missing artifact_id -> INVALID_ARGUMENT
   {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
@@ -79,11 +79,9 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   }
 
-  // Both present are accepted (may still fail deeper in the stack, but not on input validation)
+  // artifact_id present is accepted (may still fail deeper in the stack, but not on input validation)
   {
-    const auto storage_root = std::filesystem::temp_directory_path();
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
-    req.set_disk_path((storage_root / "x").string());
     req.set_artifact_id("mi2:abc:def");
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
     tensorcast::daemon::v2::MaterializeReplicaResponse resp;
@@ -91,38 +89,6 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
     auto st = svc.MaterializeReplica(&ctx, &req, &resp);
     REQUIRE(st.error_code() != grpc::StatusCode::INVALID_ARGUMENT);
   }
-}
-
-TEST_CASE("MaterializeReplica enforces shared storage root", "[daemon][parity]") {
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  auto opts = make_daemon_options();
-  opts.storage_path = std::filesystem::temp_directory_path();
-  auto harness = make_harness(engine, opts);
-  auto& svc = harness->service();
-
-  tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_disk_path("/var/denied/path");
-  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
-  grpc::ServerContext ctx;
-  auto st = svc.MaterializeReplica(&ctx, &req, &resp);
-  REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-}
-
-TEST_CASE("MaterializeReplica allows absolute paths when storage root is empty", "[daemon][parity]") {
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
-  auto opts = make_daemon_options();
-  opts.storage_path.clear();
-  auto harness = make_harness(engine, opts);
-  auto& svc = harness->service();
-
-  tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_disk_path((std::filesystem::temp_directory_path() / "absolute_path_ok").string());
-  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
-  grpc::ServerContext ctx;
-  auto st = svc.MaterializeReplica(&ctx, &req, &resp);
-  REQUIRE(st.error_code() != grpc::StatusCode::INVALID_ARGUMENT);
 }
 
 TEST_CASE("WaitReplicaVerification unknown returns UNKNOWN", "[daemon][parity]") {

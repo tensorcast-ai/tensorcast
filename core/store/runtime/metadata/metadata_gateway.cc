@@ -278,13 +278,12 @@ absl::StatusOr<components::ViewMetadata> MetadataGateway::get_view_metadata(
 absl::Status MetadataGateway::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
-    std::string_view disk_path,
     absl::Duration ttl) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
   }
-  return (*client_or)->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+  return (*client_or)->upsert_key_mapping(key, artifact_id, ttl);
 }
 
 absl::StatusOr<components::KeyMappingSwapResult> MetadataGateway::swap_key_mapping(

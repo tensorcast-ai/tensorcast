@@ -123,9 +123,19 @@ struct KeyMapping {
   std::string artifact_id;
   std::string replica_uuid;
   std::string daemon_address;
-  std::string disk_path;
   uint64_t generation{0};
   uint32_t cache_ttl_seconds{0};
+};
+
+struct ArtifactDiskLocation {
+  std::string artifact_id;
+  std::string cluster_id;
+  std::string relative_path;
+  global_store::DiskLocationKind kind{global_store::DISK_LOCATION_KIND_UNSPECIFIED};
+  bool is_deleted{false};
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+  std::optional<absl::Time> deleted_at;
 };
 
 struct KeyMappingSwapResult {
@@ -419,11 +429,7 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
   virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
-  virtual absl::Status upsert_key_mapping(
-      std::string_view key,
-      std::string_view artifact_id,
-      std::string_view disk_path,
-      absl::Duration ttl) = 0;
+  virtual absl::Status upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration ttl) = 0;
 
   virtual absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
       std::string_view key,
@@ -432,6 +438,19 @@ class IGlobalStoreClient {
       std::optional<uint64_t> expected_generation) = 0;
 
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
+
+  virtual absl::StatusOr<std::string> get_cluster_id() = 0;
+
+  virtual absl::Status upsert_artifact_disk_location(
+      std::string_view artifact_id,
+      std::string_view cluster_id,
+      std::string_view relative_path,
+      global_store::DiskLocationKind kind,
+      bool is_deleted = false) = 0;
+
+  virtual absl::StatusOr<std::vector<ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) = 0;
 
   // Memory tier RPCs (optional; default implementations return Unimplemented)
   virtual absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) {
@@ -677,7 +696,6 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
-      std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration()) override;
 
   absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
@@ -687,6 +705,19 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::optional<uint64_t> expected_generation) override;
 
   absl::Status revoke_key_mapping(std::string_view key) override;
+
+  absl::StatusOr<std::string> get_cluster_id() override;
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view artifact_id,
+      std::string_view cluster_id,
+      std::string_view relative_path,
+      global_store::DiskLocationKind kind,
+      bool is_deleted = false) override;
+
+  absl::StatusOr<std::vector<ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) override;
 
   absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) override;
   absl::StatusOr<MemoryTierLeaseDescriptor> request_memory_tier_lease(

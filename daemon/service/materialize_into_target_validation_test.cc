@@ -93,6 +93,18 @@ std::filesystem::path ensure_dir(std::filesystem::path path) {
   return path;
 }
 
+void register_disk_location(
+    tensorcast::store::testing::RecordingGlobalStoreClient& client,
+    std::string_view artifact_id,
+    const std::filesystem::path& relative_path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = client.cluster_id;
+  loc.relative_path = relative_path.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  client.disk_locations.push_back(std::move(loc));
+}
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
@@ -178,18 +190,6 @@ TEST_CASE("MaterializeIntoTarget rejects missing artifact_id", "[daemon][materia
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
 
-TEST_CASE("MaterializeIntoTarget rejects empty disk_fallback path", "[daemon][materialize][into_target]") {
-  ValidationFixture fix;
-  MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
-  req.mutable_disk_fallback();
-  MaterializeIntoTargetResponse resp;
-  auto status = run_request(fix.controller, req, resp);
-
-  REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-}
-
 TEST_CASE("MaterializeIntoTarget accepts subset selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
@@ -230,17 +230,19 @@ TEST_CASE(
   fix.global_store_client->connected = false;
 
   const auto storage_root = fix.storage_root;
-  const auto artifact_dir = storage_root / "artifact_disk_only";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_disk_only";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
   REQUIRE(write_file(artifact_dir / "tensor_index.json", make_canonical_index_json()));
+  register_disk_location(*fix.global_store_client, "mi2:dummy:dummy", artifact_rel);
 
   MaterializeIntoTargetRequest req;
   req.set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
   req.add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
@@ -368,7 +370,9 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   ValidationFixture fix;
 
   const auto storage_root = fix.storage_root;
-  const auto artifact_dir = storage_root / "artifact_multi_region";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_multi_region";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
 
@@ -423,7 +427,7 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
+  register_disk_location(*fix.global_store_client, "artifact_multi_region", artifact_rel);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -487,7 +491,9 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   ValidationFixture fix(/*external_target_verification_enabled=*/true);
 
   const auto storage_root = fix.storage_root;
-  const auto artifact_dir = storage_root / "artifact_verify_fail";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_verify_fail";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
 
@@ -504,6 +510,7 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   const std::string descriptor_json = std::string("{\"artifact_id\":\"") + artifact_id + "\",\"index_multihash\":\"" +
       *index_mh_or + "\",\"data_multihash\":\"bad\",\"schema_version\":\"v3\",\"encoding\":\"json\",\"total_size\":8}";
   REQUIRE(write_file(artifact_dir / "artifact_descriptor.json", descriptor_json));
+  register_disk_location(*fix.global_store_client, artifact_id, artifact_rel);
 
   int device_count = 0;
   REQUIRE(tensorcast::cuda::get_device_count(&device_count).ok());
@@ -544,7 +551,6 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

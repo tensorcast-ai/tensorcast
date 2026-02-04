@@ -196,8 +196,26 @@ class GlobalStoreClientStub : public components::IGlobalStoreClient {
     return absl::UnimplementedError("get_view_metadata not supported in GlobalStoreClientStub");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
     return absl::UnimplementedError("upsert_key_mapping not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    return absl::UnimplementedError("get_cluster_id not supported in GlobalStoreClientStub");
+  }
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view,
+      std::string_view,
+      std::string_view,
+      tensorcast::global_store::v1::DiskLocationKind,
+      bool) override {
+    return absl::UnimplementedError("upsert_artifact_disk_location not supported in GlobalStoreClientStub");
+  }
+
+  absl::StatusOr<std::vector<components::ArtifactDiskLocation>> list_artifact_disk_locations(std::string_view, bool)
+      override {
+    return absl::UnimplementedError("list_artifact_disk_locations not supported in GlobalStoreClientStub");
   }
 
   absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(

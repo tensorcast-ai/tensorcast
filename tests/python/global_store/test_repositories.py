@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.repositories import ArtifactDiskLocationRepository
 
 
 class TestRepositories:
@@ -124,6 +125,49 @@ class TestRepositories:
         accepting_workers = worker_repo.list_active(accepting_only=True)
         accepting_count = sum(1 for w in accepting_workers if w.accepting_new_requests)
         assert accepting_count >= 2  # At least workers 0 and 2
+
+    def test_artifact_disk_locations_soft_delete_is_sticky(self, db_connection):
+        repo = ArtifactDiskLocationRepository(db_connection)
+        artifact_id = "mi2:idx:dat"
+        cluster_id = "cluster-1"
+        relative_path = "clusters/cluster-1/objects/mi2_idx_dat"
+
+        repo.upsert(
+            artifact_id=artifact_id,
+            cluster_id=cluster_id,
+            relative_path=relative_path,
+            kind="MANAGED",
+            is_deleted=False,
+        )
+        rows = repo.list_by_artifact(artifact_id)
+        assert len(rows) == 1
+        assert rows[0]["is_deleted"] is False
+        assert rows[0]["deleted_at"] is None
+
+        repo.upsert(
+            artifact_id=artifact_id,
+            cluster_id=cluster_id,
+            relative_path=relative_path,
+            kind="MANAGED",
+            is_deleted=True,
+        )
+        assert repo.list_by_artifact(artifact_id) == []
+        rows = repo.list_by_artifact(artifact_id, include_deleted=True)
+        assert len(rows) == 1
+        assert rows[0]["is_deleted"] is True
+        assert rows[0]["deleted_at"] is not None
+
+        # Deletion is sticky: an upsert must not revive a deleted location.
+        repo.upsert(
+            artifact_id=artifact_id,
+            cluster_id=cluster_id,
+            relative_path=relative_path,
+            kind="MANAGED",
+            is_deleted=False,
+        )
+        rows = repo.list_by_artifact(artifact_id, include_deleted=True)
+        assert len(rows) == 1
+        assert rows[0]["is_deleted"] is True
 
     def test_artifact_replica_repository_crud(self, repositories):
         """Test Replica CRUD operations."""

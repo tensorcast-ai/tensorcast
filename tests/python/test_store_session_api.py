@@ -54,7 +54,7 @@ class FakeHandle:
 
 @dataclass
 class FakeDaemonCtl:
-    resolves: dict[str, tuple[str | None, str | None]]
+    resolves: dict[str, str | None]
     materialized_by_id: dict[str, MaterializationPayload] = field(default_factory=dict)
     cache_ttl_seconds: int = 0
 
@@ -66,16 +66,16 @@ class FakeDaemonCtl:
         self.resolve_calls: list[str] = []
         self.resolve_disk_calls: list[tuple[str, bool]] = []
         self.index_by_id: dict[str, bytes] = {}
+        self.disk_artifacts: dict[str, str] = {}
 
     def get_server_config(self) -> ServerConfig:
         return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
 
     def resolve_key_mapping(self, key: str) -> daemon_ctl.KeyMappingResolution:
         self.resolve_calls.append(key)
-        artifact_id, disk_path = self.resolves.get(key, (None, None))
+        artifact_id = self.resolves.get(key)
         return daemon_ctl.KeyMappingResolution(
             artifact_id=artifact_id or "",
-            used_disk_path=disk_path or "",
             generation=0,
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )
@@ -84,11 +84,7 @@ class FakeDaemonCtl:
         self, *, disk_path: str, verify_checksums: bool = True
     ):
         self.resolve_disk_calls.append((disk_path, bool(verify_checksums)))
-        artifact_id = None
-        for resolved_id, mapped_path in self.resolves.values():
-            if mapped_path == disk_path and resolved_id:
-                artifact_id = resolved_id
-                break
+        artifact_id = self.disk_artifacts.get(disk_path, disk_path)
 
         class _Resp:
             pass
@@ -291,36 +287,46 @@ class FakeEnvironment:
         view_id: str | None = None,
         placement: int | None = None,
         canonical_index_hint: bytes | None = None,
-        disk_path_hint: str | None = None,
         preference: int | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         verify_checksums: bool = True,
         **_: Any,
     ) -> MaterializationPayload:
-        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, preference, tensor_names, verify_checksums
-        disk_hint = disk_path_hint
+        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, tensor_names, verify_checksums
         if artifact_id is not None and artifact_id in self.materialized_by_id:
             resolved = self.materialized_by_id[artifact_id]
         elif key is not None:
-            resolved_id, mapped_disk = client.resolves.get(key, (None, None))
+            resolved_id = client.resolves.get(key)
             if resolved_id and resolved_id in self.materialized_by_id:
                 resolved = self.materialized_by_id[resolved_id]
-                if disk_hint is None:
-                    disk_hint = mapped_disk
             else:
                 resolved = None
         else:
             resolved = None
         if resolved is None:
             raise RuntimeError("artifact not found")
+        effective_preference = preference
+        if effective_preference is None and source_policy is not None:
+            effective_preference = source_policy.preference
+        use_disk = False
+        if source_policy is not None and source_policy.allow_disk:
+            use_disk = (
+                effective_preference
+                == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+            )
         resolved_source = resolved.source or (
             store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
-            if disk_hint
+            if use_disk
             else store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
         )
-        if disk_hint is not None and resolved.disk_path != disk_hint:
-            resolved = replace(resolved, disk_path=disk_hint, source=resolved_source)
-            self.materialized_by_id[resolved.artifact_id] = resolved
+        if use_disk:
+            disk_path_value = f"/managed/{resolved.artifact_id}"
+            if resolved.disk_path != disk_path_value or resolved.source != resolved_source:
+                resolved = replace(
+                    resolved, disk_path=disk_path_value, source=resolved_source
+                )
+                self.materialized_by_id[resolved.artifact_id] = resolved
         elif resolved.source != resolved_source:
             resolved = replace(resolved, source=resolved_source)
         return resolved
@@ -598,7 +604,7 @@ def test_store_get_prefers_disk_when_available(
     store_env: tuple[Store, FakeEnvironment], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, env = store_env
-    disk_called: dict[str, str | store_daemon_pb2.SourcePreference | None] = {}
+    disk_called: dict[str, object] = {}
     tensor = torch.zeros(1, dtype=torch.float32)
     size_bytes = int(tensor.element_size() * tensor.numel())
     canonical_index_bytes = json.dumps(
@@ -606,16 +612,98 @@ def test_store_get_prefers_disk_when_available(
         separators=(",", ":"),
     ).encode("utf-8")
     env.client.index_by_id["disk-artifact"] = canonical_index_bytes
-    env.client.resolves["does-not-matter"] = ("disk-artifact", "/tmp/artifact")
+    env.client.resolves["does-not-matter"] = "disk-artifact"
 
     def fake_materialize(
         *,
-        disk_path_hint: str | None,
         preference: store_daemon_pb2.SourcePreference | None = None,
+        source_policy: store_daemon_pb2.SourcePolicy | None = None,
         **_: Any,
     ) -> MaterializationPayload:
-        disk_called["path"] = disk_path_hint
         disk_called["preference"] = preference
+        disk_called["allow_disk"] = (
+            bool(source_policy.allow_disk) if source_policy is not None else None
+        )
+        disk_called["policy_preference"] = (
+            source_policy.preference if source_policy is not None else None
+        )
+        descriptor = TensorPayloadDescriptor(
+            name="t",
+            dtype=str(tensor.dtype),
+            shape=tuple(tensor.shape),
+            stride=tuple(tensor.stride()),
+            buffer_offset=0,
+            byte_length=size_bytes,
+            storage_offset=int(tensor.storage_offset()),
+        )
+        effective_preference = preference
+        if effective_preference is None and source_policy is not None:
+            effective_preference = source_policy.preference
+        use_disk = (
+            effective_preference
+            == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+        )
+        disk_path_value = "/managed/disk-artifact" if use_disk else None
+        source = (
+            store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK
+            if use_disk
+            else store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P
+        )
+
+        def _iter():
+            yield descriptor, tensor
+
+        return MaterializationPayload(
+            artifact_id="disk-artifact",
+            canonical_index_bytes=canonical_index_bytes,
+            descriptors=(descriptor,),
+            payload_iter=_iter,
+            state_dict={"t": tensor},
+            replica_uuid="rep-disk",
+            disk_path=disk_path_value,
+            source=source,
+        )
+
+    store.set_materialize_fn(fake_materialize)
+
+    artifact = store.artifact(
+        key="does-not-matter",
+        fallback="disk",
+    )
+    result = artifact.tensor_dict(device=torch.device("cuda", 0))
+    assert disk_called["preference"] == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+    assert disk_called["allow_disk"] is True
+    assert "t" in result
+
+
+def test_artifact_tensor_dict_wait_for_shared_disk_ms_passthrough(
+    store_env: tuple[Store, FakeEnvironment],
+) -> None:
+    store, env = store_env
+
+    calls: list[tuple[int | None, float | None]] = []
+    tensor = torch.zeros(1, dtype=torch.float32)
+    size_bytes = int(tensor.element_size() * tensor.numel())
+    canonical_index_bytes = json.dumps(
+        {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    env.client.index_by_id["disk-wait-artifact"] = canonical_index_bytes
+
+    def fake_materialize(
+        *,
+        options: GetArtifactOptions | None = None,
+        timeout_s: float | None = None,
+        **_: Any,
+    ) -> MaterializationPayload:
+        calls.append(
+            (
+                options.wait_for_shared_disk_ms if options is not None else None,
+                timeout_s,
+            )
+        )
+        if len(calls) == 1:
+            raise RuntimeError("artifact not found")
         descriptor = TensorPayloadDescriptor(
             name="t",
             dtype=str(tensor.dtype),
@@ -630,26 +718,27 @@ def test_store_get_prefers_disk_when_available(
             yield descriptor, tensor
 
         return MaterializationPayload(
-            artifact_id="disk-artifact",
+            artifact_id="disk-wait-artifact",
             canonical_index_bytes=canonical_index_bytes,
             descriptors=(descriptor,),
             payload_iter=_iter,
             state_dict={"t": tensor},
-            replica_uuid="rep-disk",
-            disk_path=disk_path_hint,
-            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_DISK,
+            replica_uuid="rep-disk-wait",
+            source=store_daemon_pb2.MaterializationSource.MATERIALIZATION_SOURCE_P2P,
         )
 
     store.set_materialize_fn(fake_materialize)
 
-    artifact = store.artifact(
-        key="does-not-matter",
-        fallback="disk:/tmp/artifact",
+    artifact = store.artifact(artifact_id="disk-wait-artifact")
+    result = artifact.tensor_dict(
+        device=torch.device("cuda", 0),
+        options=GetArtifactOptions(wait_for_shared_disk_ms=120_000),
     )
-    result = artifact.tensor_dict(device=torch.device("cuda", 0))
-    assert disk_called["path"] == "/tmp/artifact"
-    assert disk_called["preference"] == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
     assert "t" in result
+    assert calls[0] == (0, None)
+    assert calls[1][0] == 120_000
+    assert calls[1][1] is not None
+    assert calls[1][1] >= 120.0
 
 
 def test_store_key_resolution_cache_reuses_mapping(
@@ -669,8 +758,7 @@ def test_store_key_resolution_cache_reuses_mapping(
 
     key = "artifact-key"
     artifact_id_value = "mi2:test:cached"
-    disk_path_value = "/tmp/cached-artifact"
-    client.resolves[key] = (artifact_id_value, disk_path_value)
+    client.resolves[key] = artifact_id_value
 
     tensor = torch.ones(2, dtype=torch.float32)
     env.add_materialized(artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache")
@@ -683,7 +771,7 @@ def test_store_key_resolution_cache_reuses_mapping(
 
     fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
 
-    # Warm the key mapping cache so disk fallback has a resolved path.
+    # Warm the key mapping cache so key resolution is cached.
     store._runtime.resolve_key_mapping_cached(key=key)
 
     artifact = store.artifact(key=key, fallback=fallback)
@@ -705,7 +793,7 @@ def test_store_key_resolution_cache_ttl_zero_disables_cache(
 
     key = "artifact-key"
     artifact_id_value = "mi2:test:cached"
-    client.resolves[key] = (artifact_id_value, None)
+    client.resolves[key] = artifact_id_value
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
     store = store_mod.Store("fake://daemon")
@@ -823,25 +911,23 @@ def test_get_function_delegates_to_session(
             *,
             artifact_id: str | None = None,
             key: str | None = None,
-            disk_path: str | None = None,
             fallback: FallbackOptions | str | None = None,
         ) -> object:
             self.kwargs = {
                 "artifact_id": artifact_id,
                 "key": key,
-                "disk_path": disk_path,
                 "fallback": fallback,
             }
             return self.result
 
     session = DummyStore()
     monkeypatch.setattr(store_mod, "store", lambda: session)
-    outcome: object = store_mod.artifact(key="demo", fallback="disk:/tmp/a")
+    outcome: object = store_mod.artifact(key="demo", fallback="disk")
 
     assert outcome is session.result
     assert session.kwargs is not None
     assert session.kwargs["key"] == "demo"
-    assert session.kwargs["fallback"] == "disk:/tmp/a"
+    assert session.kwargs["fallback"] == "disk"
 
 
 def test_from_disk_function_delegates_to_session(
@@ -856,19 +942,24 @@ def test_from_disk_function_delegates_to_session(
             self,
             path: str,
             *,
-            fallback: FallbackOptions | str | None = None,
+            key: str | None = None,
+            verify_checksums: bool = True,
         ):
-            self.kwargs = {"path": path, "fallback": fallback}
+            self.kwargs = {
+                "path": path,
+                "key": key,
+                "verify_checksums": verify_checksums,
+            }
             return self.result
 
     session = DummyStore()
     monkeypatch.setattr(store_mod, "store", lambda: session)
-    result = store_mod.from_disk("/tmp/data", fallback="disk:/tmp/data")
+    result = store_mod.from_disk("/tmp/data")
 
     assert result is session.result
     assert session.kwargs is not None
     assert session.kwargs["path"] == "/tmp/data"
-    assert session.kwargs["fallback"] == "disk:/tmp/data"
+    assert session.kwargs["verify_checksums"] is True
 
 
 def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -282,11 +282,6 @@ enum ViewRegistrationKind {
   VIEW_REGISTRATION_KIND_PIECE = 2;
 }
 
-message DiskFallbackHint {
-  string disk_path = 1;
-  bool verify_checksums = 2;
-}
-
 message TensorPayloadDescriptor {
   string name = 1;
   repeated int64 shape = 2;
@@ -372,7 +367,8 @@ message ReplicaOperationStatus {
 message MaterializeReplicaRequest {
   // RFC-0007: Use content-addressed artifact_id when available.
   optional string artifact_id = 1;
-  DiskFallbackHint disk_fallback = 2;
+  reserved 2;
+  reserved "disk_fallback";
 
   string replica_uuid = 3;
   string device_uuid = 4;
@@ -389,9 +385,8 @@ message MaterializeReplicaRequest {
   repeated string tensor_names = 10;
   bytes view_subset_hash = 11;
 
-  // Legacy disk fallback fields; prefer disk_fallback instead.
-  optional bool verify_checksums = 12;
-  optional string disk_path = 13;
+  reserved 12, 13;
+  reserved "verify_checksums", "disk_path";
 
   oneof view_identity {
     tensorcast.common.v1.ViewSpec view = 1001;
@@ -400,6 +395,10 @@ message MaterializeReplicaRequest {
 
   TransformPlacement placement = 1003;
   bool wait_for_completion = 1004;
+  // Server-side wait budget for managed shared-disk readiness. When >0 and the
+  // initial materialization attempt fails, the daemon waits for a managed disk
+  // location in the local cluster before retrying disk-only.
+  uint32 wait_for_shared_disk_ms = 16;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -460,7 +459,8 @@ message MaterializeIntoMappedTargetRequest {
     string artifact_id = 1;
     string key = 2;
   }
-  DiskFallbackHint disk_fallback = 3;
+  reserved 3;
+  reserved "disk_fallback";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
@@ -488,7 +488,8 @@ message MaterializeIntoTargetRequest {
     string artifact_id = 1;
     string key = 2;
   }
-  DiskFallbackHint disk_fallback = 3;
+  reserved 3;
+  reserved "disk_fallback";
 
   TargetLayout target_layout = 4;
   int32 pid = 5;
@@ -972,6 +973,8 @@ message DeregisterArtifactRequest {
   optional bool release_regions = 8;
   tensorcast.common.v1.ByteSpaceRef byte_space = 9;
   optional string operation_id = 10;
+  // When true, keep any managed shared-disk copies (default: purge on deregister).
+  optional bool keep_shared_disk_copy = 11;
 }
 
 message DeregisterArtifactResponse {
@@ -1028,6 +1031,10 @@ message MaterializeByKeyRequest {
   SourcePreference preference = 12;
   SourcePolicy source_policy = 13;
   bool wait_for_completion = 20;
+  // Server-side wait budget for managed shared-disk readiness. When >0 and the
+  // initial materialization attempt fails, the daemon waits for a managed disk
+  // location in the local cluster before retrying disk-only.
+  uint32 wait_for_shared_disk_ms = 21;
 }
 message MaterializeByKeyResponse {
   MaterializeReplicaStatus status = 1;
@@ -1162,7 +1169,8 @@ message PublishReplicaKeyRequest {
   // Content-addressed artifact descriptor (RFC-0007)
   tensorcast.common.v1.ArtifactDescriptor artifact_descriptor = 2;
   string replica_uuid = 3;
-  string disk_path = 4; // optional
+  reserved 4;
+  reserved "disk_path";
   bool fail_if_exists = 5; // default semantics: true
 }
 message PublishReplicaKeyResponse {
@@ -1176,7 +1184,8 @@ message ResolveKeyMappingRequest {
 }
 message ResolveKeyMappingResponse {
   string artifact_id = 1;
-  string used_disk_path = 2;
+  reserved 2;
+  reserved "used_disk_path";
   uint64 generation = 3;
   uint32 cache_ttl_seconds = 4;
 }
@@ -1266,6 +1275,7 @@ message StartPersistenceRequest {
   StorePolicy policy = 2;
   reserved 3;
   reserved "placement_policy", "persist_to_shared_disk";
+  string key_hint = 4;
 }
 
 message StartPersistenceResponse {

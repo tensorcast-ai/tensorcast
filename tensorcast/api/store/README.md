@@ -9,8 +9,9 @@ managing clients manually.
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
   bound to the process `Store`. `tc.artifact("my-key")` is shorthand for
-  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`/`disk:`) map to
-  explicit identifier kinds.
+  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`) map to
+  explicit identifier kinds. `disk:` is reserved and rejected; use
+  `from_disk(...)` for explicit imports.
   Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
@@ -24,8 +25,8 @@ managing clients manually.
   non-identity views the SDK resolves and sends a deterministic `view_id` in
   the `TargetLayout`. `region_backed_mode` (`auto`/`require`/`disable`) controls
   fallback behavior.
-- Handles retain whichever identifiers are available (`artifact_id`, `key`,
-  `disk_path`). At least one identifier is required when instantiating or
+- Handles retain whichever identifiers are available (`artifact_id`, `key`).
+  At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
   `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
   continue to work.
@@ -33,16 +34,16 @@ managing clients manually.
   artifacts via the daemon `ResolveArtifactFromDisk` RPC. The daemon validates
   descriptor multihashes when `verify_checksums=True` (when a descriptor is
   present), returns canonical `canonical_index_bytes` + `generation`, and seeds
-  `ArtifactCache` while binding a disk-first `FallbackOptions` so
-  materialization prefers the local files without extra resolver RPCs. For
-  safetensors directories, the daemon prefers `tensor_index.(json|cbor)` when
-  present; otherwise it builds canonical metadata directly from `.safetensors`
-  headers. When checksums are verified and the daemon can write to the
-  directory, it will backfill `tensor_index.(json|cbor)` for faster subsequent
-  metadata reads.
-  Set `verify_checksums=False` on `FallbackOptions.for_disk(...)` to allow
-  descriptor-free local development; checksum validation (and descriptor
-  requirements) remain the default in production.
+  the `ArtifactCache` with the resolved metadata. This API is an explicit
+  **import/registration** step: it does **not** inject disk fallback hints into
+  later materializations. For safetensors directories, the daemon prefers
+  `tensor_index.(json|cbor)` when present; otherwise it builds canonical
+  metadata directly from `.safetensors` headers. When checksums are verified
+  and the daemon can write to the directory, it will backfill
+  `tensor_index.(json|cbor)` for faster subsequent metadata reads.
+  Set `verify_checksums=False` on `from_disk(...)` to allow descriptor-free
+  local development; checksum validation (and descriptor requirements) remain
+  the default in production.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -166,13 +167,14 @@ binding.swap("model:v2")
 `FallbackOptions` now supports explicit source preferences:
 
 - `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P and disk unless an explicit `disk_path` is provided;
-  daemon enforces this via `SourcePolicy` gating
+- `prefer="local"` — disallow P2P and disk; daemon enforces this via
+  `SourcePolicy` gating
 - `prefer="p2p"` — allow remote transfer
-- `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
-  mapping
+- `prefer="disk"` — prioritize disk fallback when a managed disk location is
+  available; disk paths are resolved by the daemon via Global Store
 
-Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
+Use `allow_p2p` / `allow_disk` to gate sources explicitly. Compatibility flags
+`prefer_disk` and `allow_p2p` continue to work; setting
 `replica_uuid` hints the daemon to reuse a prefetched replica.
 
 ## Feature Toggles
@@ -185,8 +187,8 @@ Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
 ## Metadata Cache
 
 - The process runtime owns an `ArtifactCache` that stores canonical index bytes,
-  parsed indices, and disk hints keyed by `artifact_id`. Cache entries expire by
-  TTL and obey an LRU bound.
+  parsed indices, and generation metadata keyed by `artifact_id`. Cache entries
+  expire by TTL and obey an LRU bound.
 - Environment defaults:
   - `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS=600` (set `<=0` to disable)
   - `TENSORCAST_STORE_CACHE_MAX_ENTRIES=1000` (set `<=0` to disable)
@@ -198,12 +200,11 @@ Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
 - Invalidation hooks run after registration, deregistration, and materialization
   errors (`NOT_FOUND`/`FAILED_PRECONDITION`) to keep key→artifact mappings and
   cached indices consistent.
-- Disk lookups honor cache entries keyed by `disk_path` (not just
-  `artifact_id`) to bypass resolver RPCs; mismatched `disk_path` or `generation`
-  values trigger cache invalidation and a fresh daemon fetch.
+- Key→artifact-id lookups are cached with TTL (see
+  `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS`) to avoid repeated resolver RPCs.
 - Disk resolution (`ResolveArtifactFromDisk`) seeds the cache with
-  `canonical_index_bytes`, `generation`, and `disk_path` so repeated
-  `from_disk` calls avoid extra daemon RPCs and preserve generation metadata.
+  `canonical_index_bytes` and `generation` so repeated `from_disk` calls avoid
+  extra daemon RPCs and preserve generation metadata.
 - Metadata hydration (`_ensure_metadata`) applies `_set_metadata` while holding
   the artifact’s reentrant lock so concurrent callers never observe partially
   populated canonical metadata.

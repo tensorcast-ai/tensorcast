@@ -437,8 +437,27 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("get_view_metadata not used in tests");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
     return absl::UnimplementedError("upsert_key_mapping not used in tests");
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    return absl::UnimplementedError("get_cluster_id not used in tests");
+  }
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view,
+      std::string_view,
+      std::string_view,
+      tensorcast::global_store::v1::DiskLocationKind,
+      bool) override {
+    return absl::UnimplementedError("upsert_artifact_disk_location not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view,
+      bool) override {
+    return absl::UnimplementedError("list_artifact_disk_locations not used in tests");
   }
 
   absl::StatusOr<tensorcast::store::components::KeyMappingSwapResult> swap_key_mapping(

@@ -518,6 +518,17 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_loader_partition_order_test",
+    srcs = ["loaders/tests/disk_loader_partition_order_test.cc"],
+    deps = [
+        ":disk_loader",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "disk_error_test",
     srcs = ["loaders/tests/disk_error_test.cc"],
     tags = ["requires_cuda"],
@@ -590,6 +601,19 @@ cc_test(
     deps = [
         ":index_reader",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "disk_dir_hash_test",
+    srcs = ["metadata/tests/disk_dir_hash_test.cc"],
+    deps = [
+        ":disk_dir_hash",
+        ":source_hash",
+        "//core/testing:catch_main",
+        "//core/testing:common",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],

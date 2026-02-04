@@ -77,13 +77,48 @@ def _resolve_schema_path() -> str:
     )
 
 
-def init_db(db: DuckDBPyConnection) -> None:
-    # Check if tables already exist in this specific connection
-    res = db.execute("SHOW TABLES").fetchall()
-    if len(res) > 0:
-        logger.info("Database already initialized; skipping schema re-apply")
-        return
+def _column_exists(db: DuckDBPyConnection, table: str, column: str) -> bool:
+    try:
+        rows = db.execute(f"PRAGMA table_info('{table}')").fetchall()
+    except Exception:
+        return False
+    return any(row[1] == column for row in rows)
 
+
+def _apply_schema_migrations(db: DuckDBPyConnection) -> None:
+    # Drop legacy key_mappings.disk_path column if present
+    if _column_exists(db, "key_mappings", "disk_path"):
+        try:
+            db.execute("ALTER TABLE key_mappings DROP COLUMN disk_path")
+            logger.info("Dropped legacy key_mappings.disk_path column")
+        except Exception:
+            logger.exception("Failed to drop legacy key_mappings.disk_path column")
+            raise
+
+    # Soft-delete columns for managed shared-disk GC.
+    if not _column_exists(db, "artifact_disk_locations", "is_deleted"):
+        try:
+            # DuckDB may reject NOT NULL for ADD COLUMN on some versions; keep it nullable and
+            # treat NULL as false in queries.
+            db.execute(
+                "ALTER TABLE artifact_disk_locations ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE"
+            )
+            logger.info("Added artifact_disk_locations.is_deleted column")
+        except Exception:
+            logger.exception("Failed to add artifact_disk_locations.is_deleted column")
+            raise
+    if not _column_exists(db, "artifact_disk_locations", "deleted_at"):
+        try:
+            db.execute(
+                "ALTER TABLE artifact_disk_locations ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE"
+            )
+            logger.info("Added artifact_disk_locations.deleted_at column")
+        except Exception:
+            logger.exception("Failed to add artifact_disk_locations.deleted_at column")
+            raise
+
+
+def init_db(db: DuckDBPyConnection) -> None:
     sql_file_path = _resolve_schema_path()
     statements = parse_sql_file(sql_file_path)
     for statement in statements:
@@ -94,6 +129,8 @@ def init_db(db: DuckDBPyConnection) -> None:
             except Exception:
                 logger.exception("Failed to execute SQL statement: %s", statement)
                 raise
+
+    _apply_schema_migrations(db)
 
 
 def optimize_db(db: DuckDBPyConnection) -> None:

@@ -54,7 +54,7 @@ Non-Goals
 - Region & lifecycle (advanced):
   - `tc.register_vram_region(device_id, base_ptr, size_bytes, ttl_ms, name=None) -> VramRegionHandle`.
   - `tc.unregister_vram_region(region_id, *, force=None) -> bool`.
-  - `tc.deregister_artifact(artifact_id, *, wait=True, drain_timeout_s=None, extend_ttl_ms=None, device_id=None) -> DeregisterArtifactOutcome`.
+  - `tc.deregister_artifact(artifact_id, *, wait=True, drain_timeout_s=None, extend_ttl_ms=None, device_id=None, keep_shared_disk_copy=False) -> DeregisterArtifactOutcome`.
   - `tc.seal_assembly(assembly_id, *, publish_canonical=True, timeout_s=120.0)`.
 
 Removed after migration: module-level `get`, `get_into`, `get_view`, `get_view_into` (sync/async); `store()` remains for advanced callers but is not required for common flows.

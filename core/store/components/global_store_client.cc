@@ -2079,7 +2079,6 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
       .artifact_id = response.artifact_id(),
       .replica_uuid = response.replica_uuid(),
       .daemon_address = response.daemon_address(),
-      .disk_path = response.disk_path(),
   };
   out.generation = response.generation();
   out.cache_ttl_seconds = response.cache_ttl_seconds();
@@ -2089,12 +2088,10 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
 absl::Status GlobalStoreClient::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
-    std::string_view disk_path,
     absl::Duration ttl) {
   global_store::UpsertKeyMappingRequest request;
   request.set_key(std::string(key));
   request.set_artifact_id(std::string(artifact_id));
-  request.set_disk_path(std::string(disk_path));
   if (ttl > absl::ZeroDuration()) {
     auto* d = request.mutable_ttl();
     d->set_seconds(absl::ToInt64Seconds(ttl));
@@ -2164,6 +2161,93 @@ absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
     return absl::NotFoundError("key not found");
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> GlobalStoreClient::get_cluster_id() {
+  global_store::GetServerInfoRequest request;
+  global_store::GetServerInfoResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetServerInfo(ctx, req, resp); },
+      "GetServerInfo");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError("GetServerInfo failed");
+  }
+  if (response.cluster_id().empty()) {
+    return absl::NotFoundError("cluster_id unavailable");
+  }
+  return response.cluster_id();
+}
+
+absl::Status GlobalStoreClient::upsert_artifact_disk_location(
+    std::string_view artifact_id,
+    std::string_view cluster_id,
+    std::string_view relative_path,
+    global_store::DiskLocationKind kind,
+    bool is_deleted) {
+  global_store::UpsertArtifactDiskLocationRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_cluster_id(std::string(cluster_id));
+  request.set_relative_path(std::string(relative_path));
+  request.set_kind(kind);
+  request.set_is_deleted(is_deleted);
+
+  global_store::UpsertArtifactDiskLocationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpsertArtifactDiskLocation(ctx, req, resp); },
+      "UpsertArtifactDiskLocation");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError("artifact disk location upsert failed");
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<ArtifactDiskLocation>> GlobalStoreClient::list_artifact_disk_locations(
+    std::string_view artifact_id,
+    bool include_deleted) {
+  global_store::ListArtifactDiskLocationsRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_include_deleted(include_deleted);
+
+  global_store::ListArtifactDiskLocationsResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ListArtifactDiskLocations(ctx, req, resp); },
+      "ListArtifactDiskLocations");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::NotFoundError("artifact disk locations not found");
+  }
+
+  std::vector<ArtifactDiskLocation> out;
+  out.reserve(response.locations_size());
+  for (const auto& loc : response.locations()) {
+    ArtifactDiskLocation entry;
+    entry.artifact_id = loc.artifact_id();
+    entry.cluster_id = loc.cluster_id();
+    entry.relative_path = loc.relative_path();
+    entry.kind = loc.kind();
+    entry.is_deleted = loc.is_deleted();
+    entry.created_at = timestamp_to_absl(loc.created_at());
+    entry.updated_at = timestamp_to_absl(loc.updated_at());
+    if (loc.has_deleted_at()) {
+      entry.deleted_at = timestamp_to_absl(loc.deleted_at());
+    }
+    out.push_back(std::move(entry));
+  }
+  return out;
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::string_view artifact_id) {
