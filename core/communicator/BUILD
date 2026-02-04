@@ -478,6 +478,28 @@ sc_cc_library(
     ],
 )
 
+sc_cc_library(
+    name = "simple_numa_topology_lib",
+    srcs = ["topology/simple_numa_topology.cc"],
+    hdrs = ["topology/simple_numa_topology.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":topology_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
+cc_binary(
+    name = "simple_numa_topology_tool",
+    srcs = ["topology/simple_numa_topology_tool.cc"],
+    deps = [
+        ":config_io_lib",
+        ":simple_numa_topology_lib",
+        "@abseil-cpp//absl/status",
+    ],
+)
+
 # Aggregate target removed; depend on specific libs instead.
 
 # Tests

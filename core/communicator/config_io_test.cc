@@ -64,3 +64,24 @@ TEST_CASE("config_io JSON parse + defaults", "[communicator][config]") {
   REQUIRE(cfg.transport().tcp_tos() == 0);
   REQUIRE(cfg.transport().so_reuseport() == true);
 }
+
+TEST_CASE("config_io communicator wrapper parse", "[communicator][config]") {
+  const char* yaml = R"YAML(
+communicator:
+  enable_rdma: true
+  stager:
+    buffers_per_flow: 3
+  transport:
+    tcp_conn_count: 2
+)YAML";
+  const std::string path = write_temp_file(yaml, "yaml_wrapped.yaml");
+  auto cfg_or = LoadCommunicatorConfigFromFile(path);
+  REQUIRE(cfg_or.ok());
+  CommunicatorConfig cfg = cfg_or.value();
+
+  REQUIRE(cfg.enable_rdma() == true);
+  REQUIRE(cfg.stager().buffers_per_flow() == 3);
+  REQUIRE(cfg.transport().tcp_conn_count() == 2);
+  REQUIRE(cfg.transport().connect_timeout_sec() == 10);
+  REQUIRE(cfg.transport().so_reuseport() == true);
+}

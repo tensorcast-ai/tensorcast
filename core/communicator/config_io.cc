@@ -136,7 +136,6 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
     try {
       YAML::Node root = YAML::Load(content);
       root_json = YamlNodeToJson(root);
-      json_text = root_json.dump();
     } catch (const std::exception& e) {
       return absl::InvalidArgumentError(absl::StrCat("YAML parse error: ", e.what()));
     }
@@ -144,11 +143,23 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
     // Assume JSON
     try {
       root_json = nlohmann::json::parse(content);
-      json_text = root_json.dump();
     } catch (const std::exception& e) {
       return absl::InvalidArgumentError(absl::StrCat("JSON parse error: ", e.what()));
     }
   }
+
+  const nlohmann::json* config_json = &root_json;
+  if (root_json.is_object()) {
+    auto it = root_json.find("communicator");
+    if (it != root_json.end()) {
+      if (!it->is_object()) {
+        return absl::InvalidArgumentError("communicator field must be an object");
+      }
+      config_json = &(*it);
+    }
+  }
+
+  json_text = config_json->dump();
 
   auto status = google::protobuf::util::JsonStringToMessage(json_text, &cfg);
   if (!status.ok()) {
@@ -156,7 +167,8 @@ absl::StatusOr<tc::CommunicatorConfig> LoadCommunicatorConfigFromFile(const std:
   }
 
   // Handle boolean defaults that require presence checks on the original JSON
-  if (!(root_json.contains("stager") && root_json["stager"].contains("stage_cpu_for_rdma"))) {
+  if (!(config_json->is_object()
+        && config_json->contains("stager") && (*config_json)["stager"].contains("stage_cpu_for_rdma"))) {
     cfg.mutable_stager()->set_stage_cpu_for_rdma(true);
   }
 

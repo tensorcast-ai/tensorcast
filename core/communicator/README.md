@@ -78,6 +78,16 @@ The topology is pure data: it is built from explicit inputs and does **not** rel
 
 Topology modeling examples live in `core/communicator/topology/topology_test.cc`, including a rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout (separate NVSwitch and network switch components) and a no-rail 4-GPU/1-NIC/1-CPU layout where a single NIC (bound to CPU + all GPUs) links to one network switch without per-GPU PCIe endpoints. When running under Bazel, the tests emit DOT files into `TEST_UNDECLARED_OUTPUTS_DIR` as `topology_<label>.dot`; set `TENSORCAST_TOPOLOGY_DOT_STDOUT=1` to also print the graphs to stdout.
 
+### Simple NUMA -> DOT helper
+
+For quick validation, you can build a switch-based direct topology from `CommunicatorConfig.simple_numa` and emit a DOT graph. The helper loads either a **CommunicatorConfig** YAML/JSON directly or a daemon config that contains a top-level `communicator:` section.
+
+```bash
+bazel run //core/communicator:simple_numa_topology_tool -- path/to/comm_or_daemon.yaml > topology.dot
+```
+
+The adapter always connects NIC endpoints to a single virtual network switch (`netsw0`) using switch links, avoiding full-mesh P2P edges.
+
 ---
 
 ## 2. Threading Replica
