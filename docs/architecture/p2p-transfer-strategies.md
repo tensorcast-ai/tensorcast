@@ -14,6 +14,7 @@ This document explains how P2P transfers work in Global Store mode. It is code-d
 - Control plane: gRPC to Global Store and key mapping.
 - Data plane: `communicator::engine::Communicator` over RDMA or MTCP (multi-TCP).
 - Remote access uses memory keys registered for coalesced chunk ranges.
+- Topology modeling (`core/communicator/topology`) now exists to describe Pool/Endpoint/Link reachability (including switch endpoints) without hardware discovery; routing integration is a follow-up.
 
 ## End-to-end lifecycle (control + data)
 

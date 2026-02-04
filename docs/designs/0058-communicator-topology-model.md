@@ -73,11 +73,14 @@ flowchart TB
 ### Endpoint（传输端点）
 - 作用：通信单边实体；承载设备能力与拓扑属性。
 - 类型：
-  - **Client Endpoint**：真实设备端点（NIC/PCIe/NVLink/UPI）。
+  - **Client Endpoint**：真实设备端点（NIC/PCIe/NVLink）。
   - **Switch Endpoint**：仅用于路径搜索的抽象交换节点。
 - 关键字段：
-  - `type`：NIC / PCIE / NVLINK / UPI + Client 或 Switch
-  - `pool`
+  - `type`：NIC / PCIE / NVLINK + Client 或 Switch
+  - `pool_ids`
+    - NIC/PCIE：至少包含一个 CPU pool + 一个 GPU pool
+    - NVLINK：仅包含 GPU pools（CPU pool 为空）
+    - Switch：不绑定任何 pool
   - `name` / `uuid`
   - `bw`（用于路径打分与 striping 权重）
   - `communicators_map`：`{ dst: [communicator_list] }`

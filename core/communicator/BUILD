@@ -465,6 +465,19 @@ sc_cc_library(
     ],
 )
 
+# ========== Topology model ==========
+
+sc_cc_library(
+    name = "topology_lib",
+    srcs = ["topology/topology.cc"],
+    hdrs = ["topology/topology.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+    ],
+)
+
 # Aggregate target removed; depend on specific libs instead.
 
 # Tests
@@ -552,6 +565,16 @@ cc_test(
     srcs = ["config_io_test.cc"],
     deps = [
         ":config_io_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "topology_test",
+    srcs = ["topology/topology_test.cc"],
+    deps = [
+        ":topology_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

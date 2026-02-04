@@ -66,6 +66,18 @@ flowchart TB
 * **PinnedBufferPool & StreamingPinnedBuffer** — Shared pinned pools sourced from the daemon-wide `pinned_memory` authority (or internal defaults when constructed standalone).
 * **MrCache** — Per-protection-domain cache that reuses RDMA MRs for staged buffers to avoid repeated registrations.
 
+### Topology Model (Pool / Endpoint / Link)
+
+The communicator now ships a topology model under `core/communicator/topology/` that captures *reachability* separately from the transport implementation:
+
+- **Pool** models a resource domain (CPU/GPU) and anchors endpoint affinity.
+- **Endpoint** models a transport endpoint with pool affinity constraints by type. Each endpoint carries a `pool_ids` list and validation enforces: **NIC**/**PCIE** endpoints must reference at least one CPU pool and one GPU pool, **NVLINK** endpoints must reference GPU pools only, and **Switch** endpoints have no pool affinity (used only for path search).
+- **Link** models a topology edge; **SW links** are the only links allowed to touch switch endpoints.
+
+The topology is pure data: it is built from explicit inputs and does **not** rely on any external hardware discovery. `Topology::validate()` enforces switch semantics and structural invariants, and `Topology::to_dot()` emits a minimal Graphviz view for debugging. Routing/connection mapping will be layered on in subsequent phases.
+
+Topology modeling examples live in `core/communicator/topology/topology_test.cc`, including a rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout (separate NVSwitch and network switch components) and a no-rail 4-GPU/1-NIC/1-CPU layout where a single NIC (bound to CPU + all GPUs) links to one network switch without per-GPU PCIe endpoints. When running under Bazel, the tests emit DOT files into `TEST_UNDECLARED_OUTPUTS_DIR` as `topology_<label>.dot`; set `TENSORCAST_TOPOLOGY_DOT_STDOUT=1` to also print the graphs to stdout.
+
 ---
 
 ## 2. Threading Replica
