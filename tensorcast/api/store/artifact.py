@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import threading
 import time
 import uuid
@@ -14,6 +15,7 @@ from typing import TYPE_CHECKING, Mapping, Sequence, TypedDict, cast
 
 import torch
 
+from tensorcast.api._device import CPU_DEVICE_ID
 from tensorcast.api._view_ops import (
     SliceSpec,
     ViewSpecBuildResult,
@@ -46,6 +48,7 @@ from tensorcast.api.store.view_composer import (
     compute_view_id,
 )
 from tensorcast.common.selection_identity import (
+    compute_logical_layout_hash,
     compute_selection_hash,
     compute_view_subset_hash,
 )
@@ -599,18 +602,37 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
 
-        device_obj = (
-            torch.device(f"cuda:{int(device)}")
-            if isinstance(device, int)
-            else torch.device(device)
-        )
-        if device_obj.type == "cpu":
-            raise ArtifactError(
-                "prefetch does not support CPU devices",
-                status_code="INVALID_ARGUMENT",
-                retryable=False,
-            )
-        device_id = int(device_obj.index if device_obj.index is not None else 0)
+        if ctx is not None and ctx.idempotency_key:
+            # Deterministic operation ids require stable index bytes for logical layout hashing.
+            self._ensure_metadata()
+
+        if isinstance(device, int):
+            if device < 0:
+                device_obj = torch.device("cpu")
+                device_id = CPU_DEVICE_ID
+            else:
+                device_obj = torch.device(f"cuda:{int(device)}")
+                device_id = int(device)
+        else:
+            if isinstance(device, str) and device.strip().lower() == "dram":
+                device_obj = torch.device("cpu")
+                device_id = CPU_DEVICE_ID
+            else:
+                device_obj = (
+                    device if isinstance(device, torch.device) else torch.device(device)
+                )
+                if device_obj.type == "cpu":
+                    device_id = CPU_DEVICE_ID
+                elif device_obj.type == "cuda":
+                    device_id = int(
+                        device_obj.index if device_obj.index is not None else 0
+                    )
+                else:
+                    raise ArtifactError(
+                        f"prefetch does not support device type {device_obj.type!r}",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
         daemon_id = (
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
@@ -626,10 +648,70 @@ class Artifact:
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:
+            canonical_index_bytes = self._canonical_index_bytes
+            if canonical_index_bytes is None:
+                raise ArtifactError(
+                    "Canonical index bytes unavailable for deterministic prefetch",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=True,
+                )
+
+            needs_view_index = bool(view_id)
+            index_bytes = canonical_index_bytes
+            if needs_view_index:
+                if view_index_hint is not None:
+                    index_bytes = view_index_hint
+                else:
+                    if view_spec_proto is None:
+                        raise ArtifactError(
+                            "View index bytes unavailable for deterministic prefetch",
+                            status_code="FAILED_PRECONDITION",
+                            retryable=True,
+                        )
+                    from tensorcast._c_ext import compute_view_index_bytes
+
+                    normalized_ops: dict[str, list[dict[str, int | str]]] = {}
+                    if view_spec_proto.tensors:
+                        for name, ops in view_spec_proto.tensors.items():
+                            op_list: list[dict[str, int | str]] = []
+                            for op in ops.ops:
+                                if op.HasField("narrow"):
+                                    op_list.append(
+                                        {
+                                            "type": "narrow",
+                                            "dim": int(op.narrow.dim),
+                                            "start": int(op.narrow.start),
+                                            "length": int(op.narrow.length),
+                                        }
+                                    )
+                                elif op.HasField("transpose"):
+                                    op_list.append(
+                                        {
+                                            "type": "transpose",
+                                            "dim0": int(op.transpose.dim0),
+                                            "dim1": int(op.transpose.dim1),
+                                        }
+                                    )
+                            if op_list:
+                                normalized_ops[str(name)] = op_list
+                    payload = compute_view_index_bytes(
+                        canonical_index_bytes, normalized_ops
+                    )
+                    index_bytes = bytes(payload["view_index_bytes"])
+
+            logical_layout_hash = compute_logical_layout_hash(
+                index_bytes=index_bytes, needs_view_index=needs_view_index
+            ).hex()
             ns = uuid.uuid5(uuid.NAMESPACE_DNS, "tensorcast.op.v1")
-            action_fingerprint = f"prefetch|daemon={daemon_id}|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+            idempotency_key_hex = hashlib.sha256(
+                ctx.idempotency_key.encode("utf-8")
+            ).hexdigest()
+            action_fingerprint = (
+                f"prefetch|daemon={daemon_id}|artifact={artifact_id}|layout={logical_layout_hash}"
+                f"|selection={selection_hash}|device={device_id}|lease=NO_LEASE|v1"
+            )
             deterministic_replica_uuid = str(
-                uuid.uuid5(ns, f"{ctx.idempotency_key}|{action_fingerprint}")
+                uuid.uuid5(ns, f"{idempotency_key_hex}|{action_fingerprint}")
             )
 
         replica_uuid = deterministic_replica_uuid or (

@@ -52,8 +52,10 @@ Module-level helpers (`tensorcast.api.store.register`, `get`, etc.) reuse a proc
   artifact/view identity, but `ctx.idempotency_key` seeds deterministic operation ids for joinable actions.
 - Long-tail control-plane actions return `Operation[T]` (sync/blocking): use `status()` / `result()` / `cancel()` to
   implement wait/cancel without ad-hoc polling loops.
-- `Artifact.prefetch(...)` is GPU-only; CPU materialization requires explicit `device="cpu"` fetches that mint
-  PID-bound handle leases.
+- `Artifact.prefetch(...)` warms a **daemon-owned** replica and supports both GPU and CPU/DRAM placement:
+  - GPU VRAM: `device="cuda:0"` or `0`
+  - daemon-owned host DRAM: `device="cpu"`, `"dram"`, or `-1`
+  Prefetch defaults to `NO_LEASE` and does not export handles to the caller; handle-exporting APIs remain PID/lease-bound.
 - `ctx.deadline_ms` is enforced end-to-end: materialization retries and polling operations clamp their budgets to the
   remaining deadline, and worker/agent RPCs inherit the same timeout budget.
 - `tensorcast.plan(ctx)` builds a programmable orchestration plan. Plan steps target stable worker identities

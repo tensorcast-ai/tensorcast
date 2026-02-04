@@ -92,10 +92,12 @@ managing clients manually.
   materialization (`wait_for_completion=False`) and returns an operation handle. Use `op.result(timeout_s=...)` (or
   `op.wait(...)`) to block and `op.cancel()` to best-effort release the operation record. Prefetch defaults to
   `lease_mode=NO_LEASE` so it does not create PID-bound UseLeases and does not mint IPC handle leases. Prefetch is
-  GPU-only; CPU targets are rejected because they require PID-bound handle leases.
-- Prefetch idempotency fingerprints derive `selection_hash` via
-  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan/Queue selection
-  identity semantics.
+  supported for both GPU VRAM (`"cuda:0"`/`0`) and daemon-owned host DRAM (`"cpu"`/`"dram"`/`-1`). Handle-exporting APIs
+  remain PID/lease-bound and are separate from daemon-owned warm replicas.
+- Prefetch idempotency derives a stable action fingerprint from selection identity (`artifact_id`,
+  `logical_layout_hash`, `selection_hash`) and target placement (daemon + device/tier). `selection_hash` is computed via
+  `tensorcast.common.selection_identity` (stable `view_id` + `view_subset_hash`), matching Plan selection identity
+  semantics.
 - `artifact.pin_device_residency(device=..., ttl_ms=..., ctx=...) -> Operation[PlacementPin]` creates a placement pin
   (process-independent device residency intent) backed by a daemon-scoped capability token; the returned `PlacementPin`
   supports `renew()` / `release()`.
