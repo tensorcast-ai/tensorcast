@@ -42,6 +42,7 @@
 #include "core/store/store_engine.h"
 #include "core/store/store_engine_options.h"
 #include "daemon/app/daemon_app.h"
+#include "daemon/app/startup_memory_preflight.h"
 #include "daemon/util/identity_utils.h"
 #include "grpcpp/server.h"
 #include "grpcpp/server_builder.h"
@@ -543,6 +544,14 @@ int main(int argc, char** argv) {
     cc.rdma_preregister = cls.rdma_preregister();
     pinned_total_bytes += cls.pool_bytes();
     pm_cfg.classes.push_back(std::move(cc));
+  }
+
+  const uint64_t stable_bytes =
+      (cfg.engine().has_memory_tiers() ? static_cast<uint64_t>(cfg.engine().memory_tiers().stable_bytes()) : 0);
+  const absl::Status startup_mem = daemon::preflight_startup_memory(pinned_total_bytes, stable_bytes);
+  if (!startup_mem.ok()) {
+    LOG(ERROR) << "RESOURCE_EXHAUSTED: startup memory preflight failed: " << startup_mem;
+    return 2;
   }
 
   absl::StatusOr<std::shared_ptr<common::memory::PinnedMemoryAuthority>> pma_or =

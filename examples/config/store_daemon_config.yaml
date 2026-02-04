@@ -83,6 +83,9 @@ engine:
 # Unified pinned memory configuration for all daemon-side pinned usage.
 pinned_memory:
   # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes).
+  # Startup fail-fast: before allocating pinned pools, the daemon checks current available memory and
+  # exits early if insufficient. Required bytes = pinned_total + engine.memory_tiers.stable_bytes + headroom,
+  # where headroom = min(10% * (pinned_total + stable_bytes), 10GiB).
   # Deadline for pinned slice acquisition under pressure.
   allocation_timeout: 30s
   classes:

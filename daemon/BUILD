@@ -139,6 +139,24 @@ sc_cc_library(
     hdrs = ["testing/cuda_ipc_spawn_helper.h"],
 )
 
+sc_cc_library(
+    name = "startup_memory_preflight_lib",
+    srcs = ["app/startup_memory_preflight.cc"],
+    hdrs = ["app/startup_memory_preflight.h"],
+    deps = [
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+cc_test(
+    name = "startup_memory_preflight_test",
+    srcs = ["app/startup_memory_preflight_test.cc"],
+    deps = [
+        ":startup_memory_preflight_lib",
+        "@catch2//:catch2_main",
+    ],
+)
+
 cc_binary(
     name = "cuda_ipc_helper",
     srcs = ["testing/cuda_ipc_helper.cc"],
@@ -366,6 +384,7 @@ cc_binary(
     deps = [
         ":daemon_app_lib",
         ":identity_utils_lib",
+        ":startup_memory_preflight_lib",
         "//core/common:async_runtime_lib",
         "//core/common:daemon_config_io_lib",
         "//core/common:logging_init_lib",
