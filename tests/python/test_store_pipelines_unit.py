@@ -59,7 +59,6 @@ class _FakeClient:
         del key
         return KeyMappingResolution(
             artifact_id="",
-            used_disk_path="",
             generation=0,
             cache_ttl_seconds=0,
         )
@@ -121,12 +120,9 @@ class _DummyRuntime:
 
     def resolve_key_mapping_cached(
         self, *, key: str
-    ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
+    ) -> str | None:  # pragma: no cover - noop
         mapping = self.client.resolve_key_mapping(key)
-        return mapping.artifact_id or None, mapping.used_disk_path or None
-
-    def get_artifact_index_by_disk_path(self, _disk_path: str) -> object | None:
-        return None
+        return mapping.artifact_id or None
 
     def invalidate_artifact(
         self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None

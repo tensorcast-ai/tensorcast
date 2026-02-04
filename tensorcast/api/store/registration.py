@@ -631,7 +631,7 @@ class RegistrationPipeline:
                 ttl_ms=ttl_ms,
                 client_artifact_id=normalized_artifact_id,
                 force_lease_in_place=plan is PlanType.VRAM_LEASED,
-                prevalidate_disk=self._should_prevalidate_disk(options),
+                prevalidate_disk=False,
                 client=self._runtime.ensure_client(),
                 daemon_address=self._runtime.daemon_endpoint,
                 cancel_event=cancel_event,
@@ -669,14 +669,6 @@ class RegistrationPipeline:
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-
-    def _should_prevalidate_disk(self, options: RegisterArtifactOptions) -> bool:
-        disk_path = options.disk_path
-        if disk_path is None:
-            return False
-        if not isinstance(disk_path, str):
-            return False
-        return disk_path.strip() != ""
 
     def _maybe_start_persistence(
         self, options: RegisterArtifactOptions, result: RegistrationResult
@@ -751,13 +743,8 @@ class RegistrationPipeline:
         if not artifact_id:
             return
         resolved_key = key or (options.key if options is not None else None)
-        disk_path = None
-        if options is not None and options.disk_path:
-            disk_path = options.disk_path
         if resolved_key:
-            self._runtime.cache_key_mapping(
-                resolved_key, artifact_id=artifact_id, disk_path=disk_path
-            )
+            self._runtime.cache_key_mapping(resolved_key, artifact_id=artifact_id)
         registration = result.registration_result
         if registration is None or not registration.index_bytes:
             return
@@ -766,7 +753,6 @@ class RegistrationPipeline:
             canonical_index_bytes=registration.index_bytes,
             parsed_index=result.canonical_index,
             generation=self._compute_generation(registration.index_bytes),
-            disk_path=disk_path,
             expires_at=time.monotonic(),
         )
         self._runtime.cache_artifact_index(entry)
