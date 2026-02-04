@@ -2122,152 +2122,8 @@ class MaterializationPipeline:
                     span.set_attribute("tc.store.source", source_label or "")
                     span.set_status(Status(StatusCode.OK))
                     return materialized, device_id
-                except ArtifactError as error:
-                    span.record_exception(error)
-                    if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
-                        self._runtime.invalidate_artifact(
-                            artifact_id, key=key, reason="materialize_error"
-                        )
-                    should_retry_op = should_retry(
-                        error=error,
-                        attempt=attempt,
-                        policy=policy,
-                        start_time=start_time,
-                        cancel_event=cancel_event,
-                    )
-                    if not should_retry_op:
-                        if (
-                            wait_for_shared_disk_ms > 0
-                            and not wait_attempted
-                            and error.status_code == "NOT_FOUND"
-                        ):
-                            wait_attempted = True
-                            span.add_event(
-                                "store.wait_for_shared_disk",
-                                {
-                                    "tc.store.wait_for_shared_disk_ms": wait_for_shared_disk_ms
-                                },
-                            )
-
-                            wait_timeout_s: float | None = None
-                            if ctx is not None and ctx.deadline_ms is not None:
-                                ctx_remaining_s = (float(ctx.deadline_ms) / 1000.0) - (
-                                    time.monotonic() - start_time
-                                )
-                                if ctx_remaining_s <= 0:
-                                    raise ArtifactError(
-                                        "CallContext deadline exceeded",
-                                        status_code="DEADLINE_EXCEEDED",
-                                        retryable=False,
-                                    ) from None
-                                wait_timeout_s = ctx_remaining_s
-                            else:
-                                required_s = (
-                                    float(wait_for_shared_disk_ms) / 1000.0
-                                ) + 5.0
-                                if required_s > 60.0:
-                                    wait_timeout_s = required_s
-
-                            try:
-                                materialized, device_id = self._attempt_get(
-                                    artifact_id=artifact_id,
-                                    key=key,
-                                    device=device,
-                                    fallback=fallback,
-                                    cancel_event=cancel_event,
-                                    options_override=options_override,
-                                    span=span,
-                                    view=view,
-                                    view_id=view_id,
-                                    placement=placement,
-                                    canonical_index_hint=canonical_index_hint,
-                                    tensor_names=tensor_names,
-                                    view_data_hash=view_data_hash,
-                                    view_index_hint=view_index_hint,
-                                    replica_uuid=replica_uuid,
-                                    allow_cpu=allow_cpu,
-                                    lease_mode=lease_mode,
-                                    ctx=ctx,
-                                    timeout_s=wait_timeout_s,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                error = map_materialization_error(exc)
-                            else:
-                                summary = self._summarize_materialized(
-                                    materialized, tensor_names
-                                )
-                                selection_label = summary["selection"]
-                                source_label = _source_label(materialized.source)
-                                count_value = summary["count"]
-                                bytes_value = summary["bytes"]
-                                if count_value is not None:
-                                    span.set_attribute(
-                                        "tc.tensor.count", int(count_value)
-                                    )
-                                if bytes_value is not None:
-                                    span.set_attribute(
-                                        "tc.tensor.bytes", int(bytes_value)
-                                    )
-                                if selection_label:
-                                    span.set_attribute(
-                                        "tc.tensor.selection", selection_label
-                                    )
-                                record_outcome("OK")
-                                span.set_attribute("tc.store.retry.count", attempt + 1)
-                                span.set_attribute("tc.device.id", int(device_id))
-                                span.set_attribute(
-                                    "tc.artifact.id", materialized.artifact_id
-                                )
-                                span.set_attribute(
-                                    "tc.store.fallback.used_disk",
-                                    bool(materialized.disk_path),
-                                )
-                                span.set_attribute(
-                                    "tc.store.source", source_label or ""
-                                )
-                                span.set_status(Status(StatusCode.OK))
-                                return materialized, device_id
-
-                        record_outcome(error.status_code)
-                        span.set_status(Status(StatusCode.ERROR, error.status_code))
-                        raise
-                    assert policy is not None
-                    delay = compute_retry_delay(policy, attempt)
-                    remaining = remaining_budget(policy, start_time)
-                    if remaining is not None and remaining <= 0:
-                        record_outcome(error.status_code)
-                        span.set_status(Status(StatusCode.ERROR, error.status_code))
-                        raise
-                    if remaining is not None:
-                        delay = min(delay, max(0.0, remaining))
-                    store_metrics.increment_retry(
-                        method,
-                        self._runtime.daemon_endpoint,
-                        error.status_code,
-                        source=source_label,
-                        selection=selection_label,
-                    )
-                    span.add_event(
-                        "store.retry",
-                        {
-                            "tc.store.retry_attempt": attempt + 1,
-                            "tc.store.status": error.status_code,
-                        },
-                    )
-                    if delay > 0:
-                        logger.info(
-                            "store.get_retry",
-                            extra={
-                                "tc.store.daemon": self._runtime.daemon_endpoint,
-                                "tc.store.method": method,
-                                "tc.store.attempt": attempt + 1,
-                                "tc.store.delay_sec": delay,
-                                "tc.store.status_code": error.status_code,
-                            },
-                        )
-                        time.sleep(delay)
-                    attempt += 1
                 except Exception as exc:  # noqa: BLE001
+                    exc_is_artifact_error = isinstance(exc, ArtifactError)
                     error = map_materialization_error(exc)
                     span.record_exception(error)
                     if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
@@ -2376,6 +2232,8 @@ class MaterializationPipeline:
 
                         record_outcome(error.status_code)
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        if exc_is_artifact_error:
+                            raise
                         raise error from None
                     assert policy is not None
                     delay = compute_retry_delay(policy, attempt)
@@ -2383,6 +2241,8 @@ class MaterializationPipeline:
                     if remaining is not None and remaining <= 0:
                         record_outcome(error.status_code)
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
+                        if exc_is_artifact_error:
+                            raise
                         raise error from None
                     if remaining is not None:
                         delay = min(delay, max(0.0, remaining))
