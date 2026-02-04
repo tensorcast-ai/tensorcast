@@ -358,14 +358,7 @@ class InplaceSlot:
                     ctx=ctx,
                 )
 
-            preference, source_policy, disk_path = self._resolve_source_policy(
-                resolved._fallback
-            )
-            verify_checksums = (
-                True
-                if resolved._fallback is None
-                else bool(resolved._fallback.verify_checksums)
-            )
+            preference, source_policy = self._resolve_source_policy(resolved._fallback)
             artifact_id = resolved._ensure_identified()
             client = self._runtime.ensure_client()
             attempt = 0
@@ -385,8 +378,6 @@ class InplaceSlot:
                         device_uuid=device_uuid_for(self._device_id),
                         preference=preference,
                         source_policy=source_policy,
-                        disk_path=disk_path,
-                        verify_checksums=verify_checksums,
                         copy_plan=self._copy_plan,
                         dst_tensors=self._tensors,
                         view=view_spec_proto,
@@ -465,14 +456,7 @@ class InplaceSlot:
                 ctx=ctx,
             )
 
-        preference, source_policy, disk_path = self._resolve_source_policy(
-            resolved._fallback
-        )
-        verify_checksums = (
-            True
-            if resolved._fallback is None
-            else bool(resolved._fallback.verify_checksums)
-        )
+        preference, source_policy = self._resolve_source_policy(resolved._fallback)
         artifact_id = resolved._ensure_identified()
         client = self._runtime.ensure_client()
         publish_checked = False
@@ -510,8 +494,6 @@ class InplaceSlot:
                     device_uuid=device_uuid_for(self._device_id),
                     preference=preference,
                     source_policy=source_policy,
-                    disk_path=disk_path,
-                    verify_checksums=verify_checksums,
                     tensor_names=region_layout.selection_names,
                     view=view_spec_proto,
                     view_id=region_layout.view_id if view_spec_proto is None else None,
@@ -674,10 +656,8 @@ class InplaceSlot:
     ) -> tuple[
         store_daemon_pb2.SourcePreference,
         store_daemon_pb2.SourcePolicy,
-        str | None,
     ]:
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        disk_path: str | None = None
         effective_prefer = fallback.prefer if fallback is not None else "auto"
         if fallback is not None:
             if fallback.prefer == "p2p":
@@ -688,22 +668,18 @@ class InplaceSlot:
                 preference = (
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
                 )
-            disk_path = fallback.disk_path
-        if (
-            disk_path
-            and preference == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-        ):
-            preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
         allow_p2p = True if fallback is None else bool(fallback.allow_p2p)
         if effective_prefer == "local":
             allow_p2p = False
-        allow_disk = effective_prefer != "local" or bool(disk_path)
+        allow_disk = True if fallback is None else bool(fallback.allow_disk)
+        if effective_prefer == "local":
+            allow_disk = False
         source_policy = _build_source_policy(
             preference=preference,
             allow_p2p=allow_p2p,
             allow_disk=allow_disk,
         )
-        return preference, source_policy, disk_path
+        return preference, source_policy
 
     def _retire_published(
         self,

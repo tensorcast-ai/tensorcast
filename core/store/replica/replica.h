@@ -207,6 +207,10 @@ class Replica {
     return view_plan_;
   }
 
+  [[nodiscard]] const std::optional<std::string>& canonical_index_json() const {
+    return canonical_index_json_;
+  }
+
  private:
   // Immutable identifier for multi-device binding.
   const loading::ReplicaKey key_{};

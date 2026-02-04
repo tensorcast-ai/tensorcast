@@ -312,7 +312,6 @@ class StoreEngine {
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
-      std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration());
   absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
       std::string_view key,
@@ -371,6 +370,9 @@ class StoreEngine {
   // instance if present; otherwise pick the GPU instance with the smallest
   // device ordinal. Returns empty on miss.
   [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_cpu_uma(std::string_view artifact_id) const;
+
+  // Returns base pointer for the CPU replica if loaded.
+  [[nodiscard]] absl::StatusOr<void*> get_replica_cpu_base_ptr(std::string_view artifact_id) const;
 
   // VS chunk locking APIs have been removed in UMA V3 final state.
 

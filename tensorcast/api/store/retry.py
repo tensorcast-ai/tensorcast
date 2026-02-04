@@ -159,8 +159,8 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             )
         if "artifact_descriptor.json required when verify_checksums=true" in lowered:
             hint = (
-                "Add artifact_descriptor.json alongside the tensors, or disable checksum validation "
-                "by setting verify_checksums=False on FallbackOptions.for_disk(...)."
+                "Add artifact_descriptor.json alongside the tensors. For explicit imports via "
+                "Store.from_disk(...), you can pass verify_checksums=False to skip descriptor validation."
             )
             return ArtifactError(
                 _append_hint(mapped, hint),
@@ -186,8 +186,8 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
     if "artifact_descriptor.json required when verify_checksums=true" in lowered:
         hint = (
-            "Add artifact_descriptor.json alongside the tensors, or disable checksum validation "
-            "by setting verify_checksums=False on FallbackOptions.for_disk(...)."
+            "Add artifact_descriptor.json alongside the tensors. For explicit imports via "
+            "Store.from_disk(...), you can pass verify_checksums=False to skip descriptor validation."
         )
         message = _append_hint(message, hint)
         return ArtifactError(

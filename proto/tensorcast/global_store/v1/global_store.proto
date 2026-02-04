@@ -109,6 +109,10 @@ service GlobalStoreService {
   rpc PlanPlacement(PlanPlacementRequest) returns (PlanPlacementResponse) {}
   rpc ReportPersistenceStatus(ReportPersistenceStatusRequest) returns (ReportPersistenceStatusResponse) {}
 
+  // ========== Disk Locations ==========
+  rpc UpsertArtifactDiskLocation(UpsertArtifactDiskLocationRequest) returns (UpsertArtifactDiskLocationResponse) {}
+  rpc ListArtifactDiskLocations(ListArtifactDiskLocationsRequest) returns (ListArtifactDiskLocationsResponse) {}
+
   // ========== Key Mapping ==========
   // Map a human-readable key to a single artifact_id, with optional replica hints
   rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
@@ -827,6 +831,7 @@ message GetServerInfoResponse {
   uint32 metrics_port = 8;
   string version = 9;
   string db_file = 10;
+  string cluster_id = 11;
 }
 
 // ========== Chunk Directory Messages ==========
@@ -1001,11 +1006,55 @@ message ReportPersistenceStatusResponse {
   Status status = 1;
 }
 
+// ========== Disk Location Messages ==========
+
+enum DiskLocationKind {
+  DISK_LOCATION_KIND_UNSPECIFIED = 0;
+  DISK_LOCATION_KIND_MANAGED = 1;
+  DISK_LOCATION_KIND_IMPORTED = 2;
+}
+
+message ArtifactDiskLocation {
+  string artifact_id = 1;
+  string cluster_id = 2;
+  string relative_path = 3;
+  DiskLocationKind kind = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  bool is_deleted = 7;
+  google.protobuf.Timestamp deleted_at = 8;
+}
+
+message UpsertArtifactDiskLocationRequest {
+  string artifact_id = 1;
+  string cluster_id = 2;
+  string relative_path = 3;
+  DiskLocationKind kind = 4;
+  // Soft delete marker. When true, the entry is treated as deleted for disk fallback.
+  // Deletion is sticky: a deleted location cannot be revived by an upsert.
+  bool is_deleted = 5;
+}
+
+message UpsertArtifactDiskLocationResponse {
+  Status status = 1;
+}
+
+message ListArtifactDiskLocationsRequest {
+  string artifact_id = 1;
+  // When true, include deleted locations (tombstones). Default false.
+  bool include_deleted = 2;
+}
+
+message ListArtifactDiskLocationsResponse {
+  Status status = 1;
+  repeated ArtifactDiskLocation locations = 2;
+}
+
 // ========== Key Mapping Messages ==========
 // See docs/architecture/api/materialization-flow.md for key mapping usage.
 // Upsert/resolve a mapping from a human-friendly key to a content-addressed artifact_id.
 // The mapping is unique: one key must point to exactly one artifact_id.
-// Optional fields provide hints (e.g., a known disk_path) for client fallbacks.
+// Optional fields provide hints for client fallbacks.
 
 message UpsertKeyMappingRequest {
   string key = 1;
@@ -1013,7 +1062,8 @@ message UpsertKeyMappingRequest {
   // Optional hints (opaque to server logic except for persistence)
   string replica_uuid = 3;
   string daemon_address = 4;
-  string disk_path = 5;
+  reserved 5;
+  reserved "disk_path";
   google.protobuf.Duration ttl = 6; // Optional TTL for the mapping
 }
 message UpsertKeyMappingResponse {
@@ -1043,7 +1093,8 @@ message ResolveKeyMappingResponse {
   string artifact_id = 2;
   string replica_uuid = 3;
   string daemon_address = 4;
-  string disk_path = 5;
+  reserved 5;
+  reserved "disk_path";
   uint64 generation = 6;
   uint32 cache_ttl_seconds = 7;
 }

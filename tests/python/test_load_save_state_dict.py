@@ -1,9 +1,9 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import torch
 from typing import Any
 
-from tensorcast import FallbackOptions, artifact, startup
+from tensorcast import from_disk, startup
 
 
 def compare_tensor_dicts(
@@ -92,16 +92,10 @@ if __name__ == "__main__":
         torch_state_dict = torch.load(path_to_torch_state_dict)
         startup.init(mode="connect", address="127.0.0.1:8073")
         try:
-            fallback = FallbackOptions(
-                disk_path=path_to_sc_model_dir,
-                prefer_disk=True,
-                allow_p2p=False,
-                verify_checksums=False,
-            )
             device_selector = "cuda:0" if torch.cuda.is_available() else "cpu"
-            sc_state_dict = artifact(
-                disk_path=path_to_sc_model_dir,
-                fallback=fallback,
+            sc_state_dict = from_disk(
+                path_to_sc_model_dir,
+                verify_checksums=False,
             ).tensor_dict(device=device_selector)
         finally:
             startup.shutdown()

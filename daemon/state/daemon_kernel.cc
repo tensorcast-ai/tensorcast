@@ -87,9 +87,13 @@ DaemonKernel::DaemonKernel(
       scheduler_.get(),
       lip_mgr_.get(),
       engine_.get(),
+      async_runtime_,
       engine_->get_artifact_chunk_bytes(),
       std::chrono::milliseconds(500),
       options_.persistence_log_path);
+  if (persistence_mgr_) {
+    persistence_mgr_->set_storage_path(options_.storage_path);
+  }
   engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
     if (!persistence_mgr_) {
       return false;

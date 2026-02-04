@@ -1,10 +1,12 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,21 +49,44 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
   }
 
   // Collect partitions in deterministic order
-  std::vector<fs::path> parts;
+  std::vector<std::pair<uint64_t, fs::path>> parts;
+  auto parse_partition_index = [](std::string_view name) -> std::optional<uint64_t> {
+    constexpr std::string_view kPrefix = "tensor.data_";
+    if (!name.starts_with(kPrefix)) {
+      return std::nullopt;
+    }
+    const std::string_view suffix = name.substr(kPrefix.size());
+    if (suffix.empty()) {
+      return std::nullopt;
+    }
+    uint64_t value = 0;
+    for (char c : suffix) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) {
+        return std::nullopt;
+      }
+      value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+    return value;
+  };
   for (const auto& entry : fs::directory_iterator(dir)) {
     if (!entry.is_regular_file()) {
       continue;
     }
     const auto name = entry.path().filename().string();
-    if (name.starts_with("tensor.data_")) {
-      parts.push_back(entry.path());
+    if (auto idx = parse_partition_index(name)) {
+      parts.emplace_back(*idx, entry.path());
     }
   }
-  std::ranges::sort(parts, [](const auto& a, const auto& b) { return a.filename() < b.filename(); });
+  std::ranges::sort(parts, [](const auto& a, const auto& b) {
+    if (a.first != b.first) {
+      return a.first < b.first;
+    }
+    return a.second.filename() < b.second.filename();
+  });
   if (parts.empty()) {
     fs::path single = dir / "tensor.data";
     if (fs::exists(single)) {
-      parts.push_back(single);
+      parts.emplace_back(0u, single);
     }
   }
   if (parts.empty()) {
@@ -69,9 +94,9 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
   }
 
   FilePartitionSource::Options opts;
-  for (const auto& p : parts) {
-    opts.partition_paths.push_back(p);
-    opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(p)));
+  for (const auto& [_, path] : parts) {
+    opts.partition_paths.push_back(path);
+    opts.partition_sizes.push_back(static_cast<size_t>(fs::file_size(path)));
   }
   opts.total_size = total_size;
   opts.io_batch_bytes = 128 * 1024 * 1024;

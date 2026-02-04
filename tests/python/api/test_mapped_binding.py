@@ -232,7 +232,6 @@ def _cache_index(runtime: _FakeRuntime, artifact_id: str, index_bytes: bytes) ->
         canonical_index_bytes=index_bytes,
         parsed_index=parsed,
         generation=1,
-        disk_path=None,
         expires_at=time.monotonic(),
     )
     runtime.cache_artifact_index(entry)

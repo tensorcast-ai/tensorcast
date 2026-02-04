@@ -51,16 +51,12 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
     return it->second;
   }
 
-  absl::Status upsert_key_mapping(
-      std::string_view key,
-      std::string_view artifact_id,
-      std::string_view disk_path,
-      absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration) override {
     tensorcast::store::components::KeyMapping mapping;
     mapping.artifact_id = std::string(artifact_id);
-    mapping.disk_path = std::string(disk_path);
-    last_disk_path = mapping.disk_path;
     mappings_[std::string(key)] = std::move(mapping);
+    last_key = std::string(key);
+    last_artifact_id = std::string(artifact_id);
     return absl::OkStatus();
   }
 
@@ -69,7 +65,8 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
     return absl::OkStatus();
   }
 
-  std::string last_disk_path;
+  std::string last_key;
+  std::string last_artifact_id;
 
  private:
   std::unordered_map<std::string, tensorcast::store::components::KeyMapping> mappings_;
@@ -77,32 +74,20 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
 
 } // namespace
 
-TEST_CASE("PublishReplicaKey canonicalizes storage_path before validating disk_path", "[daemon][key-mapping][disk]") {
+TEST_CASE("PublishReplicaKey upserts key mapping", "[daemon][key-mapping]") {
   const auto root = test_root();
   std::filesystem::remove_all(root);
   std::filesystem::create_directories(root);
 
-  const auto storage_real = root / "storage_real";
-  const auto storage_link = root / "storage_link";
-  const auto storage_link_via_dotdot = root / "subdir" / ".." / "storage_link";
-  std::filesystem::create_directories(storage_real);
-  std::filesystem::create_directories(root / "subdir");
+  const auto storage_root = root / "storage_root";
+  std::filesystem::create_directories(storage_root);
 
-  std::error_code ec;
-  std::filesystem::remove(storage_link, ec);
-  ec.clear();
-  std::filesystem::create_directory_symlink(storage_real, storage_link, ec);
-  REQUIRE_FALSE(ec);
-
-  const auto artifact_dir = storage_real / "artifact";
-  std::filesystem::create_directories(artifact_dir);
-
-  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_real));
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
   auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
   engine->set_global_store_client_for_testing(gs_client);
 
   tensorcast::daemon::DaemonOptions daemon_opts;
-  daemon_opts.storage_path = storage_link_via_dotdot;
+  daemon_opts.storage_path = storage_root;
   auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
   REQUIRE(harness_or.ok());
   auto harness = std::move(*harness_or);
@@ -112,16 +97,12 @@ TEST_CASE("PublishReplicaKey canonicalizes storage_path before validating disk_p
   tensorcast::daemon::v2::PublishReplicaKeyRequest req;
   req.set_key("key-1");
   req.mutable_artifact_descriptor()->set_artifact_id("mi2:test");
-  req.set_disk_path(artifact_dir.string());
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::PublishReplicaKeyResponse resp;
   auto status = svc.PublishReplicaKey(&ctx, &req, &resp);
   REQUIRE(status.ok());
   REQUIRE(resp.ok());
-
-  std::error_code canonical_ec;
-  const auto expected = std::filesystem::weakly_canonical(artifact_dir, canonical_ec);
-  REQUIRE_FALSE(canonical_ec);
-  REQUIRE(gs_client->last_disk_path == expected.string());
+  REQUIRE(gs_client->last_key == "key-1");
+  REQUIRE(gs_client->last_artifact_id == "mi2:test");
 }

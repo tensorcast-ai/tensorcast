@@ -80,6 +80,9 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
 
   auto kernel = std::make_unique<DaemonKernel>(engine, async_runtime, options);
   if (global_store_client) {
+    if (kernel->persistence_manager()) {
+      kernel->persistence_manager()->set_global_store_client(global_store_client.get());
+    }
     kernel->lip_manager().set_global_store_client(global_store_client);
   }
 

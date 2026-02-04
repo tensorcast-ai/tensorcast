@@ -128,7 +128,7 @@ class _DummyRuntime:
         self.opts = StoreOptions()
         self.retry_policies: dict[str, object] = {}
         self.executor = _DummyExecutor()
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, str | None] = {}
 
     def ensure_client(self) -> Any:
         return self._client
@@ -145,11 +145,11 @@ class _DummyRuntime:
     def track_future(self, _future: Any) -> None:
         return None
 
-    def resolve_key_mapping_cached(self, key: str) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(self, key: str) -> str | None:
+        return self._key_cache.get(key)
 
-    def cache_key_mapping(self, key: str, artifact_id: str | None, disk_path: str | None) -> None:
-        self._key_cache[key] = (artifact_id, disk_path)
+    def cache_key_mapping(self, key: str, artifact_id: str | None) -> None:
+        self._key_cache[key] = artifact_id
 
 
 def _fresh_store() -> Store:

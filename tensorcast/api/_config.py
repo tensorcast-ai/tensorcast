@@ -634,6 +634,9 @@ class GetArtifactOptions(BaseModel):
 
     prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
+    # When >0 and the initial retrieval fails, the daemon can wait for a managed
+    # shared-disk location to become ready before retrying disk-only.
+    wait_for_shared_disk_ms: int = 0
     wait_for_completion: bool = True
     enable_verification: bool = True
     region_backed_mode: RegionBackedMode = RegionBackedMode.AUTO
@@ -654,6 +657,16 @@ class GetArtifactOptions(BaseModel):
     @classmethod
     def _normalize_region_backed_mode(cls, value: object) -> RegionBackedMode:
         return RegionBackedMode.parse(value)
+
+    @field_validator("wait_for_shared_disk_ms", mode="before")
+    @classmethod
+    def _normalize_wait_for_shared_disk_ms(cls, value: object) -> int:
+        if value is None or value == "":
+            return 0
+        ms = int(cast(SupportsInt, value))
+        if ms < 0:
+            raise ValueError("GetArtifactOptions.wait_for_shared_disk_ms must be >= 0")
+        return ms
 
 
 __all__ = [

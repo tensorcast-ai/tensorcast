@@ -251,7 +251,6 @@ def test_inplace_slot_swap_publish_e2e(
     artifact_b_id = "artifact_b"
     _seed_global_store(servicer, artifact_id=artifact_a_id, index_bytes=index_bytes)
     _seed_global_store(servicer, artifact_id=artifact_b_id, index_bytes=index_bytes)
-
     storage_dir = tmp_path / "storage"
     storage_dir.mkdir(parents=True, exist_ok=True)
     artifact_a_dir = storage_dir / artifact_a_id
@@ -265,6 +264,24 @@ def test_inplace_slot_swap_publish_e2e(
     )
     _write_artifact_dir(artifact_a_dir, index_bytes, data_a)
     _write_artifact_dir(artifact_b_dir, index_bytes, data_b)
+    channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+    stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+    try:
+        info = stub.GetServerInfo(global_store_pb2.GetServerInfoRequest())
+        cluster_id = info.cluster_id
+        for artifact_id in (artifact_a_id, artifact_b_id):
+            resp = stub.UpsertArtifactDiskLocation(
+                global_store_pb2.UpsertArtifactDiskLocationRequest(
+                    artifact_id=artifact_id,
+                    cluster_id=cluster_id,
+                    relative_path=artifact_id,
+                    kind=global_store_pb2.DISK_LOCATION_KIND_MANAGED,
+                )
+            )
+            if resp.status != global_store_pb2.Status.STATUS_OK:
+                raise RuntimeError("failed to upsert artifact disk location")
+    finally:
+        channel.close()
 
     listen_port = _get_free_port()
     p2p_port = _get_free_port()
@@ -297,8 +314,16 @@ def test_inplace_slot_swap_publish_e2e(
             _wait_for_worker(gs_port, listen_port)
 
             store = Store(f"127.0.0.1:{listen_port}")
-            fallback_a = FallbackOptions.for_disk(str(artifact_a_dir), verify=False)
-            fallback_b = FallbackOptions.for_disk(str(artifact_b_dir), verify=False)
+            fallback_a = FallbackOptions(
+                prefer="disk",
+                allow_p2p=False,
+                verify_checksums=False,
+            )
+            fallback_b = FallbackOptions(
+                prefer="disk",
+                allow_p2p=False,
+                verify_checksums=False,
+            )
             artifact_a = store.artifact(artifact_id=artifact_a_id, fallback=fallback_a)
             artifact_b = store.artifact(artifact_id=artifact_b_id, fallback=fallback_b)
 

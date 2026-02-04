@@ -143,13 +143,13 @@ high_availability:
       # Port for Global Store gRPC.
       port: 50051
   # Heartbeat cadence; lower values detect failures faster but add RPC load.
-  heartbeat_interval: 5s
+  heartbeat_interval: 30s
   # Chunk inventory sync cadence; set 0s to disable sync thread.
-  periodic_sync_interval: 10s
+  periodic_sync_interval: 30s
   # Retry attempts for HA registration/requests; currently uses GlobalStoreClient defaults.
   max_retries: 3
   # Backoff between registration retries; currently not wired in the daemon.
-  registration_retry_delay: 100ms
+  registration_retry_delay: 500ms
   # When true, an empty local inventory is treated as authoritative and removes replicas during sync.
   force_full_sync_on_empty_inventory: false
 

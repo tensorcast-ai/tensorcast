@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/loaders/disk_loader.h"
 
@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -114,7 +115,26 @@ absl::Status DiskLoader::initialize() {
   // (tensor.data) and multi-part (tensor.data_*) exist. Prefer multi-part if present.
   bool has_single_file = false;
   std::filesystem::path single_file_path;
-  std::vector<std::filesystem::path> multipart_paths;
+  std::vector<std::pair<uint64_t, std::filesystem::path>> multipart_paths;
+
+  auto parse_partition_index = [](std::string_view name) -> std::optional<uint64_t> {
+    constexpr std::string_view kPrefix = "tensor.data_";
+    if (!name.starts_with(kPrefix)) {
+      return std::nullopt;
+    }
+    const std::string_view suffix = name.substr(kPrefix.size());
+    if (suffix.empty()) {
+      return std::nullopt;
+    }
+    uint64_t value = 0;
+    for (char c : suffix) {
+      if (!std::isdigit(static_cast<unsigned char>(c))) {
+        return std::nullopt;
+      }
+      value = value * 10 + static_cast<uint64_t>(c - '0');
+    }
+    return value;
+  };
 
   for (const auto& entry : std::filesystem::directory_iterator(artifact_dir)) {
     if (!entry.is_regular_file()) {
@@ -124,16 +144,22 @@ absl::Status DiskLoader::initialize() {
     if (filename == "tensor.data") {
       has_single_file = true;
       single_file_path = entry.path();
-    } else if (filename.starts_with("tensor.data_")) {
-      multipart_paths.push_back(entry.path());
+    } else if (auto idx = parse_partition_index(filename)) {
+      multipart_paths.emplace_back(*idx, entry.path());
     }
   }
 
   if (!multipart_paths.empty()) {
     // Use only multi-part files
-    for (const auto& p : multipart_paths) {
-      partition_paths_.push_back(p);
-      size_t file_size = std::filesystem::file_size(p);
+    std::ranges::sort(multipart_paths, [](const auto& a, const auto& b) {
+      if (a.first != b.first) {
+        return a.first < b.first;
+      }
+      return a.second.filename() < b.second.filename();
+    });
+    for (const auto& [_, path] : multipart_paths) {
+      partition_paths_.push_back(path);
+      size_t file_size = std::filesystem::file_size(path);
       partition_sizes_.push_back(file_size);
       artifact_size_ += file_size;
     }
@@ -177,23 +203,6 @@ absl::Status DiskLoader::initialize() {
       partition_sizes_.push_back(static_cast<size_t>(header_info->data_size));
       artifact_size_ += header_info->data_size;
     }
-  }
-
-  // Sort partitions by name to ensure consistent ordering
-  std::vector<std::pair<std::filesystem::path, size_t>> path_size_pairs;
-  path_size_pairs.reserve(partition_paths_.size());
-  for (size_t i = 0; i < partition_paths_.size(); ++i) {
-    path_size_pairs.emplace_back(partition_paths_[i], partition_sizes_[i]);
-  }
-
-  std::ranges::sort(
-      path_size_pairs, [](const auto& a, const auto& b) { return a.first.filename() < b.first.filename(); });
-
-  partition_paths_.clear();
-  partition_sizes_.clear();
-  for (const auto& [path, size] : path_size_pairs) {
-    partition_paths_.push_back(path);
-    partition_sizes_.push_back(size);
   }
 
   // RFC-0007: For standard partition format, require descriptor and index presence

@@ -2,13 +2,18 @@
 
 from pathlib import Path
 from typing import Sequence
+from concurrent.futures import ThreadPoolExecutor
 
+import grpc
 import pytest
 import torch
 import os
 import tempfile
 
-from tensorcast import FallbackOptions, artifact, startup
+from tensorcast import FallbackOptions, from_disk, startup
+from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
 from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
@@ -61,35 +66,68 @@ def test_shared_storage_roundtrip(tmp_path):
     if cpu_target:
         local_handle_dir = Path(tempfile.mkdtemp(prefix="tc_local_handle_"))
         local_handle_socket_path = str(local_handle_dir / "local_handle.sock")
-    daemon_proc = start_daemon_binary(
-        listen,
-        storage_root,
-        cpu_shared_memory_enabled=cpu_target,
-        local_handle_socket_path=local_handle_socket_path,
-        stable_bytes=64 * 1024 * 1024,
+    set_config(GlobalStoreConfig())
+    gs_servicer = GlobalStoreServicer()
+    gs_server = grpc.server(ThreadPoolExecutor(max_workers=4))
+    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(
+        gs_servicer, gs_server
     )
+    gs_port = gs_server.add_insecure_port("127.0.0.1:0")
+    if gs_port <= 0:
+        raise RuntimeError("failed to bind Global Store server port")
+    gs_server.start()
     try:
-        startup.init(mode="connect", address=listen)
+        channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
+        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
         try:
-            fallback = FallbackOptions(
-                disk_path=str(save_path),
-                prefer_disk=True,
-                allow_p2p=False,
-                verify_checksums=False,
+            info = stub.GetServerInfo(global_store_pb2.GetServerInfoRequest())
+            cluster_id = info.cluster_id
+            rel_path = save_path.relative_to(storage_root)
+            resp = stub.UpsertArtifactDiskLocation(
+                global_store_pb2.UpsertArtifactDiskLocationRequest(
+                    artifact_id=descriptor["artifact_id"],
+                    cluster_id=cluster_id,
+                    relative_path=str(rel_path),
+                    kind=global_store_pb2.DISK_LOCATION_KIND_MANAGED,
+                )
             )
-            device_selector = "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
-            loaded_state_dict = artifact(
-                artifact_id=descriptor["artifact_id"],
-                fallback=fallback,
-            ).tensor_dict(device=device_selector)
+            if resp.status != global_store_pb2.Status.STATUS_OK:
+                raise RuntimeError("failed to upsert artifact disk location")
         finally:
-            startup.shutdown()
-    finally:
+            channel.close()
+
+        daemon_proc = start_daemon_binary(
+            listen,
+            storage_root,
+            cpu_shared_memory_enabled=cpu_target,
+            local_handle_socket_path=local_handle_socket_path,
+            stable_bytes=64 * 1024 * 1024,
+            global_store_addr=f"127.0.0.1:{gs_port}",
+        )
         try:
-            daemon_proc.terminate()
-            daemon_proc.wait(timeout=3)
-        except Exception:
-            pass
+            startup.init(mode="connect", address=listen)
+            try:
+                fallback = FallbackOptions(
+                    prefer="disk",
+                    allow_p2p=False,
+                    verify_checksums=False,
+                )
+                device_selector = "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
+                artifact_handle = from_disk(
+                    str(save_path),
+                    verify_checksums=False,
+                ).with_fallback(fallback)
+                loaded_state_dict = artifact_handle.tensor_dict(device=device_selector)
+            finally:
+                startup.shutdown()
+        finally:
+            try:
+                daemon_proc.terminate()
+                daemon_proc.wait(timeout=3)
+            except Exception:
+                pass
+    finally:
+        gs_server.stop(grace=None)
 
     # For value comparisons, normalize to CPU to avoid device mismatch errors
     loaded_for_compare: dict[str, torch.Tensor] = {

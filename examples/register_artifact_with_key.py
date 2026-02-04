@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from pathlib import Path
 
@@ -24,7 +24,7 @@ def main() -> None:
 
     opts = RegisterArtifactOptions(
         plan=PlanType.VRAM_COALESCED,
-        disk_path=str(out_dir),  # validate/record disk source
+        disk_path=str(out_dir),  # optional prevalidation against on-disk layout
     )
     registered = tc.put(
         state_dict,

@@ -105,7 +105,6 @@ class ResolvedViewInputs:
     artifact_id: str
     canonical_index_bytes: bytes | None
     build_result: ViewSpecBuildResult | None
-    disk_path_hint: str | None
     view_id: str | None
 
     def __post_init__(self) -> None:
@@ -141,13 +140,11 @@ class ResolvedViewInputs:
         artifact_id: str,
         canonical_index_bytes: bytes,
         build_result: ViewSpecBuildResult,
-        disk_path_hint: str | None = None,
     ) -> "ResolvedViewInputs":
         return cls(
             artifact_id=artifact_id,
             canonical_index_bytes=canonical_index_bytes,
             build_result=build_result,
-            disk_path_hint=disk_path_hint,
             view_id=None,
         )
 
@@ -157,13 +154,11 @@ class ResolvedViewInputs:
         *,
         artifact_id: str,
         view_id: str,
-        disk_path_hint: str | None = None,
     ) -> "ResolvedViewInputs":
         return cls(
             artifact_id=artifact_id,
             canonical_index_bytes=None,
             build_result=None,
-            disk_path_hint=disk_path_hint,
             view_id=view_id,
         )
 

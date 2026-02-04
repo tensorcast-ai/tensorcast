@@ -75,7 +75,6 @@ _METRIC_RPC_RETRIES: int = 0
 @dataclass(frozen=True, slots=True)
 class KeyMappingResolution:
     artifact_id: str
-    used_disk_path: str
     generation: int
     cache_ttl_seconds: int
 
@@ -392,82 +391,10 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
     ):
-        logger.debug(
-            f"load_into_gpu: {disk_path}, {replica_uuid}, wait_for_completion={wait_for_completion}"
+        raise RuntimeError(
+            "load_into_gpu is no longer supported; disk-path materialization was removed. "
+            "Use Store.from_disk(...) to import and then materialize by artifact_id or key."
         )
-
-        # Choose between host PID and regular PID based on configuration
-        pid = self._get_effective_pid()
-        if self.use_host_pid:
-            logger.debug(f"Using host PID: {pid}")
-        else:
-            logger.debug(f"Using container PID: {pid}")
-
-        with self._client_span("Client/MaterializeReplica") as span:
-            request = store_daemon_pb2.MaterializeReplicaRequest(
-                pid=pid,
-                disk_path=disk_path,
-                replica_uuid=replica_uuid,
-                device_uuid=device_uuid,
-                target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-                pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
-            )
-            try:
-                response = self._unary_call(
-                    self.stub.MaterializeReplica,
-                    request,
-                    timeout=60,
-                    span=span,
-                    retries=1,
-                )
-            except grpc.RpcError as e:
-                span.record_exception(e)
-                if e.code() == grpc.StatusCode.CANCELLED:
-                    raise RuntimeError(
-                        _grpc_message(e, fallback="Artifact not loaded")
-                    ) from e
-                elif e.code() == grpc.StatusCode.UNAVAILABLE:
-                    raise RuntimeError(
-                        f"Local StoreDaemon ({self.server_address}) is not available."
-                    ) from e
-                else:
-                    raise RuntimeError(
-                        _grpc_message(e, fallback="MaterializeReplica RPC failed")
-                    ) from e
-
-        load_status = response.status
-        if (
-            load_status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
-        ):
-            raise RuntimeError(f"Artifact allocation failed for {disk_path}")
-
-        if not wait_for_completion:
-            # In async mode, return both handle and status
-            logger.info(
-                f"Artifact allocation initiated (async): {disk_path}, {replica_uuid}"
-            )
-
-            assert response.mem_handle is not None
-            return response.mem_handle.cuda_ipc_handle, load_status
-
-        # In sync mode, wait for confirmation
-        logger.info(f"Artifact loaded: {disk_path}, {replica_uuid}")
-
-        # For sync mode with new async backend, we need to confirm
-        if (
-            response.status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            # Wait for asynchronous loading to complete
-            success = self.confirm_replica_loaded(disk_path, replica_uuid)
-            if not success:
-                raise RuntimeError(
-                    f"Failed to confirm artifact loading for {disk_path}"
-                )
-
-        assert response.mem_handle is not None
-        return response.mem_handle.cuda_ipc_handle
 
     def materialize_by_artifact_id(
         self,
@@ -480,7 +407,6 @@ class DaemonCtl:
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
-        disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
     ) -> store_daemon_pb2.MaterializeReplicaResponse | bytes | tuple[bytes, int]:
         """Materialize a replica by content-addressed artifact_id via daemon.
@@ -509,8 +435,6 @@ class DaemonCtl:
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
             )
-            if disk_path:
-                request.disk_path = disk_path
             if preference is not None:
                 request.preference = preference
             if view is not None:
@@ -565,8 +489,10 @@ class DaemonCtl:
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
-            # Confirm using empty disk_path (daemon ignores it for P2P sessions)
-            success = self.confirm_replica_loaded(disk_path or "", replica_uuid)
+            # Confirm using disk path from the daemon response.
+            success = self.confirm_replica_loaded(
+                response.disk_path or "", replica_uuid
+            )
             if not success:
                 raise RuntimeError(
                     f"Failed to confirm artifact loading for {artifact_id}"
@@ -586,8 +512,6 @@ class DaemonCtl:
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        disk_path: str | None = None,
-        verify_checksums: bool = True,
         tensor_names: Sequence[str] | None = None,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
@@ -628,9 +552,6 @@ class DaemonCtl:
                 request.tensor_names.extend(list(tensor_names))
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
-            if disk_path:
-                request.disk_fallback.disk_path = disk_path
-                request.disk_fallback.verify_checksums = bool(verify_checksums)
             if view_subset_hash is not None:
                 request.view_subset_hash = bytes(view_subset_hash)
             if view is not None:
@@ -681,8 +602,6 @@ class DaemonCtl:
         dst_tensors: Mapping[str, torch.Tensor],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        disk_path: str | None = None,
-        verify_checksums: bool = True,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
@@ -750,9 +669,6 @@ class DaemonCtl:
                 request.dst_tensors.append(spec)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
-            if disk_path:
-                request.disk_fallback.disk_path = disk_path
-                request.disk_fallback.verify_checksums = bool(verify_checksums)
             if view is not None:
                 request.view.CopyFrom(view)
             elif view_id is not None:
@@ -1041,15 +957,14 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: bool = True,
+        wait_for_shared_disk_ms: int = 0,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
-        disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
-        verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
@@ -1065,15 +980,14 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[False],
+        wait_for_shared_disk_ms: int = 0,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
-        disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
-        verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
@@ -1089,15 +1003,14 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[True] = True,
+        wait_for_shared_disk_ms: int = 0,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
-        disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
-        verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
@@ -1111,15 +1024,14 @@ class DaemonCtl:
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
+        wait_for_shared_disk_ms: int = 0,
         view: common_pb2.ViewSpec | None = None,
         view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
-        disk_path: str | None = None,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         tensor_names: Sequence[str] | None = None,
-        verify_checksums: bool = True,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
@@ -1166,11 +1078,10 @@ class DaemonCtl:
                 preference=preference_value,
                 lease_mode=lease_mode,
             )
+            if wait_for_shared_disk_ms:
+                request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
-            if disk_path:
-                request.disk_fallback.disk_path = disk_path
-                request.disk_fallback.verify_checksums = bool(verify_checksums)
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
             if view_subset_hash:
@@ -1234,7 +1145,7 @@ class DaemonCtl:
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
         ):
             success = self.confirm_replica_loaded(
-                disk_path or "",
+                response.disk_path or "",
                 replica_uuid,
                 target_device_type=target_device_type,
             )
@@ -1260,6 +1171,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: bool = True,
+        wait_for_shared_disk_ms: int = 0,
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
@@ -1279,6 +1191,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[False],
+        wait_for_shared_disk_ms: int = 0,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
@@ -1298,6 +1211,7 @@ class DaemonCtl:
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[True] = True,
+        wait_for_shared_disk_ms: int = 0,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
@@ -1315,6 +1229,7 @@ class DaemonCtl:
         device_id: int,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
+        wait_for_shared_disk_ms: int = 0,
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
@@ -1363,6 +1278,8 @@ class DaemonCtl:
                 target_device_type=target_device_type,
                 lease_mode=lease_mode,
             )
+            if wait_for_shared_disk_ms:
+                request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
             if tensor_names:
@@ -2181,6 +2098,7 @@ class DaemonCtl:
         device_id: int | None = None,
         byte_space: common_pb2.ByteSpaceRef | None = None,
         release_regions: bool | None = None,
+        keep_shared_disk_copy: bool = False,
         operation_id: str | None = None,
         timeout_s: float = 60.0,
     ) -> DeregisterArtifactOutcome:
@@ -2205,6 +2123,8 @@ class DaemonCtl:
             req.byte_space.CopyFrom(byte_space)
         if release_regions is not None:
             req.release_regions = bool(release_regions)
+        if keep_shared_disk_copy:
+            req.keep_shared_disk_copy = True
         if operation_id:
             req.operation_id = str(operation_id)
 
@@ -2213,6 +2133,7 @@ class DaemonCtl:
                 {
                     "tc.artifact.id": artifact_id,
                     "tc.deregister.wait": bool(wait_for_drain),
+                    "tc.deregister.keep_shared_disk_copy": bool(keep_shared_disk_copy),
                 }
             )
             try:
@@ -2485,7 +2406,6 @@ class DaemonCtl:
         *,
         key: str,
         descriptor: "ArtifactDescriptor",
-        disk_path: str = "",
         fail_if_exists: bool = True,
         timeout_s: float = 5.0,
     ) -> bool:
@@ -2493,7 +2413,6 @@ class DaemonCtl:
 
         req = store_daemon_pb2.PublishReplicaKeyRequest(
             key=key,
-            disk_path=disk_path,
             fail_if_exists=bool(fail_if_exists),
         )
         # Map our typed descriptor into proto
@@ -2551,7 +2470,6 @@ class DaemonCtl:
             )
             return KeyMappingResolution(
                 artifact_id=resp.artifact_id or "",
-                used_disk_path=resp.used_disk_path or "",
                 generation=int(getattr(resp, "generation", 0) or 0),
                 cache_ttl_seconds=int(getattr(resp, "cache_ttl_seconds", 0) or 0),
             )
@@ -2767,12 +2685,15 @@ class DaemonCtl:
         self,
         *,
         artifact_id: str,
+        key_hint: str | None = None,
         policy: StorePolicy | dict[str, object] | str | None = None,
         timeout_s: float = 10.0,
     ) -> store_daemon_pb2.StartPersistenceResponse:
         if not artifact_id:
             raise ValueError("artifact_id is required")
         req = store_daemon_pb2.StartPersistenceRequest(artifact_id=artifact_id)
+        if key_hint:
+            req.key_hint = str(key_hint)
         policy_proto = self._policy_to_proto(policy)
         if policy_proto is not None:
             req.policy.CopyFrom(policy_proto)
