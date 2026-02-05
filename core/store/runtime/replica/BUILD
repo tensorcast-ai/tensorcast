@@ -2,6 +2,25 @@ load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library")
 
 sc_cc_library(
+    name = "replica_promotion_manager",
+    srcs = ["replica_promotion_manager.cc"],
+    hdrs = ["replica_promotion_manager.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/store:communication_types",
+        "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:loading_spec",
+        "//core/store/replica",
+        "//core/store/runtime:ingestion_events",
+        "//core/store/runtime/context:runtime_context",
+        "//core/store/runtime/replica:replica_runtime",
+        "@abseil-cpp//absl/log:absl_log",
+        "@abseil-cpp//absl/synchronization",
+        "@gsl",
+    ],
+)
+
+sc_cc_library(
     name = "replica_runtime",
     srcs = ["replica_runtime.cc"],
     hdrs = [

@@ -145,6 +145,13 @@ enum SourcePreference {
   SOURCE_PREFERENCE_PREFER_DISK = 3;
 }
 
+enum ExportPolicy {
+  EXPORT_POLICY_UNSPECIFIED = 0;
+  EXPORT_POLICY_NEVER = 1;
+  EXPORT_POLICY_AUTO = 2;
+  EXPORT_POLICY_FORCE = 3;
+}
+
 // Source selection policy that can further gate which sources are allowed.
 message SourcePolicy {
   SourcePreference preference = 1;
@@ -399,6 +406,7 @@ message MaterializeReplicaRequest {
   // initial materialization attempt fails, the daemon waits for a managed disk
   // location in the local cluster before retrying disk-only.
   uint32 wait_for_shared_disk_ms = 16;
+  ExportPolicy export_policy = 17;
 }
 
 // MaterializeReplica now returns immediately after memory allocation succeeds.
@@ -1035,6 +1043,7 @@ message MaterializeByKeyRequest {
   // initial materialization attempt fails, the daemon waits for a managed disk
   // location in the local cluster before retrying disk-only.
   uint32 wait_for_shared_disk_ms = 21;
+  ExportPolicy export_policy = 22;
 }
 message MaterializeByKeyResponse {
   MaterializeReplicaStatus status = 1;

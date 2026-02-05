@@ -496,6 +496,7 @@ struct MetadataGatewayHarness {
     MetadataGateway::Config cfg{
         .runtime_context = &context,
         .replica_runtime = &replica_runtime,
+        .promotion_manager = nullptr,
         .artifact_chunk_bytes = options.artifact_chunk_bytes,
         .pinned_memory_timeout = options.pinned_memory_timeout,
         .replica_factory = {},

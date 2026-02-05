@@ -355,6 +355,7 @@ sc_cc_library(
         "//core/store/runtime:runtime_env",
         "//core/store/runtime/ingestion:ingestion_runtime",
         "//core/store/runtime/metadata:metadata_gateway",
+        "//core/store/runtime/replica:replica_promotion_manager",
         "//core/store/runtime/replica:replica_runtime",
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",

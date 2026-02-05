@@ -400,6 +400,7 @@ RegistrationBackend::RegistrationBackend(
       async_runtime_(std::move(resources.async_runtime)),
       memory_tier_budget_(std::move(resources.memory_tier_budget)),
       memory_tier_config_(resources.memory_tier_config),
+      promotion_manager_(resources.promotion_manager),
       byte_mapping_config_(resources.byte_mapping_config),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
@@ -1001,6 +1002,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
 
   std::vector<std::string> remote_keys;
   std::vector<uint64_t> buffer_sizes;
+  std::optional<ExportRegistration> export_registration;
   if (entry->enable_p2p && communication_manager_ && communication_manager_->is_enabled()) {
     const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU
@@ -1009,6 +1011,7 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     if (!reg_info_or.ok()) {
       return reg_info_or.status();
     }
+    export_registration = *reg_info_or;
     remote_keys = reg_info_or->remote_memory_keys;
     buffer_sizes.reserve(reg_info_or->buffer_sizes.size());
     for (const auto& sz : reg_info_or->buffer_sizes) {
@@ -1033,6 +1036,14 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       if (info_or.ok()) {
         verification_json = info_or->to_json();
       }
+    }
+  }
+
+  if (promotion_manager_ && export_registration.has_value()) {
+    auto promotion_status =
+        promotion_manager_->record_export_registration(mi2_key, *export_registration, verification_json);
+    if (!promotion_status.ok()) {
+      LOG(WARNING) << "record_export_registration failed for " << mi2_key << ": " << promotion_status;
     }
   }
 

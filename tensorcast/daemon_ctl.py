@@ -964,6 +964,7 @@ class DaemonCtl:
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -987,6 +988,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1010,6 +1012,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1031,6 +1034,7 @@ class DaemonCtl:
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1082,6 +1086,8 @@ class DaemonCtl:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if export_policy is not None:
+                request.export_policy = export_policy
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
             if view_subset_hash:
@@ -1175,6 +1181,7 @@ class DaemonCtl:
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1195,6 +1202,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1215,6 +1223,7 @@ class DaemonCtl:
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1233,6 +1242,7 @@ class DaemonCtl:
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
+        export_policy: store_daemon_pb2.ExportPolicy | None = None,
         tensor_names: Sequence[str] | None = None,
         view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
@@ -1282,6 +1292,8 @@ class DaemonCtl:
                 request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
+            if export_policy is not None:
+                request.export_policy = export_policy
             if tensor_names:
                 request.tensor_names.extend(tensor_names)
             if view_subset_hash:

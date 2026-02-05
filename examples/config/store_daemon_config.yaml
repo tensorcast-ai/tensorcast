@@ -80,6 +80,35 @@ engine:
     # Reclaim target ratio for preemptible pressure; lower values reclaim more aggressively.
     preemptible_low_watermark_ratio: 0.4
 
+# Promotion policy for P2P routing.
+promotion:
+  # Promotion controls whether the daemon will "export" newly materialized
+  # replicas to become P2P-routable sources in the Global Store (i.e., publish
+  # `export_state=EXPORTABLE` + transport metadata).
+  #
+  # IMPORTANT: Promotion is only attempted when the *client request* asks for
+  # it via `export_policy` (SDK `GetArtifactOptions.export_policy`):
+  # - `never` (default): do not attempt promotion for this materialize.
+  # - `auto`: allow policy-driven promotion (if the daemon policy permits).
+  # - `force`: request an immediate promotion attempt (still gated by daemon policy).
+  #
+  # Policy values:
+  # - PROMOTION_POLICY_NEVER:
+  #     Never promote; replicas remain presence-only and are not P2P targets.
+  # - PROMOTION_POLICY_ON_MATERIALIZE:
+  #     Promote after any successful materialize when `export_policy` is `auto` or `force`.
+  # - PROMOTION_POLICY_ON_HOTNESS:
+  #     Promote only when `export_policy=force` (conservative default; treat "force" as
+  #     the caller's "this is hot" signal; `auto` does not promote).
+  # - PROMOTION_POLICY_ON_POLICY:
+  #     Currently behaves like ON_MATERIALIZE (promote on `auto`/`force`); reserved for
+  #     future policy-based gating beyond the request signal.
+  policy: PROMOTION_POLICY_ON_HOTNESS
+  # Require verification metadata before exporting.
+  require_verified: false
+  # Bounded drain timeout before forced demotion.
+  demotion_drain_timeout: 30s
+
 # Unified pinned memory configuration for all daemon-side pinned usage.
 pinned_memory:
   # Phase 1 fixed-allocation: total pinned bytes is derived as sum(classes[].pool_bytes).

@@ -161,6 +161,15 @@ def _tensor_payload_from_proto(
     )
 
 
+def _export_policy_to_proto(value: str | None) -> store_daemon_pb2.ExportPolicy:
+    normalized = "never" if value is None else str(value).strip().lower()
+    if normalized == "force":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_FORCE
+    if normalized == "auto":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_AUTO
+    return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_NEVER
+
+
 def materialize_artifact_v2(
     *,
     client: DaemonCtl,
@@ -263,6 +272,7 @@ def materialize_artifact_v2(
             )
         else:
             preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        export_policy = _export_policy_to_proto(opts.export_policy)
         response: (
             store_daemon_pb2.MaterializeReplicaResponse
             | store_daemon_pb2.MaterializeByKeyResponse
@@ -286,6 +296,7 @@ def materialize_artifact_v2(
                 return_response=True,
                 preference=preference_value,
                 source_policy=source_policy,
+                export_policy=export_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
@@ -311,6 +322,7 @@ def materialize_artifact_v2(
                 return_response=True,
                 preference=preference_value,
                 source_policy=source_policy,
+                export_policy=export_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,

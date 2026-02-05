@@ -117,6 +117,25 @@ def _apply_schema_migrations(db: DuckDBPyConnection) -> None:
             logger.exception("Failed to add artifact_disk_locations.deleted_at column")
             raise
 
+    if not _column_exists(db, "artifact_replicas", "export_state"):
+        try:
+            db.execute(
+                "ALTER TABLE artifact_replicas ADD COLUMN export_state TEXT DEFAULT 'PRESENCE_ONLY'"
+            )
+            logger.info("Added artifact_replicas.export_state column")
+        except Exception:
+            logger.exception("Failed to add artifact_replicas.export_state column")
+            raise
+    if not _column_exists(db, "artifact_replicas", "export_generation"):
+        try:
+            db.execute(
+                "ALTER TABLE artifact_replicas ADD COLUMN export_generation BIGINT DEFAULT 0"
+            )
+            logger.info("Added artifact_replicas.export_generation column")
+        except Exception:
+            logger.exception("Failed to add artifact_replicas.export_generation column")
+            raise
+
 
 def init_db(db: DuckDBPyConnection) -> None:
     sql_file_path = _resolve_schema_path()

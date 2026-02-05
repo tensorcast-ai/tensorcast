@@ -13,6 +13,14 @@ enum VerificationTimeoutStatus {
   VERIFICATION_TIMEOUT_STATUS_DEADLINE = 2;
 }
 
+enum PromotionPolicy {
+  PROMOTION_POLICY_UNSPECIFIED = 0;
+  PROMOTION_POLICY_NEVER = 1;
+  PROMOTION_POLICY_ON_MATERIALIZE = 2;
+  PROMOTION_POLICY_ON_HOTNESS = 3;
+  PROMOTION_POLICY_ON_POLICY = 4;
+}
+
 // Explicit daemon server config to avoid ambiguity with other servers.
 message DaemonServer {
   // Legacy fields replaced by listen/p2p_listen for structure.
@@ -140,6 +148,12 @@ message Engine {
   ByteMapping byte_mapping = 13;
 }
 
+message Promotion {
+  PromotionPolicy policy = 1;
+  bool require_verified = 2;
+  google.protobuf.Duration demotion_drain_timeout = 3;
+}
+
 message PinnedMemory {
   message PinnedClass {
     string name = 1;
@@ -165,6 +179,7 @@ message DaemonConfig {
   tensorcast.communicator.v1.CommunicatorConfig communicator = 4;
   Engine engine = 5;
   tensorcast.config.v1.Observability observability = 6;
+  Promotion promotion = 25;
   // Stable identity for this daemon instance used by the control plane.
   // Must not be derived from network address and should remain stable across restarts.
   string daemon_id = 10;

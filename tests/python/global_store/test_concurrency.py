@@ -8,7 +8,7 @@ import time
 import concurrent.futures
 from uuid import uuid4
 
-from tensorcast.global_store.models import Replica, Worker, MemoryType
+from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
 from .conftest import create_test_replicas, create_test_workers
 
 
@@ -130,6 +130,9 @@ class TestConcurrency:
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=i,
+                remote_memory_keys=[f"rk{i}"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 worker_id=worker_ids[i],
                 max_concurrency=2,  # Low concurrency to test queueing
                 is_available=True,
@@ -287,6 +290,9 @@ class TestConcurrency:
             memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
             worker_id=worker_id,
             max_concurrency=max_concurrency,
             is_available=True,
@@ -441,6 +447,9 @@ class TestRaceConditions:
             memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
             worker_id=worker_id,
             max_concurrency=1,
             is_available=True,

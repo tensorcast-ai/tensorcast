@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -44,6 +44,7 @@ class ScopedIngestionRuntimeTestHarness {
     metadata_gateway_ = std::make_unique<metadata::MetadataGateway>(metadata::MetadataGateway::Config{
         .runtime_context = &env_->runtime_context(),
         .replica_runtime = replica_runtime_.get(),
+        .promotion_manager = nullptr,
         .artifact_chunk_bytes = options_.artifact_chunk_bytes,
         .pinned_memory_timeout = options_.pinned_memory_timeout,
         .replica_factory = {},

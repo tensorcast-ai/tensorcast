@@ -10,7 +10,7 @@ from .persistence import (
     PlacementShard,
     PlacementTarget,
 )
-from .replica import ByteSpaceKind, ByteSpaceRef, MemoryType, Replica
+from .replica import ByteSpaceKind, ByteSpaceRef, ExportState, MemoryType, Replica
 from .transport import Transport
 from .worker import Worker, WorkerMemoryTierState
 
@@ -23,6 +23,7 @@ __all__ = [
     "MemoryType",
     "ByteSpaceKind",
     "ByteSpaceRef",
+    "ExportState",
 ]
 __all__ += [
     "PlacementPlan",

@@ -1214,9 +1214,6 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   if (!tensor_index_key.empty()) {
     mem_info->set_tensor_index_key(std::string(tensor_index_key));
   }
-  if (verification_json.has_value() && !verification_json->empty()) {
-    mem_info->set_verification_json(*verification_json);
-  }
   // Best-effort creation metadata
   {
     const auto now = std::chrono::system_clock::now();
@@ -1230,20 +1227,21 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     *request.mutable_descriptor_() = *descriptor;
   }
 
-  for (const auto& key : remote_memory_keys) {
-    mem_info->add_remote_memory_keys(key);
+  if (!remote_memory_keys.empty() || !buffer_sizes.empty() ||
+      (verification_json.has_value() && !verification_json->empty())) {
+    auto* transport = mem_info->mutable_transport();
+    transport->set_export_state(common::v1::ReplicaTransportMetadata::EXPORT_STATE_EXPORTABLE);
+    transport->set_export_generation(0);
+    for (const auto& key : remote_memory_keys) {
+      transport->add_remote_memory_keys(key);
+    }
+    for (const auto& sz : buffer_sizes) {
+      transport->add_buffer_sizes(sz);
+    }
+    if (verification_json.has_value() && !verification_json->empty()) {
+      transport->set_verification_json(*verification_json);
+    }
   }
-  for (const auto& sz : buffer_sizes) {
-    mem_info->add_buffer_sizes(sz);
-  }
-
-  // Attach remote memory keys and buffer sizes if present
-  // The header signature includes vectors; however, to maintain backward
-  // compatibility with existing callers we do not require them.
-  // Callers using enable_remote_replica_access should populate these via
-  // the Replica/CommunicationManager before calling this method.
-  // NOTE: We cannot reference parameters by name due to preexisting signature –
-  // adjust after refactor if needed.
 
   // Optionally include canonical index data for UPSERT on first write.
   if (tensor_index_data.has_value() && !tensor_index_data->empty()) {
@@ -1783,15 +1781,27 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   replica.memory_type = convert_from_proto_memory_type(info.memory_type());
   replica.device_id = info.device_id();
 
-  for (const auto& key : info.remote_memory_keys()) {
-    replica.remote_memory_keys.push_back(key);
-  }
-
-  for (const auto& size : info.buffer_sizes()) {
-    replica.buffer_sizes.push_back(size);
-  }
-  if (!info.verification_json().empty()) {
-    replica.verification_json = info.verification_json();
+  if (info.has_transport()) {
+    const auto& transport = info.transport();
+    for (const auto& key : transport.remote_memory_keys()) {
+      replica.remote_memory_keys.push_back(key);
+    }
+    for (const auto& size : transport.buffer_sizes()) {
+      replica.buffer_sizes.push_back(size);
+    }
+    if (!transport.verification_json().empty()) {
+      replica.verification_json = transport.verification_json();
+    }
+  } else {
+    for (const auto& key : info.remote_memory_keys()) {
+      replica.remote_memory_keys.push_back(key);
+    }
+    for (const auto& size : info.buffer_sizes()) {
+      replica.buffer_sizes.push_back(size);
+    }
+    if (!info.verification_json().empty()) {
+      replica.verification_json = info.verification_json();
+    }
   }
   if (info.has_byte_space() && info.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW) {
     if (!info.byte_space().id().empty()) {

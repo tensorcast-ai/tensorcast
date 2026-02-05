@@ -2756,6 +2756,7 @@ IngestionResultEvent MaterializationFacade::make_ingestion_event_seed(
   event.request_id = request_id;
   event.source = source;
   event.materialize_mode = mode;
+  event.export_policy = hints.export_policy;
   event.artifact_id = std::string(artifact_identifier);
   event.target_device = target.location.to_device_key();
   event.target_location = target.location.type;
@@ -2785,6 +2786,7 @@ IngestionStartedEvent MaterializationFacade::make_started_event(
   started.publish_context_id = publish_context_id;
   started.publish_to_global_store = publish_to_global_store;
   started.materialize_mode = mode;
+  started.export_policy = hints.export_policy;
   if (hints.variant && hints.variant->view_id.has_value()) {
     started.view_id = hints.variant->view_id;
   }

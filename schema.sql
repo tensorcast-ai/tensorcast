@@ -171,6 +171,8 @@ CREATE TABLE IF NOT EXISTS artifact_replicas (
     is_available BOOLEAN DEFAULT TRUE,
     remote_memory_keys TEXT[] NULL,
     buffer_sizes BIGINT[] NULL,
+    export_state TEXT NOT NULL DEFAULT 'PRESENCE_ONLY',
+    export_generation BIGINT NOT NULL DEFAULT 0,
     verification_json TEXT NULL,
     -- relationship to workers
     worker_id TEXT,

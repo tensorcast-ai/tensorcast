@@ -19,6 +19,20 @@ enum class ReplicaPublishState : std::uint8_t {
   kRetiring = 3,
 };
 
+enum class ReplicaExportState : std::uint8_t {
+  kPresenceOnly = 0,
+  kExportable = 1,
+  kDraining = 2,
+};
+
+struct ReplicaTransportState {
+  ReplicaExportState export_state{ReplicaExportState::kPresenceOnly};
+  uint64_t export_generation{0};
+  std::vector<std::string> remote_memory_keys;
+  std::vector<uint64_t> buffer_sizes;
+  std::string verification_json;
+};
+
 struct ReplicaInfo {
   loading::ReplicaKey key;
   std::string artifact_id;
@@ -40,6 +54,9 @@ struct ReplicaInventoryEntry {
   ReplicaPublishState publish_state{ReplicaPublishState::kLocalOnly};
   std::vector<std::string> remote_memory_keys;
   std::vector<uint64_t> buffer_sizes;
+  ReplicaExportState export_state{ReplicaExportState::kPresenceOnly};
+  uint64_t export_generation{0};
+  std::string verification_json;
 };
 
 } // namespace tensorcast::store::runtime

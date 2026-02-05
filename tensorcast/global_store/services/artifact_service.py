@@ -28,7 +28,9 @@ class ArtifactService:
         """Initialize service with repository."""
         self.replica_repository = replica_repository
 
-    def register_replica(self, replica: Replica) -> Replica:
+    def register_replica(
+        self, replica: Replica, *, preserve_transport: bool = False
+    ) -> Replica:
         """
         Register or update a artifact replica.
 
@@ -74,7 +76,9 @@ class ArtifactService:
         # Use atomic transaction to prevent race conditions
         with self.replica_repository.transaction() as cursor:
             # Use database-level UPSERT to handle concurrent registrations
-            result = self.replica_repository.create_or_update_atomic(replica, cursor)
+            result = self.replica_repository.create_or_update_atomic(
+                replica, cursor, preserve_transport=preserve_transport
+            )
 
             # Update metrics after successful transaction
             inc_replica_register(result.artifact_id, result.memory_type.value)

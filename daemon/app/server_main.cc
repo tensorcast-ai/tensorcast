@@ -716,6 +716,30 @@ int main(int argc, char** argv) {
     }
   }
 
+  if (cfg.has_promotion()) {
+    const auto& promo = cfg.promotion();
+    switch (promo.policy()) {
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_MATERIALIZE:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnMaterialize;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_HOTNESS:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnHotness;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_ON_POLICY:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kOnPolicy;
+        break;
+      case tensorcast::config::v1::PROMOTION_POLICY_NEVER:
+      case tensorcast::config::v1::PROMOTION_POLICY_UNSPECIFIED:
+      default:
+        opts.promotion.policy = store::StoreEngineOptions::PromotionPolicy::kNever;
+        break;
+    }
+    opts.promotion.require_verified = promo.require_verified();
+    if (promo.has_demotion_drain_timeout()) {
+      opts.promotion.demotion_drain_timeout = duration_to_millis(promo.demotion_drain_timeout());
+    }
+  }
+
   if (opts.cpu_shared_memory_enabled) {
     if (!cfg.engine().has_memory_tiers() || cfg.engine().memory_tiers().stable_bytes() == 0) {
       LOG(ERROR) << "INVALID_ARGUMENT: engine.cpu_shared_memory.enabled requires engine.memory_tiers.stable_bytes > 0";

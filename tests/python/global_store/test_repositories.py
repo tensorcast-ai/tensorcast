@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
 from tensorcast.global_store.repositories import ArtifactDiskLocationRepository
 
 
@@ -245,6 +245,7 @@ class TestRepositories:
             accepting_new_requests=True,
         )
         worker_repo.create(worker)
+        assert worker_repo.update_heartbeat("worker1", 1024, True) is True
 
         # Create replicas with different priorities
         replicas = [
@@ -253,6 +254,7 @@ class TestRepositories:
                 node_id="node1",
                 node_address="192.168.1.1",
                 node_port=8080,
+                memory_size=1024,
                 memory_type=MemoryType.DISK,
                 device_id=0,
                 max_concurrency=10,
@@ -264,8 +266,12 @@ class TestRepositories:
                 node_id="node2",
                 node_address="192.168.1.2",
                 node_port=8080,
+                memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 max_concurrency=10,
                 current_requests=2,
                 worker_id="worker1",
@@ -275,8 +281,12 @@ class TestRepositories:
                 node_id="node3",
                 node_address="192.168.1.3",
                 node_port=8080,
+                memory_size=1024,
                 memory_type=MemoryType.RAM,
                 device_id=0,
+                remote_memory_keys=["rk1"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 max_concurrency=10,
                 current_requests=8,
                 worker_id="worker1",
@@ -287,12 +297,13 @@ class TestRepositories:
             replica_repo.create(replica)
 
         # Test load balancing selection
-        selected = replica_repo.find_available_for_transport(
+        selection = replica_repo.find_available_for_transport(
             "test_artifact", heartbeat_timeout_seconds=60
         )
+        assert selection.replica is not None
+        selected = selection.replica
 
         # Should select GPU replica (lowest load among GPU replicas)
-        assert selected is not None
         assert selected.memory_type == MemoryType.GPU
         assert selected.current_requests == 3  # Incremented by query
 
@@ -301,10 +312,11 @@ class TestRepositories:
         replica_repo = repositories["replica"]
 
         # No replicas created
-        selected = replica_repo.find_available_for_transport(
+        selection = replica_repo.find_available_for_transport(
             "nonexistent_artifact", heartbeat_timeout_seconds=60
         )
-        assert selected is None
+        assert selection.replica is None
+        assert selection.exportable_replicas == 0
 
     def test_artifact_replica_full_capacity(self, repositories):
         """Test replicas at full capacity."""
@@ -324,6 +336,7 @@ class TestRepositories:
             accepting_new_requests=True,
         )
         worker_repo.create(worker)
+        assert worker_repo.update_heartbeat("worker1", 1024, True) is True
 
         # Create replica at full capacity
         replica = Replica(
@@ -331,8 +344,12 @@ class TestRepositories:
             node_id="node1",
             node_address="192.168.1.1",
             node_port=8080,
+            memory_size=1024,
             memory_type=MemoryType.GPU,
             device_id=0,
+            remote_memory_keys=["rk0"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
             max_concurrency=2,
             current_requests=2,  # Full capacity
             worker_id="worker1",
@@ -340,10 +357,10 @@ class TestRepositories:
         replica_repo.create(replica)
 
         # Should not be selected for transport
-        selected = replica_repo.find_available_for_transport(
+        selection = replica_repo.find_available_for_transport(
             "test_artifact", heartbeat_timeout_seconds=60
         )
-        assert selected is None
+        assert selection.replica is None
 
     def test_transport_repository_crud(self, repositories):
         """Test Transport CRUD operations."""

@@ -3,7 +3,7 @@
 """Integration tests for Global Store full stack."""
 
 
-from tensorcast.global_store.models import MemoryType, Replica, Worker
+from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
 
 
 class TestIntegration:
@@ -95,6 +95,9 @@ class TestIntegration:
                     memory_size=1024,
                     memory_type=mem_type,
                     device_id=0,
+                    remote_memory_keys=[f"rk{i}"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
                     worker_id=worker_id,
                     max_concurrency=10,
                     current_requests=current_requests,  # Set initial load directly
@@ -140,6 +143,9 @@ class TestIntegration:
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 worker_id=worker.worker_id,
                 max_concurrency=3,
             )
@@ -319,6 +325,9 @@ class TestIntegration:
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
                 device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
                 worker_id=worker.worker_id,
                 max_concurrency=1,
             )
@@ -385,6 +394,9 @@ class TestIntegration:
                     memory_size=1024,
                     memory_type=MemoryType.GPU,
                     device_id=i,
+                    remote_memory_keys=[f"rk{i}"],
+                    buffer_sizes=[1024],
+                    export_state=ExportState.EXPORTABLE,
                     worker_id=worker.worker_id,
                     max_concurrency=2,
                 )

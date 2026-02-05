@@ -30,6 +30,7 @@
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
 #include "core/store/runtime/replica/replica_info.h"
+#include "core/store/runtime/replica/replica_promotion_manager.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/runtime/runtime_env.h"
 #include "core/store/seal_assembly_result.h"
@@ -208,6 +209,12 @@ class StoreEngine {
       std::optional<std::string_view> view_id = std::nullopt) const;
 
   [[nodiscard]] std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
+  [[nodiscard]] std::optional<std::string> get_replica_global_store_id(const loading::ReplicaKey& key) const;
+  void set_replica_global_store_id(const loading::ReplicaKey& key, std::string replica_id);
+
+  [[nodiscard]] const StoreEngineOptions& options() const {
+    return options_;
+  }
 
   /**
    * @brief Returns a unique GPU device ordinal if the artifact resides on exactly
@@ -223,6 +230,11 @@ class StoreEngine {
    * Ownership is shared so tests may reuse the stub beyond the StoreEngine lifetime.
    */
   void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
+  void set_promotion_sync_hooks(runtime::PromotionSyncHooks hooks);
+
+  [[nodiscard]] runtime::ReplicaPromotionManager* promotion_manager() const {
+    return promotion_manager_.get();
+  }
 
   void set_stable_cache_spill_evictable(
       std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback);
@@ -400,6 +412,7 @@ class StoreEngine {
 
   std::unique_ptr<runtime::RuntimeEnv> runtime_env_;
   std::unique_ptr<runtime::ReplicaRuntime> replica_runtime_;
+  std::unique_ptr<runtime::ReplicaPromotionManager> promotion_manager_;
   std::unique_ptr<runtime::metadata::MetadataGateway> metadata_gateway_;
   std::unique_ptr<runtime::IngestionRuntime> ingestion_runtime_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(
