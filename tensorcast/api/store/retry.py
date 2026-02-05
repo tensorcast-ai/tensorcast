@@ -146,6 +146,18 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
         lowered = mapped.lower()
+        if "globalstoreclient not connected" in lowered:
+            hint = (
+                "Materialization requires a Global Store connection. "
+                "Start TensorCast with Global Store enabled, e.g. "
+                "`tensorcast.startup.init(mode='create', global_store_mode='start')`, "
+                "or start the Global Store service and connect the daemon to it."
+            )
+            return ArtifactError(
+                _append_hint(mapped, hint),
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
         if "tensor index not found" in lowered:
             hint = (
                 "Ensure the directory contains tensor_index.json, tensor_index.cbor, or *.safetensors files. "

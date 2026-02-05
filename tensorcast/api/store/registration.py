@@ -454,11 +454,46 @@ class RegistrationPipeline:
         return view_ctx, upload_tensors
 
     @staticmethod
-    def _require_cuda_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
-        if any(not tensor.is_cuda for tensor in tensors.values()):
+    def _require_put_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
+        """Validate tc.put / tc.put_async inputs.
+
+        Historically we required CUDA tensors for `put`, but the registration
+        pipeline can stage CPU tensors onto the selected CUDA device during
+        upload. We still require:
+        - all tensors are either CPU, or CUDA on the same device
+        - no mixing CPU and CUDA tensors
+        """
+        saw_cpu = False
+        saw_cuda = False
+        device_id: int | None = None
+        for tensor in tensors.values():
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if tensor.is_cuda:
+                saw_cuda = True
+                idx = tensor.device.index or 0
+                if device_id is None:
+                    device_id = int(idx)
+                elif int(idx) != int(device_id):
+                    raise ArtifactError(
+                        "All CUDA tensors must reside on the same device",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+            else:
+                saw_cpu = True
+        if saw_cpu and saw_cuda:
             raise ArtifactError(
-                "put requires CUDA tensors; CPU tensors are not supported yet",
+                "Artifact tensors must be all CPU or all CUDA tensors on the same device",
                 status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        # `put` always requires a CUDA device for staging and IPC; fail early to
+        # produce a clearer error than a deeper runtime path.
+        if saw_cpu and not torch.cuda.is_available():
+            raise ArtifactError(
+                "put requires CUDA to be available for staging CPU tensors",
+                status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
 
@@ -472,7 +507,7 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
-        self._require_cuda_tensors(tensors)
+        self._require_put_tensors(tensors)
         return self._perform_registration(
             tensors,
             artifact_id=artifact_id,
@@ -495,7 +530,7 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
-        self._require_cuda_tensors(tensors)
+        self._require_put_tensors(tensors)
         cancel_event = threading.Event()
         handle_lock = threading.Lock()
         handle_ref: dict[str, _RegisterHandle | None] = {"handle": None}
