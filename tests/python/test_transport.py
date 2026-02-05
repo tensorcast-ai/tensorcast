@@ -11,6 +11,8 @@ import uuid
 import pytest
 
 from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.config import GlobalStoreConfig
+from tensorcast.global_store.config.settings import get_config, set_config
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.common.v1 import common_pb2
 from google.protobuf import duration_pb2
@@ -33,6 +35,10 @@ class _MockContext:
 @pytest.fixture
 def servicer():
     """Create an in-memory GlobalStoreServicer for testing"""
+    try:
+        get_config()
+    except RuntimeError:
+        set_config(GlobalStoreConfig())
     return GlobalStoreServicer()
 
 
@@ -45,15 +51,20 @@ def test_context():
 @pytest.fixture
 def memory_info():
     """Create a sample memory info for testing"""
-    return common_pb2.MemoryInfo(
+    info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
-        remote_memory_keys=["test_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
+    transport = info.transport
+    transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    transport.export_generation = 1
+    transport.remote_memory_keys.append("test_key")
+    transport.buffer_sizes.append(info.memory_size)
+    return info
 
 
 def test_transport_concurrency(servicer, test_context, memory_info):
@@ -265,31 +276,43 @@ def test_transport_memory_type_priority(servicer, test_context):
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
-        remote_memory_keys=["gpu_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
+    gpu_transport = gpu_info.transport
+    gpu_transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    gpu_transport.export_generation = 1
+    gpu_transport.remote_memory_keys.append("gpu_key")
+    gpu_transport.buffer_sizes.append(gpu_info.memory_size)
 
     ram_info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.2",
         node_port=8000,
-        remote_memory_keys=["ram_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_RAM,
         device_id=0,
     )
+    ram_transport = ram_info.transport
+    ram_transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    ram_transport.export_generation = 1
+    ram_transport.remote_memory_keys.append("ram_key")
+    ram_transport.buffer_sizes.append(ram_info.memory_size)
 
     disk_info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.3",
         node_port=8000,
-        remote_memory_keys=["disk_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_DISK,
         device_id=0,
     )
+    disk_transport = disk_info.transport
+    disk_transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    disk_transport.export_generation = 1
+    disk_transport.remote_memory_keys.append("disk_key")
+    disk_transport.buffer_sizes.append(disk_info.memory_size)
 
     # Register workers first
     gpu_worker_request = global_store_pb2.RegisterWorkerRequest(

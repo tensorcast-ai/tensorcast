@@ -165,6 +165,11 @@ explicit keepalive settings (for example `keepalive_time: 30s`,
 `keepalive_timeout: 10s`) to avoid idle GOAWAY churn. The Python SDK reuses a
 single gRPC channel/stub per `DaemonCtl` instance, so keep the instance around
 instead of recreating it for each RPC.
+
+Replica promotion/export for P2P routing is controlled via the `promotion` block
+(`policy`, `require_verified`, `demotion_drain_timeout`). The default
+`promotion.policy` is `never`, which means replicas remain presence-only unless
+promotion is explicitly enabled and requested by the SDK.
 ```yaml
 network:
 high_availability:

@@ -124,6 +124,22 @@ struct StoreEngineOptions {
   };
 
   ByteMappingConfig byte_mapping{};
+
+  enum class PromotionPolicy : std::uint8_t {
+    kUnspecified = 0,
+    kNever = 1,
+    kOnMaterialize = 2,
+    kOnHotness = 3,
+    kOnPolicy = 4,
+  };
+
+  struct PromotionOptions {
+    PromotionPolicy policy{PromotionPolicy::kNever};
+    bool require_verified{false};
+    std::chrono::milliseconds demotion_drain_timeout{0};
+  };
+
+  PromotionOptions promotion{};
 };
 
 } // namespace tensorcast::store

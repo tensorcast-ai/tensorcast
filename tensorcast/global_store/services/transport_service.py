@@ -11,6 +11,7 @@ from tensorcast.global_store.exceptions import NotFoundError, TimeoutError
 from tensorcast.global_store.metrics import (
     dec_active_transports,
     inc_active_transports,
+    inc_transport_no_exportable,
     inc_transport_request,
     observe_transport_wait,
 )
@@ -74,13 +75,14 @@ class TransportService:
         while True:
             try:
                 # Try to find and claim an available replica
-                replica = self.replica_repository.find_available_for_transport(
+                selection = self.replica_repository.find_available_for_transport(
                     artifact_id=artifact_id,
                     view_id=view_id,
                     heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
                 )
 
-                if replica:
+                if selection.replica:
+                    replica = selection.replica
                     # Create transport record
                     transport = Transport(
                         replica_id=replica.replica_id,
@@ -106,10 +108,29 @@ class TransportService:
                     )
 
                     return replica, transport.transport_id
+                if selection.exportable_replicas == 0:
+                    inc_transport_request(artifact_id, "not_found")
+                    inc_transport_no_exportable(artifact_id)
+                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    raise NotFoundError(
+                        f"No exportable replicas available for artifact {artifact_id}"
+                    )
 
-            except Exception as e:
+            except (NotFoundError, TimeoutError):
+                raise
+            except Exception as e:  # noqa: BLE001
                 # Handle database conflicts/retries - retry on conflicts
-                logger.debug(f"Transport request retry due to: {e}")
+                message = str(e).lower()
+                if any(
+                    token in message
+                    for token in ("transaction", "conflict", "serialization")
+                ):
+                    logger.debug(
+                        "Transport request retry due to transient DB error: %s", e
+                    )
+                else:
+                    raise
+                # Fall through to timeout/sleep handling for transient errors.
 
             # Check timeout
             if time.time() >= end_time:

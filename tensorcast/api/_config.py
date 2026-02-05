@@ -633,6 +633,7 @@ class GetArtifactOptions(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     prefer: str = "auto"  # "auto" | "local" | "p2p" | "disk"
+    export_policy: str = "never"  # "never" | "auto" | "force"
     pinned_allocation_timeout_ms: int = DEFAULT_PINNED_TIMEOUT_MS
     # When >0 and the initial retrieval fails, the daemon can wait for a managed
     # shared-disk location to become ready before retrying disk-only.
@@ -650,6 +651,16 @@ class GetArtifactOptions(BaseModel):
         if normalized not in {"auto", "local", "p2p", "disk"}:
             raise ValueError(
                 "GetArtifactOptions.prefer must be one of: auto, local, p2p, disk"
+            )
+        return normalized
+
+    @field_validator("export_policy", mode="before")
+    @classmethod
+    def _normalize_export_policy(cls, value: object) -> str:
+        normalized = "never" if value is None else str(value).strip().lower()
+        if normalized not in {"never", "auto", "force"}:
+            raise ValueError(
+                "GetArtifactOptions.export_policy must be one of: never, auto, force"
             )
         return normalized
 

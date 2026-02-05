@@ -458,6 +458,13 @@ class TestGRPCService:
                 kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
             ),
         )
+        canonical_transport = canonical_info.transport
+        canonical_transport.export_state = (
+            common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        )
+        canonical_transport.export_generation = 1
+        canonical_transport.remote_memory_keys.append("rk0")
+        canonical_transport.buffer_sizes.append(canonical_info.memory_size)
         view_id = "view-1"
         view_info = common_pb2.MemoryInfo(
             node_id=str(uuid.uuid4()),
@@ -470,6 +477,13 @@ class TestGRPCService:
                 kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
             ),
         )
+        view_transport = view_info.transport
+        view_transport.export_state = (
+            common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        )
+        view_transport.export_generation = 1
+        view_transport.remote_memory_keys.append("rk1")
+        view_transport.buffer_sizes.append(view_info.memory_size)
 
         servicer.RegisterReplica(
             global_store_pb2.RegisterReplicaRequest(
@@ -765,9 +779,10 @@ class TestGRPCService:
         assert sum(1 for _ in list_response.replicas) == 1
         assert list_response.replicas[0].artifact_id == artifact_id
         assert list_response.replicas[0].memory_info.node_id == memory_info.node_id
+        assert list_response.replicas[0].memory_info.HasField("transport")
         assert (
-            list_response.replicas[0].memory_info.remote_memory_keys[0]
-            == memory_info.remote_memory_keys[0]
+            list_response.replicas[0].memory_info.transport.remote_memory_keys[0]
+            == memory_info.transport.remote_memory_keys[0]
         )
 
         # 4. Unregister the replica

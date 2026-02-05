@@ -144,9 +144,15 @@ StoreEngine::StoreEngine(const StoreEngineOptions& opts)
       .runtime_context = &context,
   };
   replica_runtime_ = std::make_unique<runtime::ReplicaRuntime>(replica_config);
+  runtime::ReplicaPromotionManager::Config promotion_config{
+      .runtime_context = &context,
+      .replica_runtime = replica_runtime_.get(),
+  };
+  promotion_manager_ = std::make_unique<runtime::ReplicaPromotionManager>(promotion_config);
   metadata_gateway_ = std::make_unique<runtime::metadata::MetadataGateway>(runtime::metadata::MetadataGateway::Config{
       .runtime_context = &context,
       .replica_runtime = replica_runtime_.get(),
+      .promotion_manager = promotion_manager_.get(),
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .pinned_memory_timeout = pinned_memory_timeout_,
       .replica_factory = {},
@@ -186,6 +192,12 @@ void StoreEngine::set_global_store_client_for_testing(std::shared_ptr<components
   }
   if (metadata_gateway_) {
     metadata_gateway_->set_client_override(std::move(client));
+  }
+}
+
+void StoreEngine::set_promotion_sync_hooks(runtime::PromotionSyncHooks hooks) {
+  if (promotion_manager_) {
+    promotion_manager_->set_sync_hooks(std::move(hooks));
   }
 }
 
@@ -480,6 +492,14 @@ std::vector<DeviceKey> StoreEngine::get_resident_devices(
 
 std::vector<StoreEngine::ReplicaInventoryEntry> StoreEngine::get_ha_inventory() const {
   return replica_runtime_->get_ha_inventory();
+}
+
+std::optional<std::string> StoreEngine::get_replica_global_store_id(const loading::ReplicaKey& key) const {
+  return replica_runtime_->get_replica_global_id(key);
+}
+
+void StoreEngine::set_replica_global_store_id(const loading::ReplicaKey& key, std::string replica_id) {
+  replica_runtime_->set_replica_global_id(key, std::move(replica_id));
 }
 
 std::vector<ReplicaKey> StoreEngine::list_device_replicas(const DeviceKey& device) const {

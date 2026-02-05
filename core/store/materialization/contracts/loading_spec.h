@@ -36,6 +36,8 @@ enum class SourcePreference : uint8_t { kUnspecified, kAuto, kPreferP2P, kPrefer
 
 enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalReplica };
 
+enum class ExportPolicy : uint8_t { kUnspecified, kNever, kAuto, kForce };
+
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
 };
@@ -108,6 +110,7 @@ struct MaterializeHints {
   SourcePreference source_preference{SourcePreference::kAuto};
   bool allow_p2p{true};
   bool allow_disk{true};
+  ExportPolicy export_policy{ExportPolicy::kNever};
 
   std::optional<VariantIdentity> variant;
 };

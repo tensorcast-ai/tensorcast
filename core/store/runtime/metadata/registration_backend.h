@@ -3,19 +3,18 @@
 #pragma once
 
 #include <chrono>
-#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/types/span.h"
 #include "core/store/runtime/metadata/metadata_types.h"
+#include "core/store/runtime/replica/replica_promotion_manager.h"
 
 namespace tensorcast::store::runtime::metadata {
 
@@ -65,6 +64,7 @@ class RegistrationBackend {
   std::shared_ptr<common::AsyncRuntime> async_runtime_;
   std::shared_ptr<MemoryTierBudget> memory_tier_budget_;
   std::optional<MemoryTierConfig> memory_tier_config_;
+  ReplicaPromotionManager* promotion_manager_{nullptr};
   ReplicaFactory replica_factory_;
   size_t artifact_chunk_bytes_{0};
   std::chrono::milliseconds pinned_memory_timeout_{0};

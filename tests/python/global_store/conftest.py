@@ -144,15 +144,20 @@ def test_context():
 @pytest.fixture
 def memory_info():
     """Create a sample memory info for testing"""
-    return common_pb2.MemoryInfo(
+    info = common_pb2.MemoryInfo(
         node_id=str(uuid.uuid4()),
         node_address="192.168.1.1",
         node_port=8000,
-        remote_memory_keys=["test_key"],
         memory_size=1000000000,
         memory_type=common_pb2.MemoryType.MEMORY_TYPE_GPU,
         device_id=0,
     )
+    transport = info.transport
+    transport.export_state = common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+    transport.export_generation = 1
+    transport.remote_memory_keys.append("test_key")
+    transport.buffer_sizes.append(info.memory_size)
+    return info
 
 
 @pytest.fixture

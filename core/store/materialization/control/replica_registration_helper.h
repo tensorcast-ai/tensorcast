@@ -3,7 +3,7 @@
 #pragma once
 
 #include <string_view>
-#include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "core/common/memory/memory_location.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/device_types.h"
@@ -15,7 +15,7 @@ class ReplicaRegistrationHelper {
  public:
   // Registers the current process' replica of the given artifact with Global Store.
   // This is a thin wrapper around GlobalStoreClient::register_replica().
-  static absl::Status register_local_replica(
+  static absl::StatusOr<std::string> register_local_replica(
       gsl::not_null<components::IGlobalStoreClient*> gs_client,
       std::string_view worker_id,
       std::string_view artifact_id,

@@ -193,6 +193,20 @@ void normalize_enum_aliases(nlohmann::json& root) {
         c["verification_timeout_status"] = "VERIFICATION_TIMEOUT_STATUS_DEADLINE";
     }
   }
+  if (root.contains("promotion") && root["promotion"].is_object()) {
+    auto& p = root["promotion"];
+    if (p.contains("policy") && p["policy"].is_string()) {
+      std::string v = absl::AsciiStrToLower(p["policy"].get<std::string>());
+      if (v == "never")
+        p["policy"] = "PROMOTION_POLICY_NEVER";
+      else if (v == "on_materialize" || v == "materialize")
+        p["policy"] = "PROMOTION_POLICY_ON_MATERIALIZE";
+      else if (v == "on_hotness" || v == "hotness")
+        p["policy"] = "PROMOTION_POLICY_ON_HOTNESS";
+      else if (v == "on_policy" || v == "policy")
+        p["policy"] = "PROMOTION_POLICY_ON_POLICY";
+    }
+  }
 }
 
 // Convert size-like string fields to numeric bytes in-place on JSON tree
@@ -283,10 +297,15 @@ void normalize_duration_fields(nlohmann::json& root) {
     }
     if (lf.contains("handle_leases") && lf["handle_leases"].is_object()) {
       auto& hl = lf["handle_leases"];
-      if (hl.contains("ttl")) {
+      if (hl.contains("ttl"))
         to_duration(hl["ttl"]);
-      }
     }
+  }
+
+  if (root.contains("promotion") && root["promotion"].is_object()) {
+    auto& promo = root["promotion"];
+    if (promo.contains("demotion_drain_timeout"))
+      to_duration(promo["demotion_drain_timeout"]);
   }
 
   if (root.contains("high_availability") && root["high_availability"].is_object()) {

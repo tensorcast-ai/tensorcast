@@ -2,21 +2,16 @@
 
 #pragma once
 
-#include <chrono>
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/types/span.h"
 #include "core/common/artifact_identity.h"
-#include "core/common/memory/memory_location.h"
 #include "core/common/memory/pinned_buffer_pool.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/components/communication_manager.h"
@@ -24,19 +19,17 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/metrics_collector.h"
 #include "core/store/components/replica_registry.h"
+#include "core/store/components/stable_dram_cache_manager.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/device_types.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
 #include "core/store/replica/replica.h"
+#include "core/store/runtime/replica/replica_promotion_manager.h"
 #include "core/store/store_engine_options.h"
 #include "core/store/view_utils.h"
 #include "gsl/pointers"
-
-namespace tensorcast::store::components {
-class StableDramCacheManager;
-} // namespace tensorcast::store::components
 
 namespace tensorcast::store::runtime::metadata {
 
@@ -120,6 +113,7 @@ struct RegistrationResources {
   std::shared_ptr<MemoryTierBudget> memory_tier_budget;
   std::optional<MemoryTierConfig> memory_tier_config;
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
+  ::tensorcast::store::runtime::ReplicaPromotionManager* promotion_manager{nullptr};
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;

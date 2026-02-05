@@ -893,6 +893,19 @@ SourcePreference to_hint_preference(v2::SourcePreference preference) {
   }
 }
 
+store::loading::ExportPolicy to_hint_export_policy(v2::ExportPolicy policy) {
+  switch (policy) {
+    case v2::ExportPolicy::EXPORT_POLICY_FORCE:
+      return store::loading::ExportPolicy::kForce;
+    case v2::ExportPolicy::EXPORT_POLICY_AUTO:
+      return store::loading::ExportPolicy::kAuto;
+    case v2::ExportPolicy::EXPORT_POLICY_NEVER:
+    case v2::ExportPolicy::EXPORT_POLICY_UNSPECIFIED:
+    default:
+      return store::loading::ExportPolicy::kNever;
+  }
+}
+
 struct ResolvedSourcePolicy {
   v2::SourcePreference preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
   bool allow_p2p{true};
@@ -1790,6 +1803,7 @@ grpc::Status MaterializationController::materialize_replica(
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
+  hints.export_policy = to_hint_export_policy(req.export_policy());
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
   if (has_disk)

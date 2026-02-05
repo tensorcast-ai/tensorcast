@@ -35,6 +35,7 @@ from tensorcast.global_store.exceptions import (
 from tensorcast.global_store.models import (
     ByteSpaceKind,
     ByteSpaceRef,
+    ExportState,
     Instance,
     MemoryType,
     PersistenceShardStatus,
@@ -2374,9 +2375,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                 request.max_concurrency,
                 request.worker_id,
             )
+            preserve_transport = not request.mem_info.HasField("transport")
 
             # Register replica
-            registered = self.artifact_service.register_replica(replica)
+            registered = self.artifact_service.register_replica(
+                replica, preserve_transport=preserve_transport
+            )
 
             # Enrich span with key business attributes (best-effort only)
             from contextlib import suppress
@@ -4252,6 +4256,105 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
                     target_proto.degraded_reason = target.degraded_reason
         return response
 
+    @staticmethod
+    def _export_state_from_proto(
+        state: common_pb2.ReplicaTransportMetadata.ExportState,
+    ) -> ExportState:
+        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE:
+            return ExportState.EXPORTABLE
+        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING:
+            return ExportState.DRAINING
+        return ExportState.PRESENCE_ONLY
+
+    @staticmethod
+    def _export_state_to_proto(
+        state: ExportState,
+    ) -> common_pb2.ReplicaTransportMetadata.ExportState:
+        if state is ExportState.EXPORTABLE:
+            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        if state is ExportState.DRAINING:
+            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING
+        return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_PRESENCE_ONLY
+
+    def _parse_transport_metadata(
+        self, mem_info: common_pb2.MemoryInfo
+    ) -> tuple[bool, ExportState, int, list[str], list[int], str | None]:
+        transport_authoritative = mem_info.HasField("transport")
+        export_state = ExportState.PRESENCE_ONLY
+        export_generation = 0
+        remote_keys: list[str] = []
+        buffer_sizes: list[int] = []
+        verification_json: str | None = None
+
+        if not transport_authoritative:
+            # New protocol: without `transport` presence, this is a presence-only
+            # update and must not update transport metadata via legacy fields.
+            return (
+                transport_authoritative,
+                export_state,
+                export_generation,
+                remote_keys,
+                buffer_sizes,
+                verification_json,
+            )
+
+        transport = mem_info.transport
+        export_state = self._export_state_from_proto(transport.export_state)
+        export_generation = int(transport.export_generation or 0)
+        remote_keys = list(transport.remote_memory_keys)
+        buffer_sizes = [int(size) for size in transport.buffer_sizes]
+        verification_json = (
+            transport.verification_json if transport.verification_json else None
+        )
+
+        # Presence-only is a routing-withdraw state and must not retain keys or
+        # export-bound verification metadata.
+        if export_state is ExportState.PRESENCE_ONLY:
+            return (
+                transport_authoritative,
+                export_state,
+                export_generation,
+                [],
+                [],
+                None,
+            )
+
+        keys_required = export_state is ExportState.EXPORTABLE
+        if keys_required and not remote_keys:
+            export_state = ExportState.PRESENCE_ONLY
+            remote_keys = []
+            buffer_sizes = []
+            verification_json = None
+
+        # Validate keys when provided. Draining may omit keys entirely.
+        if remote_keys or buffer_sizes:
+            keys_valid = True
+            if len(remote_keys) != len(buffer_sizes):
+                keys_valid = False
+            else:
+                total = 0
+                for size in buffer_sizes:
+                    if size <= 0:
+                        keys_valid = False
+                        break
+                    total += int(size)
+                if keys_valid and mem_info.memory_size > 0:
+                    keys_valid = total == mem_info.memory_size
+            if not keys_valid:
+                remote_keys = []
+                buffer_sizes = []
+                export_state = ExportState.PRESENCE_ONLY
+                verification_json = None
+
+        return (
+            transport_authoritative,
+            export_state,
+            export_generation,
+            remote_keys,
+            buffer_sizes,
+            verification_json,
+        )
+
     def _replica_to_memory_info(self, replica: Replica) -> common_pb2.MemoryInfo:
         """Convert Replica to MemoryInfo proto."""
         # Map domain enum to proto enum
@@ -4273,6 +4376,13 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             buffer_sizes=replica.buffer_sizes,
             verification_json=replica.verification_json or "",
         )
+        transport = memory_info.transport
+        transport.export_state = self._export_state_to_proto(replica.export_state)
+        transport.export_generation = int(replica.export_generation or 0)
+        transport.remote_memory_keys.extend(replica.remote_memory_keys)
+        transport.buffer_sizes.extend([int(size) for size in replica.buffer_sizes])
+        if replica.verification_json:
+            transport.verification_json = replica.verification_json
         if replica.byte_space.kind == ByteSpaceKind.VIEW:
             memory_info.byte_space.CopyFrom(
                 common_pb2.ByteSpaceRef(
@@ -4300,13 +4410,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         worker_id: str,
     ) -> Replica:
         """Convert MemoryInfo proto to Replica using content-addressed artifact_id."""
-        # Derive transport chunk sizes if client omitted them.
-        remote_keys = list(mem_info.remote_memory_keys)
-        buffer_sizes = list(mem_info.buffer_sizes)
-        if remote_keys and not buffer_sizes and len(remote_keys) == 1:
-            # Fallback: treat the replica as a single contiguous region.
-            # This keeps validation invariants while allowing simpler clients/tests.
-            buffer_sizes = [mem_info.memory_size]
+        (
+            transport_authoritative,
+            export_state,
+            export_generation,
+            remote_keys,
+            buffer_sizes,
+            verification_json,
+        ) = self._parse_transport_metadata(mem_info)
 
         # Map proto enum to domain enum
         if mem_info.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU:
@@ -4317,7 +4428,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             domain_mem_type = MemoryType.DISK
 
         byte_space = ByteSpaceRef.canonical()
-        if hasattr(mem_info, "byte_space") and mem_info.HasField("byte_space"):
+        if mem_info.HasField("byte_space"):
             if mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
                 view_id = mem_info.byte_space.id.strip()
                 if not view_id:
@@ -4341,12 +4452,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             max_concurrency=max_concurrency,
             remote_memory_keys=remote_keys,
             buffer_sizes=buffer_sizes,
+            export_state=export_state,
+            export_generation=export_generation,
             worker_id=worker_id,
-            verification_json=(
-                mem_info.verification_json
-                if hasattr(mem_info, "verification_json") and mem_info.verification_json
-                else None
-            ),
+            verification_json=verification_json,
         )
 
     def _determine_worker_status(

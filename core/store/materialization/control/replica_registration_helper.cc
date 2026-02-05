@@ -6,7 +6,7 @@
 
 namespace tensorcast::store::materialization::control {
 
-absl::Status ReplicaRegistrationHelper::register_local_replica(
+absl::StatusOr<std::string> ReplicaRegistrationHelper::register_local_replica(
     gsl::not_null<components::IGlobalStoreClient*> gs_client,
     std::string_view worker_id,
     std::string_view artifact_id,
@@ -28,7 +28,7 @@ absl::Status ReplicaRegistrationHelper::register_local_replica(
     return reg_or.status();
   }
   VLOG(1) << "Registered local replica replica for " << artifact_id << " with replica_id " << *reg_or;
-  return absl::OkStatus();
+  return *reg_or;
 }
 
 } // namespace tensorcast::store::materialization::control
