@@ -75,6 +75,7 @@ Pinned pool sizing and chunking are no longer part of `CommunicatorConfig`. When
 
 - Missing typed config: Engine construction fails fast with a clear error. The engine no longer supports any environment-variable based configuration.
 - Env-only configuration: Unsupported. Provide a typed config (e.g., via YAML or explicit injection). Missing required fields produce validation errors.
+- Invalid `simple_numa` mappings: duplicate node/GPU IDs, empty NIC lists, or empty NIC names are rejected by Simple NUMA topology validation.
 
 ## Checklist
 

@@ -12,7 +12,7 @@ This document explains how P2P transfers work in Global Store mode. It is code-d
 
 - P2P transfer happens between Store Daemons; Global Store only coordinates.
 - Control plane: gRPC to Global Store and key mapping.
-- Data plane: `communicator::engine::Communicator` over RDMA or MTCP (multi-TCP).
+- Data plane: today `communicator::engine::Communicator` over RDMA or MTCP (multi-TCP); Phase 2 adds a routing wrapper (`communicator::routing::RoutingContext`) that will sit above the engine once the P2P path is integrated.
 - Remote access uses memory keys registered for coalesced chunk ranges.
 - Topology modeling (`core/communicator/topology`) now exists to describe Pool/Endpoint/Link reachability (including switch endpoints) without hardware discovery; routing integration is a follow-up.
 
@@ -121,6 +121,7 @@ Notes:
 
 - `P2PLoader` requires `memory_keys`, `buf_sizes`, `size_bytes`, and a communicator engine. It builds a `RemoteKeySource` which maps global offsets to per-key offsets (`core/store/materialization/dataplane/loaders/p2p_loader.cc`, `core/store/materialization/dataplane/sources/remote_key_source.cc`).
 - `RemoteKeySource::read_at` issues `Communicator::read_tensor` calls and blocks on the returned future; this is why the pipeline runs on the blocking executor.
+- The routing wrapper (`core/communicator/routing`) is not yet wired into `P2PLoader`; Phase 4 will route `read_tensor` through the wrapper to select direct links/NVLINK where applicable.
 - If `fallback_disk_dir` is set, `P2PLoader` wraps the remote source in `MuxSeekableSource`, which falls back on short reads or remote errors (`core/store/materialization/dataplane/sources/mux_seekable_source.cc`).
 
 ### TransferService and pump_ranges

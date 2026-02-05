@@ -500,6 +500,88 @@ cc_binary(
     ],
 )
 
+# ========== Routing wrapper (Phase 2) ==========
+
+sc_cc_library(
+    name = "routing_types_lib",
+    srcs = ["routing/types.cc"],
+    hdrs = ["routing/types.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":constants_lib",
+        "@abseil-cpp//absl/hash:hash",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_header_only_library(
+    name = "routing_read_helpers_lib",
+    hdrs = ["routing/read_helpers.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":request_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_adapter_lib",
+    srcs = ["routing/adapter.cc"],
+    hdrs = ["routing/adapter.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":engine_lib",
+        ":request_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_connection_lib",
+    srcs = ["routing/connection.cc"],
+    hdrs = ["routing/connection.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":routing_adapter_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+        ":topology_lib",
+        "//core/common:async_runtime_lib",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_channel_lib",
+    srcs = ["routing/route_channel.cc"],
+    hdrs = ["routing/route_channel.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":routing_connection_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+    ],
+)
+
+sc_cc_library(
+    name = "routing_context_lib",
+    srcs = ["routing/routing_context.cc"],
+    hdrs = ["routing/routing_context.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":engine_lib",
+        ":routing_adapter_lib",
+        ":routing_channel_lib",
+        ":routing_connection_lib",
+        ":routing_read_helpers_lib",
+        ":routing_types_lib",
+        ":topology_lib",
+        "//core/common:async_runtime_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+    ],
+)
+
 # Aggregate target removed; depend on specific libs instead.
 
 # Tests
@@ -596,7 +678,21 @@ cc_test(
     name = "topology_test",
     srcs = ["topology/topology_test.cc"],
     deps = [
+        ":simple_numa_topology_lib",
         ":topology_lib",
+        "//proto/tensorcast/communicator/v1:communicator_cc",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "routing_context_test",
+    srcs = ["routing/routing_context_test.cc"],
+    deps = [
+        ":routing_connection_lib",
+        ":routing_context_lib",
+        "//core/common:async_runtime_lib",
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
     ],

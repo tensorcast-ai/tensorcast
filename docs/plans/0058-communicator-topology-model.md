@@ -50,6 +50,23 @@ related_code:
   - [ ] Milestone 4.1: 在 P2P 读路径引入“路由选择”入口（保持默认回退到旧逻辑），逐步接入 `P2PLoader` / `RemoteKeySource`。
   - [ ] Milestone 4.2: 增加集成测试与压力回归（多 GPU / 多 NIC / 交换拓扑模拟），并完善文档更新。
 
+## Phase 2 Mapping Decisions (补充方案)
+
+**目标**：在不改动现有数据面行为的前提下，将拓扑可达性映射到现有通信实现，并显式纳入 NVLINK 作为本地 GPU↔GPU 传输。
+
+**运行时映射来源**
+- Endpoint 的运行时绑定信息（IP/Port/NIC/GPU UUID 等）以 **Global Store** 为权威来源。
+- 路由层只消费 GS 侧的节点与设备元数据，不引入额外的硬件发现或本地探测。
+
+**传输适配与落地位置**
+- 新增 **NvlinkAdapter** 作为 NVLINK 传输的唯一落地入口（routing/中间层负责选择，执行层由 NvlinkAdapter 完成）。
+- 现有 RDMA/MTCP/TCP 继续由 `engine::Communicator` 执行，作为 **EngineAdapter** 复用。
+
+**映射规则（最小可用）**
+- 同节点 GPU↔GPU：优先走 NVLINK（NvlinkAdapter），失败回退到已有路径。
+- 跨节点通信：仍走 RDMA/MTCP/TCP（EngineAdapter）。
+- Switch Endpoint 仅参与路径搜索，不直接生成 Connection。
+
 # Tasks
 
 - 更新 `core/communicator/README.md`，补充拓扑与多路径语义。

@@ -72,11 +72,25 @@ The communicator now ships a topology model under `core/communicator/topology/` 
 
 - **Pool** models a resource domain (CPU/GPU) and anchors endpoint affinity.
 - **Endpoint** models a transport endpoint with pool affinity constraints by type. Each endpoint carries a `pool_ids` list and validation enforces: **NIC**/**PCIE** endpoints must reference at least one CPU pool and one GPU pool, **NVLINK** endpoints must reference GPU pools only, and **Switch** endpoints have no pool affinity (used only for path search).
-- **Link** models a topology edge; **SW links** are the only links allowed to touch switch endpoints.
+- **Link** models a topology edge; **SW links** are the only links allowed to touch switch endpoints, and link endpoints must share the same `EndpointType` (e.g., NIC↔NIC, NVLINK↔NVLINK).
 
-The topology is pure data: it is built from explicit inputs and does **not** rely on any external hardware discovery. `Topology::validate()` enforces switch semantics and structural invariants, and `Topology::to_dot()` emits a minimal Graphviz view for debugging. Routing/connection mapping will be layered on in subsequent phases.
+The topology is pure data: it is built from explicit inputs and does **not** rely on any external hardware discovery. `Topology::validate()` enforces switch semantics and structural invariants, and `Topology::to_dot()` emits a minimal Graphviz view for debugging with DOT-safe escaped ids/labels. Routing/connection mapping will be layered on in subsequent phases.
 
 Topology modeling examples live in `core/communicator/topology/topology_test.cc`, including a rail-optimized 8-GPU/8-NIC/2-CPU NVLINK layout (separate NVSwitch and network switch components) and a no-rail 4-GPU/1-NIC/1-CPU layout where a single NIC (bound to CPU + all GPUs) links to one network switch without per-GPU PCIe endpoints. When running under Bazel, the tests emit DOT files into `TEST_UNDECLARED_OUTPUTS_DIR` as `topology_<label>.dot`; set `TENSORCAST_TOPOLOGY_DOT_STDOUT=1` to also print the graphs to stdout.
+
+### Routing Wrapper (Phase 2)
+
+Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the topology model and runtime endpoint bindings onto the existing engine without changing data-plane behavior:
+
+- **RoutingContext** owns a `Topology` plus `EndpointBinding` records (node id, IP/port, device ids) and returns a per `src_endpoint_id` → `dst_endpoint_id` communicator.
+- **RouteChannel** represents a path composed of `Connection` hops; Phase 2 supports direct 1-hop channels only (multi-hop returns `UNIMPLEMENTED`).
+- **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`, while `NvlinkAdapter` is a placeholder that currently returns `UNIMPLEMENTED`.
+- **Stats/Health** are tracked per connection and per link (`ConnectionStats`, `LinkStats`, `HealthState`), recording success/failure counts, last latency, and last error.
+- **Protocol selection** prefers NVLINK when both endpoints are NVLINK on the same node and the NVLINK adapter reports availability; otherwise it falls back to `AUTO` (engine path).
+- **Topology updates** increment a routing generation; cached channels are rebuilt on the next use, and connections retain a shared reference to the topology so link pointers remain valid across swaps.
+- **Link directionality** is explicit: a reverse path requires a reverse `Link` entry in the topology.
+
+The wrapper is currently standalone and not yet wired into the P2P read path; existing callers still use `engine::Communicator` directly until Phase 4 integration.
 
 ### Simple NUMA -> DOT helper
 
@@ -87,6 +101,8 @@ bazel run //core/communicator:simple_numa_topology_tool -- path/to/comm_or_daemo
 ```
 
 The adapter always connects NIC endpoints to a single virtual network switch (`netsw0`) using switch links, avoiding full-mesh P2P edges.
+
+Validation is strict: each node must list at least one NIC and one GPU, node IDs and GPU IDs must be unique across the config, NIC names must be non-empty/unique, and `switch_id` must not collide with any generated `nic_<name>` endpoint ID.
 
 ---
 
@@ -645,7 +661,7 @@ Communicator is configured via `CommunicatorConfig` (C++ type, mirrored in Pytho
 - `transport.so_reuseport`: enables multi-listener `SO_REUSEPORT`. Leave enabled in production multi-tenant deployments; tests disable it to force deterministic single-owner control sockets when running communicator suites in parallel.
 - `stager.buffers_per_flow`: staging pipeline depth.
 - `rdma.ack_ttl_ms`, `rdma.traffic_class`, `rdma.qp_timeout`, `rdma.qp_retry`: staged-buffer GC window and QP tuning knobs.
-- `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets).
+- `simple_numa.nodes`: optional mapping from NICs/GPUs to stagers (pools are shared via pinned class budgets); node IDs and GPU IDs must be unique, and each node must list at least one NIC and one GPU.
 
 Pinned pool sizing and chunking are configured via `DaemonConfig.pinned_memory`:
 - `pinned_memory.classes[name=comm_gpu]`: GPU staging pool (slice size + min/max bytes).

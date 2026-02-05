@@ -61,6 +61,17 @@ flowchart TB
 - **执行层**：`Connection` 封装真实传输（RDMA/TCP/SHM 等）。
 - **调度复用层**：`Channel / Communicator` 管理多跳路径与策略选择。
 
+## Phase 2 包装层细化
+
+Phase 2 在不改动现有数据面行为的前提下，引入 routing 包装层把 Topology 映射到现有通信实现：
+
+- **RoutingContext**：持有 `Topology` 与 `EndpointBinding`（node id / IP / port / device ids），生成 src→dst 的路由 Communicator。
+- **RouteChannel**：表达一条路径（Phase 2 仅支持 direct 1-hop；多 hop 返回 `UNIMPLEMENTED`）。
+- **ConnectionAdapter**：封装执行层适配；`EngineAdapter` 复用 `engine::Communicator`，`NvlinkAdapter` 作为占位实现。
+- **Stats/Health**：`ConnectionStats` / `LinkStats` 记录成功/失败/时延/最后错误，并派生 `HealthState` 供后续路由。
+
+NVLINK 选择规则：同节点 + NVLINK endpoints + adapter available → NVLINK，否则回退到 `AUTO`（engine 路径）。该包装层尚未接入 P2P 读路径，Phase 4 统一接入。
+
 ## 对象模型（字段语义）
 
 ### Pool（资源域）
