@@ -10,7 +10,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "core/communicator/topology/simple_numa_topology.h"
 #include "core/communicator/topology/topology.h"
+#include "tensorcast/communicator/v1/communicator_config.pb.h"
 
 namespace {
 
@@ -21,8 +23,11 @@ using tensorcast::communicator::topology::Link;
 using tensorcast::communicator::topology::LinkType;
 using tensorcast::communicator::topology::Pool;
 using tensorcast::communicator::topology::PoolType;
+using tensorcast::communicator::topology::BuildSwitchTopologyFromSimpleNuma;
+using tensorcast::communicator::topology::SimpleNumaTopologyOptions;
 using tensorcast::communicator::topology::Topology;
 using tensorcast::communicator::topology::ValidationOptions;
+using tensorcast::communicator::v1::CommunicatorConfig;
 
 constexpr std::string_view kDotEnv = "TENSORCAST_TOPOLOGY_DOT_STDOUT";
 constexpr std::string_view kTestOutputsEnv = "TEST_UNDECLARED_OUTPUTS_DIR";
@@ -224,4 +229,222 @@ TEST_CASE("Topology no-rail 4-GPU/1-NIC/1-CPU layout", "[communicator][topology]
   const std::string dot = topology.to_dot();
   CHECK_FALSE(dot.empty());
   maybe_emit_dot("no_rail_single_nic", dot);
+}
+
+TEST_CASE("Topology rejects switch links with mismatched endpoint types", "[communicator][topology]") {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+
+  std::vector<Endpoint> endpoints;
+  Endpoint nic;
+  nic.id = "nic0";
+  nic.name = "nic0";
+  nic.kind = EndpointKind::kClient;
+  nic.type = EndpointType::kNic;
+  nic.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(std::move(nic));
+
+  Endpoint nvswitch;
+  nvswitch.id = "nvsw0";
+  nvswitch.name = "nvsw0";
+  nvswitch.kind = EndpointKind::kSwitch;
+  nvswitch.type = EndpointType::kNvlink;
+  endpoints.push_back(std::move(nvswitch));
+
+  std::vector<Link> links;
+  Link link;
+  link.id = "nic0_to_nvsw0";
+  link.name = link.id;
+  link.type = LinkType::kSwitch;
+  link.src_endpoint_id = "nic0";
+  link.dst_endpoint_id = "nvsw0";
+  links.push_back(std::move(link));
+
+  ValidationOptions options;
+  options.require_endpoint_links = true;
+  options.require_connected = true;
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      options);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("endpoint types must match") !=
+        std::string::npos);
+}
+
+TEST_CASE("Topology rejects forward and P2P links with mismatched endpoint types",
+          "[communicator][topology]") {
+  const auto build_mismatched_link = [](LinkType link_type) {
+    std::vector<Pool> pools;
+    pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+    pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+    pools.push_back(Pool{"gpu1", "gpu1", PoolType::kGpu});
+
+    std::vector<Endpoint> endpoints;
+    Endpoint nic;
+    nic.id = "nic0";
+    nic.name = "nic0";
+    nic.kind = EndpointKind::kClient;
+    nic.type = EndpointType::kNic;
+    nic.pool_ids = {"cpu0", "gpu0"};
+    endpoints.push_back(std::move(nic));
+
+    Endpoint nvlink;
+    nvlink.id = "nvlink0";
+    nvlink.name = "nvlink0";
+    nvlink.kind = EndpointKind::kClient;
+    nvlink.type = EndpointType::kNvlink;
+    nvlink.pool_ids = {"gpu1"};
+    endpoints.push_back(std::move(nvlink));
+
+    std::vector<Link> links;
+    Link link;
+    link.id = "nic0_to_nvlink0";
+    link.name = link.id;
+    link.type = link_type;
+    link.src_endpoint_id = "nic0";
+    link.dst_endpoint_id = "nvlink0";
+    links.push_back(std::move(link));
+
+    ValidationOptions options;
+    options.require_endpoint_links = true;
+    options.require_connected = true;
+
+    return Topology::Build(
+        std::move(pools),
+        std::move(endpoints),
+        std::move(links),
+        options);
+  };
+
+  for (LinkType link_type : {LinkType::kForward, LinkType::kP2P}) {
+    auto topology_or = build_mismatched_link(link_type);
+    INFO(topology_or.status());
+    CHECK_FALSE(topology_or.ok());
+    CHECK(std::string(topology_or.status().message()).find("endpoint types must match") !=
+          std::string::npos);
+  }
+}
+
+TEST_CASE("Topology rejects disconnected graphs when required", "[communicator][topology]") {
+  std::vector<Pool> pools;
+  pools.push_back(Pool{"cpu0", "cpu0", PoolType::kCpu});
+  pools.push_back(Pool{"gpu0", "gpu0", PoolType::kGpu});
+  pools.push_back(Pool{"gpu1", "gpu1", PoolType::kGpu});
+
+  std::vector<Endpoint> endpoints;
+  Endpoint nic0;
+  nic0.id = "nic0";
+  nic0.name = "nic0";
+  nic0.kind = EndpointKind::kClient;
+  nic0.type = EndpointType::kNic;
+  nic0.pool_ids = {"cpu0", "gpu0"};
+  endpoints.push_back(std::move(nic0));
+
+  Endpoint nic1;
+  nic1.id = "nic1";
+  nic1.name = "nic1";
+  nic1.kind = EndpointKind::kClient;
+  nic1.type = EndpointType::kNic;
+  nic1.pool_ids = {"cpu0", "gpu1"};
+  endpoints.push_back(std::move(nic1));
+
+  std::vector<Link> links;
+
+  ValidationOptions options;
+  options.require_endpoint_links = false;
+  options.require_connected = true;
+
+  auto topology_or = Topology::Build(
+      std::move(pools),
+      std::move(endpoints),
+      std::move(links),
+      options);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("disconnected") != std::string::npos);
+}
+
+TEST_CASE("SimpleNuma topology rejects duplicate node ids", "[communicator][topology]") {
+  CommunicatorConfig config;
+  auto* simple = config.mutable_simple_numa();
+  simple->set_enable(true);
+
+  auto* node0 = simple->add_nodes();
+  node0->set_id(0);
+  node0->add_nics("eth0");
+  node0->add_gpus(0);
+
+  auto* node1 = simple->add_nodes();
+  node1->set_id(0);
+  node1->add_nics("eth1");
+  node1->add_gpus(1);
+
+  auto topology_or = BuildSwitchTopologyFromSimpleNuma(config);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa node id") !=
+        std::string::npos);
+}
+
+TEST_CASE("SimpleNuma topology rejects duplicate gpu ids", "[communicator][topology]") {
+  CommunicatorConfig config;
+  auto* simple = config.mutable_simple_numa();
+  simple->set_enable(true);
+
+  auto* node0 = simple->add_nodes();
+  node0->set_id(0);
+  node0->add_nics("eth0");
+  node0->add_gpus(0);
+  node0->add_gpus(1);
+
+  auto* node1 = simple->add_nodes();
+  node1->set_id(1);
+  node1->add_nics("eth1");
+  node1->add_gpus(1);
+
+  auto topology_or = BuildSwitchTopologyFromSimpleNuma(config);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("duplicate simple_numa gpu id") !=
+        std::string::npos);
+}
+
+TEST_CASE("SimpleNuma topology rejects nodes with empty NIC lists", "[communicator][topology]") {
+  CommunicatorConfig config;
+  auto* simple = config.mutable_simple_numa();
+  simple->set_enable(true);
+
+  auto* node0 = simple->add_nodes();
+  node0->set_id(0);
+  node0->add_gpus(0);
+
+  auto topology_or = BuildSwitchTopologyFromSimpleNuma(config);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("has no nics") != std::string::npos);
+}
+
+TEST_CASE("SimpleNuma topology rejects switch_id collisions", "[communicator][topology]") {
+  CommunicatorConfig config;
+  auto* simple = config.mutable_simple_numa();
+  simple->set_enable(true);
+
+  auto* node0 = simple->add_nodes();
+  node0->set_id(0);
+  node0->add_nics("eth0");
+  node0->add_gpus(0);
+
+  SimpleNumaTopologyOptions options;
+  options.switch_id = "nic_eth0";
+
+  auto topology_or = BuildSwitchTopologyFromSimpleNuma(config, options);
+  INFO(topology_or.status());
+  CHECK_FALSE(topology_or.ok());
+  CHECK(std::string(topology_or.status().message()).find("switch_id collides") !=
+        std::string::npos);
 }

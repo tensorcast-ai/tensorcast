@@ -47,9 +47,11 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
     }
     pools.push_back(Pool{cpu_pool_id(node.id()), cpu_pool_id(node.id()), PoolType::kCpu});
     for (int gpu_id : node.gpus()) {
-      if (seen_gpus.insert(gpu_id).second) {
-        pools.push_back(Pool{gpu_pool_id(gpu_id), gpu_pool_id(gpu_id), PoolType::kGpu});
+      if (!seen_gpus.insert(gpu_id).second) {
+        return absl::InvalidArgumentError(
+            std::format("duplicate simple_numa gpu id: {}", gpu_id));
       }
+      pools.push_back(Pool{gpu_pool_id(gpu_id), gpu_pool_id(gpu_id), PoolType::kGpu});
     }
   }
 
@@ -59,6 +61,10 @@ absl::StatusOr<Topology> BuildSwitchTopologyFromSimpleNuma(
   size_t nic_count = 0;
 
   for (const auto& node : simple.nodes()) {
+    if (node.nics().empty()) {
+      return absl::InvalidArgumentError(
+          std::format("simple_numa node {} has no nics", node.id()));
+    }
     if (node.gpus().empty()) {
       return absl::InvalidArgumentError(
           std::format("simple_numa node {} has no gpus", node.id()));

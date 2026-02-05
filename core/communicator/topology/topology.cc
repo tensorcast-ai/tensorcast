@@ -25,6 +25,47 @@ std::string join_ids(const std::vector<std::string>& ids) {
   return output;
 }
 
+std::string escape_dot(std::string_view value) {
+  std::string output;
+  output.reserve(value.size());
+  for (char ch : value) {
+    switch (ch) {
+      case '\\':
+        output += "\\\\";
+        break;
+      case '"':
+        output += "\\\"";
+        break;
+      case '\n':
+        output += "\\n";
+        break;
+      case '\r':
+        output += "\\r";
+        break;
+      case '\t':
+        output += "\\t";
+        break;
+      default:
+        output.push_back(ch);
+        break;
+    }
+  }
+  return output;
+}
+
+std::string join_label_lines(const std::vector<std::string>& lines) {
+  std::string output;
+  bool first = true;
+  for (const auto& line : lines) {
+    if (!first) {
+      output += "\\n";
+    }
+    output += line;
+    first = false;
+  }
+  return output;
+}
+
 } // namespace
 
 std::string_view to_string(PoolType type) {
@@ -315,6 +356,17 @@ absl::Status Topology::validate(ValidationOptions options) const {
       }
     }
 
+    if (src.type != dst.type) {
+      return absl::InvalidArgumentError(
+          std::format(
+              "link endpoint types must match: {} ({}:{} vs {}:{})",
+              link_id,
+              link.src_endpoint_id,
+              to_string(src.type),
+              link.dst_endpoint_id,
+              to_string(dst.type)));
+    }
+
     if (options.require_endpoint_links) {
       link_degree[link.src_endpoint_id] += 1;
       link_degree[link.dst_endpoint_id] += 1;
@@ -372,8 +424,11 @@ std::string Topology::to_dot() const {
   output += "digraph Topology {\n";
 
   for (const auto& [endpoint_id, endpoint] : endpoints_) {
-    std::string label = endpoint.name.empty() ? endpoint_id : endpoint.name;
-    label += std::format("\\n{} {}", to_string(endpoint.kind), to_string(endpoint.type));
+    std::vector<std::string> label_lines;
+    label_lines.push_back(
+        escape_dot(endpoint.name.empty() ? endpoint_id : endpoint.name));
+    label_lines.push_back(
+        escape_dot(std::format("{} {}", to_string(endpoint.kind), to_string(endpoint.type))));
     std::vector<std::string> cpu_pools;
     std::vector<std::string> gpu_pools;
     std::vector<std::string> other_pools;
@@ -402,33 +457,45 @@ std::string Topology::to_dot() const {
     }
 
     if (!cpu_pools.empty()) {
-      label += std::format("\\ncpu_pools={}", join_ids(cpu_pools));
+      label_lines.push_back(
+          escape_dot(std::format("cpu_pools={}", join_ids(cpu_pools))));
     }
     if (!gpu_pools.empty()) {
-      label += std::format("\\ngpu_pools={}", join_ids(gpu_pools));
+      label_lines.push_back(
+          escape_dot(std::format("gpu_pools={}", join_ids(gpu_pools))));
     }
     if (!other_pools.empty()) {
-      label += std::format("\\npools={}", join_ids(other_pools));
+      label_lines.push_back(
+          escape_dot(std::format("pools={}", join_ids(other_pools))));
     }
     if (endpoint.bandwidth_gbps > 0.0) {
-      label += std::format("\\nbw={}Gbps", endpoint.bandwidth_gbps);
+      label_lines.push_back(
+          escape_dot(std::format("bw={}Gbps", endpoint.bandwidth_gbps)));
     }
-    output += std::format("  \"{}\" [label=\"{}\"];\n", endpoint_id, label);
+    const std::string label = join_label_lines(label_lines);
+    output += std::format(
+        "  \"{}\" [label=\"{}\"];\n",
+        escape_dot(endpoint_id),
+        label);
   }
 
   for (const auto& [link_id, link] : links_) {
-    std::string label = link.name.empty() ? link_id : link.name;
-    label += std::format("\\n{}", to_string(link.type));
+    std::vector<std::string> label_lines;
+    label_lines.push_back(escape_dot(link.name.empty() ? link_id : link.name));
+    label_lines.push_back(escape_dot(std::format("{}", to_string(link.type))));
     if (link.bandwidth_gbps > 0.0) {
-      label += std::format("\\nbw={}Gbps", link.bandwidth_gbps);
+      label_lines.push_back(
+          escape_dot(std::format("bw={}Gbps", link.bandwidth_gbps)));
     }
     if (link.latency_us > 0.0) {
-      label += std::format("\\nlat={}us", link.latency_us);
+      label_lines.push_back(
+          escape_dot(std::format("lat={}us", link.latency_us)));
     }
+    const std::string label = join_label_lines(label_lines);
     output += std::format(
         "  \"{}\" -> \"{}\" [label=\"{}\"];\n",
-        link.src_endpoint_id,
-        link.dst_endpoint_id,
+        escape_dot(link.src_endpoint_id),
+        escape_dot(link.dst_endpoint_id),
         label);
   }
 
