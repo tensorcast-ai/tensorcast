@@ -257,6 +257,63 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         )
 
         # Initialize services
+        self.chunk_service = ChunkService(self.chunk_directory_repository)
+        self.view_state_service = ViewStateService(
+            self.view_repository,
+            self.leaf_repository,
+            self.view_coverage_repository,
+            self.layout_spec_repository,
+            self.assembly_layout_binding_repository,
+            self.proof_repository,
+        )
+        self._rebuild_runtime_services_and_handlers()
+        self.view_proof_rpc_handler = ViewProofRpcHandler(
+            config=self.config,
+            artifact_repository=self.artifacts_repo,
+            view_repository=self.view_repository,
+            view_coverage_repository=self.view_coverage_repository,
+            proof_repository=self.proof_repository,
+            view_state_service=self.view_state_service,
+            timestamp_to_datetime=self._timestamp_to_datetime,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            get_tensor_intervals_for_artifact_id=self._get_tensor_intervals_for_artifact_id,
+            logger=logger,
+        )
+        self.layout_rpc_handler = LayoutRpcHandler(
+            connection=self.connection,
+            artifact_indices=self.artifact_indices,
+            artifact_repository=self.artifacts_repo,
+            layout_spec_repository=self.layout_spec_repository,
+            assembly_layout_binding_repository=self.assembly_layout_binding_repository,
+            artifact_layout_attachment_repository=self.artifact_layout_attachment_repository,
+            assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
+            multibase_sha256_to_hex=self._multibase_sha256_to_hex,
+            sha256_digest_to_multibase=self._sha256_digest_to_multibase,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            coerce_db_datetime=self._coerce_db_datetime,
+            logger=logger,
+        )
+
+        self._initiate_startup_recovery()
+
+        self.cluster_id = self.cluster_info_repository.get_or_create_cluster_id()
+        self.disk_location_rpc_handler = DiskLocationRpcHandler(
+            disk_location_repository=self.disk_location_repository,
+            cluster_id=self.cluster_id,
+            is_safe_relative_path=self._is_safe_relative_path,
+            disk_location_kind_from_proto=self._DISK_LOCATION_KIND_FROM_PROTO,
+            disk_location_kind_to_proto=self._DISK_LOCATION_KIND_TO_PROTO,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            coerce_db_datetime=self._coerce_db_datetime,
+            logger=logger,
+        )
+
+        # Start background cleanup thread
+        self._start_cleanup_thread()
+        # Cleanup and optimization are now handled by a single maintenance thread
+
+    def _rebuild_runtime_services_and_handlers(self) -> None:
+        """Rebuild services/handlers that depend on mutable worker/replica repositories."""
         self.artifact_service = ArtifactService(self.replica_repository)
         self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
             artifact_service=self.artifact_service,
@@ -289,53 +346,8 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.instance_service = InstanceService(
             self.instance_repository, self.worker_repository
         )
-        self.chunk_service = ChunkService(self.chunk_directory_repository)
-        self.chunk_rpc_handler = ChunkRpcHandler(
-            chunk_service=self.chunk_service,
-            logger=logger,
-        )
-        self.view_state_service = ViewStateService(
-            self.view_repository,
-            self.leaf_repository,
-            self.view_coverage_repository,
-            self.layout_spec_repository,
-            self.assembly_layout_binding_repository,
-            self.proof_repository,
-        )
-        self.artifact_query_rpc_handler = ArtifactQueryRpcHandler(
-            artifact_service=self.artifact_service,
-            artifact_repository=self.artifacts_repo,
-            view_state_service=self.view_state_service,
-            replica_to_memory_info=self._replica_to_memory_info,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
-            logger=logger,
-        )
-        self.view_proof_rpc_handler = ViewProofRpcHandler(
-            config=self.config,
-            artifact_repository=self.artifacts_repo,
-            view_repository=self.view_repository,
-            view_coverage_repository=self.view_coverage_repository,
-            proof_repository=self.proof_repository,
-            view_state_service=self.view_state_service,
-            timestamp_to_datetime=self._timestamp_to_datetime,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            get_tensor_intervals_for_artifact_id=self._get_tensor_intervals_for_artifact_id,
-            logger=logger,
-        )
-        self.layout_rpc_handler = LayoutRpcHandler(
-            connection=self.connection,
-            artifact_indices=self.artifact_indices,
-            artifact_repository=self.artifacts_repo,
-            layout_spec_repository=self.layout_spec_repository,
-            assembly_layout_binding_repository=self.assembly_layout_binding_repository,
-            artifact_layout_attachment_repository=self.artifact_layout_attachment_repository,
-            assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
-            multibase_sha256_to_hex=self._multibase_sha256_to_hex,
-            sha256_digest_to_multibase=self._sha256_digest_to_multibase,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
-            logger=logger,
+        self.recovery_service = RecoveryService(
+            self.worker_repository, self.replica_repository, self.worker_service
         )
         self.placement_service = PlacementService(
             self.worker_repository,
@@ -350,10 +362,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             plan_to_proto=self._plan_to_proto,
             logger=logger,
         )
-
-        # Initialize recovery service for high availability
-        self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository, self.worker_service
+        self.artifact_query_rpc_handler = ArtifactQueryRpcHandler(
+            artifact_service=self.artifact_service,
+            artifact_repository=self.artifacts_repo,
+            view_state_service=self.view_state_service,
+            replica_to_memory_info=self._replica_to_memory_info,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            coerce_db_datetime=self._coerce_db_datetime,
+            logger=logger,
+        )
+        self.chunk_rpc_handler = ChunkRpcHandler(
+            chunk_service=self.chunk_service,
+            logger=logger,
         )
         self.worker_instance_rpc_handler = WorkerInstanceRpcHandler(
             worker_service=self.worker_service,
@@ -365,24 +385,6 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             determine_instance_status=self._determine_instance_status,
             logger=logger,
         )
-
-        self._initiate_startup_recovery()
-
-        self.cluster_id = self.cluster_info_repository.get_or_create_cluster_id()
-        self.disk_location_rpc_handler = DiskLocationRpcHandler(
-            disk_location_repository=self.disk_location_repository,
-            cluster_id=self.cluster_id,
-            is_safe_relative_path=self._is_safe_relative_path,
-            disk_location_kind_from_proto=self._DISK_LOCATION_KIND_FROM_PROTO,
-            disk_location_kind_to_proto=self._DISK_LOCATION_KIND_TO_PROTO,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
-            logger=logger,
-        )
-
-        # Start background cleanup thread
-        self._start_cleanup_thread()
-        # Cleanup and optimization are now handled by a single maintenance thread
 
     def set_runtime_info(
         self,
@@ -1360,61 +1362,11 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             logger.debug("Failed to reset Prometheus gauges during reset_state")
 
         # Ensure all outstanding metrics / in-memory counters in services are in sync.
-        # The simplest way is to recreate the repositories & services bound to the
-        # existing connection so that any internal caches are discarded.
+        # Recreate repositories and rebuild all runtime components that depend on them.
         self.replica_repository = ReplicaRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
-
-        self.artifact_service = ArtifactService(self.replica_repository)
-        self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
-            artifact_service=self.artifact_service,
-            artifact_repository=self.artifacts_repo,
-            artifact_index_repository=self.artifact_indices,
-            memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
-            index_bytes_to_multibase_sha256=self._index_bytes_to_multibase_sha256,
-            hex_sha256_to_multibase=self._hex_sha256_to_multibase,
-            logger=logger,
-        )
-        self.transport_service = TransportService(
-            self.replica_repository, self.transport_repository
-        )
-        self.worker_service = WorkerService(
-            self.worker_repository, self.replica_repository
-        )
-        self.instance_service = InstanceService(
-            self.instance_repository, self.worker_repository
-        )
-        self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository, self.worker_service
-        )
-        self.transport_rpc_handler = TransportRpcHandler(
-            transport_service=self.transport_service,
-            replica_to_memory_info=self._replica_to_memory_info,
-            logger=logger,
-        )
-        self.replica_lifecycle_rpc_handler = ReplicaLifecycleRpcHandler(
-            artifact_service=self.artifact_service,
-            replica_repository=self.replica_repository,
-            transport_repository=self.transport_repository,
-            transport_service=self.transport_service,
-            replica_to_memory_info=self._replica_to_memory_info,
-            logger=logger,
-        )
-        self.chunk_rpc_handler = ChunkRpcHandler(
-            chunk_service=self.chunk_service,
-            logger=logger,
-        )
-        self.worker_instance_rpc_handler = WorkerInstanceRpcHandler(
-            worker_service=self.worker_service,
-            worker_repository=self.worker_repository,
-            recovery_service=self.recovery_service,
-            instance_service=self.instance_service,
-            default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
-            determine_worker_status=self._determine_worker_status,
-            determine_instance_status=self._determine_instance_status,
-            logger=logger,
-        )
+        self._rebuild_runtime_services_and_handlers()
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")
