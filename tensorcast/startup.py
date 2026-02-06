@@ -15,18 +15,28 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import hashlib
+import json
 import os
 import signal
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from tensorcast import runtime
 from tensorcast.api._config import clear_daemon_address, set_daemon_address
 from tensorcast.cli_utils.config import discover_daemon_config
 from tensorcast.cli_utils.health import ping_daemon
-from tensorcast.cli_utils.paths import session_paths
+from tensorcast.cli_utils.paths import runtime_lock_path, runtime_root, session_paths
+from tensorcast.cli_utils.process import (
+    atomic_write_json,
+    file_lock,
+    instance_fingerprint,
+    is_process_alive,
+    read_json_default,
+)
 from tensorcast.client_config_loader import discover_client_config, load_client_config
 from tensorcast.client_runtime import daemon_target_default, set_client_config
 
@@ -38,6 +48,20 @@ from tensorcast.logger import init_logger, setup_logging
 _current_ctx: Context | None = None
 _atexit_registered = False
 _ctx_lock: "threading.Lock" = threading.Lock()
+
+_AUTO_STATE_SCHEMA_VERSION = 1
+_AUTO_STATUS_EMPTY = "EMPTY"
+_AUTO_STATUS_STARTING = "STARTING"
+_AUTO_STATUS_READY = "READY"
+_AUTO_STATUS_FAILED = "FAILED"
+_AUTO_STATUS_VALUES = {
+    _AUTO_STATUS_EMPTY,
+    _AUTO_STATUS_STARTING,
+    _AUTO_STATUS_READY,
+    _AUTO_STATUS_FAILED,
+}
+_AUTO_WAIT_TIMEOUT_SECONDS = 180.0
+_AUTO_POLL_INTERVAL_SECONDS = 0.2
 
 
 @dataclass(slots=True)
@@ -77,8 +101,11 @@ class Context:
                 release_daemon_client(self.address)
             self._client_released = True
         if self.is_owner and self.session_id:
-            # Stop daemon session we launched
-            runtime.stop(session_id=self.session_id)
+            # Stop daemon session we launched.
+            try:
+                runtime.stop(session_id=self.session_id)
+            finally:
+                _clear_auto_state_if_matches(self.session_id, self.address)
         self._closed = True
         clear_daemon_address()
 
@@ -133,9 +160,565 @@ def _current_session_address() -> str | None:
     return get_session_address()
 
 
+def _register_atexit_if_needed() -> None:
+    global _atexit_registered
+    if _atexit_registered:
+        return
+    atexit.register(lambda: _current_ctx and _current_ctx.close())  # type: ignore[func-returns-value]
+    _atexit_registered = True
+
+
+def _auto_state_path() -> Path:
+    return runtime_root() / "daemon_auto_state.json"
+
+
+def _default_auto_state() -> dict[str, object]:
+    return {
+        "schema_version": _AUTO_STATE_SCHEMA_VERSION,
+        "status": _AUTO_STATUS_EMPTY,
+        "epoch": 0,
+        "updated_at": time.time(),
+    }
+
+
+def _read_auto_state_locked() -> dict[str, object]:
+    state = read_json_default(_auto_state_path(), _default_auto_state())
+    if not isinstance(state, dict):
+        state = _default_auto_state()
+    normalized = dict(_default_auto_state())
+    normalized.update(state)
+    status = str(normalized.get("status", _AUTO_STATUS_EMPTY)).upper()
+    if status not in _AUTO_STATUS_VALUES:
+        status = _AUTO_STATUS_EMPTY
+    normalized["status"] = status
+    try:
+        normalized["epoch"] = max(0, int(normalized.get("epoch", 0) or 0))
+    except Exception:
+        normalized["epoch"] = 0
+    return normalized
+
+
+def _write_auto_state_locked(state: dict[str, object]) -> None:
+    payload = dict(state)
+    payload["schema_version"] = _AUTO_STATE_SCHEMA_VERSION
+    payload["updated_at"] = time.time()
+    atomic_write_json(_auto_state_path(), payload)
+
+
+def _clear_auto_state_if_matches(
+    session_id: str | None, address: str | None = None
+) -> None:
+    if not session_id and not address:
+        return
+    with file_lock(runtime_lock_path()):
+        state = _read_auto_state_locked()
+        tracked_session = state.get("session_id")
+        tracked_address = state.get("address")
+        if tracked_session != session_id and tracked_address != address:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            _auto_state_path().unlink()
+
+
+def _auto_wait_timeout_seconds() -> float:
+    raw = os.environ.get("TENSORCAST_STARTUP_AUTO_WAIT_TIMEOUT_SECONDS")
+    if raw is None or raw == "":
+        return _AUTO_WAIT_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return _AUTO_WAIT_TIMEOUT_SECONDS
+    if value <= 0:
+        return _AUTO_WAIT_TIMEOUT_SECONDS
+    return value
+
+
+def _hash_file(path: Path | None) -> str | None:
+    if path is None:
+        return None
+    try:
+        data = path.expanduser().resolve().read_bytes()
+    except Exception:
+        return None
+    return hashlib.sha256(data).hexdigest()
+
+
+def _compute_auto_config_hash(
+    *,
+    daemon_config_path: Path | None,
+    global_store_mode: Literal["connect", "start", "none"],
+    global_store_address: str | None,
+    global_store_config_path: str | None,
+    cluster_id: str | None,
+    allow_gs_fallback: bool,
+    session_id: str | None,
+) -> str:
+    daemon_path = (
+        str(daemon_config_path.expanduser().resolve()) if daemon_config_path else None
+    )
+    gs_cfg = (
+        str(Path(global_store_config_path).expanduser().resolve())
+        if global_store_config_path
+        else None
+    )
+    payload = {
+        "daemon_config_path": daemon_path,
+        "daemon_config_hash": _hash_file(daemon_config_path),
+        "global_store_mode": global_store_mode,
+        "global_store_address": global_store_address,
+        "global_store_config_path": gs_cfg,
+        "global_store_config_hash": _hash_file(Path(gs_cfg)) if gs_cfg else None,
+        "cluster_id": cluster_id,
+        "allow_gs_fallback": bool(allow_gs_fallback),
+        "session_id": session_id,
+    }
+    digest = hashlib.sha256()
+    digest.update(json.dumps(payload, sort_keys=True).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _owner_alive(owner_pid: int, owner_fingerprint: object) -> bool:
+    if owner_pid <= 0 or not is_process_alive(owner_pid):
+        return False
+    if not isinstance(owner_fingerprint, dict):
+        return True
+    current = instance_fingerprint(owner_pid)
+    try:
+        return owner_fingerprint.get("host_id") == current.get(
+            "host_id"
+        ) and owner_fingerprint.get("boot_id") == current.get("boot_id")
+    except Exception:
+        return False
+
+
+def _auto_error(
+    *,
+    code: str,
+    reason: str,
+    state: dict[str, object],
+    wait_s: float | None = None,
+) -> RuntimeError:
+    owner_pid = int(state.get("owner_pid", 0) or 0)
+    epoch = int(state.get("epoch", 0) or 0)
+    session = str(state.get("session_id", "") or "")
+    address = str(state.get("address", "") or "")
+    logs_dir = str(state.get("logs_dir", "") or "")
+    config_hash = str(state.get("config_hash", "") or "")
+    started_at = float(state.get("started_at", 0.0) or 0.0)
+    elapsed = max(0.0, time.time() - started_at) if started_at > 0 else 0.0
+    wait_text = f", wait_s={wait_s:.2f}" if wait_s is not None else ""
+    return RuntimeError(
+        f"[{code}] {reason}; owner_pid={owner_pid}, epoch={epoch}, "
+        f"elapsed_s={elapsed:.2f}{wait_text}, session_id={session or 'unknown'}, "
+        f"address={address or 'unknown'}, logs_dir={logs_dir or 'unknown'}, "
+        f"config_hash={config_hash or 'unknown'}"
+    )
+
+
+def _resolve_launch_config(
+    daemon_config_path: str | None,
+) -> tuple[Path | None, Any | None, bool]:
+    cfg_path: Path | None = None
+    restrict_localhost = True
+    cfg: Any | None = None
+    if daemon_config_path:
+        cfg_path = Path(daemon_config_path)
+    else:
+        discovered = discover_daemon_config()
+        if discovered:
+            cfg_path = Path(discovered)
+    if cfg_path is not None:
+        cfg = load_daemon_config(cfg_path)
+        listen_host = (cfg.server.listen.host or "").strip().lower()
+        if listen_host and listen_host not in {"127.0.0.1", "localhost"}:
+            restrict_localhost = False
+        if cfg.server.HasField("p2p_listen"):
+            p2p_host = cfg.server.p2p_listen.host.strip()
+            p2p_port = int(cfg.server.p2p_listen.port)
+            if p2p_host or p2p_port:
+                restrict_localhost = False
+    return cfg_path, cfg, restrict_localhost
+
+
+def _connect_context(
+    *,
+    target_address: str,
+    install_signal_handlers: bool,
+    fate_share_sigterm: bool,
+    logger,
+) -> Context:
+    global _current_ctx
+    if not target_address:
+        raise RuntimeError("Missing daemon address for connect mode.")
+    if not ping_daemon(target_address):
+        raise RuntimeError(f"No daemon found at {target_address}")
+    set_daemon_address(target_address)
+    from tensorcast.daemon_ctl import get_daemon_client
+
+    client = get_daemon_client(target_address)
+    logger.info("✅ Connected to daemon at %s", target_address)
+    ctx = Context(
+        address=target_address,
+        is_owner=False,
+        session_id=None,
+        session_dir=None,
+        client=client,
+    )
+    _current_ctx = ctx
+    if install_signal_handlers:
+        ctx.install_signal_handlers("hard-exit" if fate_share_sigterm else "graceful")
+    _register_atexit_if_needed()
+    return ctx
+
+
+def _start_context(
+    *,
+    cfg_path: Path | None,
+    cfg: Any | None,
+    restrict_localhost: bool,
+    show_daemon_logs: bool,
+    install_signal_handlers: bool,
+    fate_share_sigterm: bool,
+    global_store_mode: Literal["connect", "start", "none"],
+    global_store_address: str | None,
+    global_store_config_path: str | None,
+    cluster_id: str | None,
+    allow_gs_fallback: bool,
+    session_id: str | None,
+    reuse_existing: bool,
+    logger,
+) -> Context:
+    global _current_ctx
+    session_obj = runtime.start(
+        daemon_config=cfg_path,
+        session_id=session_id,
+        global_store_mode=global_store_mode,
+        global_store_address=global_store_address,
+        global_store_config=(
+            Path(global_store_config_path).expanduser()
+            if global_store_config_path
+            else None
+        ),
+        allow_gs_fallback=allow_gs_fallback,
+        cluster_id=cluster_id,
+        register_current=session_id is None,
+        ephemeral=session_id is not None,
+        restrict_to_localhost=restrict_localhost,
+        to_console=show_daemon_logs,
+        reuse_existing=reuse_existing,
+    )
+
+    daemon_address = session_obj.daemon_address or _current_session_address()
+    if not daemon_address and cfg is not None:
+        with contextlib.suppress(Exception):
+            host = cfg.server.listen.host or "127.0.0.1"
+            port = int(cfg.server.listen.port or 0)
+            daemon_address = f"{host}:{port}"
+    if not daemon_address:
+        daemon_address = "127.0.0.1:0"
+    set_daemon_address(daemon_address)
+    from tensorcast.daemon_ctl import get_daemon_client
+
+    client = get_daemon_client(daemon_address)
+    logger.info(
+        "✅ tensorcast initialized; daemon at %s (session=%s)",
+        daemon_address,
+        session_obj.session_id,
+    )
+    ctx = Context(
+        address=daemon_address,
+        is_owner=True,
+        session_id=session_obj.session_id,
+        session_dir=str(session_paths(session_obj.session_id).session),
+        client=client,
+    )
+    _current_ctx = ctx
+    if install_signal_handlers:
+        ctx.install_signal_handlers("hard-exit" if fate_share_sigterm else "graceful")
+    _register_atexit_if_needed()
+    return ctx
+
+
+def _init_auto_mode(
+    *,
+    cfg_path: Path | None,
+    cfg: Any | None,
+    restrict_localhost: bool,
+    address: str | None,
+    show_daemon_logs: bool,
+    install_signal_handlers: bool,
+    fate_share_sigterm: bool,
+    global_store_mode: Literal["connect", "start", "none"],
+    global_store_address: str | None,
+    global_store_config_path: str | None,
+    cluster_id: str | None,
+    allow_gs_fallback: bool,
+    session_id: str | None,
+    logger,
+) -> Context:
+    if address and address not in {"auto", "local"}:
+        raise ValueError(
+            "init(mode='auto') does not accept explicit 'address'. "
+            "Use mode='connect' to attach to an existing daemon."
+        )
+    expected_hash = _compute_auto_config_hash(
+        daemon_config_path=cfg_path,
+        global_store_mode=global_store_mode,
+        global_store_address=global_store_address,
+        global_store_config_path=global_store_config_path,
+        cluster_id=cluster_id,
+        allow_gs_fallback=allow_gs_fallback,
+        session_id=session_id,
+    )
+    timeout_s = _auto_wait_timeout_seconds()
+    while True:
+        existing = runtime.status()
+        existing_address = (
+            existing.daemon_address
+            if existing
+            and existing.daemon_address
+            and ping_daemon(existing.daemon_address)
+            else None
+        )
+        next_action = "wait"
+        connect_address: str | None = None
+        leader_state: dict[str, object] | None = None
+        leader_session_id: str | None = None
+        reset_state = False
+        with file_lock(runtime_lock_path()):
+            state = _read_auto_state_locked()
+            status = str(state.get("status", _AUTO_STATUS_EMPTY)).upper()
+            state_address_raw = state.get("address")
+            state_address = (
+                str(state_address_raw).strip()
+                if isinstance(state_address_raw, str)
+                else ""
+            )
+            state_hash_raw = state.get("config_hash")
+            state_hash = (
+                str(state_hash_raw).strip() if isinstance(state_hash_raw, str) else ""
+            )
+            enforce_hash = status == _AUTO_STATUS_STARTING or (
+                status == _AUTO_STATUS_READY
+                and bool(existing_address)
+                and bool(state_address)
+                and state_address == existing_address
+            )
+            if enforce_hash and state_hash and state_hash != expected_hash:
+                raise _auto_error(
+                    code="AUTO_CONFIG_MISMATCH",
+                    reason="auto init configuration hash differs from active state",
+                    state=state,
+                )
+            if status == _AUTO_STATUS_FAILED:
+                if existing_address:
+                    connect_address = existing_address
+                    next_action = "connect"
+                else:
+                    owner_pid = int(state.get("owner_pid", 0) or 0)
+                    if owner_pid > 0 and not _owner_alive(
+                        owner_pid, state.get("owner_fingerprint")
+                    ):
+                        reset_state = True
+                        _write_auto_state_locked(_default_auto_state())
+                        next_action = "reset"
+                    else:
+                        raise _auto_error(
+                            code="AUTO_START_FAILED",
+                            reason=str(
+                                state.get("error_message", "owner reported failure")
+                            ),
+                            state=state,
+                        )
+            elif status == _AUTO_STATUS_READY:
+                owner_pid = int(state.get("owner_pid", 0) or 0)
+                if owner_pid > 0 and not _owner_alive(
+                    owner_pid, state.get("owner_fingerprint")
+                ):
+                    reset_state = True
+                    _write_auto_state_locked(_default_auto_state())
+                    next_action = "reset"
+                else:
+                    ready_address = state.get("address")
+                    if isinstance(ready_address, str) and ready_address:
+                        connect_address = ready_address
+                        next_action = "connect"
+                    elif existing_address:
+                        connect_address = existing_address
+                        next_action = "connect"
+                    else:
+                        raise _auto_error(
+                            code="AUTO_READY_INVALID",
+                            reason="ready state is missing daemon address",
+                            state=state,
+                        )
+            elif status == _AUTO_STATUS_STARTING:
+                owner_pid = int(state.get("owner_pid", 0) or 0)
+                if not _owner_alive(owner_pid, state.get("owner_fingerprint")):
+                    raise _auto_error(
+                        code="AUTO_OWNER_LOST",
+                        reason="leader process exited before daemon became ready",
+                        state=state,
+                    )
+                started_at = float(state.get("started_at", 0.0) or 0.0)
+                elapsed = max(0.0, time.time() - started_at) if started_at > 0 else 0.0
+                if elapsed > timeout_s:
+                    raise _auto_error(
+                        code="AUTO_START_TIMEOUT",
+                        reason="waiting for leader startup timed out",
+                        state=state,
+                        wait_s=elapsed,
+                    )
+                if existing_address:
+                    connect_address = existing_address
+                    next_action = "connect"
+                else:
+                    next_action = "wait"
+            else:
+                if existing_address:
+                    connect_address = existing_address
+                    next_action = "connect"
+                else:
+                    leader_session_id = session_id
+                    epoch = int(state.get("epoch", 0) or 0) + 1
+                    leader_state = {
+                        "schema_version": _AUTO_STATE_SCHEMA_VERSION,
+                        "status": _AUTO_STATUS_STARTING,
+                        "epoch": epoch,
+                        "owner_pid": os.getpid(),
+                        "owner_fingerprint": instance_fingerprint(),
+                        "config_hash": expected_hash,
+                        "session_id": leader_session_id or "",
+                        "started_at": time.time(),
+                        "address": "",
+                        "logs_dir": "",
+                        "error_code": "",
+                        "error_message": "",
+                    }
+                    _write_auto_state_locked(leader_state)
+                    next_action = "create"
+
+        if next_action == "reset":
+            if reset_state:
+                logger.info(
+                    "Auto init cleared stale daemon auto state; retrying election"
+                )
+            time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
+            continue
+
+        if next_action == "connect":
+            assert connect_address is not None
+            if ping_daemon(connect_address):
+                return _connect_context(
+                    target_address=connect_address,
+                    install_signal_handlers=install_signal_handlers,
+                    fate_share_sigterm=fate_share_sigterm,
+                    logger=logger,
+                )
+            with file_lock(runtime_lock_path()):
+                latest_state = _read_auto_state_locked()
+                latest_status = str(
+                    latest_state.get("status", _AUTO_STATUS_EMPTY)
+                ).upper()
+                latest_owner_pid = int(latest_state.get("owner_pid", 0) or 0)
+                latest_owner_alive = _owner_alive(
+                    latest_owner_pid, latest_state.get("owner_fingerprint")
+                )
+            if latest_status == _AUTO_STATUS_STARTING:
+                time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
+                continue
+            latest_address_raw = latest_state.get("address")
+            latest_address = (
+                str(latest_address_raw).strip()
+                if isinstance(latest_address_raw, str)
+                else ""
+            )
+            if (
+                latest_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                and latest_address
+                and latest_address == connect_address
+                and not latest_owner_alive
+            ):
+                with file_lock(runtime_lock_path()):
+                    refreshed = _read_auto_state_locked()
+                    refreshed_status = str(
+                        refreshed.get("status", _AUTO_STATUS_EMPTY)
+                    ).upper()
+                    refreshed_address_raw = refreshed.get("address")
+                    refreshed_address = (
+                        str(refreshed_address_raw).strip()
+                        if isinstance(refreshed_address_raw, str)
+                        else ""
+                    )
+                    refreshed_owner_pid = int(refreshed.get("owner_pid", 0) or 0)
+                    if (
+                        refreshed_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
+                        and refreshed_address == connect_address
+                        and not _owner_alive(
+                            refreshed_owner_pid, refreshed.get("owner_fingerprint")
+                        )
+                    ):
+                        _write_auto_state_locked(_default_auto_state())
+                time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
+                continue
+            raise RuntimeError(f"No daemon found at {connect_address}")
+
+        if next_action == "create":
+            assert leader_state is not None
+            logger.info(
+                "Auto init elected leader pid=%s for daemon session=%s",
+                os.getpid(),
+                leader_session_id or "<auto>",
+            )
+            try:
+                ctx = _start_context(
+                    cfg_path=cfg_path,
+                    cfg=cfg,
+                    restrict_localhost=restrict_localhost,
+                    show_daemon_logs=show_daemon_logs,
+                    install_signal_handlers=install_signal_handlers,
+                    fate_share_sigterm=fate_share_sigterm,
+                    global_store_mode=global_store_mode,
+                    global_store_address=global_store_address,
+                    global_store_config_path=global_store_config_path,
+                    cluster_id=cluster_id,
+                    allow_gs_fallback=allow_gs_fallback,
+                    session_id=leader_session_id,
+                    reuse_existing=False,
+                    logger=logger,
+                )
+            except Exception as exc:
+                with file_lock(runtime_lock_path()):
+                    failed = dict(leader_state)
+                    failed["status"] = _AUTO_STATUS_FAILED
+                    failed["error_code"] = "AUTO_START_FAILED"
+                    failed["error_message"] = str(exc)
+                    failed["logs_dir"] = (
+                        str(session_paths(leader_session_id).logs)
+                        if leader_session_id
+                        else ""
+                    )
+                    _write_auto_state_locked(failed)
+                raise
+            with file_lock(runtime_lock_path()):
+                ready = dict(leader_state)
+                ready["status"] = _AUTO_STATUS_READY
+                ready["address"] = ctx.address
+                ready["session_id"] = ctx.session_id or ""
+                ready["logs_dir"] = (
+                    str(session_paths(ctx.session_id).logs) if ctx.session_id else ""
+                )
+                ready["error_code"] = ""
+                ready["error_message"] = ""
+                _write_auto_state_locked(ready)
+            return ctx
+
+        time.sleep(_AUTO_POLL_INTERVAL_SECONDS)
+
+
 def init(
     *,
-    mode: Literal["connect", "create"],
+    mode: Literal["connect", "create", "auto"],
     address: str | None = None,
     daemon_config_path: str | None = None,
     install_signal_handlers: bool = False,
@@ -154,6 +737,7 @@ def init(
     - Connect: `init(mode="connect", address="host:port")`
     - Connect (auto-discover local): `init(mode="connect")`
     - Launch:  `init(mode="create", global_store_mode="start", daemon_config_path="/path/to/config.yaml")`
+    - Auto:    `init(mode="auto")` (connect if one exists, otherwise one process creates and others wait)
 
     When launching, the SDK will pick a config in the following order:
     1) user-provided `daemon_config_path`
@@ -163,7 +747,8 @@ def init(
 
     Args:
         mode: Required init mode. Use "connect" to attach to an existing daemon,
-            "create" to launch a new daemon owned by the current process.
+            "create" to launch a new daemon owned by the current process,
+            or "auto" for process-group singleflight connect-or-create.
         address: Optional target daemon address (connect-only).
         daemon_config_path: Config file when launching a local daemon.
         install_signal_handlers: Install SIGTERM/SIGINT handlers on success.
@@ -201,116 +786,58 @@ def init(
                 raise RuntimeError(
                     "No local daemon session found. Start one with "
                     "'tensorcast daemon start' or call "
-                    "tensorcast.startup.init(mode='create', ...)."
+                    "tensorcast.startup.init(mode='auto'|'create', ...)."
                 )
-            if not ping_daemon(target_address):
-                raise RuntimeError(f"No daemon found at {target_address}")
-            set_daemon_address(target_address)
-            from tensorcast.daemon_ctl import get_daemon_client
-
-            client = get_daemon_client(target_address)
-            logger.info("✅ Connected to daemon at %s", target_address)
-            ctx = Context(
-                address=target_address,
-                is_owner=False,
-                session_id=None,
-                session_dir=None,
-                client=client,
+            return _connect_context(
+                target_address=target_address,
+                install_signal_handlers=install_signal_handlers,
+                fate_share_sigterm=fate_share_sigterm,
+                logger=logger,
             )
-            _current_ctx = ctx
-            if install_signal_handlers:
-                ctx.install_signal_handlers(
-                    "hard-exit" if fate_share_sigterm else "graceful"
-                )
-            if not _atexit_registered:
-                atexit.register(lambda: _current_ctx and _current_ctx.close())  # type: ignore[func-returns-value]
-                _atexit_registered = True
-            return ctx
 
-        if mode != "create":
+        if mode not in {"create", "auto"}:
             raise ValueError(f"Unknown init mode: {mode}")
 
-        if address and address not in {"auto", "local"}:
+        if mode == "create" and address and address not in {"auto", "local"}:
             raise ValueError(
                 "init(mode='create') does not accept 'address'. "
                 "Use mode='connect' to attach to an existing daemon."
             )
 
-        # Launch requires a config file (optional; defaults to example config when available).
-        cfg_path: Path | None = None
-        restrict_localhost = True
-        cfg = None
-        if daemon_config_path:
-            cfg_path = Path(daemon_config_path)
-        else:
-            discovered = discover_daemon_config()
-            if discovered:
-                cfg_path = Path(discovered)
-        if cfg_path is not None:
-            cfg = load_daemon_config(cfg_path)
-            listen_host = (cfg.server.listen.host or "").strip().lower()
-            if listen_host and listen_host not in {"127.0.0.1", "localhost"}:
-                restrict_localhost = False
-            if cfg.server.HasField("p2p_listen"):
-                p2p_host = cfg.server.p2p_listen.host.strip()
-                p2p_port = int(cfg.server.p2p_listen.port)
-                if p2p_host or p2p_port:
-                    restrict_localhost = False
-
-        # Private launch for SDK: do not publish meta/current_session when session_id provided
-        session_obj = runtime.start(
-            daemon_config=cfg_path,
-            session_id=session_id,
+        cfg_path, cfg, restrict_localhost = _resolve_launch_config(daemon_config_path)
+        if mode == "auto":
+            return _init_auto_mode(
+                cfg_path=cfg_path,
+                cfg=cfg,
+                restrict_localhost=restrict_localhost,
+                address=address,
+                show_daemon_logs=show_daemon_logs,
+                install_signal_handlers=install_signal_handlers,
+                fate_share_sigterm=fate_share_sigterm,
+                global_store_mode=global_store_mode,
+                global_store_address=global_store_address,
+                global_store_config_path=global_store_config_path,
+                cluster_id=cluster_id,
+                allow_gs_fallback=allow_gs_fallback,
+                session_id=session_id,
+                logger=logger,
+            )
+        return _start_context(
+            cfg_path=cfg_path,
+            cfg=cfg,
+            restrict_localhost=restrict_localhost,
+            show_daemon_logs=show_daemon_logs,
+            install_signal_handlers=install_signal_handlers,
+            fate_share_sigterm=fate_share_sigterm,
             global_store_mode=global_store_mode,
             global_store_address=global_store_address,
-            global_store_config=(
-                Path(global_store_config_path).expanduser()
-                if global_store_config_path
-                else None
-            ),
-            allow_gs_fallback=allow_gs_fallback,
+            global_store_config_path=global_store_config_path,
             cluster_id=cluster_id,
-            register_current=session_id is None,
-            ephemeral=session_id is not None,
-            restrict_to_localhost=restrict_localhost,
-            to_console=show_daemon_logs,
+            allow_gs_fallback=allow_gs_fallback,
+            session_id=session_id,
             reuse_existing=False,
+            logger=logger,
         )
-
-        daemon_address = session_obj.daemon_address or _current_session_address()
-        if not daemon_address and cfg is not None:
-            # Fallback: read original config (may be wrong when port was 0)
-            host = cfg.server.listen.host or "127.0.0.1"
-            port = int(cfg.server.listen.port or 0)
-            daemon_address = f"{host}:{port}"
-        if not daemon_address:
-            daemon_address = "127.0.0.1:0"
-        set_daemon_address(daemon_address)
-        from tensorcast.daemon_ctl import get_daemon_client
-
-        client = get_daemon_client(daemon_address)
-        logger.info(
-            "✅ tensorcast initialized; daemon at %s (session=%s)",
-            daemon_address,
-            session_obj.session_id,
-        )
-
-        ctx = Context(
-            address=daemon_address,
-            is_owner=True,
-            session_id=session_obj.session_id,
-            session_dir=str(session_paths(session_obj.session_id).session),
-            client=client,
-        )
-        _current_ctx = ctx
-        if install_signal_handlers:
-            ctx.install_signal_handlers(
-                "hard-exit" if fate_share_sigterm else "graceful"
-            )
-        if not _atexit_registered:
-            atexit.register(lambda: _current_ctx and _current_ctx.close())  # type: ignore[func-returns-value]
-            _atexit_registered = True
-        return ctx
 
 
 def is_initialized() -> bool:
@@ -323,7 +850,7 @@ def require_initialized() -> Context:
     if ctx is None or ctx._closed:
         raise RuntimeError(
             "TensorCast runtime is not initialized. "
-            "Call tensorcast.startup.init(mode='connect'|'create') first."
+            "Call tensorcast.startup.init(mode='connect'|'create'|'auto') first."
         )
     return ctx
 

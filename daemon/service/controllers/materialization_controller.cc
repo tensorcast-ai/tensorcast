@@ -4652,20 +4652,36 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     span->SetAttribute("tc.artifact.id", artifact_id);
   }
 
-  if (descriptor.artifact_id.has_value() && *descriptor.artifact_id != artifact_id) {
+  const bool artifact_id_mismatch = descriptor.artifact_id.has_value() && *descriptor.artifact_id != artifact_id;
+  if (artifact_id_mismatch && verify_checksums) {
     record_disk_resolution_outcome("checksum_failed");
     return to_grpc_status(
         absl::FailedPreconditionError("artifact_id mismatch between resolved descriptor and computed identity"));
   }
-  if (verify_checksums && descriptor.data_multihash.has_value() && *descriptor.data_multihash != data_multihash) {
+  if (artifact_id_mismatch && !verify_checksums) {
+    LOG(WARNING) << "artifact_id mismatch between descriptor and computed identity at " << normalized.string()
+                 << "; verify_checksums=false, proceeding with computed identity";
+  }
+
+  const bool data_multihash_mismatch =
+      descriptor.data_multihash.has_value() && *descriptor.data_multihash != data_multihash;
+  if (data_multihash_mismatch && verify_checksums) {
     record_disk_resolution_outcome("checksum_failed");
     return to_grpc_status(absl::FailedPreconditionError("data_multihash mismatch for disk artifact"));
+  }
+  if (data_multihash_mismatch && !verify_checksums) {
+    LOG(WARNING) << "data_multihash mismatch between descriptor and disk bytes at " << normalized.string()
+                 << "; verify_checksums=false, proceeding with computed multihash";
   }
 
   const bool missing_descriptor_fields = !descriptor.found || !descriptor.artifact_id.has_value() ||
       !descriptor.index_multihash.has_value() || !descriptor.data_multihash.has_value();
+  const bool stale_descriptor_fields = artifact_id_mismatch ||
+      (descriptor.index_multihash.has_value() && *descriptor.index_multihash != index_multihash) ||
+      data_multihash_mismatch;
+  const bool should_backfill_descriptor = missing_descriptor_fields || stale_descriptor_fields;
   bool descriptor_present = descriptor.found;
-  if (missing_descriptor_fields) {
+  if (should_backfill_descriptor) {
     const auto total_size =
         index_or->total_size_bytes > 0 ? std::optional<uint64_t>(index_or->total_size_bytes) : std::nullopt;
     const std::optional<std::string_view> schema_version = descriptor.schema_version.has_value()

@@ -604,7 +604,7 @@ def get_context(
                 try:
                     startup.init(mode="connect")
                 except RuntimeError:
-                    startup.init(mode="create")
+                    startup.init(mode="auto")
             runtime = runtime_provider()
         else:
             raise
