@@ -9,7 +9,6 @@ This provides the gRPC interface layer, delegating business logic to services.
 import base64
 import binascii
 import hashlib
-import ipaddress
 import json
 import threading
 import time
@@ -81,6 +80,9 @@ from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
+from tensorcast.global_store.rpc.worker_instance_rpc_handler import (
+    WorkerInstanceRpcHandler,
+)
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
@@ -282,6 +284,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # Initialize recovery service for high availability
         self.recovery_service = RecoveryService(
             self.worker_repository, self.replica_repository, self.worker_service
+        )
+        self.worker_instance_rpc_handler = WorkerInstanceRpcHandler(
+            worker_service=self.worker_service,
+            worker_repository=self.worker_repository,
+            recovery_service=self.recovery_service,
+            instance_service=self.instance_service,
+            default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
+            determine_worker_status=self._determine_worker_status,
+            determine_instance_status=self._determine_instance_status,
+            logger=logger,
         )
 
         self._initiate_startup_recovery()
@@ -2627,423 +2639,28 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.RegisterWorkerRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterWorkerResponse:
-        """Register a new worker."""
-        try:
-            daemon_id = (request.daemon_id or "").strip()
-            if not daemon_id:
-                context.set_details("daemon_id is required")
-                return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            # Convert proto to domain artifact
-            worker = Worker(
-                daemon_id=daemon_id,
-                node_id=request.node_id,
-                node_address=request.node_address,
-                grpc_port=request.grpc_port,
-                p2p_port=request.p2p_port,
-                mem_pool_total_size=request.mem_pool_total_size,
-                mem_pool_available_size=request.mem_pool_available_size,
-                capability_flags=int(request.capability_flags),
-            )
-
-            # Span attributes with worker metadata
-            set_span_attributes(
-                {
-                    "tc.worker.daemon_id": str(worker.daemon_id),
-                    "tc.worker.node_id": worker.node_id,
-                    "tc.worker.node_address": worker.node_address,
-                    "tc.worker.grpc_port": int(worker.grpc_port),
-                    "tc.worker.p2p_port": int(worker.p2p_port),
-                    "tc.mem_pool.total_bytes": int(worker.mem_pool_total_size),
-                    "tc.mem_pool.available_bytes": int(worker.mem_pool_available_size),
-                    "tc.worker.is_recovery": bool(request.is_recovery_registration),
-                    "tc.worker.capability_flags": int(worker.capability_flags),
-                }
-            )
-
-            # Check if this is a recovery registration
-            is_recovery = request.is_recovery_registration
-            previous_worker_id = (
-                request.previous_worker_id if request.previous_worker_id else None
-            )
-
-            # Reject loopback/unspecified IPs up front for both normal and recovery registrations
-            try:
-                addr = ipaddress.ip_address(worker.node_address)
-                if addr.is_loopback or addr.is_unspecified:
-                    raise ValidationError(
-                        f"Invalid node_address '{worker.node_address}'. Use a routable (non-loopback, non-unspecified) IP of the external interface; 127.0.0.1 and 0.0.0.0 are not allowed."
-                    )
-            except ValueError:
-                # Not an IP literal; allow hostnames (may resolve to routable IPs)
-                pass
-
-            if is_recovery:
-                # Handle recovery registration through recovery service
-                success, state_sync_required = (
-                    self.recovery_service.handle_worker_recovery_registration(
-                        worker, previous_worker_id
-                    )
-                )
-
-                if not success:
-                    return global_store_pb2.RegisterWorkerResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
-                    )
-
-                # Get the registered worker to get the worker_id
-                registered = self.worker_service.find_worker_by_address(
-                    worker.node_address, worker.grpc_port
-                )
-
-                if not registered:
-                    return global_store_pb2.RegisterWorkerResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
-                    )
-
-                # Single, enriched registration log (recovery)
-                logger.info(
-                    "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s prev_worker_id=%s state_sync_required=%s expected_state_version=%d",
-                    registered.worker_id,
-                    (registered.daemon_id or ""),
-                    worker.node_id,
-                    worker.node_address,
-                    int(worker.grpc_port),
-                    int(worker.p2p_port),
-                    int(worker.mem_pool_total_size),
-                    int(worker.mem_pool_available_size),
-                    True,
-                    (previous_worker_id or ""),
-                    bool(state_sync_required),
-                    int(
-                        self.recovery_service.ensure_worker_state_version(
-                            registered.worker_id
-                        )
-                    ),
-                )
-
-                return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    worker_id=registered.worker_id,
-                    heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
-                    state_sync_required=state_sync_required,
-                    expected_state_version=self.recovery_service.ensure_worker_state_version(
-                        registered.worker_id
-                    ),
-                )
-            else:
-                # Normal registration
-                # Reject cross-host duplicates on the same address:port; allow same-host restart/update
-                existing = self.worker_service.find_worker_by_address(
-                    worker.node_address, worker.grpc_port
-                )
-                if (
-                    existing
-                    and existing.node_id != worker.node_id
-                    and existing.inactive_at is None
-                ):
-                    logger.error(
-                        "Registration conflict: %s:%d already owned by worker_id=%s (node=%s); attempted by node=%s.",
-                        worker.node_address,
-                        worker.grpc_port,
-                        existing.worker_id,
-                        existing.node_id,
-                        worker.node_id,
-                    )
-                    # Map to generic error status (client logs will include details)
-                    return global_store_pb2.RegisterWorkerResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
-                    )
-
-                registered = self.worker_service.register_worker(worker)
-                expected_state_version = (
-                    self.recovery_service.ensure_worker_state_version(
-                        registered.worker_id
-                    )
-                )
-
-                # Single, enriched registration log (normal)
-                logger.info(
-                    "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s",
-                    registered.worker_id,
-                    (registered.daemon_id or ""),
-                    worker.node_id,
-                    worker.node_address,
-                    int(worker.grpc_port),
-                    int(worker.p2p_port),
-                    int(worker.mem_pool_total_size),
-                    int(worker.mem_pool_available_size),
-                    False,
-                )
-
-                return global_store_pb2.RegisterWorkerResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    worker_id=registered.worker_id,
-                    heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
-                    state_sync_required=False,
-                    expected_state_version=expected_state_version,
-                )
-
-        except ValidationError as e:
-            logger.error(f"Validation error: {e}")
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterWorkerResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as e:
-            logger.exception("Error registering worker")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterWorkerResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.register_worker(request, context)
 
     def WorkerHeartbeat(
         self,
         request: global_store_pb2.WorkerHeartbeatRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.WorkerHeartbeatResponse:
-        """Process worker heartbeat (enhanced-only)."""
-        try:
-            # Detect possible duplicate worker_id usage across different addresses
-            try:
-                w = self.worker_repository.find_by_id(request.worker_id)
-                if w and request.HasField("state_version"):
-                    # Best-effort detection: if the heartbeat's implied source differs from DB registration
-                    # we log a warning to aid diagnosis of shared storage / misconfigured listen.host.
-                    # Note: request doesn't carry node_address; this check is limited.
-                    pass
-            except Exception:
-                # Non-fatal diagnostics
-                logger.debug(
-                    "worker lookup during heartbeat diagnostics failed", exc_info=True
-                )
-            set_span_attributes(
-                {
-                    "tc.worker.id": request.worker_id,
-                    "tc.mem_pool.available_bytes": int(request.mem_pool_available_size),
-                    "tc.worker.accepting_new_requests": bool(
-                        request.accepting_new_requests
-                    ),
-                    "tc.worker.state_version": int(request.state_version),
-                    "tc.worker.capability_flags": int(request.capability_flags),
-                }
-            )
-            if request.state_version <= 0:
-                logger.warning(
-                    "Rejected legacy heartbeat for worker %s: state_version must be >= 1",
-                    request.worker_id,
-                )
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(
-                    "state_version must be >= 1; legacy heartbeats are not supported"
-                )
-                return global_store_pb2.WorkerHeartbeatResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-            return self._handle_enhanced_heartbeat(request, context)
-
-        except Exception as e:
-            logger.exception("Error processing worker heartbeat")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-
-    def _handle_enhanced_heartbeat(
-        self,
-        request: global_store_pb2.WorkerHeartbeatRequest,
-        context: grpc.ServicerContext,
-    ) -> global_store_pb2.WorkerHeartbeatResponse:
-        """Handle enhanced heartbeat with state synchronization."""
-        try:
-            capability_flags: int | None = None
-            if request.HasField("capability_flags"):
-                capability_flags = int(request.capability_flags)
-            # Process basic heartbeat first
-            success = self.worker_service.heartbeat(
-                worker_id=request.worker_id,
-                mem_pool_available_size=request.mem_pool_available_size,
-                accepting_new_requests=request.accepting_new_requests,
-                capability_flags=capability_flags,
-            )
-
-            if not success:
-                return global_store_pb2.WorkerHeartbeatResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-
-            # Check if state synchronization is needed
-            current_version = self.recovery_service.ensure_worker_state_version(
-                request.worker_id
-            )
-            state_sync_required = request.state_version < current_version
-
-            # Checksum validation (if provided by worker)
-            if request.state_checksum:
-                server_checksum = self.recovery_service.get_worker_state_checksum(
-                    request.worker_id
-                )
-
-                if request.state_checksum != server_checksum:
-                    logger.debug(
-                        "State checksum mismatch for worker %s: local=%s, global=%s",
-                        request.worker_id,
-                        request.state_checksum,
-                        server_checksum,
-                    )
-                    state_sync_required = True
-
-            # Detect obsolete artifacts reported by the worker but not present in global state
-            obsolete_replicas: list[str] = []
-            if request.registered_artifact_ids:
-                obsolete_replicas = self.recovery_service.get_obsolete_artifacts(
-                    request.worker_id, list(request.registered_artifact_ids)
-                )
-
-            # If obsolete artifacts exist instruct state sync
-            if obsolete_replicas:
-                state_sync_required = True
-
-            ts = timestamp_pb2.Timestamp()
-            ts.FromSeconds(int(time.time()))
-            return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                state_sync_required=state_sync_required,
-                expected_state_version=current_version,
-                obsolete_replicas=obsolete_replicas,
-                server_timestamp_ts=ts,
-            )
-
-        except Exception as e:
-            logger.exception(
-                f"Error handling enhanced heartbeat for worker {request.worker_id}"
-            )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.WorkerHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.worker_heartbeat(request, context)
 
     def UnregisterWorker(
         self,
         request: global_store_pb2.UnregisterWorkerRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterWorkerResponse:
-        """Unregister a worker."""
-        try:
-            # Pre-fetch worker details for enriched logging
-            worker_before = None
-            try:
-                worker_before = self.worker_repository.find_by_id(
-                    request.worker_id, include_inactive=True
-                )
-            except Exception:
-                # Best-effort; proceed even if lookup fails
-                worker_before = None
-
-            success = self.worker_service.unregister_worker(request.worker_id)
-
-            status = (
-                global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-            if success:
-                # Single, enriched deregistration log
-                if worker_before:
-                    logger.info(
-                        "Worker unregistered: worker_id=%s graceful=%s node_id=%s addr=%s:%d p2p=%d",
-                        request.worker_id,
-                        getattr(request, "is_graceful_shutdown", False),
-                        worker_before.node_id,
-                        worker_before.node_address,
-                        int(worker_before.grpc_port),
-                        int(worker_before.p2p_port),
-                    )
-                else:
-                    logger.info(
-                        "Worker unregistered: worker_id=%s graceful=%s",
-                        request.worker_id,
-                        getattr(request, "is_graceful_shutdown", False),
-                    )
-            else:
-                logger.warning(
-                    "UnregisterWorker failed: worker %s not found",
-                    request.worker_id,
-                )
-
-            return global_store_pb2.UnregisterWorkerResponse(status=status)
-
-        except Exception as e:
-            logger.exception("Error unregistering worker")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UnregisterWorkerResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.unregister_worker(request, context)
 
     def ListActiveWorkers(
         self,
         request: global_store_pb2.ListActiveWorkersRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListActiveWorkersResponse:
-        """List active workers."""
-        try:
-            workers = self.worker_service.list_active_workers(
-                include_unavailable=request.include_unavailable
-            )
-            gs_metrics.set_capability_counts(scope="worker", entries=workers)
-            required_flags = int(getattr(request, "required_capability_flags", 0))
-            if required_flags:
-                workers = [
-                    worker
-                    for worker in workers
-                    if (int(worker.capability_flags) & required_flags) == required_flags
-                ]
-
-            # Convert to proto format
-            worker_infos = []
-            for worker in workers:
-                # Build Timestamp for last heartbeat
-                last_ts = timestamp_pb2.Timestamp()
-                if worker.last_heartbeat:
-                    last_ts.FromSeconds(int(worker.last_heartbeat.timestamp()))
-                else:
-                    last_ts.FromSeconds(0)
-
-                worker_info = global_store_pb2.ListActiveWorkersResponse.WorkerInfo(
-                    worker_id=worker.worker_id,
-                    daemon_id=str(worker.daemon_id or ""),
-                    node_id=worker.node_id,
-                    node_address=worker.node_address,
-                    grpc_port=worker.grpc_port,
-                    p2p_port=worker.p2p_port,
-                    mem_pool_total_size=worker.mem_pool_total_size,
-                    mem_pool_available_size=worker.mem_pool_available_size,
-                    accepting_new_requests=worker.accepting_new_requests,
-                    capability_flags=int(worker.capability_flags),
-                    last_heartbeat_ts=last_ts,
-                    state_version=self.recovery_service.get_worker_state_version(
-                        worker.worker_id
-                    ),
-                    status=self._determine_worker_status(worker),
-                )
-                worker_infos.append(worker_info)
-
-            logger.info(f"Listed {len(worker_infos)} active workers")
-
-            return global_store_pb2.ListActiveWorkersResponse(workers=worker_infos)
-
-        except Exception as e:
-            logger.exception("Error listing active workers")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.ListActiveWorkersResponse()
+        return self.worker_instance_rpc_handler.list_active_workers(request, context)
 
     # ========== Instance Methods ==========
 
@@ -3052,143 +2669,28 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.RegisterInstanceRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterInstanceResponse:
-        """Register a new engine instance."""
-        try:
-            instance = Instance(
-                instance_id=request.instance_id,
-                daemon_id=request.daemon_id,
-                worker_id=request.worker_id if request.HasField("worker_id") else None,
-                engine=request.engine,
-                signals_endpoint=request.signals_endpoint or None,
-                labels=dict(request.labels) if request.labels else {},
-                capability_flags=int(request.capability_flags),
-            )
-            registered = self.instance_service.register_instance(instance)
-            return global_store_pb2.RegisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                instance_id=registered.instance_id,
-                heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
-            )
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error registering instance")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.register_instance(request, context)
 
     def InstanceHeartbeat(
         self,
         request: global_store_pb2.InstanceHeartbeatRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.InstanceHeartbeatResponse:
-        """Process instance heartbeat."""
-        try:
-            worker_id = request.worker_id if request.HasField("worker_id") else None
-            capability_flags: int | None = None
-            if request.HasField("capability_flags"):
-                capability_flags = int(request.capability_flags)
-            success = self.instance_service.heartbeat(
-                request.instance_id,
-                worker_id=worker_id,
-                capability_flags=capability_flags,
-            )
-            return global_store_pb2.InstanceHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return global_store_pb2.InstanceHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error processing instance heartbeat")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.InstanceHeartbeatResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.instance_heartbeat(request, context)
 
     def UnregisterInstance(
         self,
         request: global_store_pb2.UnregisterInstanceRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterInstanceResponse:
-        """Unregister an instance."""
-        try:
-            success = self.instance_service.unregister_instance(request.instance_id)
-            return global_store_pb2.UnregisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-        except ValidationError as e:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return global_store_pb2.UnregisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error unregistering instance")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UnregisterInstanceResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.unregister_instance(request, context)
 
     def ListActiveInstances(
         self,
         request: global_store_pb2.ListActiveInstancesRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListActiveInstancesResponse:
-        """List active instances."""
-        try:
-            instances = self.instance_service.list_active_instances(
-                include_unavailable=request.include_unavailable
-            )
-            gs_metrics.set_capability_counts(scope="instance", entries=instances)
-            required_flags = int(getattr(request, "required_capability_flags", 0))
-            if required_flags:
-                instances = [
-                    inst
-                    for inst in instances
-                    if (int(inst.capability_flags) & required_flags) == required_flags
-                ]
-            infos: list[global_store_pb2.ListActiveInstancesResponse.InstanceInfo] = []
-            for inst in instances:
-                last_ts = timestamp_pb2.Timestamp()
-                if inst.last_heartbeat:
-                    last_ts.FromSeconds(int(inst.last_heartbeat.timestamp()))
-                else:
-                    last_ts.FromSeconds(0)
-                infos.append(
-                    global_store_pb2.ListActiveInstancesResponse.InstanceInfo(
-                        instance_id=inst.instance_id,
-                        daemon_id=inst.daemon_id,
-                        worker_id=inst.worker_id or "",
-                        engine=inst.engine,
-                        signals_endpoint=inst.signals_endpoint or "",
-                        last_heartbeat_ts=last_ts,
-                        labels=dict(inst.labels) if inst.labels else {},
-                        capability_flags=int(inst.capability_flags),
-                        status=self._determine_instance_status(inst),
-                    )
-                )
-            return global_store_pb2.ListActiveInstancesResponse(instances=infos)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error listing active instances")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.ListActiveInstancesResponse()
+        return self.worker_instance_rpc_handler.list_active_instances(request, context)
 
     # ========== High Availability Methods ==========
 
@@ -3197,78 +2699,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.SynchronizeWorkerStateRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.SynchronizeWorkerStateResponse:
-        """Synchronize worker state for high availability."""
-        try:
-            success, state_changes, new_version, new_checksum, ignored = (
-                self.recovery_service.synchronize_worker_state(
-                    request.worker_id,
-                    request.local_state,
-                    request.sync_epoch,
-                    request.sync_request_id,
-                    request.force_full_sync,
-                )
-            )
-
-            if success:
-                return global_store_pb2.SynchronizeWorkerStateResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    new_state_version=new_version,
-                    state_changes=state_changes,
-                    new_state_checksum=new_checksum,
-                    ignored=ignored,
-                )
-            else:
-                return global_store_pb2.SynchronizeWorkerStateResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-        except Exception as e:
-            logger.exception(
-                f"Error synchronizing worker state for {request.worker_id}"
-            )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.SynchronizeWorkerStateResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.synchronize_worker_state(
+            request, context
+        )
 
     def RequestFullStateSync(
         self,
         request: global_store_pb2.RequestFullStateSyncRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RequestFullStateSyncResponse:
-        """Request full state synchronization for a worker."""
-        try:
-            success, expected_replicas, new_version, new_checksum, ignored = (
-                self.recovery_service.request_full_state_sync(
-                    request.worker_id,
-                    request.sync_epoch,
-                    request.sync_request_id,
-                )
-            )
-
-            if success:
-                return global_store_pb2.RequestFullStateSyncResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    new_state_version=new_version,
-                    expected_replicas=expected_replicas,
-                    new_state_checksum=new_checksum,
-                    ignored=ignored,
-                )
-            else:
-                return global_store_pb2.RequestFullStateSyncResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-        except Exception as e:
-            logger.exception(
-                f"Error requesting full state sync for {request.worker_id}"
-            )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RequestFullStateSyncResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.worker_instance_rpc_handler.request_full_state_sync(
+            request, context
+        )
 
     # ========== Utility Methods ==========
 
