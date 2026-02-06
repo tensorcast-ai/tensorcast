@@ -189,43 +189,84 @@ class AppContext:
     def plan(self, ctx: "CallContext") -> "Plan": ...
     def close(self) -> None: ...
 
-def init_app(
+def connect_app(
     *,
-    mode: str,  # "connect" | "agent"
     controller_address: str,
     global_store_address: str,
     app_id: str | None = None,
-    # Agent mode only (when the app process is also an engine instance):
-    instance_id: str | None = None,
-    daemon_id: str | None = None,
-    engine: str | None = None,
-    node_agent_listen_address: str | None = None,
-    engine_adapter: "EngineAdapter | None" = None,
-    labels: Mapping[str, str] | None = None,
 ) -> AppContext: ...
 
-def app() -> AppContext: ...
+class InstanceAgentError(Exception): ...
+
+class InstanceAgentHandle:
+    instance_id: str
+    node_agent_endpoint: str
+
+    def close(self) -> None: ...
+
+def serve_instance_agent(
+    *,
+    controller_address: str,
+    global_store_address: str,
+    instance_id: str,
+    daemon_id: str | None = None,
+    engine: str,
+    listen_address: str,
+    engine_adapter: "EngineAdapter",
+    labels: Mapping[str, str] | None = None,
+) -> InstanceAgentHandle: ...
+
+def app() -> AppContext: ...  # returns the active AppContext created by connect_app(...)
 ```
 
-Modes:
+### Initialization UX (planned)
 
-- `mode="connect"`: control-plane client only (typical for schedulers/controllers living outside engine processes).
-- `mode="agent"`: starts a node-local Instance Agent (NodeAgent + Engine Adapter) and registers/heartbeats an `Instance`
-  into Global Store.
+The 0055 `tensorcast.init(mode=...)` (data plane) and a hypothetical 0056 `init_app(mode=...)` (control plane) are easy
+to confuse if both are expressed as `init(...)` + mode strings.
+
+This design therefore recommends a **role-specific, verb-first public API**, and treats any `init_app(mode=...)` shape
+as an internal/legacy alias (if it exists at all). The goal is for call sites to be self-describing in LLM app code
+(e.g., ToT routing/rebalancing) where both planes may be present.
+
+- Data plane (Store Daemon client/session; existing, 0055):
+  - `tensorcast.connect_store(...)` is an alias for `tensorcast.init(mode="connect", ...)`.
+  - `tensorcast.launch_local_store(...)` is an alias for `tensorcast.init(mode="create", ...)`.
+- Control plane (Controller + Global Store; planned, 0056):
+  - `tensorcast.connect_app(...)` connects an external app (e.g., ToT scheduler) to Controller-run plan execution and
+    signals.
+  - `tensorcast.serve_instance_agent(...)` runs a node-local Instance Agent (NodeAgent + Engine Adapter) that
+    registers/heartbeats an `Instance` into Global Store.
+
+Mapping to the original 4-mode shape:
+
+| Original API | Proposed API | Typical caller |
+| --- | --- | --- |
+| `init(mode="connect")` | `connect_store(...)` | Any process doing direct artifact IO |
+| `init(mode="create")` | `launch_local_store(...)` | Dev/local tooling (rare in prod) |
+| `init_app(mode="connect")` (avoid) | `connect_app(...)` | Scheduler/router (ToT rebalancer) |
+| `init_app(mode="agent")` (avoid) | `serve_instance_agent(...)` | Inference engine process (SGLang) |
 
 Relationship to existing `tensorcast.init(...)` (note):
 
 - `tensorcast.init(...)` (0055) initializes a Store/data-plane client for artifact access against a specific daemon/GS
   endpoint, as used by in-process workers.
-- `tensorcast.init_app(...)` (0056) initializes the **control-plane** runtime (Controller + Global Store) for plan
-  execution and signals. A pure scheduler process typically needs only `init_app(...)`; an engine/agent process may
-  need both depending on whether it also performs direct artifact IO.
+- `tensorcast.connect_app(...)` (0056) initializes the **control-plane** runtime (Controller + Global Store) for plan
+  execution and signals. A pure scheduler process typically needs only `connect_app(...)`; an engine process typically
+  needs `serve_instance_agent(...)` (and may also need `init(...)` if it performs direct artifact IO).
 
 `Plan` construction routing (planned):
 
 - When an `AppContext` is active, module-level `tensorcast.plan(ctx)` SHOULD be equivalent to `tensorcast.app().plan(ctx)`
   so call sites do not have to thread `AppContext` explicitly.
 - Without an active `AppContext`, `tensorcast.plan(ctx)` continues to build a locally-executed plan per 0055.
+
+Recommended usage patterns (planned):
+
+- **ToT scheduler / router**: call `connect_app(...)`, then use `app.signals()` + `app.plan(ctx).run()`; do not call
+  `connect_store(...)` unless the app needs direct artifact IO in-process.
+- **Inference engine process (SGLang)**: call `serve_instance_agent(...)` to register and expose instance-scoped steps;
+  the engine’s HiCache storage backend may internally use the 0055 Store client to talk to the co-located daemon.
+- **Offline tooling**: call `connect_store(...)` (or `init(mode="connect")`) and use `Artifact.prefetch/into`.
 
 ## Controller-run Plan execution
 
@@ -414,6 +455,20 @@ Rules:
 - `<engine_key_enc>` is opaque to TensorCast; it must be collision-safe across engine/model/layout.
 - IDs are immutable: same CGID must always refer to identical bytes (see conflict-write rules below).
 
+### Example encoding profile: SGLang HiCache (recommended)
+
+SGLang’s HiCache interface uses a **base per-page hash** `H` (a chained SHA256 hex string). Backends such as
+`MooncakeStore` expand each page key into **blob-level object keys** (e.g., K/V parts and rank suffixes).
+
+For TensorCast CGIDs, the recommended `engine_key_enc` is the **blob-level expanded key** (so each physical blob is one
+artifact):
+
+- MHA models (K/V split): `engine_key_enc = f"{H}_{suffix}_k"` and `engine_key_enc = f"{H}_{suffix}_v"`.
+- MLA models (often merged/only K): `engine_key_enc = f"{H}_{suffix}_k"`.
+
+`suffix` MUST follow the engine/backend’s own disambiguation scheme (e.g., TP/PP rank suffixing used by SGLang’s
+`MooncakeStore`) so multiple ranks and multiple instances converge on the same blob identity when they are compatible.
+
 ## SGLang + Mooncake blob granularity (ground truth)
 
 SGLang’s KV blobs are **page-level and highly fragmented**:
@@ -424,6 +479,52 @@ SGLang’s KV blobs are **page-level and highly fragmented**:
 - each blob contains **all layers** (page_first layout) for IO efficiency.
 
 Implication: a single request often maps to **dozens to hundreds** of blobs, so orchestration must be **batch-first**.
+
+## SGLang keying + IO contract (code reality; feasibility notes)
+
+SGLang’s HiCache integration with storage backends (Mooncake being one) is intentionally **KV-semantics-free** and is
+based on deterministic page keys and batch IO. The following code points define the actual contract:
+
+- **Key derivation (token-only, deterministic)**:
+  - `sglang/python/sglang/srt/mem_cache/hicache_storage.py:get_hash_str(...)` computes a chained SHA256 hex string over
+    page-aligned token ids (`prior_hash` seeds the chain).
+  - `sglang/python/sglang/srt/mem_cache/radix_cache.py:compute_node_hash_values(...)` uses the same chained hashing to
+    compute
+    per-page `hash_value` lists stored on radix nodes.
+- **Prefetch probes consecutive hits**:
+  - `sglang/python/sglang/srt/managers/cache_controller.py:HiCacheController._storage_hit_query(...)` computes the
+    page-hash chain
+    for a request and calls `HiCacheStorage.batch_exists(...)`.
+  - `HiCacheStorage.batch_exists(...)` returns **the number of consecutive existing pages from the start**, enabling
+    prefix reuse without the backend understanding token semantics.
+- **`req_id` is progress identity, not cache identity**:
+  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py:prefetch_from_storage(req_id, ...)` issues a prefetch
+    operation tagged by `req_id` and records it in `ongoing_prefetch` only to track progress/termination.
+  - The actual storage keys are page hashes (`hash_value`), not `req_id`.
+- **Write/backup uses host staging + batch put**:
+  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py:write_backup_storage(...)` calls
+    `HiCacheController.write_storage(host_indices, token_ids, hash_value, prefix_keys)`.
+  - `sglang/python/sglang/srt/mem_cache/storage/mooncake_store/mooncake_store.py:batch_set_v1(...)` implements a
+    PutIfAbsent-like behavior by checking existence and only writing missing pages (per-page granularity; K/V blobs are
+    separate in MHA).
+  - `sglang/python/sglang/srt/mem_cache/storage/mooncake_store/mooncake_store.py:batch_get_v1(...)` /
+    `batch_set_v1(...)` use the host KV pool’s page metadata (pointers + sizes) to support a zero-copy “get_into /
+    put_from” interface.
+
+Implications for 0056 KV orchestration (this design):
+
+- `engine_request_id` is feasible for SGLang and maps to `Req.rid`. It is required to locate request context (token ids,
+  committed KV length, KV index ownership), but it is **not** part of KV blob identity.
+- `kvcache_key_set(engine_request_id)` is implementable as a read-only inspection: compute the request’s page keys from
+  engine state (page-aligned) and map them to deterministic `cgid:kvcache~...` blob identities.
+- `kvcache_flush(engine_request_id, ...)` is the publish barrier: for pages that are still only on-device, it must force
+  device→host staging and then use the engine’s storage-backend write path to publish the blobs. (SGLang provides all
+  necessary primitives via `HiCacheController.write(...)` + `HiCacheController.write_storage(...)`; see also
+  `sglang/python/sglang/srt/disaggregation/decode_kvcache_offload_manager.py` for a concrete per-request
+  device→host→storage flow.)
+- `kvcache_prefetch(engine_request_id, ...)` necessarily requires **local request context** on the target instance for
+  engines like SGLang (token ids are required to make the imported pages usable by token-keyed prefix caches). It cannot
+  be specified as a pure `key_set`-only operation without additional engine support.
 
 ## KV blob schema (transport contract)
 
@@ -464,6 +565,25 @@ contract:
 
 - **Local eviction** (engine safety): reclaim engine-local KV state without touching shared blobs.
 - **Backend retention** (resource governance): TTL/LRU ensures the shared backend remains bounded.
+
+### Recommended integration layering (SGLang motivating case)
+
+For inference engines that already expose a HiCache-style “storage backend” abstraction (SGLang), the most feasible and
+engine-agnostic integration is a **two-layer split**:
+
+1. **Storage backend plugin (engine → TensorCast data plane)**  
+   Implement the engine’s storage backend interface using TensorCast, so the engine continues to:
+   - own KV layout and staging (device↔host pools),
+   - own token→page-key mapping (prefix-hash chaining),
+   - and treat the backend as a pure key→bytes store.
+
+2. **Instance Agent KV adapter (app/controller → engine)**  
+   Implement `EngineKvCacheAdapter` as a thin orchestration surface that:
+   - forces a publish barrier (`kvcache_flush`) when the app wants explicit migration,
+   - triggers engine-side warm/rehydrate (`kvcache_prefetch`) when a request context exists on the destination,
+   - and returns `KvKeySet` containing deterministic CGID blob identities for plan orchestration.
+
+This keeps TensorCast core KV-semantics-free while still allowing explicit app-driven KV movement.
 
 ---
 
@@ -535,9 +655,9 @@ class EngineKvCacheAdapter:
     ) -> KvFlushResult: ...
     def kv_prefetch(
         self,
+        engine_request_id: str,
         *,
-        key_set: KvKeySet,
-        engine_request_id: str | None = None,
+        key_set: KvKeySet | None = None,
         ctx: CallContext | None = None,
     ) -> KvPrefetchResult: ...
     def kv_evict_local(
@@ -591,10 +711,15 @@ These are **instance-scoped** plan steps executed by the Instance Agent.
     - `KvFlushResult.put` (per-blob outcomes).
   - Rationale: a standalone `kvcache_key_set` cannot guarantee backend existence nor apply TTL, and it can race with
     request advancement; flush returns a barrier-consistent key set that subsequent warm steps can rely on.
-- `kvcache_prefetch(key_set, engine_request_id=None) -> KvPrefetchResult`
+- `kvcache_prefetch(engine_request_id, key_set=None) -> KvPrefetchResult`
   - **Purpose**: target-side engine warm/rehydrate so KV becomes usable for decoding.
-  - `key_set` is REQUIRED; `engine_request_id` is a tag only (the target may not have a local request object yet).
-  - MUST return per-blob outcomes in `KvPrefetchResult.get` and MUST NOT be a silent no-op.
+  - `engine_request_id` MUST refer to a request context that exists on the target instance at execution time (the
+    adapter may need access to token ids / KV ownership metadata). If the request context does not exist, the step MUST
+    fail (e.g., `NOT_FOUND` / `FAILED_PRECONDITION`) and MUST NOT be a silent no-op.
+  - If `key_set` is provided, the adapter SHOULD treat it as the intended snapshot/hint for prefetch (and use it for
+    observability and per-blob results). If `key_set` is omitted, the adapter MAY compute the key set from engine state
+    and backend existence checks (engine-specific).
+  - MUST return per-blob outcomes in `KvPrefetchResult.get`.
 - `kvcache_evict_local(engine_request_id=None, key_set=None) -> KvBatchResult`
   - **Purpose**: reclaim engine-local memory/state (OOM safety / footprint control).
   - **Scope**: engine-local only; MUST NOT delete shared backend blobs.
@@ -619,8 +744,12 @@ Scenario:
 
 Planned call flow (control plane + node-local boundaries):
 
+0. **Precondition (engine-specific; outside TensorCast)**:
+   - The app ensures the target instance has a request context for `engine_request_id` (e.g., request has been created
+     / staged / paused on the destination), so an instance-scoped `kvcache_prefetch(engine_request_id=...)` can access
+     token ids and engine-local KV state.
 1. **App issues plans** (flush first, then warm):
-   - `app = tc.init_app(mode="connect", controller_address=..., global_store_address=...)`
+   - `app = tc.connect_app(controller_address=..., global_store_address=...)`
    - `ctx = tc.context(request_id=..., qos=..., deadline_ms=...)`
    - `plan1 = app.plan(ctx)`
    - `flush_ref = plan1.on_instance(inst_a).kvcache_flush(engine_request_id="rid-123", ttl_ms=60_000)`
@@ -628,7 +757,7 @@ Planned call flow (control plane + node-local boundaries):
    - `key_set = flush_out.key_set`
    - `plan2 = app.plan(ctx)`
    - `plan2.on_worker(worker_b).prefetch_many([...], device="dram")` (optional; batch)
-   - `plan2.on_instance(inst_b).kvcache_prefetch(key_set=key_set, engine_request_id="rid-123")`
+   - `plan2.on_instance(inst_b).kvcache_prefetch(engine_request_id="rid-123", key_set=key_set)`
    - `plan2.run(...)`
 2. **Plan.run dispatch**:
    - `Plan.run()` → `ControllerService.ExecutePlan(PlanSpec)`
@@ -641,13 +770,22 @@ Planned call flow (control plane + node-local boundaries):
    - `ExecutePlan` → Store Daemon B prefetches the listed CGID selections into daemon-owned DRAM tier.
 5. **Controller dispatches instance step (kvcache_prefetch)**:
    - `ExecutePlan` → `NodeAgentService.ExecutePlan(plan_fragment_for_inst_b)`
-   - Instance Agent calls `EngineKvCacheAdapter.kv_prefetch(key_set=...)`
+   - Instance Agent calls `EngineKvCacheAdapter.kv_prefetch(engine_request_id=..., key_set=...)`
    - Adapter batch-reads blobs (possibly hitting local daemon DRAM if prefetch_many ran) and rehydrates engine-local KV.
 6. **App reassigns request**:
    - after the plan completes successfully, the scheduler routes the decode continuation to Instance B.
 
 Note: if Controller-run plans support step-output references, this can be expressed as a single plan; otherwise a
 two-plan sequence (flush → warm) is the simplest correct shape.
+
+SGLang note (practical integration):
+
+- If the app cannot (or does not want to) pre-create a request context on the target instance, it SHOULD omit the
+  instance-scoped `kvcache_prefetch(...)` step and rely on the engine’s normal “prefetch on enqueue” behavior (SGLang’s
+  scheduler calls `_prefetch_kvcache(...)` when adding a request to the waiting queue).
+- In that mode, `kvcache_flush(...)` + `on_worker(...).prefetch_many(...)` still provide explicit, app-driven migration:
+  the bytes are moved to the destination worker ahead of time, and the engine will rehydrate them when it receives the
+  request (best-effort; misses fall back to recompute).
 
 ---
 
@@ -672,8 +810,10 @@ This section is illustrative and intentionally separated from 0055.
 Suggested code locations for implementing the planned features in this design:
 
 - App runtime / SDK:
-  - `tensorcast/api/app_context.py` (new; `AppContext`, `init_app`, `app`)
-  - `tensorcast/__init__.py` and `tensorcast/api/__init__.py` (export `init_app`, `app`)
+  - `tensorcast/api/app_context.py` (new; `AppContext`, `connect_app`, `app`)
+  - `tensorcast/api/instance_agent.py` (new; `serve_instance_agent`, `InstanceAgentHandle`)
+  - `tensorcast/startup.py` (existing; add UX aliases `connect_store`, `launch_local_store` for `init(...)`)
+  - `tensorcast/__init__.py` and `tensorcast/api/__init__.py` (export `connect_app`, `serve_instance_agent`, `app`)
   - `tensorcast/api/plan/plan.py` (switch `Plan.run()` execution mode: local vs Controller-run)
 - Controller service (new control plane component):
   - `proto/tensorcast/controller/v1/controller.proto` (new; `ControllerService.ExecutePlan`)
@@ -702,3 +842,8 @@ Suggested code locations for implementing the planned features in this design:
 - Engine KV integration (engine-owned adapter layer; TensorCast core remains KV-semantics-free):
   - `tensorcast/engine_adapter/kvcache_adapter.py` (new; `EngineKvCacheAdapter` interface + typed results)
   - `tensorcast/integrations/llm/` (new; engine-specific adapters such as SGLang HiCache implementation)
+
+- External integration (SGLang HiCache; in the SGLang source tree):
+  - `sglang/python/sglang/srt/mem_cache/storage/backend_factory.py` (register a `tensorcast` storage backend)
+  - `sglang/python/sglang/srt/mem_cache/storage/tensorcast_store/tensorcast_store.py` (new; implement `HiCacheStorage` via TensorCast)
+  - `sglang/python/sglang/srt/mem_cache/hiradix_cache.py` and `sglang/python/sglang/srt/managers/cache_controller.py` (integration points referenced by the adapter semantics)
