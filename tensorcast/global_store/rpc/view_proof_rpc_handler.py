@@ -43,9 +43,7 @@ class ViewProofRpcHandler:
         view_state_service: ViewStateService,
         timestamp_to_datetime: Callable,
         datetime_to_timestamp: Callable[[object], timestamp_pb2.Timestamp | None],
-        get_tensor_intervals_for_artifact_id: Callable[
-            [str], dict[str, tuple[int, int]]
-        ],
+        get_tensor_intervals_for_artifact_id: Callable[..., dict[str, tuple[int, int]]],
         logger,
     ) -> None:
         self._config = config
@@ -239,7 +237,7 @@ class ViewProofRpcHandler:
                 and view_payload.canonical_ranges
             ):
                 tensor_intervals = self._get_tensor_intervals_for_artifact_id(
-                    artifact_id
+                    artifact_id=artifact_id
                 )
 
             self._view_state_service.update_view_state(
