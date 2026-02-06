@@ -94,6 +94,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .lip_manager = kernel->lip_manager(),
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
+      .disk_imports = kernel->disk_import_catalog(),
       .shutdown_signal = kernel->shutdown_signal(),
       .async_runtime = *async_runtime,
       .identity = kernel->worker_identity_store(),

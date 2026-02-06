@@ -44,7 +44,7 @@ bool is_local_replica(const RemoteReplicaInfo& remote, const WorkerIdentity& loc
 
 absl::Status stale_local_route_status(std::string_view artifact_id) {
   return absl::UnavailableError(
-      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
+      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
 }
 
 } // namespace
@@ -58,13 +58,14 @@ MaterializeOrchestrator::MaterializeOrchestrator(
 absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     std::string_view artifact_id,
     const DeviceKey& target_device,
-    const MaterializeHints& hints) {
+    const MaterializeHints& hints,
+    const std::optional<loading::DiskSource>& disk_source) {
   // ------------------------------------------------------------------
   // 1. Preference handling and Global Store connectivity guard
   // ------------------------------------------------------------------
   const bool gs_connected = gs_client_->is_connected();
   const auto preference = hints.source_preference;
-  const bool has_disk_path = !hints.disk_path.empty();
+  const bool has_disk_source = disk_source.has_value();
   const bool has_artifact_id_hint = !hints.artifact_id.empty();
   const bool allow_p2p = hints.allow_p2p;
   const bool allow_disk = hints.allow_disk;
@@ -80,7 +81,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   if (preference == loading::SourcePreference::kPreferDisk && !allow_disk) {
     return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
   }
-  if (!gs_connected && (!has_disk_path || !allow_disk)) {
+  if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
@@ -99,9 +100,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // ------------------------------------------------------------------
   // 2. Disk-first path when requested
   // ------------------------------------------------------------------
-  if (preference == loading::SourcePreference::kPreferDisk && has_disk_path && allow_disk) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (preference == loading::SourcePreference::kPreferDisk && has_disk_source && allow_disk) {
+    loading::DiskSource disk_src = *disk_source;
 
     loading::ReplicaTarget target;
     target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
@@ -160,7 +160,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
       }
       last_p2p_status = stale_local_route_status(artifact_id);
-      if (hints.disk_path.empty() || !allow_disk) {
+      if (!has_disk_source || !allow_disk) {
         return last_p2p_status;
       }
     } else {
@@ -175,6 +175,9 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       p2p_src.enable_checksum = true;
       p2p_src.location.type = remote.memory_type;
       p2p_src.location.device_id = remote.device_id;
+      if (has_disk_source && allow_disk && preference != loading::SourcePreference::kPreferP2P) {
+        p2p_src.fallback_disk_dir = disk_source->path.string();
+      }
 
       // Build target description
       ReplicaTarget target;
@@ -208,7 +211,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "P2P load failed: " << load_or.status();
       }
 
-      if (hints.disk_path.empty() || !allow_disk) {
+      if (!has_disk_source || !allow_disk) {
         return load_or.status();
       }
     }
@@ -217,7 +220,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     // Not found or GS unavailable → fall back to disk
     LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk"
               << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "");
-    if (hints.disk_path.empty() || !allow_disk) {
+    if (!has_disk_source || !allow_disk) {
       return transport_or.status();
     }
   }
@@ -225,8 +228,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   // ------------------------------------------------------------------
   // 3. Disk fallback
   // ------------------------------------------------------------------
-  DiskSource disk_src;
-  disk_src.path = std::filesystem::path(hints.disk_path);
+  DiskSource disk_src = *disk_source;
 
   ReplicaTarget target;
   target.location.type = (target_device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
@@ -237,7 +239,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
     if (!last_p2p_status.ok()) {
       return last_p2p_status;
     }
-    return transport_or.ok() ? absl::FailedPreconditionError("disk path already attempted") : transport_or.status();
+    return transport_or.ok() ? absl::FailedPreconditionError("disk source already attempted") : transport_or.status();
   }
 
   if (!allow_disk) {

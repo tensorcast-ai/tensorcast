@@ -448,9 +448,9 @@ static void require_replica_registered(const StoreEngine& store, const ArtifactF
 static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
-  hints.disk_path = artifact.dir.string();
-  auto handle_or =
-      store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  tensorcast::store::loading::DiskSource disk_source{.path = artifact.dir, .expected_size = std::nullopt};
+  auto handle_or = store.materialize_replica(
+      make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   INFO("load_artifact_gpu status=" << handle_or.status().ToString());
   REQUIRE(handle_or.ok());
   auto handle = std::move(handle_or.value());
@@ -470,9 +470,10 @@ static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifac
 static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
-  hints.disk_path = artifact.dir.string();
+  tensorcast::store::loading::DiskSource disk_source{.path = artifact.dir, .expected_size = std::nullopt};
   DeviceKey cpu{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  auto handle_or = store.materialize_replica(cpu, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle_or =
+      store.materialize_replica(cpu, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   INFO("load_artifact_cpu status=" << handle_or.status().ToString());
   REQUIRE(handle_or.ok());
   auto handle = std::move(handle_or.value());

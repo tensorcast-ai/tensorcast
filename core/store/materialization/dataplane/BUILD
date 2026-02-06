@@ -76,6 +76,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":multi_safetensors_source",
         ":source_hash",
         "@nlohmann_json//:json",
     ],

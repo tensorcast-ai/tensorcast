@@ -172,5 +172,49 @@ def test_shared_storage_roundtrip(tmp_path):
     assert ptr_group1 not in indep_ptrs
     assert ptr_group2 not in indep_ptrs
 
+
+def test_from_disk_tensor_dict_without_global_store(tmp_path):
+    tmp_path = Path(tmp_path)
+    storage_root = tmp_path / "daemon-storage"
+    save_path = storage_root / "artifact"
+    expected = {"weights": torch.arange(32, dtype=torch.float32)}
+    save_dict(expected, str(save_path))
+
+    listen = f"127.0.0.1:{get_free_port()}"
+    cpu_target = os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake"
+    local_handle_socket_path: str | None = None
+    if cpu_target:
+        local_handle_dir = Path(tempfile.mkdtemp(prefix="tc_local_handle_"))
+        local_handle_socket_path = str(local_handle_dir / "local_handle.sock")
+
+    daemon_proc = start_daemon_binary(
+        listen,
+        storage_root,
+        cpu_shared_memory_enabled=cpu_target,
+        local_handle_socket_path=local_handle_socket_path,
+        stable_bytes=64 * 1024 * 1024,
+    )
+    try:
+        startup.init(mode="connect", address=listen)
+        try:
+            artifact_handle = from_disk(str(save_path), verify_checksums=False).with_fallback(
+                FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
+            )
+            device_selector = (
+                "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
+            )
+            loaded = artifact_handle.tensor_dict(device=device_selector)
+        finally:
+            startup.shutdown()
+    finally:
+        try:
+            daemon_proc.terminate()
+            daemon_proc.wait(timeout=3)
+        except Exception:
+            pass
+
+    loaded_cpu = loaded["weights"].cpu() if loaded["weights"].is_cuda else loaded["weights"]
+    assert torch.equal(loaded_cpu, expected["weights"])
+
 if __name__ == "__main__":
     test_shared_storage_roundtrip(tmp_path="/tmp/test_shared_storage")
