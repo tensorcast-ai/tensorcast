@@ -20,7 +20,7 @@ import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type ch
 import grpc
 from google.protobuf import timestamp_pb2
 
-from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
+from tensorcast.common.identity import ArtifactIdKind
 from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
@@ -81,6 +81,9 @@ from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
 )
 from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
     ReplicaLifecycleRpcHandler,
+)
+from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
+    ReplicaRegistrationRpcHandler,
 )
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.worker_instance_rpc_handler import (
@@ -255,6 +258,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
 
         # Initialize services
         self.artifact_service = ArtifactService(self.replica_repository)
+        self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
+            artifact_service=self.artifact_service,
+            artifact_repository=self.artifacts_repo,
+            artifact_index_repository=self.artifact_indices,
+            memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
+            index_bytes_to_multibase_sha256=self._index_bytes_to_multibase_sha256,
+            hex_sha256_to_multibase=self._hex_sha256_to_multibase,
+            logger=logger,
+        )
         self.transport_service = TransportService(
             self.replica_repository, self.transport_repository
         )
@@ -2135,154 +2147,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.RegisterReplicaRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterReplicaResponse:
-        """Register or update a artifact replica."""
-        try:
-            schema_version_value = "v3"
-            if request.HasField("schema_version"):
-                candidate_schema_version = request.schema_version.strip()
-                if candidate_schema_version and candidate_schema_version != "v3":
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details("schema_version must be 'v3'")
-                    return global_store_pb2.RegisterReplicaResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
-                    )
-                if candidate_schema_version:
-                    schema_version_value = candidate_schema_version
-
-            # Convert proto to domain artifact
-            replica = self._memory_info_to_replica_artifact_id(
-                request.mem_info,
-                request.artifact_id,
-                request.max_concurrency,
-                request.worker_id,
-            )
-            preserve_transport = not request.mem_info.HasField("transport")
-
-            # Register replica
-            registered = self.artifact_service.register_replica(
-                replica, preserve_transport=preserve_transport
-            )
-
-            # Enrich span with key business attributes (best-effort only)
-            from contextlib import suppress
-
-            with suppress(Exception):
-                span_attrs: dict[str, bool | int | float | str] = {
-                    "tc.artifact.id": registered.artifact_id,
-                    "tc.replica.id": str(registered.replica_id),
-                    "tc.memory.type": str(replica.memory_type.value),
-                    "tc.memory.size": int(replica.memory_size),
-                    "tc.device.id": int(replica.device_id),
-                }
-                worker_id = replica.worker_id
-                if worker_id:
-                    span_attrs["tc.worker.id"] = worker_id
-                set_span_attributes(span_attrs)
-
-            # RFC-0007: Persist artifact descriptor into `artifacts` table.
-            artifact_id = registered.artifact_id
-            descriptor = request.descriptor if request.HasField("descriptor") else None
-            if descriptor is not None and descriptor.artifact_id:
-                artifact_id = descriptor.artifact_id
-
-            kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
-            if descriptor is not None and descriptor.id_kind:
-                kind = (
-                    ArtifactIdKind.MI2
-                    if descriptor.id_kind
-                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
-                    else ArtifactIdKind.CGID
-                    if descriptor.id_kind
-                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
-                    else kind
-                )
-
-            if artifact_id:
-                index_mh = None
-                data_mh = None
-                encoding = "json"
-                schema_version = schema_version_value
-                id_kind = "MI2" if kind is ArtifactIdKind.MI2 else "CGID"
-                if descriptor is not None:
-                    if descriptor.index_multihash:
-                        index_mh = descriptor.index_multihash
-                    if descriptor.data_multihash:
-                        data_mh = descriptor.data_multihash
-                    if descriptor.encoding:
-                        encoding = descriptor.encoding
-                    if descriptor.schema_version:
-                        schema_version = descriptor.schema_version
-                if kind is ArtifactIdKind.MI2 and (index_mh is None or data_mh is None):
-                    parts = artifact_id.split(":", 2)
-                    if len(parts) == 3:
-                        index_mh = index_mh or parts[1]
-                        data_mh = data_mh or parts[2]
-                if not index_mh:
-                    if (
-                        request.HasField("tensor_index_data")
-                        and request.tensor_index_data
-                    ):
-                        derived = self._index_bytes_to_multibase_sha256(
-                            request.tensor_index_data
-                        )
-                        if derived is not None:
-                            index_mh = derived
-                    if not index_mh and request.mem_info.tensor_index_key:
-                        derived = self._hex_sha256_to_multibase(
-                            request.mem_info.tensor_index_key
-                        )
-                        if derived is not None:
-                            index_mh = derived
-                try:
-                    self.artifacts_repo.upsert_artifact(
-                        artifact_id=artifact_id,
-                        index_multihash=index_mh,
-                        data_multihash=data_mh,
-                        schema_version=schema_version,
-                        encoding=encoding,
-                        hash_params_json=None,
-                        id_kind=id_kind,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"Failed to upsert artifacts entry for {artifact_id}: {e}"
-                    )
-
-            # If canonical index data is provided, store it for de-duplication
-            if request.HasField("tensor_index_data") and request.tensor_index_data:
-                try:
-                    _ = self.artifact_indices.upsert_index(
-                        index_data=request.tensor_index_data,
-                        encoding=(
-                            request.encoding if request.HasField("encoding") else "json"
-                        ),
-                        schema_version=schema_version_value,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(
-                        f"Failed to upsert artifact index for artifact_id={artifact_id}: {e}"
-                    )
-
-            return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                artifact_id=registered.artifact_id,
-                replica_id=str(registered.replica_id),
-            )
-
-        except ValidationError as e:
-            logger.error(f"Validation error: {e}")
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as e:
-            logger.exception("Error registering artifact replica")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.replica_registration_rpc_handler.register_replica(request, context)
 
     def UpdateReplica(
         self,
@@ -2916,6 +2781,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.instance_repository = InstanceRepository(self.connection)
 
         self.artifact_service = ArtifactService(self.replica_repository)
+        self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
+            artifact_service=self.artifact_service,
+            artifact_repository=self.artifacts_repo,
+            artifact_index_repository=self.artifact_indices,
+            memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
+            index_bytes_to_multibase_sha256=self._index_bytes_to_multibase_sha256,
+            hex_sha256_to_multibase=self._hex_sha256_to_multibase,
+            logger=logger,
+        )
         self.transport_service = TransportService(
             self.replica_repository, self.transport_repository
         )
