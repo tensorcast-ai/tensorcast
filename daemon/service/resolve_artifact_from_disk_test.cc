@@ -276,6 +276,55 @@ TEST_CASE("ResolveArtifactFromDisk fails checksum validation when descriptor mis
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
 }
 
+TEST_CASE(
+    "ResolveArtifactFromDisk backfills stale descriptor when verify_checksums is false",
+    "[daemon][disk][resolve]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_stale_descriptor";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 32));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+  nlohmann::json descriptor = nlohmann::json::parse(std::ifstream(descriptor_path));
+  descriptor["artifact_id"] = "mi2:stale:index";
+  {
+    std::ofstream out(descriptor_path, std::ios::trunc);
+    REQUIRE(out.is_open());
+    out << descriptor.dump(2);
+  }
+
+  ResolveFixture fix;
+  grpc::ServerContext ctx;
+  tensorcast::daemon::RpcContext rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest req;
+  req.set_disk_path(artifact_dir.string());
+  req.set_verify_checksums(false);
+  ResolveArtifactFromDiskResponse resp;
+  auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
+
+  REQUIRE(status.ok());
+  REQUIRE(resp.artifact_id().starts_with("mi2:"));
+
+  nlohmann::json backfilled = nlohmann::json::parse(std::ifstream(descriptor_path));
+  REQUIRE(backfilled["artifact_id"].get<std::string>() == resp.artifact_id());
+  REQUIRE(backfilled["index_multihash"].is_string());
+  REQUIRE(backfilled["data_multihash"].is_string());
+  REQUIRE(
+      backfilled["artifact_id"].get<std::string>() ==
+      std::string("mi2:") + backfilled["index_multihash"].get<std::string>() + ":" +
+          backfilled["data_multihash"].get<std::string>());
+
+  grpc::ServerContext strict_ctx;
+  tensorcast::daemon::RpcContext strict_rctx{"ResolveArtifactFromDiskTest", strict_ctx, /*allow_high_card_attrs=*/true};
+  req.set_verify_checksums(true);
+  ResolveArtifactFromDiskResponse strict_resp;
+  auto strict_status = fix.controller.resolve_artifact_from_disk(strict_rctx, req, strict_resp);
+  REQUIRE(strict_status.ok());
+  REQUIRE(strict_resp.artifact_id() == resp.artifact_id());
+}
+
 TEST_CASE("Standalone disk import materializes without Global Store", "[daemon][disk][resolve][standalone]") {
   const auto artifact_dir = test_tmpdir() / "artifact_standalone";
   std::filesystem::remove_all(artifact_dir);
