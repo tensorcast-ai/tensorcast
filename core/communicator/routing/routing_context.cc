@@ -49,12 +49,13 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::Communicator::prim
     return primary_channel_;
   }
   primary_channel_.reset();
-  auto channel_or = context_->build_direct_channel(src_endpoint_id_, dst_endpoint_id_);
+  auto channel_or = context_->build_direct_channel_with_generation(
+      src_endpoint_id_, dst_endpoint_id_);
   if (!channel_or.ok()) {
     return channel_or.status();
   }
-  primary_channel_ = channel_or.value();
-  primary_channel_generation_ = context_->topology_generation();
+  primary_channel_ = channel_or->channel;
+  primary_channel_generation_ = channel_or->generation;
   return primary_channel_;
 }
 
@@ -78,6 +79,9 @@ RoutingContext::RoutingContext(
 
 absl::Status RoutingContext::set_topology(topology::Topology topology) {
   absl::MutexLock lock(&mu_);
+  if (topology_) {
+    return absl::FailedPreconditionError("topology is immutable once set");
+  }
   topology_ = std::make_shared<topology::Topology>(std::move(topology));
   connections_.clear();
   communicators_.clear();
@@ -96,7 +100,11 @@ absl::Status RoutingContext::set_endpoint_bindings(std::vector<EndpointBinding> 
     next_bindings[binding.endpoint_id] = std::move(binding);
   }
   absl::MutexLock lock(&mu_);
+  if (bindings_initialized_) {
+    return absl::FailedPreconditionError("endpoint bindings are immutable once set");
+  }
   bindings_ = std::move(next_bindings);
+  bindings_initialized_ = true;
   return absl::OkStatus();
 }
 
@@ -104,9 +112,8 @@ absl::Status RoutingContext::update_endpoint_binding(EndpointBinding binding) {
   if (binding.endpoint_id.empty()) {
     return absl::InvalidArgumentError("endpoint binding id must be non-empty");
   }
-  absl::MutexLock lock(&mu_);
-  bindings_[binding.endpoint_id] = std::move(binding);
-  return absl::OkStatus();
+  return absl::FailedPreconditionError(
+      "endpoint bindings are immutable; update_endpoint_binding is not supported");
 }
 
 absl::StatusOr<std::shared_ptr<RoutingContext::Communicator>> RoutingContext::get_communicator(
@@ -160,6 +167,18 @@ absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_chann
     const std::string& dst_endpoint_id) {
   absl::MutexLock lock(&mu_);
   return build_direct_channel_locked(src_endpoint_id, dst_endpoint_id);
+}
+
+absl::StatusOr<RoutingContext::ChannelBuildResult>
+RoutingContext::build_direct_channel_with_generation(
+    const std::string& src_endpoint_id,
+    const std::string& dst_endpoint_id) {
+  absl::MutexLock lock(&mu_);
+  auto channel_or = build_direct_channel_locked(src_endpoint_id, dst_endpoint_id);
+  if (!channel_or.ok()) {
+    return channel_or.status();
+  }
+  return ChannelBuildResult{std::move(channel_or).value(), topology_generation_};
 }
 
 absl::StatusOr<std::shared_ptr<RouteChannel>> RoutingContext::build_direct_channel_locked(

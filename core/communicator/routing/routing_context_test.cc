@@ -176,3 +176,26 @@ TEST_CASE("RoutingContext caches communicators and builds direct channels", "[co
   CHECK(channel_or.value()->src_endpoint_id() == "nic0");
   CHECK(channel_or.value()->dst_endpoint_id() == "nic1");
 }
+
+TEST_CASE("RoutingContext rejects topology and binding mutation", "[communicator][routing]") {
+  auto context = std::make_shared<RoutingContext>(
+      RoutingContext::Options{}, /*engine=*/nullptr);
+  REQUIRE(context->set_topology(build_minimal_topology()).ok());
+  auto second_topology = context->set_topology(build_minimal_topology());
+  CHECK(second_topology.code() == absl::StatusCode::kFailedPrecondition);
+
+  std::vector<EndpointBinding> bindings;
+  bindings.push_back(EndpointBinding{"nic0", "node0", "127.0.0.1", 1234});
+  bindings.push_back(EndpointBinding{"nic1", "node0", "127.0.0.1", 1235});
+  REQUIRE(context->set_endpoint_bindings(std::move(bindings)).ok());
+
+  std::vector<EndpointBinding> second_bindings;
+  second_bindings.push_back(EndpointBinding{"nic0", "node0", "127.0.0.1", 2001});
+  second_bindings.push_back(EndpointBinding{"nic1", "node0", "127.0.0.1", 2002});
+  auto bindings_status = context->set_endpoint_bindings(std::move(second_bindings));
+  CHECK(bindings_status.code() == absl::StatusCode::kFailedPrecondition);
+
+  EndpointBinding update_binding{"nic0", "node0", "127.0.0.1", 3000};
+  auto update_status = context->update_endpoint_binding(std::move(update_binding));
+  CHECK(update_status.code() == absl::StatusCode::kFailedPrecondition);
+}

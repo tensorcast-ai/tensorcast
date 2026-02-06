@@ -3,13 +3,20 @@
 #include "core/communicator/routing/connection.h"
 
 #include <exception>
+#include <format>
 #include <future>
 #include <utility>
 
 #include "absl/status/status.h"
+#include "absl/time/time.h"
 #include "core/communicator/routing/read_helpers.h"
 
 namespace tensorcast::communicator::routing {
+namespace {
+
+constexpr absl::Duration kReadResultTimeout = absl::Seconds(60);
+
+} // namespace
 
 LinkState::LinkState(std::string link_id)
     : link_id_(std::move(link_id)) {}
@@ -82,13 +89,27 @@ transport::future_read_result_t Connection::read_tensor(const ReadRequest& reque
               promise,
               future = std::move(inner_future)]() mutable {
                transport::read_result_t result;
-               try {
-                 result = future.get();
-               } catch (const std::exception& ex) {
-                 result.status = absl::UnknownError(ex.what());
+               const auto wait_status =
+                   future.wait_for(absl::ToChronoMilliseconds(kReadResultTimeout));
+               if (wait_status == std::future_status::ready) {
+                 try {
+                   result = future.get();
+                 } catch (const std::exception& ex) {
+                   result.status = absl::UnknownError(ex.what());
+                   result.tensor_key = tensor_key;
+                 } catch (...) {
+                   result.status = absl::UnknownError(
+                       "read result future raised non-standard exception");
+                   result.tensor_key = tensor_key;
+                 }
+               } else if (wait_status == std::future_status::timeout) {
+                 result.status = absl::DeadlineExceededError(std::format(
+                     "read result future not ready after {}",
+                     absl::FormatDuration(kReadResultTimeout)));
                  result.tensor_key = tensor_key;
-               } catch (...) {
-                 result.status = absl::UnknownError("read result future raised non-standard exception");
+               } else {
+                 result.status = absl::FailedPreconditionError(
+                     "read result future is deferred; bounded wait required");
                  result.tensor_key = tensor_key;
                }
                const absl::Duration latency = absl::Now() - start_time;

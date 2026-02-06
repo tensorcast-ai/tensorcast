@@ -87,7 +87,9 @@ Phase 2 adds a routing wrapper under `core/communicator/routing/` that maps the 
 - **ConnectionAdapter** abstracts execution: `EngineAdapter` delegates to `engine::Communicator`, while `NvlinkAdapter` is a placeholder that currently returns `UNIMPLEMENTED`.
 - **Stats/Health** are tracked per connection and per link (`ConnectionStats`, `LinkStats`, `HealthState`), recording success/failure counts, last latency, and last error.
 - **Protocol selection** prefers NVLINK when both endpoints are NVLINK on the same node and the NVLINK adapter reports availability; otherwise it falls back to `AUTO` (engine path).
-- **Topology updates** increment a routing generation; cached channels are rebuilt on the next use, and connections retain a shared reference to the topology so link pointers remain valid across swaps.
+- **Topology/bindings are immutable after setup**: `set_topology` and `set_endpoint_bindings` are one-shot; `update_endpoint_binding` returns `FAILED_PRECONDITION`. Create a new `RoutingContext` to change configuration.
+- **Channel caching** captures the topology generation used to build the channel and only reuses cached channels when the current generation matches, preventing stale channel reuse on mid-build changes.
+- **Connection reads** bound waits on adapter futures (default: 60s); timeouts return `DEADLINE_EXCEEDED` and are recorded as failures.
 - **Link directionality** is explicit: a reverse path requires a reverse `Link` entry in the topology.
 
 The wrapper is currently standalone and not yet wired into the P2P read path; existing callers still use `engine::Communicator` directly until Phase 4 integration.

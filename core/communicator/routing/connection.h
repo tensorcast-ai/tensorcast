@@ -86,7 +86,7 @@ class Connection : public std::enable_shared_from_this<Connection> {
 
   ConnectionKey key_;
   ConnectionType type_;
-  // Keeps link_ valid when the routing context swaps topologies.
+  // Keeps link_ valid for the lifetime of this connection (topology is immutable once set).
   std::shared_ptr<const topology::Topology> topology_ref_;
   const topology::Link* link_;
   EndpointBinding local_binding_;

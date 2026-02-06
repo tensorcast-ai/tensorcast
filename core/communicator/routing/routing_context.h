@@ -90,7 +90,15 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   uint64_t topology_generation() const;
 
  private:
+  struct ChannelBuildResult {
+    std::shared_ptr<RouteChannel> channel;
+    uint64_t generation = 0;
+  };
+
   absl::StatusOr<std::shared_ptr<RouteChannel>> build_direct_channel(
+      const std::string& src_endpoint_id,
+      const std::string& dst_endpoint_id);
+  absl::StatusOr<ChannelBuildResult> build_direct_channel_with_generation(
       const std::string& src_endpoint_id,
       const std::string& dst_endpoint_id);
 
@@ -133,6 +141,7 @@ class RoutingContext : public std::enable_shared_from_this<RoutingContext> {
   std::shared_ptr<topology::Topology> topology_ ABSL_GUARDED_BY(mu_);
   uint64_t topology_generation_ ABSL_GUARDED_BY(mu_) = 0;
   absl::flat_hash_map<std::string, EndpointBinding> bindings_ ABSL_GUARDED_BY(mu_);
+  bool bindings_initialized_ ABSL_GUARDED_BY(mu_) = false;
   absl::flat_hash_map<ConnectionKey, std::shared_ptr<Connection>> connections_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::shared_ptr<LinkState>> link_states_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<std::string, std::weak_ptr<Communicator>> communicators_ ABSL_GUARDED_BY(mu_);
