@@ -74,6 +74,10 @@ from tensorcast.global_store.repositories.artifact_repository import ArtifactRep
 from tensorcast.global_store.repositories.key_mapping_repository import (
     KeyMappingRepository,
 )
+from tensorcast.global_store.rpc.artifact_binding_rpc_handler import (
+    ArtifactBindingRpcHandler,
+)
+from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
 from tensorcast.global_store.services import (
     ArtifactService,
@@ -224,6 +228,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             ),
             datetime_to_timestamp=self._datetime_to_timestamp,
             coerce_db_datetime=self._coerce_db_datetime,
+            logger=logger,
+        )
+        self.artifact_binding_rpc_handler = ArtifactBindingRpcHandler(
+            binding_repository=self.binding_repository,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            logger=logger,
+        )
+        self.key_mapping_rpc_handler = KeyMappingRpcHandler(
+            key_mapping_repository=self.key_mapping_repository,
             logger=logger,
         )
 
@@ -2048,104 +2061,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.GetArtifactBindingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetArtifactBindingResponse:
-        artifact_id = request.artifact_id
-        if not artifact_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("artifact_id is required")
-            return global_store_pb2.GetArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        try:
-            row = self.binding_repository.get(artifact_id)
-            if row is None:
-                return global_store_pb2.GetArtifactBindingResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            kind = global_store_pb2.ARTIFACT_BINDING_KIND_UNSPECIFIED
-            if str(row["kind"]).lower() == "seal":
-                kind = global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
-            binding = global_store_pb2.ArtifactBinding(
-                from_artifact_id=str(row["from_artifact_id"]),
-                to_artifact_id=str(row["to_artifact_id"]),
-                kind=kind,
-            )
-            ts = self._datetime_to_timestamp(row.get("created_at"))
-            if ts is not None:
-                binding.created_at.CopyFrom(ts)
-            return global_store_pb2.GetArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_OK, binding=binding
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to get artifact binding for %s", artifact_id)
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.GetArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.artifact_binding_rpc_handler.get_artifact_binding(request, context)
 
     def UpsertArtifactBinding(
         self,
         request: global_store_pb2.UpsertArtifactBindingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpsertArtifactBindingResponse:
-        if not request.HasField("binding"):
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("binding is required")
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        binding = request.binding
-        if not binding.from_artifact_id or not binding.to_artifact_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("binding requires from_artifact_id and to_artifact_id")
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        kind = "seal"
-        if (
-            binding.kind == global_store_pb2.ARTIFACT_BINDING_KIND_UNSPECIFIED
-            or binding.kind == global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
-        ):
-            kind = "seal"
-        else:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("unsupported binding kind")
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        try:
-            row, created = self.binding_repository.upsert(
-                from_artifact_id=binding.from_artifact_id,
-                to_artifact_id=binding.to_artifact_id,
-                kind=kind,
-            )
-            kind_proto = global_store_pb2.ARTIFACT_BINDING_KIND_SEAL
-            resp_binding = global_store_pb2.ArtifactBinding(
-                from_artifact_id=str(row["from_artifact_id"]),
-                to_artifact_id=str(row["to_artifact_id"]),
-                kind=kind_proto,
-            )
-            ts = self._datetime_to_timestamp(row.get("created_at"))
-            if ts is not None:
-                resp_binding.created_at.CopyFrom(ts)
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                binding=resp_binding,
-                created=created,
-            )
-        except ValueError as exc:
-            context.set_code(grpc.StatusCode.FAILED_PRECONDITION)
-            context.set_details(str(exc))
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to upsert artifact binding")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.UpsertArtifactBindingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.artifact_binding_rpc_handler.upsert_artifact_binding(
+            request, context
+        )
 
     def RegisterReplica(
         self,
@@ -2840,171 +2765,28 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.UpsertKeyMappingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpsertKeyMappingResponse:
-        """Create or update a key → artifact mapping with uniqueness check.
-
-        Conflict when the key already exists but points to a different artifact_id.
-        """
-        try:
-            key = request.key.strip()
-            artifact_id = request.artifact_id.strip()
-            if not key or not artifact_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("key and artifact_id are required")
-                return global_store_pb2.UpsertKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-            existing = self.key_mapping_repository.get(key)
-            if existing and existing.get("artifact_id") != artifact_id:
-                return global_store_pb2.UpsertKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR,
-                    conflict_reason=(
-                        f"key already mapped to {existing.get('artifact_id')}"
-                    ),
-                )
-
-            ttl_seconds = None
-            if request.HasField("ttl"):
-                d = request.ttl
-                ttl_seconds = int(d.seconds + (d.nanos // 1_000_000_000))
-
-            self.key_mapping_repository.upsert(
-                key=key,
-                artifact_id=artifact_id,
-                replica_uuid=(request.replica_uuid or None),
-                daemon_address=(request.daemon_address or None),
-                ttl_seconds=ttl_seconds,
-            )
-            return global_store_pb2.UpsertKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_OK
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in UpsertKeyMapping")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UpsertKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.key_mapping_rpc_handler.upsert_key_mapping(request, context)
 
     def ResolveKeyMapping(
         self,
         request: global_store_pb2.ResolveKeyMappingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ResolveKeyMappingResponse:
-        try:
-            key = request.key.strip()
-            if not key:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("key is required")
-                return global_store_pb2.ResolveKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            row = self.key_mapping_repository.get(key)
-            if not row:
-                return global_store_pb2.ResolveKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            cache_ttl_seconds = 30
-            kind = (row.get("kind") or "IMMUTABLE").upper()
-            if kind == "ALIAS":
-                cache_ttl_seconds = 0
-            else:
-                ttl_seconds = row.get("ttl_seconds")
-                if ttl_seconds is not None:
-                    cache_ttl_seconds = max(0, int(ttl_seconds))
-            return global_store_pb2.ResolveKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                artifact_id=row.get("artifact_id", ""),
-                replica_uuid=row.get("replica_uuid", "") or "",
-                daemon_address=row.get("daemon_address", "") or "",
-                generation=int(row.get("generation", 0) or 0),
-                cache_ttl_seconds=int(cache_ttl_seconds),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in ResolveKeyMapping")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.ResolveKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.key_mapping_rpc_handler.resolve_key_mapping(request, context)
 
     def SwapKeyMapping(
         self,
         request: global_store_pb2.SwapKeyMappingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.SwapKeyMappingResponse:
-        try:
-            key = request.key.strip()
-            new_artifact_id = request.new_artifact_id.strip()
-            if not key or not new_artifact_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("key and new_artifact_id are required")
-                return global_store_pb2.SwapKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            expected_artifact_id = (
-                request.expected_artifact_id.strip()
-                if request.expected_artifact_id
-                else None
-            )
-            expected_generation = (
-                int(request.expected_generation)
-                if request.HasField("expected_generation")
-                else None
-            )
-            result = self.key_mapping_repository.swap(
-                key=key,
-                new_artifact_id=new_artifact_id,
-                expected_artifact_id=expected_artifact_id,
-                expected_generation=expected_generation,
-            )
-            if not result.get("ok"):
-                return global_store_pb2.SwapKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR,
-                    artifact_id=result.get("artifact_id", "") or "",
-                    generation=int(result.get("generation", 0) or 0),
-                )
-            return global_store_pb2.SwapKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                artifact_id=result.get("artifact_id", "") or "",
-                generation=int(result.get("generation", 0) or 0),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in SwapKeyMapping")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.SwapKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.key_mapping_rpc_handler.swap_key_mapping(request, context)
 
     def RevokeKeyMapping(
         self,
         request: global_store_pb2.RevokeKeyMappingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RevokeKeyMappingResponse:
-        try:
-            key = request.key.strip()
-            if not key:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("key is required")
-                return global_store_pb2.RevokeKeyMappingResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            ok = self.key_mapping_repository.delete(key)
-            return global_store_pb2.RevokeKeyMappingResponse(
-                status=(
-                    global_store_pb2.Status.STATUS_OK
-                    if ok
-                    else global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in RevokeKeyMapping")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RevokeKeyMappingResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.key_mapping_rpc_handler.revoke_key_mapping(request, context)
 
     # ========== Worker Methods ==========
 
