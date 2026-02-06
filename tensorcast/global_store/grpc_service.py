@@ -35,11 +35,7 @@ from tensorcast.global_store.models import (
     ExportState,
     Instance,
     MemoryType,
-    PersistenceShardStatus,
-    PersistenceStatus,
     PlacementPlan,
-    PlacementShard,
-    PlacementTarget,
     Replica,
     Worker,
 )
@@ -77,8 +73,13 @@ from tensorcast.global_store.rpc.artifact_binding_rpc_handler import (
 from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
     ArtifactIndexRpcHandler,
 )
+from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
+from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
+from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
+    PlacementPersistenceRpcHandler,
+)
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.worker_instance_rpc_handler import (
     WorkerInstanceRpcHandler,
@@ -267,6 +268,10 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.instance_repository, self.worker_repository
         )
         self.chunk_service = ChunkService(self.chunk_directory_repository)
+        self.chunk_rpc_handler = ChunkRpcHandler(
+            chunk_service=self.chunk_service,
+            logger=logger,
+        )
         self.view_state_service = ViewStateService(
             self.view_repository,
             self.leaf_repository,
@@ -279,6 +284,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.worker_repository,
             self.placement_repository,
             self.persistence_status_repository,
+        )
+        self.placement_persistence_rpc_handler = PlacementPersistenceRpcHandler(
+            placement_service=self.placement_service,
+            policy_from_proto=self._policy_from_proto,
+            persistence_state_from_proto=self._persistence_state_from_proto,
+            target_state_from_proto=self._target_state_from_proto,
+            plan_to_proto=self._plan_to_proto,
+            logger=logger,
         )
 
         # Initialize recovery service for high availability
@@ -299,6 +312,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self._initiate_startup_recovery()
 
         self.cluster_id = self.cluster_info_repository.get_or_create_cluster_id()
+        self.disk_location_rpc_handler = DiskLocationRpcHandler(
+            disk_location_repository=self.disk_location_repository,
+            cluster_id=self.cluster_id,
+            is_safe_relative_path=self._is_safe_relative_path,
+            disk_location_kind_from_proto=self._DISK_LOCATION_KIND_FROM_PROTO,
+            disk_location_kind_to_proto=self._DISK_LOCATION_KIND_TO_PROTO,
+            datetime_to_timestamp=self._datetime_to_timestamp,
+            coerce_db_datetime=self._coerce_db_datetime,
+            logger=logger,
+        )
 
         # Start background cleanup thread
         self._start_cleanup_thread()
@@ -2773,61 +2796,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.QueryChunkLocationsRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.QueryChunkLocationsResponse:
-        """Query chunk locations for distributed memory pool."""
-        try:
-            # Convert chunk indices to list
-            chunk_indices = (
-                list(request.chunk_indices) if request.chunk_indices else None
-            )
-
-            # Query chunk locations
-            locations = self.chunk_service.query_chunk_locations(
-                request.artifact_id, chunk_indices
-            )
-
-            return global_store_pb2.QueryChunkLocationsResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                locations=locations,
-            )
-
-        except Exception as e:
-            logger.exception(f"Error querying chunk locations: {e}")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.QueryChunkLocationsResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.chunk_rpc_handler.query_chunk_locations(request, context)
 
     def BatchUpdateChunkStates(
         self,
         request: global_store_pb2.BatchUpdateChunkStatesRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.BatchUpdateChunkStatesResponse:
-        """Batch update chunk states from StoreDaemon."""
-        try:
-            # Update chunk states
-            updates_list = list(
-                request.updates
-            )  # Convert RepeatedCompositeFieldContainer to list for typing
-            updates_applied = self.chunk_service.batch_update_chunk_states(
-                request.worker_id,
-                request.node_id,
-                updates_list,
-            )
-
-            return global_store_pb2.BatchUpdateChunkStatesResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                updates_applied=updates_applied,
-            )
-
-        except Exception as e:
-            logger.exception(f"Error updating chunk states: {e}")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.BatchUpdateChunkStatesResponse(
-                status=global_store_pb2.Status.STATUS_ERROR,
-                updates_applied=0,
-            )
+        return self.chunk_rpc_handler.batch_update_chunk_states(request, context)
 
     # ========== Placement & Persistence Methods ==========
 
@@ -2836,136 +2812,15 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.PlanPlacementRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.PlanPlacementResponse:
-        if not request.artifact_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("artifact_id is required")
-            return global_store_pb2.PlanPlacementResponse()
-        if not request.source_node_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("source_node_id is required")
-            return global_store_pb2.PlanPlacementResponse()
-        try:
-            policy = self._policy_from_proto(request.placement_policy)
-        except ValidationError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.PlanPlacementResponse()
-
-        shard_models: list[PlacementShard] = []
-        for shard in request.shards:
-            shard_id = shard.shard_id or f"{request.artifact_id}:{shard.shard_idx}"
-            shard_models.append(
-                PlacementShard(
-                    plan_id="",
-                    shard_idx=shard.shard_idx,
-                    shard_id=shard_id,
-                    size_bytes=shard.size_bytes,
-                    content_digest=shard.content_digest,
-                    byte_range_start=shard.byte_range_start,
-                    byte_range_length=shard.byte_range_length,
-                    chunk_ids=list(shard.chunk_ids),
-                )
-            )
-
-        try:
-            plan = self.placement_service.plan_placement(
-                request.artifact_id,
-                policy,
-                shard_models,
-                source_node_id=request.source_node_id,
-            )
-        except ValidationError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.PlanPlacementResponse()
-        except Exception:
-            logger.exception("Failed to plan placement")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("Failed to plan placement")
-            return global_store_pb2.PlanPlacementResponse()
-
-        return self._plan_to_proto(plan)
+        return self.placement_persistence_rpc_handler.plan_placement(request, context)
 
     def ReportPersistenceStatus(
         self,
         request: global_store_pb2.ReportPersistenceStatusRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ReportPersistenceStatusResponse:
-        if not request.task_id or not request.plan_id or not request.artifact_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("task_id, plan_id, and artifact_id are required")
-            return global_store_pb2.ReportPersistenceStatusResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        try:
-            state = self._persistence_state_from_proto(request.state)
-        except ValidationError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.ReportPersistenceStatusResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-
-        shard_statuses: list[PersistenceShardStatus] = []
-        try:
-            for shard in request.shard_statuses:
-                shard_state = self._persistence_state_from_proto(shard.state)
-                targets = [
-                    PlacementTarget(
-                        plan_id=request.plan_id,
-                        shard_idx=shard.shard_idx,
-                        node_id=target.node_id,
-                        lease_id=target.lease_id or None,
-                        target_state=self._target_state_from_proto(target.target_state),
-                        degraded_reason=target.degraded_reason or None,
-                    )
-                    for target in shard.targets
-                ]
-                shard_statuses.append(
-                    PersistenceShardStatus(
-                        shard_id=shard.shard_id,
-                        shard_idx=shard.shard_idx,
-                        state=shard_state,
-                        progress=shard.progress,
-                        degraded_reason=shard.degraded_reason or None,
-                        last_error=shard.last_error or None,
-                        targets=targets,
-                    )
-                )
-        except ValidationError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.ReportPersistenceStatusResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        except Exception:
-            logger.exception("Failed to decode shard status payload")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("Failed to decode shard status payload")
-            return global_store_pb2.ReportPersistenceStatusResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-
-        try:
-            status_model = PersistenceStatus(
-                task_id=request.task_id,
-                plan_id=request.plan_id,
-                artifact_id=request.artifact_id,
-                state=state,
-                progress=request.progress,
-                last_error=request.last_error or None,
-                degraded_reason=request.degraded_reason or None,
-            )
-            self.placement_service.record_status(status_model, shard_statuses)
-        except Exception:
-            logger.exception("Failed to persist ReportPersistenceStatus")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details("Failed to persist ReportPersistenceStatus")
-            return global_store_pb2.ReportPersistenceStatusResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-        return global_store_pb2.ReportPersistenceStatusResponse(
-            status=global_store_pb2.Status.STATUS_OK
+        return self.placement_persistence_rpc_handler.report_persistence_status(
+            request, context
         )
 
     # ========== Disk Locations ==========
@@ -2975,105 +2830,18 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.UpsertArtifactDiskLocationRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpsertArtifactDiskLocationResponse:
-        try:
-            artifact_id = request.artifact_id.strip()
-            cluster_id = request.cluster_id.strip()
-            relative_path = request.relative_path.strip()
-            if not artifact_id or not cluster_id or not relative_path:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details(
-                    "artifact_id, cluster_id, and relative_path are required"
-                )
-                return global_store_pb2.UpsertArtifactDiskLocationResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            if cluster_id != self.cluster_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("cluster_id does not match server cluster_id")
-                return global_store_pb2.UpsertArtifactDiskLocationResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            if not self._is_safe_relative_path(relative_path):
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("relative_path must be a safe, relative path")
-                return global_store_pb2.UpsertArtifactDiskLocationResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            kind = self._DISK_LOCATION_KIND_FROM_PROTO.get(request.kind, "MANAGED")
-            self.disk_location_repository.upsert(
-                artifact_id=artifact_id,
-                cluster_id=cluster_id,
-                relative_path=relative_path,
-                kind=kind,
-                is_deleted=bool(request.is_deleted),
-            )
-            return global_store_pb2.UpsertArtifactDiskLocationResponse(
-                status=global_store_pb2.Status.STATUS_OK
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in UpsertArtifactDiskLocation")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UpsertArtifactDiskLocationResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.disk_location_rpc_handler.upsert_artifact_disk_location(
+            request, context
+        )
 
     def ListArtifactDiskLocations(
         self,
         request: global_store_pb2.ListArtifactDiskLocationsRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListArtifactDiskLocationsResponse:
-        try:
-            artifact_id = request.artifact_id.strip()
-            if not artifact_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("artifact_id is required")
-                return global_store_pb2.ListArtifactDiskLocationsResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-            include_deleted = bool(request.include_deleted)
-            rows = self.disk_location_repository.list_by_artifact(
-                artifact_id, include_deleted=include_deleted
-            )
-            locations: list[global_store_pb2.ArtifactDiskLocation] = []
-            for row in rows:
-                created = self._datetime_to_timestamp(
-                    self._coerce_db_datetime(row.get("created_at"))
-                )
-                updated = self._datetime_to_timestamp(
-                    self._coerce_db_datetime(row.get("updated_at"))
-                )
-                deleted_at = None
-                if row.get("deleted_at") is not None:
-                    deleted_at = self._datetime_to_timestamp(
-                        self._coerce_db_datetime(row.get("deleted_at"))
-                    )
-                kind = self._DISK_LOCATION_KIND_TO_PROTO.get(
-                    (row.get("kind") or "MANAGED").upper(),
-                    global_store_pb2.DISK_LOCATION_KIND_MANAGED,
-                )
-                msg = global_store_pb2.ArtifactDiskLocation(
-                    artifact_id=row.get("artifact_id", ""),
-                    cluster_id=row.get("cluster_id", ""),
-                    relative_path=row.get("relative_path", ""),
-                    kind=kind,
-                    created_at=created,
-                    updated_at=updated,
-                    is_deleted=bool(row.get("is_deleted", False)),
-                )
-                if deleted_at is not None:
-                    msg.deleted_at.CopyFrom(deleted_at)
-                locations.append(msg)
-            return global_store_pb2.ListArtifactDiskLocationsResponse(
-                status=global_store_pb2.Status.STATUS_OK, locations=locations
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in ListArtifactDiskLocations")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.ListArtifactDiskLocationsResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.disk_location_rpc_handler.list_artifact_disk_locations(
+            request, context
+        )
 
     # ========== Helper Methods ==========
 
@@ -3404,7 +3172,6 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         # The simplest way is to recreate the repositories & services bound to the
         # existing connection so that any internal caches are discarded.
         self.replica_repository = ReplicaRepository(self.connection)
-        self.replica_repository = ReplicaRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
@@ -3416,8 +3183,30 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self.worker_service = WorkerService(
             self.worker_repository, self.replica_repository
         )
+        self.instance_service = InstanceService(
+            self.instance_repository, self.worker_repository
+        )
         self.recovery_service = RecoveryService(
             self.worker_repository, self.replica_repository, self.worker_service
+        )
+        self.transport_rpc_handler = TransportRpcHandler(
+            transport_service=self.transport_service,
+            replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
+        )
+        self.chunk_rpc_handler = ChunkRpcHandler(
+            chunk_service=self.chunk_service,
+            logger=logger,
+        )
+        self.worker_instance_rpc_handler = WorkerInstanceRpcHandler(
+            worker_service=self.worker_service,
+            worker_repository=self.worker_repository,
+            recovery_service=self.recovery_service,
+            instance_service=self.instance_service,
+            default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
+            determine_worker_status=self._determine_worker_status,
+            determine_instance_status=self._determine_instance_status,
+            logger=logger,
         )
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")
