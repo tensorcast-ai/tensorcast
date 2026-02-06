@@ -1,0 +1,151 @@
+#  Copyright (c) 2025-2026, TensorCast Team.
+
+"""Transport RPC handler extracted from Global Store gRPC servicer."""
+
+from __future__ import annotations
+
+from typing import Callable
+from uuid import UUID
+
+import grpc
+
+from tensorcast.global_store.exceptions import NotFoundError, TimeoutError
+from tensorcast.global_store.models import Replica
+from tensorcast.global_store.services.transport_service import TransportService
+from tensorcast.observability.otel import set_span_attributes
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.global_store.v1 import global_store_pb2
+
+
+class TransportRpcHandler:
+    """Owns transport routing RPC behavior and error mapping."""
+
+    def __init__(
+        self,
+        *,
+        transport_service: TransportService,
+        replica_to_memory_info: Callable[[Replica], common_pb2.MemoryInfo],
+        logger,
+    ) -> None:
+        self._transport_service = transport_service
+        self._replica_to_memory_info = replica_to_memory_info
+        self._logger = logger
+
+    def request_replica_transport(
+        self,
+        request: global_store_pb2.RequestReplicaTransportRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.RequestReplicaTransportResponse:
+        """Request artifact transport with load balancing."""
+        try:
+            wait_timeout_ms = 0
+            if request.HasField("wait_timeout_dur"):
+                duration = request.wait_timeout_dur
+                wait_timeout_ms = int(
+                    duration.seconds * 1000 + duration.nanos / 1_000_000
+                )
+
+            set_span_attributes(
+                {
+                    "tc.artifact.id": request.artifact_id,
+                    "tc.source.address": request.source_address,
+                    "tc.source.port": int(request.source_port),
+                    "tc.request.wait_timeout_ms": int(wait_timeout_ms),
+                }
+            )
+
+            requested_view_id: str | None = None
+            if request.HasField("requested_byte_space"):
+                space = request.requested_byte_space
+                if space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
+                    if not space.id:
+                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                        context.set_details("requested_byte_space VIEW requires id")
+                        return global_store_pb2.RequestReplicaTransportResponse(
+                            status=global_store_pb2.Status.STATUS_ERROR
+                        )
+                    requested_view_id = space.id
+                elif space.kind in (
+                    common_pb2.BYTE_SPACE_KIND_CANONICAL,
+                    common_pb2.BYTE_SPACE_KIND_UNSPECIFIED,
+                ):
+                    requested_view_id = None
+                else:
+                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+                    context.set_details("unsupported requested_byte_space kind")
+                    return global_store_pb2.RequestReplicaTransportResponse(
+                        status=global_store_pb2.Status.STATUS_ERROR
+                    )
+
+            replica, transport_id = self._transport_service.request_transport(
+                artifact_id=request.artifact_id,
+                view_id=requested_view_id,
+                source_node_id=request.source_node_id,
+                source_address=request.source_address,
+                source_port=request.source_port,
+                wait_timeout_ms=wait_timeout_ms,
+            )
+
+            remote_info = self._replica_to_memory_info(replica)
+
+            from contextlib import suppress
+
+            with suppress(Exception):
+                set_span_attributes({"tc.transport.id": str(transport_id)})
+
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_OK,
+                remote_memory_info=remote_info,
+                transport_id=str(transport_id),
+            )
+
+        except NotFoundError:
+            self._logger.info(
+                "No replicas registered for artifact %s",
+                request.artifact_id,
+            )
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+        except TimeoutError:
+            self._logger.warning(
+                "Timeout waiting for artifact %s",
+                request.artifact_id,
+            )
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_TIMED_OUT
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception("Error requesting artifact transport")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.RequestReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )
+
+    def complete_replica_transport(
+        self,
+        request: global_store_pb2.CompleteReplicaTransportRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.CompleteReplicaTransportResponse:
+        """Complete artifact transport and release resources."""
+        try:
+            transport_id = UUID(request.transport_id)
+            set_span_attributes({"tc.transport.id": str(transport_id)})
+            self._transport_service.complete_transport(transport_id)
+            return global_store_pb2.CompleteReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_OK
+            )
+
+        except NotFoundError:
+            self._logger.warning("Transport not found: %s", request.transport_id)
+            return global_store_pb2.CompleteReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_NOT_FOUND
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.exception("Error completing artifact transport")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(exc))
+            return global_store_pb2.CompleteReplicaTransportResponse(
+                status=global_store_pb2.Status.STATUS_ERROR
+            )

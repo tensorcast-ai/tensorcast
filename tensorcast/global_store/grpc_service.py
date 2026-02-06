@@ -28,8 +28,6 @@ from tensorcast.global_store.config import get_config
 from tensorcast.global_store.db_utils import init_db, optimize_db
 from tensorcast.global_store.exceptions import (
     DatabaseError,
-    NotFoundError,
-    TimeoutError,
     ValidationError,
 )
 from tensorcast.global_store.models import (
@@ -77,8 +75,12 @@ from tensorcast.global_store.repositories.key_mapping_repository import (
 from tensorcast.global_store.rpc.artifact_binding_rpc_handler import (
     ArtifactBindingRpcHandler,
 )
+from tensorcast.global_store.rpc.artifact_index_rpc_handler import (
+    ArtifactIndexRpcHandler,
+)
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
+from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
@@ -239,11 +241,22 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             key_mapping_repository=self.key_mapping_repository,
             logger=logger,
         )
+        self.artifact_index_rpc_handler = ArtifactIndexRpcHandler(
+            artifact_index_repository=self.artifact_indices,
+            artifact_repository=self.artifacts_repo,
+            multibase_sha256_to_hex=self._multibase_sha256_to_hex,
+            logger=logger,
+        )
 
         # Initialize services
         self.artifact_service = ArtifactService(self.replica_repository)
         self.transport_service = TransportService(
             self.replica_repository, self.transport_repository
+        )
+        self.transport_rpc_handler = TransportRpcHandler(
+            transport_service=self.transport_service,
+            replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
         )
         self.worker_service = WorkerService(
             self.worker_repository, self.replica_repository
@@ -2550,89 +2563,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.GetArtifactIndexRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetArtifactIndexResponse:
-        """Fetch canonical tensor index bytes by key for de-duplication/UPSERT."""
-        try:
-            if not request.tensor_index_key:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("tensor_index_key is required")
-                return global_store_pb2.GetArtifactIndexResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-            data = self.artifact_indices.get(request.tensor_index_key)
-            if data is None:
-                return global_store_pb2.GetArtifactIndexResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-
-            # Defaults until we persist per-key metadata
-            return global_store_pb2.GetArtifactIndexResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                tensor_index_data=data,
-                encoding="json",
-                schema_version="v3",
-            )
-        except Exception as e:
-            logger.exception("Error getting artifact index")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.GetArtifactIndexResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.artifact_index_rpc_handler.get_artifact_index(request, context)
 
     def GetArtifactIndexById(
         self,
         request: global_store_pb2.GetArtifactIndexByIdRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetArtifactIndexByIdResponse:
-        """Fetch canonical tensor index bytes by artifact_id.
-
-        Looks up the artifacts table to get index_multihash, then returns the
-        canonical index bytes from artifact_indices. Returns NOT_FOUND if
-        either artifact or index is missing.
-        """
-        try:
-            artifact_id = request.artifact_id
-            if not artifact_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("artifact_id is required")
-                return global_store_pb2.GetArtifactIndexByIdResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-            row = self.artifacts_repo.get(artifact_id)
-            if not row:
-                return global_store_pb2.GetArtifactIndexByIdResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            index_multihash = row.get("index_multihash")
-            index_key = self._multibase_sha256_to_hex(str(index_multihash))
-            if not index_key:
-                logger.warning(
-                    "Invalid index_multihash stored for %s; cannot derive SHA key",
-                    artifact_id,
-                )
-                return global_store_pb2.GetArtifactIndexByIdResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            data = self.artifact_indices.get(index_key)
-            if data is None:
-                return global_store_pb2.GetArtifactIndexByIdResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND
-                )
-            return global_store_pb2.GetArtifactIndexByIdResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                tensor_index_data=data,
-                encoding=str(row.get("encoding") or "json"),
-                schema_version=str(row.get("schema_version") or "v3"),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error getting artifact index by id")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.GetArtifactIndexByIdResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.artifact_index_rpc_handler.get_artifact_index_by_id(
+            request, context
+        )
 
     # ========== Transport Methods ==========
 
@@ -2641,122 +2581,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.RequestReplicaTransportRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RequestReplicaTransportResponse:
-        """Request artifact transport with load balancing."""
-        try:
-            # Normalize wait timeout
-            if request.HasField("wait_timeout_dur"):
-                d = request.wait_timeout_dur
-                wait_timeout_ms = int(d.seconds * 1000 + d.nanos / 1_000_000)
-            else:
-                wait_timeout_ms = 0
-
-            # Pre-attributes for routing decision visibility
-            set_span_attributes(
-                {
-                    "tc.artifact.id": request.artifact_id,
-                    "tc.source.address": request.source_address,
-                    "tc.source.port": int(request.source_port),
-                    "tc.request.wait_timeout_ms": int(wait_timeout_ms),
-                }
-            )
-
-            requested_view_id: str | None = None
-            if request.HasField("requested_byte_space"):
-                space = request.requested_byte_space
-                if space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
-                    if not space.id:
-                        context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                        context.set_details("requested_byte_space VIEW requires id")
-                        return global_store_pb2.RequestReplicaTransportResponse(
-                            status=global_store_pb2.Status.STATUS_ERROR
-                        )
-                    requested_view_id = space.id
-                elif space.kind in (
-                    common_pb2.BYTE_SPACE_KIND_CANONICAL,
-                    common_pb2.BYTE_SPACE_KIND_UNSPECIFIED,
-                ):
-                    requested_view_id = None
-                else:
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details("unsupported requested_byte_space kind")
-                    return global_store_pb2.RequestReplicaTransportResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
-                    )
-
-            # Request transport
-            replica, transport_id = self.transport_service.request_transport(
-                artifact_id=request.artifact_id,
-                view_id=requested_view_id,
-                source_node_id=request.source_node_id,
-                source_address=request.source_address,
-                source_port=request.source_port,
-                wait_timeout_ms=wait_timeout_ms,
-            )
-
-            # Convert to proto format
-            remote_info = self._replica_to_memory_info(replica)
-
-            # Transport ID is known at this point (best-effort only)
-            from contextlib import suppress
-
-            with suppress(Exception):
-                set_span_attributes({"tc.transport.id": str(transport_id)})
-
-            return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_OK,
-                remote_memory_info=remote_info,
-                transport_id=str(transport_id),
-            )
-
-        except NotFoundError:
-            logger.info(f"No replicas registered for artifact {request.artifact_id}")
-            return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-        except TimeoutError:
-            logger.warning(f"Timeout waiting for artifact {request.artifact_id}")
-            return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_TIMED_OUT
-            )
-        except Exception as e:
-            logger.exception("Error requesting artifact transport")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.RequestReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.transport_rpc_handler.request_replica_transport(request, context)
 
     def CompleteReplicaTransport(
         self,
         request: global_store_pb2.CompleteReplicaTransportRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.CompleteReplicaTransportResponse:
-        """Complete artifact transport and release resources."""
-        try:
-            transport_id = UUID(request.transport_id)
-
-            # Attach known attributes; CompleteReplicaTransportRequest only carries transport_id.
-            set_span_attributes({"tc.transport.id": str(transport_id)})
-
-            # Complete transport
-            self.transport_service.complete_transport(transport_id)
-
-            return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_OK
-            )
-
-        except NotFoundError:
-            logger.warning(f"Transport not found: {request.transport_id}")
-            return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-        except Exception as e:
-            logger.exception("Error completing artifact transport")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.CompleteReplicaTransportResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.transport_rpc_handler.complete_replica_transport(request, context)
 
     # ========== Key Mapping ==========
 
