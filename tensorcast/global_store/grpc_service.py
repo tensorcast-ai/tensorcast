@@ -15,7 +15,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Optional, cast
-from uuid import UUID
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
 import grpc
@@ -79,6 +78,9 @@ from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHan
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
 from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
     PlacementPersistenceRpcHandler,
+)
+from tensorcast.global_store.rpc.replica_lifecycle_rpc_handler import (
+    ReplicaLifecycleRpcHandler,
 )
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.worker_instance_rpc_handler import (
@@ -257,6 +259,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.replica_repository, self.transport_repository
         )
         self.transport_rpc_handler = TransportRpcHandler(
+            transport_service=self.transport_service,
+            replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
+        )
+        self.replica_lifecycle_rpc_handler = ReplicaLifecycleRpcHandler(
+            artifact_service=self.artifact_service,
+            replica_repository=self.replica_repository,
+            transport_repository=self.transport_repository,
             transport_service=self.transport_service,
             replica_to_memory_info=self._replica_to_memory_info,
             logger=logger,
@@ -2279,243 +2289,39 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.UpdateReplicaRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpdateReplicaResponse:
-        """Update artifact replica heartbeat."""
-        try:
-            replica_id = UUID(request.replica_id)
-            artifact_id = request.artifact_id
-
-            set_span_attributes(
-                {
-                    "tc.artifact.id": artifact_id,
-                    "tc.replica.id": str(replica_id),
-                }
-            )
-
-            success = self.artifact_service.update_heartbeat(replica_id, artifact_id)
-
-            status = (
-                global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-
-            return global_store_pb2.UpdateReplicaResponse(
-                status=status,
-                artifact_id=artifact_id,
-                replica_id=request.replica_id,
-            )
-
-        except Exception as e:
-            logger.exception("Error updating artifact replica")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UpdateReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR,
-                artifact_id=request.artifact_id,
-                replica_id=request.replica_id,
-            )
+        return self.replica_lifecycle_rpc_handler.update_replica(request, context)
 
     def UnregisterReplica(
         self,
         request: global_store_pb2.UnregisterReplicaRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterReplicaResponse:
-        """Unregister a artifact replica."""
-        try:
-            replica_id = UUID(request.replica_id)
-            artifact_id = request.artifact_id
-
-            success = self.artifact_service.unregister_replica(replica_id, artifact_id)
-
-            status = (
-                global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-
-            return global_store_pb2.UnregisterReplicaResponse(status=status)
-
-        except Exception as e:
-            logger.exception("Error unregistering artifact replica")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UnregisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.replica_lifecycle_rpc_handler.unregister_replica(request, context)
 
     def UnregisterReplicaByWorker(
         self,
         request: global_store_pb2.UnregisterReplicaByWorkerRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterReplicaByWorkerResponse:
-        """Unregister a replica by (artifact_id, worker_id[, device_id, memory_type])."""
-        try:
-            artifact_id = request.artifact_id
-            worker_id = request.worker_id
-            if not artifact_id or not worker_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("artifact_id and worker_id are required")
-                return global_store_pb2.UnregisterReplicaByWorkerResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR
-                )
-
-            mem_type = None
-            if request.HasField("memory_type"):
-                # Map proto enum to domain enum
-                from tensorcast.global_store.models import MemoryType
-
-                mt = request.memory_type
-                mem_type = (
-                    MemoryType.GPU
-                    if mt == common_pb2.MEMORY_TYPE_GPU
-                    else MemoryType.RAM
-                    if mt == common_pb2.MEMORY_TYPE_RAM
-                    else MemoryType.DISK
-                )
-
-            device_id = request.device_id if request.HasField("device_id") else None
-
-            success = self.artifact_service.unregister_by_worker(
-                worker_id=worker_id,
-                artifact_id=artifact_id,
-                memory_type=mem_type,
-                device_id=device_id,
-            )
-
-            status = (
-                global_store_pb2.Status.STATUS_OK
-                if success
-                else global_store_pb2.Status.STATUS_NOT_FOUND
-            )
-            return global_store_pb2.UnregisterReplicaByWorkerResponse(status=status)
-
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in UnregisterReplicaByWorker")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.UnregisterReplicaByWorkerResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
+        return self.replica_lifecycle_rpc_handler.unregister_replica_by_worker(
+            request, context
+        )
 
     def MarkReplicaUnavailable(
         self,
         request: global_store_pb2.MarkReplicaUnavailableRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.MarkReplicaUnavailableResponse:
-        try:
-            if not request.replica_id:
-                context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                context.set_details("replica_id is required")
-                return global_store_pb2.MarkReplicaUnavailableResponse(
-                    status=global_store_pb2.Status.STATUS_ERROR, updated=False
-                )
-            replica_id = UUID(request.replica_id)
-            replica = self.replica_repository.find_by_replica_id(replica_id)
-            if replica is None or (
-                request.artifact_id and replica.artifact_id != request.artifact_id
-            ):
-                return global_store_pb2.MarkReplicaUnavailableResponse(
-                    status=global_store_pb2.Status.STATUS_NOT_FOUND, updated=False
-                )
-
-            set_span_attributes(
-                {
-                    "tc.artifact.id": replica.artifact_id,
-                    "tc.replica.id": str(replica_id),
-                }
-            )
-
-            updated = self.replica_repository.mark_unavailable(replica_id)
-            return global_store_pb2.MarkReplicaUnavailableResponse(
-                status=global_store_pb2.Status.STATUS_OK, updated=updated
-            )
-        except ValueError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.MarkReplicaUnavailableResponse(
-                status=global_store_pb2.Status.STATUS_ERROR, updated=False
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error marking replica unavailable")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.MarkReplicaUnavailableResponse(
-                status=global_store_pb2.Status.STATUS_ERROR, updated=False
-            )
+        return self.replica_lifecycle_rpc_handler.mark_replica_unavailable(
+            request, context
+        )
 
     def WaitReplicaDrain(
         self,
         request: global_store_pb2.WaitReplicaDrainRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.WaitReplicaDrainResponse:
-        if not request.replica_id:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details("replica_id is required")
-            return global_store_pb2.WaitReplicaDrainResponse(
-                status=global_store_pb2.Status.STATUS_ERROR,
-                drained=False,
-                current_requests=0,
-            )
-        try:
-            replica_id = UUID(request.replica_id)
-        except ValueError as exc:
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.WaitReplicaDrainResponse(
-                status=global_store_pb2.Status.STATUS_ERROR,
-                drained=False,
-                current_requests=0,
-            )
-
-        timeout_ms = int(request.timeout_ms or 0)
-        interval = (
-            self.transport_service.config.transport_wait_retry_interval_ms / 1000.0
-        )
-
-        current = self.replica_repository.get_current_requests(replica_id)
-        if current is None:
-            return global_store_pb2.WaitReplicaDrainResponse(
-                status=global_store_pb2.Status.STATUS_NOT_FOUND,
-                drained=False,
-                current_requests=0,
-            )
-
-        drained = current == 0
-        if not drained and timeout_ms > 0:
-            now = time.monotonic()
-            deadline = now + (timeout_ms / 1000.0)
-            context_remaining = context.time_remaining()
-            if context_remaining is not None:
-                deadline = min(deadline, now + max(context_remaining, 0.0))
-
-            while not drained:
-                now = time.monotonic()
-                remaining = deadline - now
-                if remaining <= 0:
-                    break
-                time.sleep(min(interval, remaining))
-                current = self.replica_repository.get_current_requests(replica_id)
-                if current is None:
-                    return global_store_pb2.WaitReplicaDrainResponse(
-                        status=global_store_pb2.Status.STATUS_NOT_FOUND,
-                        drained=False,
-                        current_requests=0,
-                    )
-                drained = current == 0
-
-        oldest_age_ms = self.transport_repository.get_oldest_in_progress_age_ms(
-            replica_id
-        )
-        response = global_store_pb2.WaitReplicaDrainResponse(
-            status=global_store_pb2.Status.STATUS_OK
-            if drained
-            else global_store_pb2.Status.STATUS_TIMED_OUT,
-            drained=drained,
-            current_requests=int(current or 0),
-        )
-        if oldest_age_ms is not None:
-            response.oldest_transport_age_ms = int(oldest_age_ms)
-        return response
+        return self.replica_lifecycle_rpc_handler.wait_replica_drain(request, context)
 
     # Legacy ListReplicas removed in favor of ListReplicasV2
 
@@ -2524,74 +2330,7 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         request: global_store_pb2.ListReplicasV2Request,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListReplicasV2Response:
-        """List replicas with filtering + pagination (flat records).
-
-        Token format: opaque string encoding of integer offset.
-        """
-        try:
-            # Filters
-            artifact_id_filter: str | None = (
-                request.artifact_id if request.HasField("artifact_id") else None
-            )
-            node_id_filter: str | None = (
-                request.node_id if request.HasField("node_id") else None
-            )
-            memory_type_filter = None
-            if request.HasField("memory_type"):
-                mt = request.memory_type
-                if mt == common_pb2.MemoryType.MEMORY_TYPE_GPU:
-                    memory_type_filter = MemoryType.GPU
-                elif mt == common_pb2.MemoryType.MEMORY_TYPE_RAM:
-                    memory_type_filter = MemoryType.RAM
-                elif mt == common_pb2.MemoryType.MEMORY_TYPE_DISK:
-                    memory_type_filter = MemoryType.DISK
-
-            # Fetch all matching replicas
-            replicas = self.artifact_service.list_replicas(
-                artifact_id=artifact_id_filter,
-                node_id=node_id_filter,
-                memory_type=memory_type_filter,
-            )
-
-            # Pagination
-            page_size = (
-                int(request.pagination.page_size)
-                if request.pagination and request.pagination.page_size
-                else 100
-            )
-            start = 0
-            if request.pagination and request.pagination.page_token:
-                try:
-                    start = int(request.pagination.page_token)
-                except ValueError:
-                    start = 0
-
-            end = min(start + page_size, len(replicas))
-            sliced = replicas[start:end]
-            next_token = str(end) if end < len(replicas) else ""
-
-            # Map to flat records
-            records: list[global_store_pb2.ArtifactReplicaRecord] = [
-                global_store_pb2.ArtifactReplicaRecord(
-                    artifact_id=r.artifact_id,
-                    memory_info=self._replica_to_memory_info(r),
-                )
-                for r in sliced
-            ]
-
-            return global_store_pb2.ListReplicasV2Response(
-                replicas=records,
-                page_info=common_pb2.PageInfo(
-                    next_page_token=next_token, total_size=len(replicas)
-                ),
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("Error in ListReplicasV2")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(e))
-            return global_store_pb2.ListReplicasV2Response(
-                page_info=common_pb2.PageInfo(next_page_token="", total_size=0)
-            )
+        return self.replica_lifecycle_rpc_handler.list_replicas_v2(request, context)
 
     def GetArtifactIndex(
         self,
@@ -3190,6 +2929,14 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
             self.worker_repository, self.replica_repository, self.worker_service
         )
         self.transport_rpc_handler = TransportRpcHandler(
+            transport_service=self.transport_service,
+            replica_to_memory_info=self._replica_to_memory_info,
+            logger=logger,
+        )
+        self.replica_lifecycle_rpc_handler = ReplicaLifecycleRpcHandler(
+            artifact_service=self.artifact_service,
+            replica_repository=self.replica_repository,
+            transport_repository=self.transport_repository,
             transport_service=self.transport_service,
             replica_to_memory_info=self._replica_to_memory_info,
             logger=logger,
