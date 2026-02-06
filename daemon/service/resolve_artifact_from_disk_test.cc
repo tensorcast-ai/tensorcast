@@ -34,6 +34,8 @@
 namespace {
 
 using tensorcast::daemon::MaterializationController;
+using tensorcast::daemon::v2::MaterializeReplicaRequest;
+using tensorcast::daemon::v2::MaterializeReplicaResponse;
 using tensorcast::daemon::v2::ResolveArtifactFromDiskRequest;
 using tensorcast::daemon::v2::ResolveArtifactFromDiskResponse;
 
@@ -105,6 +107,7 @@ struct ResolveFixture {
   tensorcast::daemon::BackgroundScheduler scheduler;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
+  tensorcast::daemon::LocalDiskImportCatalog disk_imports;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
@@ -129,6 +132,7 @@ struct ResolveFixture {
                 .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
+                .disk_imports = disk_imports,
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,
@@ -161,14 +165,22 @@ TEST_CASE(
 
   REQUIRE(status.ok());
   REQUIRE_FALSE(resp.artifact_id().empty());
+  REQUIRE(resp.artifact_id().starts_with("mi2:"));
   REQUIRE(resp.generation() == generation_from_bytes(resp.canonical_index_bytes()));
   REQUIRE_FALSE(resp.canonical_index_bytes().empty());
+  const auto imported = fix.disk_imports.lookup_import(resp.artifact_id());
+  REQUIRE(imported.has_value());
+  REQUIRE(imported->normalized_disk_path == resp.disk_path());
 }
 
-TEST_CASE("ResolveArtifactFromDisk enforces shared root and missing paths", "[daemon][disk][resolve]") {
+TEST_CASE("ResolveArtifactFromDisk accepts absolute imports and rejects missing paths", "[daemon][disk][resolve]") {
   const auto artifact_dir = test_tmpdir() / "artifact_denied";
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
   ResolveFixture denied_fix(artifact_dir.parent_path() / "unrelated_root");
   grpc::ServerContext ctx;
   tensorcast::daemon::RpcContext denied_rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
@@ -176,11 +188,12 @@ TEST_CASE("ResolveArtifactFromDisk enforces shared root and missing paths", "[da
   req.set_disk_path(artifact_dir.string());
   ResolveArtifactFromDiskResponse resp;
   auto status = denied_fix.controller.resolve_artifact_from_disk(denied_rctx, req, resp);
-  REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.ok());
+  REQUIRE(resp.artifact_id().starts_with("mi2:"));
 
-  ResolveFixture ok_fix(artifact_dir.parent_path());
+  ResolveFixture ok_fix(artifact_dir.parent_path() / "other_root");
   tensorcast::daemon::RpcContext ok_rctx{"ResolveArtifactFromDiskTest", ctx, /*allow_high_card_attrs=*/true};
+  req.set_disk_path((artifact_dir.parent_path() / "missing_artifact").string());
   ResolveArtifactFromDiskResponse missing_resp;
   auto missing_status = ok_fix.controller.resolve_artifact_from_disk(ok_rctx, req, missing_resp);
   REQUIRE_FALSE(missing_status.ok());
@@ -226,7 +239,7 @@ TEST_CASE(
   auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
 
   REQUIRE(status.ok());
-  REQUIRE(resp.artifact_id() == artifact_dir.string());
+  REQUIRE(resp.artifact_id().starts_with("mi2:"));
   REQUIRE_FALSE(resp.canonical_index_bytes().empty());
   nlohmann::json parsed = nlohmann::json::parse(resp.canonical_index_bytes());
   REQUIRE(parsed.contains("weights"));
@@ -261,4 +274,39 @@ TEST_CASE("ResolveArtifactFromDisk fails checksum validation when descriptor mis
 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+}
+
+TEST_CASE("Standalone disk import materializes without Global Store", "[daemon][disk][resolve][standalone]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_standalone";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  ResolveFixture fix;
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::RpcContext resolve_rctx{
+      "ResolveArtifactFromDiskTest", resolve_ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest resolve_req;
+  resolve_req.set_disk_path(artifact_dir.string());
+  resolve_req.set_verify_checksums(true);
+  ResolveArtifactFromDiskResponse resolve_resp;
+  auto resolve_status = fix.controller.resolve_artifact_from_disk(resolve_rctx, resolve_req, resolve_resp);
+  REQUIRE(resolve_status.ok());
+  REQUIRE(resolve_resp.artifact_id().starts_with("mi2:"));
+
+  grpc::ServerContext materialize_ctx;
+  tensorcast::daemon::RpcContext materialize_rctx{
+      "MaterializeReplicaStandaloneTest", materialize_ctx, /*allow_high_card_attrs=*/true};
+  MaterializeReplicaRequest materialize_req;
+  materialize_req.set_artifact_id(resolve_resp.artifact_id());
+  materialize_req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  materialize_req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+
+  MaterializeReplicaResponse materialize_resp;
+  auto materialize_status = fix.controller.materialize_replica(materialize_rctx, materialize_req, materialize_resp);
+  REQUIRE(materialize_status.ok());
+  REQUIRE(materialize_resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  REQUIRE(materialize_resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
 }
