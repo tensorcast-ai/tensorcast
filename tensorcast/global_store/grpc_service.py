@@ -27,14 +27,18 @@ from tensorcast.global_store.exceptions import (
     ValidationError,
 )
 from tensorcast.global_store.models import (
-    ByteSpaceKind,
-    ByteSpaceRef,
     ExportState,
     Instance,
-    MemoryType,
     PlacementPlan,
     Replica,
     Worker,
+)
+from tensorcast.global_store.replica_memory_codec import (
+    export_state_from_proto,
+    export_state_to_proto,
+    memory_info_to_replica,
+    parse_transport_metadata,
+    replica_to_memory_info,
 )
 from tensorcast.global_store.repositories import (
     ArtifactBindingRepository,
@@ -1231,147 +1235,25 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
     def _export_state_from_proto(
         state: common_pb2.ReplicaTransportMetadata.ExportState,
     ) -> ExportState:
-        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE:
-            return ExportState.EXPORTABLE
-        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING:
-            return ExportState.DRAINING
-        return ExportState.PRESENCE_ONLY
+        return export_state_from_proto(state)
 
     @staticmethod
     def _export_state_to_proto(
         state: ExportState,
     ) -> common_pb2.ReplicaTransportMetadata.ExportState:
-        if state is ExportState.EXPORTABLE:
-            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
-        if state is ExportState.DRAINING:
-            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING
-        return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_PRESENCE_ONLY
+        return export_state_to_proto(state)
 
     def _parse_transport_metadata(
         self, mem_info: common_pb2.MemoryInfo
     ) -> tuple[bool, ExportState, int, list[str], list[int], str | None]:
-        transport_authoritative = mem_info.HasField("transport")
-        export_state = ExportState.PRESENCE_ONLY
-        export_generation = 0
-        remote_keys: list[str] = []
-        buffer_sizes: list[int] = []
-        verification_json: str | None = None
-
-        if not transport_authoritative:
-            # New protocol: without `transport` presence, this is a presence-only
-            # update and must not update transport metadata via legacy fields.
-            return (
-                transport_authoritative,
-                export_state,
-                export_generation,
-                remote_keys,
-                buffer_sizes,
-                verification_json,
-            )
-
-        transport = mem_info.transport
-        export_state = self._export_state_from_proto(transport.export_state)
-        export_generation = int(transport.export_generation or 0)
-        remote_keys = list(transport.remote_memory_keys)
-        buffer_sizes = [int(size) for size in transport.buffer_sizes]
-        verification_json = (
-            transport.verification_json if transport.verification_json else None
-        )
-
-        # Presence-only is a routing-withdraw state and must not retain keys or
-        # export-bound verification metadata.
-        if export_state is ExportState.PRESENCE_ONLY:
-            return (
-                transport_authoritative,
-                export_state,
-                export_generation,
-                [],
-                [],
-                None,
-            )
-
-        keys_required = export_state is ExportState.EXPORTABLE
-        if keys_required and not remote_keys:
-            export_state = ExportState.PRESENCE_ONLY
-            remote_keys = []
-            buffer_sizes = []
-            verification_json = None
-
-        # Validate keys when provided. Draining may omit keys entirely.
-        if remote_keys or buffer_sizes:
-            keys_valid = True
-            if len(remote_keys) != len(buffer_sizes):
-                keys_valid = False
-            else:
-                total = 0
-                for size in buffer_sizes:
-                    if size <= 0:
-                        keys_valid = False
-                        break
-                    total += int(size)
-                if keys_valid and mem_info.memory_size > 0:
-                    keys_valid = total == mem_info.memory_size
-            if not keys_valid:
-                remote_keys = []
-                buffer_sizes = []
-                export_state = ExportState.PRESENCE_ONLY
-                verification_json = None
-
-        return (
-            transport_authoritative,
-            export_state,
-            export_generation,
-            remote_keys,
-            buffer_sizes,
-            verification_json,
-        )
+        return parse_transport_metadata(mem_info)
 
     def _replica_to_memory_info(self, replica: Replica) -> common_pb2.MemoryInfo:
         """Convert Replica to MemoryInfo proto."""
-        # Map domain enum to proto enum
-        if replica.memory_type == MemoryType.GPU:
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_GPU
-        elif replica.memory_type == MemoryType.RAM:
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_RAM
-        else:
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
-
-        memory_info = common_pb2.MemoryInfo(
-            node_id=replica.node_id,
-            node_address=replica.node_address,
-            node_port=replica.node_port,
-            memory_size=replica.memory_size,
-            memory_type=proto_mem_type,
-            device_id=replica.device_id,
-            remote_memory_keys=replica.remote_memory_keys,
-            buffer_sizes=replica.buffer_sizes,
-            verification_json=replica.verification_json or "",
+        return replica_to_memory_info(
+            replica=replica,
+            datetime_to_timestamp=self._datetime_to_timestamp,
         )
-        transport = memory_info.transport
-        transport.export_state = self._export_state_to_proto(replica.export_state)
-        transport.export_generation = int(replica.export_generation or 0)
-        transport.remote_memory_keys.extend(replica.remote_memory_keys)
-        transport.buffer_sizes.extend([int(size) for size in replica.buffer_sizes])
-        if replica.verification_json:
-            transport.verification_json = replica.verification_json
-        if replica.byte_space.kind == ByteSpaceKind.VIEW:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(
-                    kind=common_pb2.BYTE_SPACE_KIND_VIEW,
-                    id=replica.byte_space.id or "",
-                )
-            )
-        else:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(kind=common_pb2.BYTE_SPACE_KIND_CANONICAL)
-            )
-        creation_proto = self._datetime_to_timestamp(replica.created_at)
-        if creation_proto is not None:
-            memory_info.creation_ts.CopyFrom(creation_proto)
-        expires_proto = self._datetime_to_timestamp(replica.expires_at)
-        if expires_proto is not None:
-            memory_info.expires_at.CopyFrom(expires_proto)
-        return memory_info
 
     def _memory_info_to_replica_artifact_id(
         self,
@@ -1381,52 +1263,12 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         worker_id: str,
     ) -> Replica:
         """Convert MemoryInfo proto to Replica using content-addressed artifact_id."""
-        (
-            transport_authoritative,
-            export_state,
-            export_generation,
-            remote_keys,
-            buffer_sizes,
-            verification_json,
-        ) = self._parse_transport_metadata(mem_info)
-
-        # Map proto enum to domain enum
-        if mem_info.memory_type == common_pb2.MemoryType.MEMORY_TYPE_GPU:
-            domain_mem_type = MemoryType.GPU
-        elif mem_info.memory_type == common_pb2.MemoryType.MEMORY_TYPE_RAM:
-            domain_mem_type = MemoryType.RAM
-        else:
-            domain_mem_type = MemoryType.DISK
-
-        byte_space = ByteSpaceRef.canonical()
-        if mem_info.HasField("byte_space"):
-            if mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW:
-                view_id = mem_info.byte_space.id.strip()
-                if not view_id:
-                    raise ValidationError("byte_space VIEW requires id")
-                byte_space = ByteSpaceRef.view(view_id)
-            elif mem_info.byte_space.kind in (
-                common_pb2.BYTE_SPACE_KIND_CANONICAL,
-                common_pb2.BYTE_SPACE_KIND_UNSPECIFIED,
-            ):
-                byte_space = ByteSpaceRef.canonical()
-
-        return Replica(
+        return memory_info_to_replica(
+            mem_info=mem_info,
             artifact_id=artifact_id,
-            byte_space=byte_space,
-            node_id=mem_info.node_id,
-            node_address=mem_info.node_address,
-            node_port=mem_info.node_port,
-            memory_size=mem_info.memory_size,
-            memory_type=domain_mem_type,
-            device_id=mem_info.device_id,
             max_concurrency=max_concurrency,
-            remote_memory_keys=remote_keys,
-            buffer_sizes=buffer_sizes,
-            export_state=export_state,
-            export_generation=export_generation,
             worker_id=worker_id,
-            verification_json=verification_json,
+            require_view_id=True,
         )
 
     def _determine_worker_status(
