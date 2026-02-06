@@ -222,6 +222,48 @@ absl::StatusOr<uint64_t> placement_lease_id_from_scope(
   return scope.lease_id();
 }
 
+struct PlacementLeaseResolution {
+  uint64_t lease_id{0};
+  bool envelope_token{false};
+};
+
+absl::StatusOr<PlacementLeaseResolution> resolve_placement_lease_token(
+    std::string_view lease_token,
+    common::CapabilityTokenManager* capability_tokens,
+    std::string_view daemon_id,
+    PlacementLeaseTokens* placement_lease_tokens,
+    bool require_not_expired) {
+  if (capability_tokens != nullptr && capability_tokens->configured() &&
+      tensorcast::common::CapabilityTokenManager::looks_like_envelope(lease_token)) {
+    auto envelope_or = capability_tokens->verify(
+        std::string(lease_token),
+        tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
+        std::string(daemon_id),
+        absl::Now(),
+        require_not_expired);
+    if (!envelope_or.ok()) {
+      return envelope_or.status();
+    }
+    auto lease_id_or = placement_lease_id_from_scope(*envelope_or);
+    if (!lease_id_or.ok()) {
+      return lease_id_or.status();
+    }
+    return PlacementLeaseResolution{
+        .lease_id = *lease_id_or,
+        .envelope_token = true,
+    };
+  }
+
+  auto lease_or = placement_lease_tokens->resolve(std::string(lease_token));
+  if (!lease_or.ok()) {
+    return lease_or.status();
+  }
+  return PlacementLeaseResolution{
+      .lease_id = *lease_or,
+      .envelope_token = false,
+  };
+}
+
 grpc::Status retention_acquire_status(const absl::Status& st) {
   if (absl::IsResourceExhausted(st)) {
     return {StatusCode::RESOURCE_EXHAUSTED, std::string(st.message())};
@@ -683,41 +725,26 @@ Status StoreDaemonServiceImpl::RenewPlacementLease(
     return {StatusCode::INVALID_ARGUMENT, "ttl_ms is required"};
   }
   const absl::Duration ttl = absl::Milliseconds(static_cast<int64_t>(req->ttl_ms()));
-  std::optional<uint64_t> lease_id;
-  bool envelope_token = false;
-  if (capability_tokens_ && capability_tokens_->configured() &&
-      tensorcast::common::CapabilityTokenManager::looks_like_envelope(req->lease_token())) {
-    envelope_token = true;
-    auto env_or = capability_tokens_->verify(
-        req->lease_token(),
-        tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
-        daemon_id_,
-        absl::Now(),
-        /*require_not_expired=*/true);
-    if (!env_or.ok()) {
-      return to_grpc_status(env_or.status());
-    }
-    auto scope_or = placement_lease_id_from_scope(*env_or);
-    if (!scope_or.ok()) {
-      return to_grpc_status(scope_or.status());
-    }
-    lease_id = *scope_or;
-  } else {
-    auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-    if (!lease_or.ok()) {
-      return to_grpc_status(lease_or.status());
-    }
-    lease_id = *lease_or;
+  auto resolution_or = resolve_placement_lease_token(
+      req->lease_token(),
+      capability_tokens_,
+      daemon_id_,
+      placement_lease_tokens_,
+      /*require_not_expired=*/true);
+  if (!resolution_or.ok()) {
+    return to_grpc_status(resolution_or.status());
   }
+  const uint64_t lease_id = resolution_or->lease_id;
+  const bool envelope_token = resolution_or->envelope_token;
 
-  auto st = lifecycle_manager_->renew_placement(*lease_id, ttl);
+  auto st = lifecycle_manager_->renew_placement(lease_id, ttl);
   if (!st.ok()) {
     return to_grpc_status(st);
   }
 
   if (envelope_token) {
     tensorcast::common::v1::PlacementLeaseScope scope;
-    scope.set_lease_id(*lease_id);
+    scope.set_lease_id(lease_id);
     auto scope_or = tensorcast::common::CapabilityTokenManager::serialize_scope_deterministic(scope);
     if (!scope_or.ok()) {
       return to_grpc_status(scope_or.status());
@@ -737,7 +764,7 @@ Status StoreDaemonServiceImpl::RenewPlacementLease(
     resp->set_lease_token(req->lease_token());
   }
 
-  resp->set_lease_id(*lease_id);
+  resp->set_lease_id(lease_id);
   const absl::Time expires_at = absl::Now() + ttl;
   google::protobuf::Timestamp ts;
   ts.set_seconds(absl::ToUnixSeconds(expires_at));
@@ -755,34 +782,19 @@ Status StoreDaemonServiceImpl::ReleasePlacementLease(
   if (req->lease_token().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "lease_token is required"};
   }
-  bool envelope_token = false;
-  std::optional<uint64_t> lease_id;
-  if (capability_tokens_ && capability_tokens_->configured() &&
-      tensorcast::common::CapabilityTokenManager::looks_like_envelope(req->lease_token())) {
-    envelope_token = true;
-    auto env_or = capability_tokens_->verify(
-        req->lease_token(),
-        tensorcast::common::v1::CAPABILITY_AUDIENCE_PLACEMENT_LEASE,
-        daemon_id_,
-        absl::Now(),
-        /*require_not_expired=*/false);
-    if (!env_or.ok()) {
-      return to_grpc_status(env_or.status());
-    }
-    auto scope_or = placement_lease_id_from_scope(*env_or);
-    if (!scope_or.ok()) {
-      return to_grpc_status(scope_or.status());
-    }
-    lease_id = *scope_or;
-  } else {
-    auto lease_or = placement_lease_tokens_->resolve(req->lease_token());
-    if (!lease_or.ok()) {
-      return to_grpc_status(lease_or.status());
-    }
-    lease_id = *lease_or;
+  auto resolution_or = resolve_placement_lease_token(
+      req->lease_token(),
+      capability_tokens_,
+      daemon_id_,
+      placement_lease_tokens_,
+      /*require_not_expired=*/false);
+  if (!resolution_or.ok()) {
+    return to_grpc_status(resolution_or.status());
   }
+  const uint64_t lease_id = resolution_or->lease_id;
+  const bool envelope_token = resolution_or->envelope_token;
 
-  lifecycle_manager_->release_lease(*lease_id);
+  lifecycle_manager_->release_lease(lease_id);
   const bool erased = envelope_token ? true : placement_lease_tokens_->erase(req->lease_token());
   resp->set_released(erased);
   rctx.mark_success();
