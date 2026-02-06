@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "absl/status/status.h"
 #include "core/common/device_types.h"
 #include "core/cuda/cuda_api.h"
 #include "core/testing/concurrency_utils.h"
@@ -19,6 +20,7 @@ using namespace tensorcast::testing;
 using tensorcast::DeviceType;
 using tensorcast::common::memory::MemoryLocation;
 using tensorcast::store::StoreEngine;
+using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializeHints;
 using tensorcast::store::loading::ReplicaHandle;
 using tensorcast::store::replica::MemoryState;
@@ -27,11 +29,12 @@ using tensorcast::store::replica::MemoryState;
 TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") {
   skip_if_insufficient_gpus(2, "B1");
 
-  const std::string artifact_id = "multi_gpu_model_b1";
+  const std::string artifact_id = "cgid:multi_gpu_model_b1";
   const size_t artifact_size = 50 * 1024 * 1024; // 50MB
 
   TempArtifactFixture fixture("multi_gpu_b1");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
 
@@ -48,9 +51,9 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
   std::vector<ReplicaHandle> handles;
   for (int gpu = 0; gpu < gpu_count; ++gpu) {
     MaterializeHints hints;
-
-    hints.disk_path = artifact_id;
-    auto handle_or = store->materialize_replica(make_gpu_key(gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = artifact_id;
+    auto handle_or =
+        store->materialize_replica(make_gpu_key(gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(handle_or.ok());
     handles.push_back(std::move(handle_or).value());
   }
@@ -128,19 +131,21 @@ TEST_CASE("B1: Same replica on multiple GPUs", "[store_engine][multi_gpu][b1]") 
 TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]") {
   skip_if_insufficient_gpus(2, "B2");
 
-  const std::string artifact_id = "gpu_copy_require_id_b2";
+  const std::string artifact_id = "cgid:gpu_copy_require_id_b2";
   const size_t artifact_size = 16 * 1024 * 1024; // 16MB
 
   TempArtifactFixture fixture("multi_gpu_b2");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
-  // Load to GPU 0 first via LOAD_ONLY (using disk_path)
+  // Load to GPU 0 first via LOAD_ONLY (using disk source)
   {
     MaterializeHints hints;
-    hints.disk_path = artifact_id;
-    auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = artifact_id;
+    auto handle0_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(handle0_or.ok());
     auto handle0 = std::move(handle0_or).value();
     REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -151,8 +156,8 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
     MaterializeHints hints; // intentionally leave artifact_id empty
     auto handle1_or = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::COPY_ONLY, hints);
     REQUIRE_FALSE(handle1_or.ok());
-    // Error message should clearly indicate missing artifact_id
-    REQUIRE(handle1_or.status().message().find("requires hints.artifact_id") != std::string::npos);
+    REQUIRE(handle1_or.status().code() == absl::StatusCode::kInvalidArgument);
+    REQUIRE(handle1_or.status().message().find("artifact_id") != std::string::npos);
   }
 }
 
@@ -160,20 +165,21 @@ TEST_CASE("B2: COPY_ONLY requires artifact_id", "[store_engine][multi_gpu][b2]")
 TEST_CASE("B3: GPU-to-GPU copy", "[store_engine][multi_gpu][b3]") {
   skip_if_insufficient_gpus(2, "B3");
 
-  const std::string artifact_id = "gpu_copy_model_b3";
+  const std::string artifact_id = "cgid:gpu_copy_model_b3";
   const size_t artifact_size = 40 * 1024 * 1024; // 40MB
 
   TempArtifactFixture fixture("multi_gpu_b3");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
   // First load to GPU 0
   {
     MaterializeHints hints;
-
-    hints.disk_path = artifact_id;
-    auto handle0_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = artifact_id;
+    auto handle0_or =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(handle0_or.ok());
     auto handle0 = std::move(handle0_or).value();
     REQUIRE(handle0.wait_ready(std::chrono::milliseconds(30000)).ok());
@@ -255,8 +261,9 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   std::vector<std::string> artifact_ids;
   for (int i = 0; i < num_artifacts; ++i) {
     auto artifact_id = generate_artifact_id("balance_model_b4", i);
-    artifact_ids.push_back(artifact_id);
-    fixture.create_model(artifact_id, artifact_size);
+    auto canonical_id = std::string("cgid:") + artifact_id;
+    artifact_ids.push_back(canonical_id);
+    fixture.create_model(canonical_id, artifact_size);
   }
 
   auto store = make_test_store(fixture.root(), 512); // 512MB pool
@@ -274,9 +281,10 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
   for (size_t i = 0; i < artifact_ids.size(); ++i) {
     int target_gpu = i % gpu_count;
     MaterializeHints hints;
-    hints.disk_path = artifact_ids[i];
-    auto handle_or =
-        store->materialize_replica(make_gpu_key(target_gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = artifact_ids[i];
+    DiskSource disk_source{.path = fixture.root() / artifact_ids[i], .expected_size = std::nullopt};
+    auto handle_or = store->materialize_replica(
+        make_gpu_key(target_gpu), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     if (handle_or.ok()) {
       REQUIRE(handle_or.value().wait_ready(std::chrono::milliseconds(30000)).ok());
     }
@@ -308,23 +316,25 @@ TEST_CASE("B4: Multi-GPU load balancing", "[store_engine][multi_gpu][b4]") {
 TEST_CASE("B5: Device-specific operations", "[store_engine][multi_gpu][b5]") {
   skip_if_insufficient_gpus(2, "B5");
 
-  const std::string artifact_id = "device_ops_model_b5";
+  const std::string artifact_id = "cgid:device_ops_model_b5";
   const size_t artifact_size = 30 * 1024 * 1024; // 30MB
 
   TempArtifactFixture fixture("multi_gpu_b5");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
   // Load to both GPU 0 and GPU 1
   MaterializeHints hints;
-
-  hints.disk_path = artifact_id;
-  auto handle0 = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  hints.artifact_id = artifact_id;
+  auto handle0 =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(handle0.ok());
   REQUIRE(handle0.value().wait_ready(std::chrono::milliseconds(30000)).ok());
 
-  auto handle1 = store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle1 =
+      store->materialize_replica(make_gpu_key(1), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
   LOG(INFO) << "handle0: " << handle0.status().message();
   LOG(INFO) << "handle1: " << handle1.status().message();

@@ -586,8 +586,9 @@ int StoreEngine::clear_mem() {
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_replica(
     const DeviceKey& target_device,
     MaterializeMode mode,
-    const loading::MaterializeHints& hints) {
-  return ingestion_runtime_->materialize_replica(target_device, mode, hints);
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
+  return ingestion_runtime_->materialize_replica(target_device, mode, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_into_target(
@@ -595,9 +596,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_in
     const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
-    const loading::MaterializeHints& hints) {
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
   return ingestion_runtime_->materialize_into_target(
-      target_device, target_layout, canonical_index_json, generation, hints);
+      target_device, target_layout, canonical_index_json, generation, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_mapped_into_target(
@@ -606,9 +608,10 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> StoreEngine::materialize_ma
     const loader::ByteRangeMap& mapping,
     std::string_view canonical_index_json,
     uint64_t generation,
-    const loading::MaterializeHints& hints) {
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
   return ingestion_runtime_->materialize_mapped_into_target(
-      target_device, target_layout, mapping, canonical_index_json, generation, hints);
+      target_device, target_layout, mapping, canonical_index_json, generation, hints, std::move(disk_source));
 }
 
 absl::StatusOr<loading::ReplicaHandle> StoreEngine::materialize_view_from_assembly(

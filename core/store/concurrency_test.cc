@@ -17,6 +17,7 @@ using namespace tensorcast::testing;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::MaterializeHints;
 
 namespace {
@@ -33,17 +34,19 @@ const LoggingInitializer kLoggingInitializer; // NOLINT(cert-err58-cpp)
 TEST_CASE("A0: Smoke materialize/unload flow", "[store_engine][concurrency][a0]") {
   skip_if_no_cuda("A0");
 
-  const std::string artifact_id = "concurrent_model_a0";
+  const std::string artifact_id = "cgid:concurrent_model_a0";
   const size_t artifact_size = 8 * 1024 * 1024; // 8MB
 
   TempArtifactFixture fixture("concurrency_a0");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
   MaterializeHints hints;
-  hints.disk_path = artifact_id;
-  auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  hints.artifact_id = artifact_id;
+  auto handle_or =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(handle_or.ok());
 
   auto handle = std::move(handle_or).value();
@@ -64,11 +67,12 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
   skip_if_no_cuda("A1");
 
   const int num_threads = 32;
-  const std::string artifact_id = "concurrent_model_a1";
+  const std::string artifact_id = "cgid:concurrent_model_a1";
   const size_t artifact_size = 10 * 1024 * 1024; // 10MB
 
   TempArtifactFixture fixture("concurrency_a1");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool for 32 threads x 10MB
   ThreadBarrier barrier(num_threads);
@@ -87,8 +91,9 @@ TEST_CASE("A1: Concurrent materialize_replica() same replica", "[store_engine][c
       auto load_start = std::chrono::high_resolution_clock::now();
       LOG(INFO) << "Thread " << thread_id << " preparing replica " << artifact_id;
       MaterializeHints hints;
-      hints.disk_path = artifact_id;
-      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      hints.artifact_id = artifact_id;
+      auto handle_or =
+          store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
       LoadResult result;
       result.artifact_id = artifact_id;
@@ -150,8 +155,9 @@ TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_en
   std::vector<std::string> artifact_ids;
   for (int i = 0; i < num_models; ++i) {
     auto artifact_id = generate_artifact_id("artifact", i);
-    artifact_ids.push_back(artifact_id);
-    fixture.create_model(artifact_id, random_model_size(5, 20));
+    auto canonical_id = std::string("cgid:") + artifact_id;
+    artifact_ids.push_back(canonical_id);
+    fixture.create_model(canonical_id, random_model_size(5, 20));
   }
 
   auto store = make_test_store(fixture.root(), 1024); // 1GB pool
@@ -171,8 +177,10 @@ TEST_CASE("A2: Concurrent materialize_replica() different artifacts", "[store_en
 
       auto load_start = std::chrono::high_resolution_clock::now();
       MaterializeHints hints;
-      hints.disk_path = artifact_id;
-      auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+      hints.artifact_id = artifact_id;
+      DiskSource disk_source{.path = fixture.root() / artifact_id, .expected_size = std::nullopt};
+      auto handle_or =
+          store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
 
       LoadResult result;
       result.artifact_id = artifact_id;
@@ -226,19 +234,21 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
 
   const int num_loaders = 8;
   const int num_unloaders = 8;
-  const std::string artifact_id = "concurrent_model_a3";
+  const std::string artifact_id = "cgid:concurrent_model_a3";
   const size_t artifact_size = 20 * 1024 * 1024; // 20MB
 
   TempArtifactFixture fixture("concurrency_a3");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
   // First, load the replica
   {
     MaterializeHints hints;
-    hints.disk_path = artifact_id;
-    auto initial_handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = artifact_id;
+    auto initial_handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(initial_handle.ok());
     REQUIRE(initial_handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }
@@ -258,8 +268,9 @@ TEST_CASE("A3: Concurrent materialize_replica() and unload_replica()", "[store_e
 
       while (!stop_flag.load()) {
         MaterializeHints hints;
-        hints.disk_path = artifact_id;
-        auto handle_or = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+        hints.artifact_id = artifact_id;
+        auto handle_or =
+            store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
         if (handle_or.ok()) {
           auto handle = std::move(handle_or).value();
           if (handle.wait_ready(std::chrono::milliseconds(1000)).ok()) {
@@ -306,18 +317,20 @@ TEST_CASE("A4: Concurrent unload_replica() same replica", "[store_engine][concur
   skip_if_no_cuda("A4");
 
   const int num_threads = 16;
-  const std::string artifact_id = "concurrent_model_a4";
+  const std::string artifact_id = "cgid:concurrent_model_a4";
   const size_t artifact_size = 15 * 1024 * 1024; // 15MB
 
   TempArtifactFixture fixture("concurrency_a4");
-  fixture.create_model(artifact_id, artifact_size);
+  auto artifact_dir = fixture.create_model(artifact_id, artifact_size);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   auto store = make_test_store(fixture.root());
 
   // Load the replica
   MaterializeHints hints;
-  hints.disk_path = artifact_id;
-  auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  hints.artifact_id = artifact_id;
+  auto handle =
+      store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(handle.ok());
   REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
 
@@ -372,11 +385,14 @@ TEST_CASE("A5: Concurrent clear_mem()", "[store_engine][concurrency][a5]") {
 
   for (int i = 0; i < num_models; ++i) {
     auto artifact_id = generate_artifact_id("artifact", i);
-    fixture.create_model(artifact_id, 10 * 1024 * 1024); // 10MB each
+    auto canonical_id = std::string("cgid:") + artifact_id;
+    auto artifact_dir = fixture.create_model(canonical_id, 10 * 1024 * 1024); // 10MB each
 
     MaterializeHints hints;
-    hints.disk_path = artifact_id;
-    auto handle = store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    hints.artifact_id = canonical_id;
+    DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+    auto handle =
+        store->materialize_replica(make_gpu_key(0), StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(handle.ok());
     REQUIRE(handle.value().wait_ready(std::chrono::milliseconds(30000)).ok());
   }

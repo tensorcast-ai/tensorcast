@@ -1045,7 +1045,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           executor->add([engine = std::move(engine), dev, artifact_id = std::move(artifact_id)]() mutable {
             store::loading::MaterializeHints hints;
             hints.artifact_id = artifact_id;
-            auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+            auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
             if (!res.ok()) {
               VLOG(1) << "Prefetch materialize_replica failed: artifact_id=" << artifact_id
                       << " dev=" << dev.to_string() << ": " << res.status();

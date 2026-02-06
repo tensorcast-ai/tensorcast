@@ -39,6 +39,7 @@ using tensorcast::store::DeviceKey;
 using tensorcast::store::MemoryTierConfig;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::DiskSource;
 using tensorcast::store::loading::ReplicaKey;
 using tensorcast::store::loading::ReplicaKeyHash;
 namespace components = tensorcast::store::components;
@@ -268,9 +269,9 @@ TEST_CASE("StoreEngine supports CGID load/list/lease without hashes", "[store_en
 
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = cgid;
-  hints.disk_path = artifact_dir.string();
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
-  auto handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   INFO("cgid load status: " << handle_or.status());
   REQUIRE(handle_or.ok());
   auto handle = std::move(*handle_or);
@@ -1059,9 +1060,9 @@ TEST_CASE("StoreEngine materialize_replica() GPU workflow", "[store_engine][mate
   REQUIRE(tensorcast::testing::is_cuda_available());
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact_id;
-  hints.disk_path = artifact_dir.string();
-  auto gpu_handle_or =
-      store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+  auto gpu_handle_or = store.materialize_replica(
+      make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(gpu_handle_or.ok());
   auto gpu_handle = std::move(gpu_handle_or).value();
   REQUIRE(wait_ready(gpu_handle).ok());
@@ -1113,9 +1114,9 @@ TEST_CASE("StoreEngine materializes variant slice with distinct residency", "[st
 
   tensorcast::store::loading::MaterializeHints canonical_hints;
   canonical_hints.artifact_id = canonical_artifact_id;
-  canonical_hints.disk_path = artifact_dir.string();
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
   auto canonical_handle_or =
-      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, canonical_hints);
+      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, canonical_hints, disk_source);
   INFO("canonical load status: " << canonical_handle_or.status());
   REQUIRE(canonical_handle_or.ok());
   auto canonical_handle = std::move(canonical_handle_or).value();
@@ -1140,11 +1141,10 @@ TEST_CASE("StoreEngine materializes variant slice with distinct residency", "[st
 
   tensorcast::store::loading::MaterializeHints variant_hints;
   variant_hints.artifact_id = canonical_artifact_id;
-  variant_hints.disk_path = artifact_dir.string();
   variant_hints.variant = variant_identity;
 
   auto variant_handle_or =
-      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, variant_hints);
+      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, variant_hints, disk_source);
   INFO("variant load status: " << variant_handle_or.status());
   REQUIRE(variant_handle_or.ok());
   auto variant_handle = std::move(variant_handle_or).value();
@@ -1243,11 +1243,11 @@ TEST_CASE(
 
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = canonical_artifact_id;
-  hints.disk_path = artifact_dir.string();
   hints.variant = variant_identity;
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
 
   tensorcast::store::DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  auto handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::AUTO, hints);
+  auto handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::AUTO, hints, disk_source);
   INFO("auto variant load status: " << handle_or.status());
   REQUIRE(handle_or.ok());
   auto handle = std::move(handle_or).value();
@@ -1313,9 +1313,9 @@ TEST_CASE("StoreEngine helper queries after materialize_replica()", "[store_engi
   {
     tensorcast::store::loading::MaterializeHints hints2;
     hints2.artifact_id = artifact_id;
-    hints2.disk_path = artifact_dir2.string();
-    auto gpu_handle_or =
-        store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
+    DiskSource disk_source{.path = artifact_dir2, .expected_size = std::nullopt};
+    auto gpu_handle_or = store.materialize_replica(
+        make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2, disk_source);
     REQUIRE(gpu_handle_or.ok());
     auto gpu_handle = std::move(gpu_handle_or).value();
     REQUIRE(wait_ready(gpu_handle).ok());
@@ -1373,8 +1373,9 @@ TEST_CASE("StoreEngine reconciles stable memory tier leases locally", "[store_en
 
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact_id;
-  hints.disk_path = artifact_dir.string();
-  auto cpu_handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+  auto cpu_handle_or =
+      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(cpu_handle_or.ok());
   auto cpu_handle = std::move(cpu_handle_or).value();
   REQUIRE(wait_ready(cpu_handle).ok());
@@ -1449,8 +1450,9 @@ TEST_CASE(
 
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact_id;
-  hints.disk_path = artifact_dir.string();
-  auto cpu_handle_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+  auto cpu_handle_or =
+      store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(cpu_handle_or.ok());
   auto cpu_handle = std::move(cpu_handle_or).value();
   REQUIRE(wait_ready(cpu_handle).ok());
@@ -1549,8 +1551,9 @@ TEST_CASE(
     if (cpu_replicas.empty()) {
       tensorcast::store::loading::MaterializeHints reload_hints;
       reload_hints.artifact_id = artifact_id;
-      reload_hints.disk_path = artifact_dir.string();
-      auto reload_or = store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, reload_hints);
+      DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+      auto reload_or =
+          store.materialize_replica(cpu_device, StoreEngine::MaterializeMode::LOAD_ONLY, reload_hints, disk_source);
       REQUIRE(reload_or.ok());
       auto reload_handle = std::move(*reload_or);
       REQUIRE(wait_ready(reload_handle).ok());

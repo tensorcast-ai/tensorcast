@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/planning/chunk_aware_strategy.h"
 
@@ -396,65 +396,8 @@ absl::Status ChunkAwareLoadingStrategy::execute_disk_load(
     replica::UnifiedMemoryAuthority& memory,
     const std::shared_ptr<store::replica::ReplicaLoadController>& mem_manager,
     const ProgressCallback& progress_cb) {
-  // Create disk loader
-  // Note: We'd need the actual disk source path from ReplicaLoadController
-  // For now, use the instance key to construct the path
-  const std::string& artifact_id = mem_manager->replica_key().artifact_id;
-  if (absl::StartsWith(artifact_id, "mi2:")) {
-    return absl::FailedPreconditionError(
-        "ChunkAwareLoadingStrategy: disk load path is undefined for content-addressed artifact_id; require GS routing");
-  }
-  std::filesystem::path disk_path = artifact_id;
-  auto loader =
-      std::make_unique<DiskLoader>(store::loading::DiskSource{.path = disk_path, .expected_size = std::nullopt});
-
-  // Initialize loader
-  absl::Status init_status = loader->initialize();
-  if (!init_status.ok()) {
-    return init_status;
-  }
-
-  // Plan transfer via UMA
-  auto plan_or = memory.plan_load(
-      mem_manager->replica_key(),
-      target,
-      (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
-                                                      : std::optional<int>(std::nullopt),
-      std::optional<absl::Span<const uint32_t>>(absl::MakeSpan(chunks)));
-  if (!plan_or.ok()) {
-    return plan_or.status();
-  }
-  const auto& plan = *plan_or;
-  if (plan.chunk_indices.empty()) {
-    return absl::OkStatus();
-  }
-
-  // Load chunks via open_source + ReplicaLoadController
-  auto src_or = loader->open_source();
-  if (!src_or.ok()) {
-    return src_or.status();
-  }
-  absl::Status load_status =
-      std::move(mem_manager->load_async_from_source(std::move(*src_or), target, 4, absl::MakeSpan(plan.chunk_indices)))
-          .get();
-
-  if (load_status.ok()) {
-    // Commit UMA plan on success
-    auto cst = memory.commit(
-        plan.session_id,
-        target,
-        absl::MakeSpan(plan.chunk_indices),
-        (target == common::memory::MemoryLocation::GPU) ? std::optional<int>(mem_manager->get_local_device_id())
-                                                        : std::optional<int>(std::nullopt));
-    if (!cst.ok()) {
-      return cst;
-    }
-    progress_cb(plan.chunk_indices.size(), plan.chunk_indices.size());
-  } else {
-    (void)memory.abort(plan.session_id);
-  }
-
-  return load_status;
+  // Disk loads require an explicit disk source path; avoid using artifact_id as a path.
+  return absl::FailedPreconditionError("ChunkAwareLoadingStrategy: disk load requires explicit disk source path");
 }
 
 P2PSource ChunkAwareLoadingStrategy::select_best_remote(const std::vector<P2PSource>& candidates) {

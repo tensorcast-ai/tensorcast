@@ -44,15 +44,18 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
   REQUIRE(tensorcast::testing::create_dummy_file(dir / "tensor.data", 1ULL * 1024 * 1024));
   auto st_desc = tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
   REQUIRE(st_desc.ok());
+  const std::string artifact_id = "cgid:" + dir.filename().string();
 
   // Load CPU replica from disk
   {
     tensorcast::store::loading::MaterializeHints hints;
-    hints.disk_path = dir.string();
+    hints.artifact_id = artifact_id;
+    tensorcast::store::loading::DiskSource disk_source{.path = dir, .expected_size = std::nullopt};
     auto h = engine->materialize_replica(
         tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""},
         tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY,
-        hints);
+        hints,
+        disk_source);
     REQUIRE(h.ok());
     REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }
@@ -60,11 +63,13 @@ TEST_CASE("GetDetailedStatus aggregates mixed CPU/GPU residency", "[daemon][stat
   // Load GPU replica (device 0) from the same disk artifact
   {
     tensorcast::store::loading::MaterializeHints hints;
-    hints.disk_path = dir.string();
+    hints.artifact_id = artifact_id;
+    tensorcast::store::loading::DiskSource disk_source{.path = dir, .expected_size = std::nullopt};
     auto h = engine->materialize_replica(
         tensorcast::store::DeviceKey{tensorcast::DeviceType::GPU, 0, ""},
         tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY,
-        hints);
+        hints,
+        disk_source);
     REQUIRE(h.ok());
     REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }
@@ -129,14 +134,17 @@ TEST_CASE("GetLoadedReplicas filters by artifact_id and device_id", "[daemon][st
   REQUIRE(tensorcast::testing::create_dummy_file(dir / "tensor.data", 512ULL * 1024));
   auto st_desc = tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(dir);
   REQUIRE(st_desc.ok());
+  const std::string artifact_id = "cgid:" + dir.filename().string();
 
   // Load both CPU and GPU replicas from the same artifact
   for (int i = 0; i < 2; ++i) {
     tensorcast::store::loading::MaterializeHints hints;
-    hints.disk_path = dir.string();
+    hints.artifact_id = artifact_id;
+    tensorcast::store::loading::DiskSource disk_source{.path = dir, .expected_size = std::nullopt};
     auto dev = (i == 0) ? tensorcast::store::DeviceKey{tensorcast::DeviceType::CPU, -1, ""}
                         : tensorcast::store::DeviceKey{tensorcast::DeviceType::GPU, 0, ""};
-    auto h = engine->materialize_replica(dev, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+    auto h = engine->materialize_replica(
+        dev, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
     REQUIRE(h.ok());
     REQUIRE(std::move(h->subscribe_ready()).get().ok());
   }

@@ -88,7 +88,7 @@ tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
   std::filesystem::create_directories(opts.storage_path);
-  opts.p2p_port = 47016;
+  opts.p2p_port = 0; // Let the OS pick an available port for test isolation.
   opts.memory_pool_size = 32ULL << 20;
   opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
@@ -108,6 +108,7 @@ struct MappedFixture {
   tensorcast::daemon::BackgroundScheduler scheduler;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
+  tensorcast::daemon::LocalDiskImportCatalog disk_imports;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
@@ -135,6 +136,7 @@ struct MappedFixture {
                 .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
+                .disk_imports = disk_imports,
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,

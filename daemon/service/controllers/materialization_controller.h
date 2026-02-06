@@ -23,6 +23,7 @@
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
+#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -43,6 +44,7 @@ class MaterializationController {
     LipManager& lip_manager;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
+    LocalDiskImportCatalog& disk_imports;
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;

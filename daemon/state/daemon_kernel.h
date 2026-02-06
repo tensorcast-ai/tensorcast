@@ -19,6 +19,7 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
+#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/persistence_manager.h"
 #include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/ref_tracker.h"
@@ -92,6 +93,10 @@ class DaemonKernel {
 
   [[nodiscard]] LipBridge& lip_bridge() const {
     return *lip_bridge_;
+  }
+
+  [[nodiscard]] LocalDiskImportCatalog& disk_import_catalog() {
+    return disk_import_catalog_;
   }
 
   [[nodiscard]] RegistrationManager& registration_manager() const {
@@ -179,6 +184,7 @@ class DaemonKernel {
   std::unique_ptr<SessionsService> sessions_svc_;
   std::unique_ptr<LipBridge> lip_bridge_;
   std::unique_ptr<PersistenceManager> persistence_mgr_;
+  LocalDiskImportCatalog disk_import_catalog_;
 
   DeviceResolver devices_;
   ShutdownSignal shutdown_signal_;

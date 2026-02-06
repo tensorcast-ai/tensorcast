@@ -13,4 +13,8 @@ absl::StatusOr<std::filesystem::path> normalize_disk_path(
     std::string_view disk_path,
     const std::filesystem::path& storage_root);
 
+absl::StatusOr<std::filesystem::path> normalize_disk_import_path(
+    std::string_view disk_path,
+    const std::filesystem::path& storage_root);
+
 } // namespace tensorcast::daemon

@@ -101,7 +101,6 @@ struct MaterializeHints {
   std::chrono::milliseconds pinned_timeout{0};
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
-  std::string disk_path;
   bool prefer_pageable_cpu{false};
   std::optional<DiskMetadata> disk_metadata;
 

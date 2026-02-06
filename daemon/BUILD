@@ -356,6 +356,17 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "local_disk_import_catalog_lib",
+    srcs = ["state/local_disk_import_catalog.cc"],
+    hdrs = ["state/local_disk_import_catalog.h"],
+    deps = [
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/synchronization",
+        "@abseil-cpp//absl/time:time",
+    ],
+)
+
+sc_cc_library(
     name = "ipc_region_registry_lib",
     srcs = ["state/ipc_region_registry.cc"],
     hdrs = ["state/ipc_region_registry.h"],
@@ -628,6 +639,7 @@ sc_cc_library(
         ":ipc_region_registry_lib",
         ":lip_bridge_lib",
         ":lip_manager_lib",
+        ":local_disk_import_catalog_lib",
         ":persistence_manager_lib",
         ":pid_monitor_lib",
         ":placement_lease_tokens_lib",
@@ -740,6 +752,7 @@ sc_cc_library(
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
+        ":local_disk_import_catalog_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
@@ -756,6 +769,7 @@ sc_cc_library(
         "//core/store:store_engine",
         "//core/store:view_utils",
         "//core/store/materialization/contracts:byte_range_map",
+        "//core/store/materialization/dataplane:disk_dir_hash",
         "//core/store/materialization/dataplane:source_hash",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",

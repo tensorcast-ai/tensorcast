@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -19,7 +19,8 @@ class MaterializationRequest {
       DeviceKey target_device,
       MaterializeMode mode,
       const MaterializeHints& hints,
-      const components::DeviceManager& device_manager);
+      const components::DeviceManager& device_manager,
+      std::optional<DiskSource> disk_source = std::nullopt);
 
   [[nodiscard]] const ReplicaKey& replica_key() const {
     return replica_key_;
@@ -57,8 +58,12 @@ class MaterializationRequest {
     return target_device_.type == DeviceType::CPU;
   }
 
-  [[nodiscard]] bool has_disk_path() const {
-    return !hints_.disk_path.empty();
+  [[nodiscard]] bool has_disk_source() const {
+    return disk_source_.has_value();
+  }
+
+  [[nodiscard]] const std::optional<DiskSource>& disk_source() const {
+    return disk_source_;
   }
 
  private:
@@ -68,6 +73,7 @@ class MaterializationRequest {
   MaterializeHints hints_{};
   std::optional<std::string> requested_view_id_;
   std::string canonical_artifact_id_;
+  std::optional<DiskSource> disk_source_;
   common::memory::MemoryLocation target_location_{common::memory::MemoryLocation::CPU};
 };
 

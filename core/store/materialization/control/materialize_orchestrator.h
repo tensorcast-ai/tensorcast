@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
+#include <optional>
 #include <string_view>
 
 #include "absl/status/statusor.h"
@@ -32,7 +33,8 @@ class MaterializeOrchestrator {
   absl::StatusOr<ReplicaHandle> run(
       std::string_view artifact_id,
       const DeviceKey& target_device,
-      const MaterializeHints& hints);
+      const MaterializeHints& hints,
+      const std::optional<loading::DiskSource>& disk_source);
 
  private:
   gsl::not_null<MaterializationBackend*> backend_;

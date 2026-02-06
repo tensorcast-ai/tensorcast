@@ -76,7 +76,7 @@ bool is_local_replica(const components::RemoteReplicaInfo& remote, const compone
 
 absl::Status stale_local_route_status(std::string_view artifact_id) {
   return absl::UnavailableError(
-      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
+      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
 }
 
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
@@ -686,14 +686,28 @@ MaterializationFacade::MaterializationFacade(Config config)
   };
   deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
     auto client = config_.runtime_context->global_store_client();
-    if (!client || !client->is_connected()) {
-      return absl::FailedPreconditionError("GlobalStoreClient not connected");
+    const bool gs_connected = client && client->is_connected();
+    if (!gs_connected) {
+      if (!request.hints().allow_disk || !request.has_disk_source()) {
+        return absl::FailedPreconditionError("GlobalStoreClient not connected");
+      }
+      loading::ReplicaTarget target;
+      target.location.type =
+          request.target_is_gpu() ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+      target.location.device_id = request.target_device().ordinal;
+      return run_disk_ingestion_internal(
+          request.canonical_artifact_id(),
+          *request.disk_source(),
+          target,
+          request.hints(),
+          /*publish_to_global_store=*/false);
     }
     MaterializeOrchestrator orchestrator(
         gsl::not_null<materialization::control::MaterializationBackend*>{this},
         gsl::not_null<components::IGlobalStoreClient*>{client.get()},
         config_.runtime_context->worker_identity());
-    auto orchestrated_or = orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
+    auto orchestrated_or = orchestrator.run(
+        request.canonical_artifact_id(), request.target_device(), request.hints(), request.disk_source());
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
@@ -723,9 +737,10 @@ MaterializationFacade::~MaterializationFacade() = default;
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_replica(
     const DeviceKey& target_device,
     loading::MaterializeMode mode,
-    const loading::MaterializeHints& hints) {
-  auto request_or =
-      loading::MaterializationRequest::Create(target_device, mode, hints, config_.replica_runtime->device_manager());
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
+  auto request_or = loading::MaterializationRequest::Create(
+      target_device, mode, hints, config_.replica_runtime->device_manager(), std::move(disk_source));
   if (!request_or.ok()) {
     return request_or.status();
   }
@@ -737,7 +752,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
-    const loading::MaterializeHints& hints) {
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_into_target requires GPU target device");
   }
@@ -1005,7 +1021,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool allow_p2p = hints.allow_p2p;
   const bool allow_disk = hints.allow_disk;
-  const bool has_disk_path = !hints.disk_path.empty();
+  const bool has_disk_source = disk_source.has_value();
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
     const auto& options = config_.runtime_context->options();
@@ -1022,9 +1038,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
   }
 
-  if (prefer_disk && has_disk_path && allow_disk) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (prefer_disk && has_disk_source && allow_disk) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
     if (disk_or.ok()) {
@@ -1035,7 +1050,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
   }
 
-  if (!gs_connected && (!has_disk_path || !allow_disk)) {
+  if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
@@ -1057,7 +1072,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
         }
-        if (!has_disk_path) {
+        if (!has_disk_source) {
           return stale_local_route_status(hints.artifact_id);
         }
       } else {
@@ -1071,6 +1086,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        if (has_disk_source && allow_disk && !prefer_p2p) {
+          p2p_src.fallback_disk_dir = disk_source->path.string();
+        }
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
         auto complete_status = gs_client->complete_replica_transport(session.transport_id);
         if (!complete_status.ok()) {
@@ -1079,18 +1097,17 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (p2p_or.ok()) {
           return p2p_or;
         }
-        if (!allow_disk || !has_disk_path || prefer_p2p) {
+        if (!allow_disk || !has_disk_source || prefer_p2p) {
           return p2p_or.status();
         }
       }
-    } else if (!allow_disk || !has_disk_path) {
+    } else if (!allow_disk || !has_disk_source) {
       return transport_or.status();
     }
   }
 
-  if (allow_disk && has_disk_path) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (allow_disk && has_disk_source) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
   }
@@ -1099,7 +1116,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::FailedPreconditionError("source_policy disallows P2P and disk for materialize_into_target");
   }
 
-  return absl::FailedPreconditionError("materialize_into_target requires disk_path or Global Store connectivity");
+  return absl::FailedPreconditionError("materialize_into_target requires disk source or Global Store connectivity");
 }
 
 absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_into_target(
@@ -1108,7 +1125,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loader::ByteRangeMap& mapping,
     std::string_view canonical_index_json,
     uint64_t generation,
-    const loading::MaterializeHints& hints) {
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_mapped_into_target requires GPU target device");
   }
@@ -1363,7 +1381,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool allow_p2p = hints.allow_p2p;
   const bool allow_disk = hints.allow_disk;
-  const bool has_disk_path = !hints.disk_path.empty();
+  const bool has_disk_source = disk_source.has_value();
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
     const auto& options = config_.runtime_context->options();
@@ -1380,9 +1398,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
   }
 
-  if (prefer_disk && has_disk_path && allow_disk) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (prefer_disk && has_disk_source && allow_disk) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
     if (disk_or.ok()) {
@@ -1393,7 +1410,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
   }
 
-  if (!gs_connected && (!has_disk_path || !allow_disk)) {
+  if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
@@ -1415,7 +1432,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
         }
-        if (!has_disk_path) {
+        if (!has_disk_source) {
           return stale_local_route_status(hints.artifact_id);
         }
       } else {
@@ -1429,6 +1446,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        if (has_disk_source && allow_disk && !prefer_p2p) {
+          p2p_src.fallback_disk_dir = disk_source->path.string();
+        }
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
         auto complete_status = gs_client->complete_replica_transport(session.transport_id);
         if (!complete_status.ok()) {
@@ -1437,18 +1457,17 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (p2p_or.ok()) {
           return p2p_or;
         }
-        if (!allow_disk || !has_disk_path || prefer_p2p) {
+        if (!allow_disk || !has_disk_source || prefer_p2p) {
           return p2p_or.status();
         }
       }
-    } else if (!allow_disk || !has_disk_path) {
+    } else if (!allow_disk || !has_disk_source) {
       return transport_or.status();
     }
   }
 
-  if (allow_disk && has_disk_path) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (allow_disk && has_disk_source) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
   }
@@ -1458,7 +1477,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   }
 
   return absl::FailedPreconditionError(
-      "materialize_mapped_into_target requires disk_path or Global Store connectivity");
+      "materialize_mapped_into_target requires disk source or Global Store connectivity");
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_from_assembly(

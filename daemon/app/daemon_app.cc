@@ -75,6 +75,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .lip_manager = app->kernel_->lip_manager(),
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
+      .disk_imports = app->kernel_->disk_import_catalog(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),

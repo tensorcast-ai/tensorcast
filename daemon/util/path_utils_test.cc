@@ -68,3 +68,30 @@ TEST_CASE("normalize_disk_path allows absolute when storage root is empty", "[da
   REQUIRE_FALSE(relative.ok());
   REQUIRE(relative.status().code() == absl::StatusCode::kInvalidArgument);
 }
+
+TEST_CASE("normalize_disk_import_path allows absolute even with storage root", "[daemon][util]") {
+  const auto root = test_tmpdir() / "import_root";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+  const auto outside = test_tmpdir() / "import_outside" / "tensor.data";
+  create_file(outside);
+
+  auto absolute = tensorcast::daemon::normalize_disk_import_path(outside.string(), root);
+  REQUIRE(absolute.ok());
+  REQUIRE(*absolute == std::filesystem::weakly_canonical(outside));
+}
+
+TEST_CASE("normalize_disk_import_path enforces root for relative paths", "[daemon][util]") {
+  const auto root = test_tmpdir() / "import_relative";
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root / "subdir");
+  const auto file_path = create_file(root / "subdir" / "file");
+
+  auto relative = tensorcast::daemon::normalize_disk_import_path("subdir/file", root);
+  REQUIRE(relative.ok());
+  REQUIRE(*relative == std::filesystem::weakly_canonical(file_path));
+
+  auto escape = tensorcast::daemon::normalize_disk_import_path("../escape", root);
+  REQUIRE_FALSE(escape.ok());
+  REQUIRE(escape.status().code() == absl::StatusCode::kInvalidArgument);
+}
