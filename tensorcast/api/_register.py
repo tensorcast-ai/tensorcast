@@ -161,7 +161,8 @@ class RegisteredArtifact:
         if client is None:
             raise RuntimeError(
                 "RegisteredArtifact requires an active TensorCast session. "
-                "Call tensorcast.startup.init(mode='connect'|'create') before using registration APIs."
+                "Call tensorcast.startup.init(mode='connect'|'create'|'auto') "
+                "before using registration APIs."
             )
         # Cache client for this handle's lifetime
         self._ctl = client

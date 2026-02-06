@@ -38,7 +38,7 @@ def get_daemon_address() -> str:
         if _global_daemon_address is None:
             raise RuntimeError(
                 "TensorCast runtime is not initialized. "
-                "Call tensorcast.startup.init(mode='connect'|'create') first."
+                "Call tensorcast.startup.init(mode='connect'|'create'|'auto') first."
             )
         return _global_daemon_address
 

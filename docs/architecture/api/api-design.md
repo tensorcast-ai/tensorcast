@@ -72,7 +72,9 @@ These terms show up across docs and APIs:
 TensorCast exposes a process-wide store session and module-level helpers.
 
 - `tensorcast.init(...)`: establishes a runtime (connect to an existing daemon
-  or launch services). In `mode="create"`, you can also start (or reuse) a local
+  or launch services). In `mode="auto"`, concurrent callers under the same
+  runtime root coordinate so one process launches and the rest connect to the
+  same daemon. In `mode="create"`, you can also start (or reuse) a local
   Global Store by setting `global_store_mode="start"`; use
   `global_store_config_path=...` (or `$TENSORCAST_GLOBAL_STORE_CONFIG`) to pick
   the Global Store YAML. Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
