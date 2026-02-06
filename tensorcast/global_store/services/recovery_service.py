@@ -12,11 +12,14 @@ from uuid import UUID, uuid4
 from tensorcast.global_store.exceptions import NotFoundError, ValidationError
 from tensorcast.global_store.metrics import observe_state_sync
 from tensorcast.global_store.models import (
-    ByteSpaceKind,
-    ByteSpaceRef,
-    ExportState,
     Replica,
     Worker,
+)
+from tensorcast.global_store.replica_memory_codec import (
+    export_state_to_proto,
+    memory_info_to_replica,
+    parse_transport_metadata,
+    replica_to_memory_info,
 )
 from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
 from tensorcast.global_store.services.worker_service import WorkerService
@@ -407,7 +410,7 @@ class RecoveryService:
                 local_remote_keys,
                 local_buffer_sizes,
                 local_verification_json,
-            ) = self._parse_transport_metadata(local_replica.memory_info)
+            ) = parse_transport_metadata(local_replica.memory_info)
 
             if local_node_address and local_node_address != global_replica.node_address:
                 node_address_changed = True
@@ -489,7 +492,7 @@ class RecoveryService:
                 ]
             ):
                 transport = updated_proto.memory_info.transport
-                transport.export_state = self._export_state_to_proto(local_export_state)
+                transport.export_state = export_state_to_proto(local_export_state)
                 transport.export_generation = int(local_export_generation or 0)
                 transport.remote_memory_keys[:] = local_remote_keys
                 transport.buffer_sizes[:] = local_buffer_sizes
@@ -566,43 +569,7 @@ class RecoveryService:
 
     def _convert_replica_to_proto(self, replica: Replica) -> common_pb2.ReplicaInfo:
         """Convert Replica to proto format."""
-        # Map domain MemoryType to proto MemoryType
-        if replica.memory_type.value == "GPU":
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_GPU
-        elif replica.memory_type.value == "RAM":
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_RAM
-        else:
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
-
-        memory_info = common_pb2.MemoryInfo(
-            node_id=replica.node_id,
-            node_address=replica.node_address,
-            node_port=replica.node_port,
-            memory_size=replica.memory_size,
-            memory_type=proto_mem_type,
-            device_id=replica.device_id,
-            remote_memory_keys=replica.remote_memory_keys,
-            buffer_sizes=replica.buffer_sizes,
-            verification_json=replica.verification_json or "",
-        )
-        transport = memory_info.transport
-        transport.export_state = self._export_state_to_proto(replica.export_state)
-        transport.export_generation = int(replica.export_generation or 0)
-        transport.remote_memory_keys.extend(replica.remote_memory_keys)
-        transport.buffer_sizes.extend([int(size) for size in replica.buffer_sizes])
-        if replica.verification_json:
-            transport.verification_json = replica.verification_json
-        if replica.byte_space.kind == ByteSpaceKind.VIEW:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(
-                    kind=common_pb2.BYTE_SPACE_KIND_VIEW,
-                    id=replica.byte_space.id or "",
-                )
-            )
-        else:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(kind=common_pb2.BYTE_SPACE_KIND_CANONICAL)
-            )
+        memory_info = replica_to_memory_info(replica=replica)
         stats = common_pb2.ReplicaStats(
             max_concurrency=replica.max_concurrency,
             current_requests=replica.current_requests,
@@ -628,62 +595,20 @@ class RecoveryService:
         self, proto_replica: common_pb2.ReplicaInfo, worker_id: str
     ) -> Replica:
         """Convert proto format to Replica."""
-        from tensorcast.global_store.models import MemoryType
-
-        # Map proto MemoryType to domain MemoryType string enum
-        if (
-            proto_replica.memory_info.memory_type
-            == common_pb2.MemoryType.MEMORY_TYPE_GPU
-        ):
-            dom_mem_type = "GPU"
-        elif (
-            proto_replica.memory_info.memory_type
-            == common_pb2.MemoryType.MEMORY_TYPE_RAM
-        ):
-            dom_mem_type = "RAM"
-        else:
-            dom_mem_type = "DISK"
-
-        byte_space = ByteSpaceRef.canonical()
-        if (
-            proto_replica.memory_info.HasField("byte_space")
-            and proto_replica.memory_info.byte_space.kind
-            == common_pb2.BYTE_SPACE_KIND_VIEW
-        ):
-            view_id = proto_replica.memory_info.byte_space.id.strip()
-            if view_id:
-                byte_space = ByteSpaceRef.view(view_id)
-
-        (
-            _transport_authoritative,
-            export_state,
-            export_generation,
-            remote_keys,
-            buffer_sizes,
-            verification_json,
-        ) = self._parse_transport_metadata(proto_replica.memory_info)
-
-        return Replica(
-            replica_id=UUID(proto_replica.ref.replica_id)
+        replica_id = (
+            UUID(proto_replica.ref.replica_id)
             if proto_replica.ref.replica_id
-            else uuid4(),
+            else uuid4()
+        )
+        return memory_info_to_replica(
+            mem_info=proto_replica.memory_info,
             artifact_id=proto_replica.ref.artifact_id,
-            byte_space=byte_space,
-            node_id=proto_replica.memory_info.node_id,
-            node_address=proto_replica.memory_info.node_address,
-            node_port=proto_replica.memory_info.node_port,
-            memory_size=proto_replica.memory_info.memory_size,
-            memory_type=MemoryType(dom_mem_type),
-            device_id=proto_replica.memory_info.device_id,
             max_concurrency=proto_replica.stats.max_concurrency,
+            worker_id=worker_id,
+            require_view_id=False,
+            replica_id=replica_id,
             current_requests=proto_replica.stats.current_requests,
             is_available=proto_replica.stats.is_available,
-            remote_memory_keys=remote_keys,
-            buffer_sizes=buffer_sizes,
-            export_state=export_state,
-            export_generation=export_generation,
-            worker_id=worker_id,
-            verification_json=verification_json,
         )
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
@@ -811,100 +736,6 @@ class RecoveryService:
 
             logger.exception(f"Full state sync failed for worker {worker_id}: {e}")
         return False, [], 0, "", False
-
-    @staticmethod
-    def _export_state_from_proto(
-        state: common_pb2.ReplicaTransportMetadata.ExportState,
-    ) -> ExportState:
-        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE:
-            return ExportState.EXPORTABLE
-        if state == common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING:
-            return ExportState.DRAINING
-        return ExportState.PRESENCE_ONLY
-
-    @staticmethod
-    def _export_state_to_proto(
-        state: ExportState,
-    ) -> common_pb2.ReplicaTransportMetadata.ExportState:
-        if state is ExportState.EXPORTABLE:
-            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
-        if state is ExportState.DRAINING:
-            return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_DRAINING
-        return common_pb2.ReplicaTransportMetadata.EXPORT_STATE_PRESENCE_ONLY
-
-    def _parse_transport_metadata(
-        self, mem_info: common_pb2.MemoryInfo
-    ) -> tuple[bool, ExportState, int, list[str], list[int], str | None]:
-        transport_authoritative = mem_info.HasField("transport")
-        export_state = ExportState.PRESENCE_ONLY
-        export_generation = 0
-        remote_keys: list[str] = []
-        buffer_sizes: list[int] = []
-        verification_json: str | None = None
-
-        if not transport_authoritative:
-            return (
-                transport_authoritative,
-                export_state,
-                export_generation,
-                remote_keys,
-                buffer_sizes,
-                verification_json,
-            )
-
-        transport = mem_info.transport
-        export_state = self._export_state_from_proto(transport.export_state)
-        export_generation = int(transport.export_generation or 0)
-        remote_keys = list(transport.remote_memory_keys)
-        buffer_sizes = [int(size) for size in transport.buffer_sizes]
-        verification_json = (
-            transport.verification_json if transport.verification_json else None
-        )
-
-        if export_state is ExportState.PRESENCE_ONLY:
-            return (
-                transport_authoritative,
-                export_state,
-                export_generation,
-                [],
-                [],
-                None,
-            )
-
-        keys_required = export_state is ExportState.EXPORTABLE
-        if keys_required and not remote_keys:
-            export_state = ExportState.PRESENCE_ONLY
-            remote_keys = []
-            buffer_sizes = []
-            verification_json = None
-
-        if remote_keys or buffer_sizes:
-            keys_valid = True
-            if len(remote_keys) != len(buffer_sizes):
-                keys_valid = False
-            else:
-                total = 0
-                for size in buffer_sizes:
-                    if size <= 0:
-                        keys_valid = False
-                        break
-                    total += int(size)
-                if keys_valid and mem_info.memory_size > 0:
-                    keys_valid = total == mem_info.memory_size
-            if not keys_valid:
-                remote_keys = []
-                buffer_sizes = []
-                export_state = ExportState.PRESENCE_ONLY
-                verification_json = None
-
-        return (
-            transport_authoritative,
-            export_state,
-            export_generation,
-            remote_keys,
-            buffer_sizes,
-            verification_json,
-        )
 
     def is_recovery_complete(self) -> bool:
         """Check if recovery process is complete."""
