@@ -35,7 +35,6 @@
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/common/artifact_hash.h"
-#include "core/common/artifact_identity.h"
 #include "core/common/selection_identity.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
@@ -52,6 +51,7 @@
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
+#include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/deadline_utils.h"
@@ -97,9 +97,15 @@ using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
-using materialization_replica_handle::attach_cuda_lease_for_replica_key;
 using materialization_replica_handle::bind_replica_handle_for_response;
-using materialization_replica_handle::register_session_and_refs;
+using materialization_request_common::LeaseContext;
+using materialization_request_common::LipFastPathRequest;
+using materialization_request_common::materialize_with_shared_disk_retry;
+using materialization_request_common::resolve_artifact_and_disk_source;
+using materialization_request_common::resolve_artifact_binding;
+using materialization_request_common::resolve_managed_disk_path;
+using materialization_request_common::try_satisfy_lip_fast_path;
+using materialization_request_common::validate_and_compute_lease_context;
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
@@ -189,6 +195,17 @@ void record_disk_path_denied() {
   }
 }
 
+void record_disk_resolution_outcome(std::string_view outcome) {
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_resolve_total");
+    if (counter) {
+      counter->Add(1, {{"outcome", std::string(outcome)}});
+    }
+  } catch (...) {
+  }
+}
+
 absl::Status write_artifact_descriptor(
     const std::filesystem::path& artifact_dir,
     std::string_view artifact_id,
@@ -213,183 +230,6 @@ absl::Status write_artifact_descriptor(
   out << desc.dump(2);
   return absl::OkStatus();
 }
-
-void record_disk_resolution_outcome(std::string_view outcome) {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_resolve_total");
-    if (counter) {
-      counter->Add(1, {{"outcome", std::string(outcome)}});
-    }
-  } catch (...) {
-  }
-}
-
-void record_wait_for_shared_disk(std::string_view outcome, absl::Duration waited) {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_wait_for_shared_disk_total");
-    static auto hist = meter->CreateDoubleHistogram("tc_store_wait_for_shared_disk_seconds");
-    if (counter) {
-      counter->Add(1, {{"outcome", std::string(outcome)}});
-    }
-    if (hist) {
-      hist->Record(
-          absl::ToDoubleSeconds(waited), {{"outcome", std::string(outcome)}}, opentelemetry::context::Context{});
-    }
-  } catch (...) {
-  }
-}
-
-absl::StatusOr<std::filesystem::path> wait_for_local_managed_disk_path(
-    store::components::IGlobalStoreClient* client,
-    const std::filesystem::path& storage_root,
-    std::string_view artifact_id,
-    std::chrono::milliseconds wait_budget,
-    const grpc::ServerContext& ctx) {
-  if (wait_budget.count() <= 0) {
-    return absl::InvalidArgumentError("wait_budget must be > 0");
-  }
-  if (artifact_id.empty()) {
-    return absl::InvalidArgumentError("artifact_id is required");
-  }
-  if (client == nullptr || !client->is_connected()) {
-    return absl::FailedPreconditionError("GlobalStoreClient not connected");
-  }
-  if (storage_root.empty()) {
-    return absl::FailedPreconditionError("storage_path is required for shared-disk wait");
-  }
-
-  auto cluster_or = client->get_cluster_id();
-  if (!cluster_or.ok() || cluster_or->empty()) {
-    return absl::FailedPreconditionError(absl::StrCat("cluster_id unavailable: ", cluster_or.status().message()));
-  }
-  const std::string cluster_id = *cluster_or;
-
-  const auto effective_budget = ClampToDeadline(ctx, wait_budget, wait_budget);
-  if (effective_budget.count() <= 0) {
-    record_wait_for_shared_disk("deadline_exceeded", absl::ZeroDuration());
-    return absl::DeadlineExceededError("wait_for_shared_disk budget exhausted (RPC deadline)");
-  }
-  const absl::Time start = absl::Now();
-  const absl::Time deadline = start + absl::Milliseconds(effective_budget.count());
-
-  absl::Duration backoff = absl::Milliseconds(25);
-  constexpr absl::Duration kMaxBackoff = absl::Seconds(1);
-  absl::BitGen bitgen;
-
-  while (absl::Now() < deadline) {
-    if (ctx.IsCancelled()) {
-      record_wait_for_shared_disk("cancelled", absl::Now() - start);
-      return absl::CancelledError("RPC cancelled while waiting for shared-disk readiness");
-    }
-
-    auto locations_or = client->list_artifact_disk_locations(artifact_id);
-    if (locations_or.ok()) {
-      for (const auto& loc : *locations_or) {
-        if (loc.cluster_id != cluster_id) {
-          continue;
-        }
-        if (loc.kind != tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED) {
-          continue;
-        }
-        auto normalized_or = normalize_disk_path(loc.relative_path, storage_root);
-        if (!normalized_or.ok()) {
-          record_disk_path_denied();
-          record_wait_for_shared_disk("invalid_path", absl::Now() - start);
-          return normalized_or.status();
-        }
-        record_wait_for_shared_disk("ready", absl::Now() - start);
-        return *normalized_or;
-      }
-    } else if (!absl::IsNotFound(locations_or.status())) {
-      record_wait_for_shared_disk("gs_error", absl::Now() - start);
-      return locations_or.status();
-    }
-
-    absl::Duration sleep_for = backoff;
-    const double jitter = absl::Uniform<double>(bitgen, 0.5, 1.5);
-    const auto sleep_ms =
-        static_cast<int64_t>(std::max<double>(1.0, static_cast<double>(absl::ToInt64Milliseconds(sleep_for)) * jitter));
-    sleep_for = absl::Milliseconds(sleep_ms);
-    const absl::Duration remaining = deadline - absl::Now();
-    if (remaining <= absl::ZeroDuration()) {
-      break;
-    }
-    if (sleep_for > remaining) {
-      sleep_for = remaining;
-    }
-    absl::SleepFor(sleep_for);
-    backoff = std::min(backoff * 2, kMaxBackoff);
-  }
-
-  record_wait_for_shared_disk("deadline_exceeded", absl::Now() - start);
-  return absl::DeadlineExceededError("managed shared-disk location not ready before deadline");
-}
-
-std::optional<std::filesystem::path> resolve_managed_disk_path(
-    store::components::IGlobalStoreClient* client,
-    const std::filesystem::path& storage_root,
-    std::string_view artifact_id,
-    bool allow_disk) {
-  if (!allow_disk) {
-    record_disk_resolution_outcome("disabled");
-    return std::nullopt;
-  }
-  if (artifact_id.empty()) {
-    record_disk_resolution_outcome("missing_artifact_id");
-    return std::nullopt;
-  }
-  if (client == nullptr) {
-    record_disk_resolution_outcome("no_client");
-    return std::nullopt;
-  }
-  if (storage_root.empty()) {
-    record_disk_resolution_outcome("no_storage_root");
-    return std::nullopt;
-  }
-  auto cluster_or = client->get_cluster_id();
-  if (!cluster_or.ok() || cluster_or->empty()) {
-    record_disk_resolution_outcome("cluster_id_missing");
-    return std::nullopt;
-  }
-  auto locations_or = client->list_artifact_disk_locations(artifact_id);
-  if (!locations_or.ok()) {
-    record_disk_resolution_outcome("not_found");
-    return std::nullopt;
-  }
-  const std::string& cluster_id = *cluster_or;
-  std::optional<store::components::ArtifactDiskLocation> selected;
-  for (const auto& loc : *locations_or) {
-    if (loc.cluster_id != cluster_id) {
-      continue;
-    }
-    if (loc.kind == tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED) {
-      selected = loc;
-      break;
-    }
-    if (!selected.has_value()) {
-      selected = loc;
-    }
-  }
-  if (!selected.has_value()) {
-    record_disk_resolution_outcome("cluster_mismatch");
-    return std::nullopt;
-  }
-  auto normalized_or = normalize_disk_path(selected->relative_path, storage_root);
-  if (!normalized_or.ok()) {
-    record_disk_path_denied();
-    record_disk_resolution_outcome("invalid_path");
-    LOG(WARNING) << "managed disk path rejected for artifact_id=" << artifact_id << ": " << normalized_or.status();
-    return std::nullopt;
-  }
-  record_disk_resolution_outcome("ok");
-  return *normalized_or;
-}
-
-absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
-    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
-    std::string_view artifact_id);
 
 void record_materialize_into_target(std::string_view result, std::string_view reason, v2::MaterializationSource source);
 
@@ -515,12 +355,6 @@ class OperationLeaseGuard {
   bool released_{false};
 };
 
-struct LeaseContext {
-  bool loopback_peer{false};
-  bool no_lease{false};
-  int32_t effective_pid{0};
-};
-
 absl::StatusOr<ResolvedSourcePolicy> resolve_and_validate_effective_policy(
     const v2::SourcePolicy* source_policy,
     v2::SourcePreference preference) {
@@ -532,140 +366,6 @@ absl::StatusOr<ResolvedSourcePolicy> resolve_and_validate_effective_policy(
   return effective_policy;
 }
 
-absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
-    std::string_view peer,
-    v2::LeaseMode lease_mode,
-    bool wait_for_completion,
-    int32_t request_pid,
-    bool cpu_target,
-    bool cpu_shared_memory_enabled,
-    bool handle_leases_available) {
-  LeaseContext lease_context;
-  lease_context.loopback_peer = is_loopback_grpc_peer(peer);
-  lease_context.no_lease = lease_mode == v2::LeaseMode::LEASE_MODE_NO_LEASE;
-  lease_context.effective_pid = (lease_context.loopback_peer && !lease_context.no_lease) ? request_pid : 0;
-
-  if (wait_for_completion && !lease_context.loopback_peer) {
-    return absl::PermissionDeniedError("wait_for_completion materialization is local-only (loopback/UDS)");
-  }
-  if (lease_context.no_lease && wait_for_completion) {
-    return absl::InvalidArgumentError("lease_mode=NO_LEASE requires wait_for_completion=false");
-  }
-  if (!cpu_target) {
-    return lease_context;
-  }
-  if (!lease_context.loopback_peer) {
-    return absl::PermissionDeniedError("CPU shared-memory materialization is local-only");
-  }
-  if (lease_context.effective_pid <= 0) {
-    return absl::InvalidArgumentError("pid is required for CPU handle leases");
-  }
-  if (!cpu_shared_memory_enabled) {
-    return absl::FailedPreconditionError("cpu_shared_memory is disabled");
-  }
-  if (!handle_leases_available) {
-    return absl::FailedPreconditionError("local handle plane is disabled (no handle leases)");
-  }
-  return lease_context;
-}
-
-struct ArtifactResolution {
-  std::string resolved_artifact_id;
-  std::optional<std::string> fallback_artifact_id;
-  std::optional<std::string> bound_artifact_id;
-  bool gs_connected{false};
-  std::optional<std::filesystem::path> normalized_disk_path;
-  std::optional<LocalDiskImportCatalog::Entry> local_import;
-  std::optional<store::loading::DiskSource> disk_source;
-};
-
-absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
-    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
-    LocalDiskImportCatalog* disk_imports,
-    const std::filesystem::path& storage_path,
-    std::string artifact_id,
-    bool allow_disk,
-    bool allow_local_import_fallback,
-    bool loopback_peer,
-    std::optional<uint64_t> disk_expected_size = std::nullopt) {
-  ArtifactResolution resolution;
-  resolution.resolved_artifact_id = std::move(artifact_id);
-
-  auto binding_or = resolve_artifact_binding(global_store_client, resolution.resolved_artifact_id);
-  if (!binding_or.ok()) {
-    return binding_or.status();
-  }
-  if (binding_or->has_value()) {
-    resolution.fallback_artifact_id = resolution.resolved_artifact_id;
-    resolution.bound_artifact_id = binding_or->value();
-    resolution.resolved_artifact_id = binding_or->value();
-  }
-
-  resolution.gs_connected = global_store_client && global_store_client->is_connected();
-  resolution.normalized_disk_path =
-      resolve_managed_disk_path(global_store_client.get(), storage_path, resolution.resolved_artifact_id, allow_disk);
-  if (!resolution.normalized_disk_path.has_value() && !resolution.gs_connected && allow_disk &&
-      allow_local_import_fallback && disk_imports != nullptr) {
-    auto entry = disk_imports->lookup_import(resolution.resolved_artifact_id);
-    if (entry.has_value()) {
-      if (!loopback_peer) {
-        return absl::PermissionDeniedError("standalone disk materialization is local-only (loopback/UDS)");
-      }
-      resolution.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
-      resolution.local_import = std::move(entry);
-    }
-  }
-  if (resolution.normalized_disk_path.has_value()) {
-    resolution.disk_source = store::loading::DiskSource{
-        .path = *resolution.normalized_disk_path,
-        .expected_size = disk_expected_size,
-        .require_descriptor = true,
-    };
-  }
-  return resolution;
-}
-
-using MaterializeAttemptFn =
-    std::function<absl::StatusOr<store::loading::ReplicaHandle>(const std::optional<store::loading::DiskSource>&)>;
-using PrepareRetryDiskSourceFn =
-    std::function<absl::StatusOr<std::optional<store::loading::DiskSource>>(const std::filesystem::path&)>;
-
-absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry(
-    const absl::Status& initial_status,
-    store::components::IGlobalStoreClient* global_store_client,
-    const std::filesystem::path& storage_path,
-    std::string_view resolved_artifact_id,
-    int wait_for_shared_disk_ms,
-    bool allow_disk,
-    const grpc::ServerContext& server_context,
-    std::optional<std::filesystem::path>& normalized_disk_path,
-    const MaterializeAttemptFn& materialize_retry_once,
-    const PrepareRetryDiskSourceFn& prepare_retry_disk_source) {
-  if (wait_for_shared_disk_ms <= 0 || !allow_disk) {
-    return initial_status;
-  }
-
-  auto wait_or = wait_for_local_managed_disk_path(
-      global_store_client,
-      storage_path,
-      resolved_artifact_id,
-      std::chrono::milliseconds(wait_for_shared_disk_ms),
-      server_context);
-  if (!wait_or.ok()) {
-    if (absl::IsUnavailable(wait_or.status())) {
-      return initial_status;
-    }
-    return wait_or.status();
-  }
-
-  normalized_disk_path = std::move(*wait_or);
-  auto retry_disk_source_or = prepare_retry_disk_source(*normalized_disk_path);
-  if (!retry_disk_source_or.ok()) {
-    return retry_disk_source_or.status();
-  }
-  return materialize_retry_once(*retry_disk_source_or);
-}
-
 void record_materialize_into_target_verification_enabled() {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -675,25 +375,6 @@ void record_materialize_into_target_verification_enabled() {
     }
   } catch (...) {
   }
-}
-
-absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
-    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
-    std::string_view artifact_id) {
-  if (!client || !client->is_connected()) {
-    return std::nullopt;
-  }
-  if (common::infer_artifact_id_kind(artifact_id) != common::ArtifactIdKind::kCgid) {
-    return std::nullopt;
-  }
-  auto binding_or = client->get_artifact_binding(artifact_id);
-  if (binding_or.ok()) {
-    return binding_or->to_artifact_id;
-  }
-  if (absl::IsNotFound(binding_or.status())) {
-    return std::nullopt;
-  }
-  return binding_or.status();
 }
 
 void record_materialize_into_target(
@@ -772,7 +453,6 @@ grpc::Status MaterializationController::materialize_replica(
   }
   ResolvedSourcePolicy effective_policy = *policy_or;
   const bool prefer_disk = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
-  const bool prefer_p2p = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
   bool verify_checksums = true;
 
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
@@ -1079,46 +759,27 @@ grpc::Status MaterializationController::materialize_replica(
 
   // Artifact LIP fast path: try cross-device consumption
   const bool view_requested = view_spec.has_value() || request_view_id.has_value();
-  std::optional<store::loading::ReplicaKey> lip_replica_key;
   if (has_artifact && !view_requested && dev.type == DeviceType::GPU) {
-    absl::Status session_status = absl::OkStatus();
-    auto satisfied = d_.lip.try_satisfy_from_lip(
-        resolved_artifact_id,
-        dev.ordinal,
-        [&](const store::loading::ReplicaKey& rkey) {
-          lip_replica_key = rkey;
-          session_status = register_session_and_refs(
-              d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
-        },
-        resp.mutable_mem_handle());
-    if (!session_status.ok()) {
+    LipFastPathRequest lip_request{
+        .artifact_id = resolved_artifact_id,
+        .target_device_id = dev.ordinal,
+        .replica_uuid = req.replica_uuid(),
+        .effective_pid = effective_pid,
+        .allow_pid_ref = loopback_peer,
+        .lease_log_context = "LIP path",
+    };
+    auto lip_or = try_satisfy_lip_fast_path(
+        d_.lip, d_.sessions, d_.refs, d_.handle_leases, d_.lifecycle, lip_request, *resp.mutable_mem_handle(), [&]() {
+          record_lease_create_failed();
+        });
+    if (!lip_or.ok()) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(session_status);
+      return to_grpc_status(lip_or.status());
     }
-    if (!satisfied.ok()) {
-      // Same-device denial should fall back to the engine path just like MaterializeByKey.
-      if (!absl::IsFailedPrecondition(satisfied.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(satisfied.status());
-      }
-    } else if (*satisfied) {
+    if (lip_or->satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      if (lip_replica_key.has_value()) {
-        auto lease_status = attach_cuda_lease_for_replica_key(
-            *lip_replica_key,
-            effective_pid,
-            d_.handle_leases,
-            d_.lifecycle,
-            "LIP path",
-            [&]() { record_lease_create_failed(); },
-            *resp.mutable_mem_handle());
-        if (!lease_status.ok()) {
-          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-          return to_grpc_status(lease_status);
-        }
-      }
       return finalize_response();
     }
   }
@@ -1461,51 +1122,29 @@ grpc::Status MaterializationController::materialize_by_key(
   std::string used_disk_path = normalized_disk_path.has_value() ? normalized_disk_path->string() : std::string();
 
   // Try LIP fast path first (GPU only)
-  std::optional<store::loading::ReplicaKey> lip_replica_key;
   if (!cpu_target) {
-    absl::Status session_status = absl::OkStatus();
-    auto satisfied = d_.lip.try_satisfy_from_lip(
-        resolved_artifact_id,
-        req.device_id(),
-        [&](const store::loading::ReplicaKey& rkey) {
-          lip_replica_key = rkey;
-          session_status = register_session_and_refs(
-              d_.sessions, d_.refs, rkey, nullptr, req.replica_uuid(), effective_pid, loopback_peer);
-        },
-        resp.mutable_mem_handle());
-    if (!session_status.ok()) {
+    LipFastPathRequest lip_request{
+        .artifact_id = resolved_artifact_id,
+        .target_device_id = req.device_id(),
+        .replica_uuid = req.replica_uuid(),
+        .effective_pid = effective_pid,
+        .allow_pid_ref = loopback_peer,
+        .lease_log_context = "LIP by-key",
+    };
+    auto lip_or = try_satisfy_lip_fast_path(
+        d_.lip, d_.sessions, d_.refs, d_.handle_leases, d_.lifecycle, lip_request, *resp.mutable_mem_handle(), [&]() {
+          record_lease_create_failed();
+        });
+    if (!lip_or.ok()) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(session_status);
+      return to_grpc_status(lip_or.status());
     }
-    if (!satisfied.ok()) {
-      // If LIP path fails for reasons like same-device denial, fall back to engine path.
-      // Only propagate errors that indicate a broader failure.
-      // For simple parity, we treat FailedPrecondition as a miss and continue.
-      if (!absl::IsFailedPrecondition(satisfied.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(satisfied.status());
-      }
-    }
-    if (satisfied.ok() && *satisfied) {
+    if (lip_or->satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_artifact_id(mapping.artifact_id);
       resp.set_used_disk_path(used_disk_path);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      if (lip_replica_key.has_value()) {
-        auto lease_status = attach_cuda_lease_for_replica_key(
-            *lip_replica_key,
-            effective_pid,
-            d_.handle_leases,
-            d_.lifecycle,
-            "LIP by-key",
-            [&]() { record_lease_create_failed(); },
-            *resp.mutable_mem_handle());
-        if (!lease_status.ok()) {
-          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-          return to_grpc_status(lease_status);
-        }
-      }
       return finalize_response();
     }
   }
