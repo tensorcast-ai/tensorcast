@@ -46,6 +46,7 @@ sc_cc_library(
     srcs = [
         "service/artifact_retire_utils.cc",
         "service/grpc_service_impl.cc",
+        "service/grpc_service_impl_rpc_delegates.cc",
     ],
     hdrs = [
         "service/artifact_retire_utils.h",
