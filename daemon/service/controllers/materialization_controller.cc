@@ -1109,6 +1109,196 @@ Status validate_target_offsets_against_layout(
   return Status::OK;
 }
 
+struct TargetViewResolution {
+  std::optional<ViewSpec> view_spec;
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
+  std::optional<std::string> request_view_id;
+  std::optional<std::string> view_data_hash;
+  std::optional<store::loader::ViewPlan> view_plan;
+  std::optional<std::string> resolved_view_id;
+  bool view_id_requested{false};
+  bool has_view_transform{false};
+};
+
+Status parse_target_view_identity(const v2::MaterializeIntoTargetRequest& req, TargetViewResolution& view_resolution) {
+  switch (req.view_identity_case()) {
+    case v2::MaterializeIntoTargetRequest::kView: {
+      auto spec_or = convert_view_spec(req.view());
+      if (!spec_or.ok()) {
+        return to_grpc_status(spec_or.status());
+      }
+      view_resolution.view_spec = std::move(*spec_or);
+      view_resolution.view_spec_proto = req.view();
+      break;
+    }
+    case v2::MaterializeIntoTargetRequest::kViewId: {
+      if (!req.view_id().empty()) {
+        view_resolution.view_id_requested = true;
+        view_resolution.request_view_id = req.view_id();
+      }
+      break;
+    }
+    case v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET:
+      break;
+  }
+  return Status::OK;
+}
+
+Status hydrate_target_view_from_metadata(
+    store::StoreEngine& engine,
+    const v2::MaterializeIntoTargetRequest& req,
+    TargetViewResolution& view_resolution) {
+  if (!view_resolution.view_id_requested || !view_resolution.request_view_id.has_value()) {
+    return Status::OK;
+  }
+
+  auto view_meta_or = engine.get_view_metadata(req.artifact_id(), *view_resolution.request_view_id);
+  if (!view_meta_or.ok()) {
+    record_materialize_into_target(
+        "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(view_meta_or.status());
+  }
+  auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
+  if (!spec_or.ok()) {
+    record_materialize_into_target(
+        "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(spec_or.status());
+  }
+  view_resolution.view_spec = std::move(*spec_or);
+  view_resolution.view_spec_proto = build_view_spec_proto(*view_resolution.view_spec);
+  view_resolution.view_data_hash = view_meta_or->view_data_hash;
+  return Status::OK;
+}
+
+Status compute_target_view_plan(
+    std::string_view canonical_json,
+    bool has_subset,
+    bool has_ordered_selection,
+    const std::vector<std::string>& layout_names,
+    const std::vector<std::string>& request_names,
+    v2::TargetLayout::IndexKind index_kind,
+    TargetViewResolution& view_resolution) {
+  if (!view_resolution.view_spec.has_value() && !has_subset && index_kind != v2::TargetLayout::INDEX_KIND_VIEW &&
+      !has_ordered_selection) {
+    return Status::OK;
+  }
+
+  ViewSpec plan_spec = view_resolution.view_spec.value_or(ViewSpec{});
+  std::vector<std::string> subset_names;
+  if (has_ordered_selection) {
+    subset_names = request_names;
+  } else if (has_subset) {
+    subset_names = layout_names;
+  }
+  auto plan_or = store::StoreEngine::compute_view_plan(std::string(canonical_json), plan_spec, subset_names);
+  if (!plan_or.ok()) {
+    record_materialize_into_target(
+        "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(plan_or.status());
+  }
+  view_resolution.view_plan = std::move(*plan_or);
+  return Status::OK;
+}
+
+Status validate_target_index_kind_mode(
+    const v2::TargetLayout& layout,
+    bool has_subset,
+    bool has_ordered_selection,
+    TargetViewResolution& view_resolution) {
+  view_resolution.has_view_transform = view_resolution.view_id_requested ||
+      (view_resolution.view_spec.has_value() && view_resolution.view_plan.has_value() &&
+       !view_resolution.view_plan->is_identity);
+  if (view_resolution.view_id_requested && view_resolution.view_plan.has_value() &&
+      view_resolution.view_plan->is_identity && !has_subset) {
+    record_materialize_into_target(
+        "error", "view_identity_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view_id requires a non-identity view spec"};
+  }
+
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
+    if (view_resolution.has_view_transform || has_subset || has_ordered_selection) {
+      record_materialize_into_target(
+          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset selection"};
+    }
+    return Status::OK;
+  }
+  if (!view_resolution.has_view_transform && !has_subset && !has_ordered_selection) {
+    record_materialize_into_target(
+        "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or selection order"};
+  }
+  return Status::OK;
+}
+
+Status resolve_target_view_id(std::string_view canonical_json, TargetViewResolution& view_resolution) {
+  if (!view_resolution.has_view_transform) {
+    return Status::OK;
+  }
+  if (!view_resolution.view_spec_proto.has_value()) {
+    record_materialize_into_target(
+        "error", "view_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view spec required for view transforms"};
+  }
+  auto view_id_or = compute_view_id_from_spec(*view_resolution.view_spec_proto, std::string(canonical_json));
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
+  }
+  if (view_resolution.request_view_id.has_value() && *view_resolution.request_view_id != *view_id_or) {
+    record_materialize_into_target(
+        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
+  }
+  view_resolution.resolved_view_id = *view_id_or;
+  return Status::OK;
+}
+
+Status validate_target_layout_view_binding(
+    const v2::TargetLayout& layout,
+    const TargetViewResolution& view_resolution) {
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    if (view_resolution.has_view_transform) {
+      if (layout.view_id().empty() ||
+          (view_resolution.resolved_view_id.has_value() && layout.view_id() != *view_resolution.resolved_view_id)) {
+        record_materialize_into_target(
+            "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+        return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must match resolved view_id"};
+      }
+      return Status::OK;
+    }
+    if (!layout.view_id().empty()) {
+      record_materialize_into_target(
+          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must be empty for subset-only layouts"};
+    }
+    return Status::OK;
+  }
+  if (!layout.view_id().empty()) {
+    record_materialize_into_target(
+        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id not allowed for canonical layout"};
+  }
+  return Status::OK;
+}
+
+Status choose_target_selected_index_json(
+    const v2::TargetLayout& layout,
+    std::string_view canonical_index_json,
+    const TargetViewResolution& view_resolution,
+    std::string& selected_index_json) {
+  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
+    if (!view_resolution.view_plan.has_value()) {
+      record_materialize_into_target(
+          "error", "view_plan_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::FAILED_PRECONDITION, "view plan missing for VIEW layout"};
+    }
+    selected_index_json = view_resolution.view_plan->view_index_json;
+    return Status::OK;
+  }
+  selected_index_json = std::string(canonical_index_json);
+  return Status::OK;
+}
+
 absl::Status validate_descriptor_against_index(
     const DescriptorMetadata& descriptor,
     const store::loader::IndexInfo& index_info,
@@ -2318,110 +2508,40 @@ grpc::Status MaterializationController::materialize_into_target(
   const bool has_subset = is_layout_subset_of_canonical_index(canonical_table, layout_name_set);
   const bool has_ordered_selection = !request_names.empty();
 
-  std::optional<ViewSpec> view_spec;
-  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
-  std::optional<std::string> request_view_id;
-  std::optional<std::string> view_data_hash;
-  bool view_id_requested = false;
-
-  switch (req.view_identity_case()) {
-    case v2::MaterializeIntoTargetRequest::kView: {
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        return to_grpc_status(spec_or.status());
-      }
-      view_spec = std::move(*spec_or);
-      view_spec_proto = req.view();
-      break;
-    }
-    case v2::MaterializeIntoTargetRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        view_id_requested = true;
-        request_view_id = req.view_id();
-      }
-      break;
-    }
-    case v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET:
-      break;
+  TargetViewResolution view_resolution;
+  auto parse_view_status = parse_target_view_identity(req, view_resolution);
+  if (!parse_view_status.ok()) {
+    return parse_view_status;
+  }
+  auto hydrate_view_status = hydrate_target_view_from_metadata(d_.engine, req, view_resolution);
+  if (!hydrate_view_status.ok()) {
+    return hydrate_view_status;
+  }
+  auto plan_status = compute_target_view_plan(
+      *canonical_json_or,
+      has_subset,
+      has_ordered_selection,
+      layout_names,
+      request_names,
+      layout.index_kind(),
+      view_resolution);
+  if (!plan_status.ok()) {
+    return plan_status;
+  }
+  auto index_kind_status = validate_target_index_kind_mode(layout, has_subset, has_ordered_selection, view_resolution);
+  if (!index_kind_status.ok()) {
+    return index_kind_status;
+  }
+  auto resolved_view_status = resolve_target_view_id(*canonical_json_or, view_resolution);
+  if (!resolved_view_status.ok()) {
+    return resolved_view_status;
   }
 
-  if (view_id_requested && request_view_id.has_value()) {
-    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *request_view_id);
-    if (!view_meta_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(view_meta_or.status());
-    }
-    auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
-    if (!spec_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(spec_or.status());
-    }
-    view_spec = std::move(*spec_or);
-    view_spec_proto = build_view_spec_proto(*view_spec);
-    view_data_hash = view_meta_or->view_data_hash;
-  }
-
-  std::optional<store::loader::ViewPlan> view_plan;
-  if (view_spec.has_value() || has_subset || layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW ||
-      has_ordered_selection) {
-    ViewSpec plan_spec = view_spec.value_or(ViewSpec{});
-    std::vector<std::string> subset_names;
-    if (has_ordered_selection) {
-      subset_names = request_names;
-    } else if (has_subset) {
-      subset_names = layout_names;
-    }
-    auto plan_or = store::StoreEngine::compute_view_plan(*canonical_json_or, plan_spec, subset_names);
-    if (!plan_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(plan_or.status());
-    }
-    view_plan = std::move(*plan_or);
-  }
-
-  const bool has_view_transform =
-      view_id_requested || (view_spec.has_value() && view_plan.has_value() && !view_plan->is_identity);
-  if (view_id_requested && view_plan.has_value() && view_plan->is_identity && !has_subset) {
-    record_materialize_into_target(
-        "error", "view_identity_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_id requires a non-identity view spec"};
-  }
-
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
-    if (has_view_transform || has_subset || has_ordered_selection) {
-      record_materialize_into_target(
-          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset selection"};
-    }
-  } else {
-    if (!has_view_transform && !has_subset && !has_ordered_selection) {
-      record_materialize_into_target(
-          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or selection order"};
-    }
-  }
-
-  std::optional<std::string> resolved_view_id;
-  if (has_view_transform) {
-    if (!view_spec_proto.has_value()) {
-      record_materialize_into_target(
-          "error", "view_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "view spec required for view transforms"};
-    }
-    auto view_id_or = compute_view_id_from_spec(*view_spec_proto, *canonical_json_or);
-    if (!view_id_or.ok()) {
-      return to_grpc_status(view_id_or.status());
-    }
-    if (request_view_id.has_value() && *request_view_id != *view_id_or) {
-      record_materialize_into_target(
-          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
-    }
-    resolved_view_id = *view_id_or;
-  }
+  auto& view_spec = view_resolution.view_spec;
+  auto& view_plan = view_resolution.view_plan;
+  auto& resolved_view_id = view_resolution.resolved_view_id;
+  auto& view_data_hash = view_resolution.view_data_hash;
+  const bool has_view_transform = view_resolution.has_view_transform;
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
@@ -2432,34 +2552,16 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    if (has_view_transform) {
-      if (layout.view_id().empty() || (resolved_view_id.has_value() && layout.view_id() != *resolved_view_id)) {
-        record_materialize_into_target(
-            "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must match resolved view_id"};
-      }
-    } else if (!layout.view_id().empty()) {
-      record_materialize_into_target(
-          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must be empty for subset-only layouts"};
-    }
-  } else if (!layout.view_id().empty()) {
-    record_materialize_into_target(
-        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id not allowed for canonical layout"};
+  auto layout_view_binding_status = validate_target_layout_view_binding(layout, view_resolution);
+  if (!layout_view_binding_status.ok()) {
+    return layout_view_binding_status;
   }
 
   std::string selected_index_json;
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    if (!view_plan.has_value()) {
-      record_materialize_into_target(
-          "error", "view_plan_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "view plan missing for VIEW layout"};
-    }
-    selected_index_json = view_plan->view_index_json;
-  } else {
-    selected_index_json = *canonical_json_or;
+  auto selected_index_status =
+      choose_target_selected_index_json(layout, *canonical_json_or, view_resolution, selected_index_json);
+  if (!selected_index_status.ok()) {
+    return selected_index_status;
   }
 
   auto index_table_or = parse_canonical_index(selected_index_json);
@@ -2719,8 +2821,8 @@ grpc::Status MaterializationController::materialize_into_target(
     for (const auto& name : req.tensor_names()) {
       selection.add_tensor_names(name);
     }
-    if (view_spec_proto.has_value()) {
-      selection.mutable_view_spec()->CopyFrom(*view_spec_proto);
+    if (view_resolution.view_spec_proto.has_value()) {
+      selection.mutable_view_spec()->CopyFrom(*view_resolution.view_spec_proto);
     }
 
     tensorcast::common::v1::ByteSpaceRef byte_space;

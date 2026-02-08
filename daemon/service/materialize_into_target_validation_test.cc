@@ -536,6 +536,122 @@ TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize
   REQUIRE(status.error_message() == "target_layout storage_offset mismatch");
 }
 
+TEST_CASE("MaterializeIntoTarget view index requires view or ordered selection", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(4);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(4);
+  offset_b->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "index_kind VIEW requires view or selection order");
+}
+
+TEST_CASE("MaterializeIntoTarget canonical layout forbids target view_id", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+  layout->set_view_id("unexpected-view-id");
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(4);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(4);
+  offset_b->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout.view_id not allowed for canonical layout");
+}
+
+TEST_CASE(
+    "MaterializeIntoTarget subset-only view layout requires empty view_id",
+    "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+  layout->set_view_id("unexpected-view-id");
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout.view_id must be empty for subset-only layouts");
+}
+
 TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
 
