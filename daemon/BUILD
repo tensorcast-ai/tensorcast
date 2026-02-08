@@ -821,11 +821,11 @@ sc_cc_library(
     deps = [
         ":daemon_options_hdr",
         ":device_resolver_hdr",
+        ":disk_artifact_service_lib",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
-        ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
@@ -853,6 +853,23 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
         "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "disk_artifact_service_lib",
+    srcs = ["service/controllers/disk_artifact_service.cc"],
+    hdrs = ["service/controllers/disk_artifact_service.h"],
+    deps = [
+        ":grpc_peer_utils_lib",
+        ":local_disk_import_catalog_lib",
+        ":materialization_disk_resolve_utils_lib",
+        ":rpc_context_hdr",
+        ":shutdown_signal_hdr",
+        ":status_utils",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time",
     ],
 )
 
@@ -1680,6 +1697,21 @@ cc_test(
         "//core/store:store_engine_options",
         "//core/store:testing_global_store_client_stub",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_operation_rpc_test",
+    srcs = ["service/grpc_service_impl_operation_rpc_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
         "@catch2//:catch2_main",
     ],
 )
