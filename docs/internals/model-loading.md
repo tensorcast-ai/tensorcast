@@ -63,8 +63,8 @@ sequenceDiagram
         LocalStoreDaemon-->>InferenceInstance: Return CUDA IPC handle + leases
     end
 
-    LocalStoreDaemon->>GlobalStore: 3. RequestReplicaTransport / RequestViewTransport
-    Note left of GlobalStore: RPC: RequestReplicaTransport / RequestViewTransport
+    LocalStoreDaemon->>GlobalStore: 3. RequestReplicaTransport
+    Note left of GlobalStore: RPC: RequestReplicaTransport
     GlobalStore-->>LocalStoreDaemon: 4. Remote session or disk-only hint
     Note left of GlobalStore: RPC Resp: transport descriptor
 
@@ -136,7 +136,7 @@ Both the fast path and the engine path increment the caller’s PID in `RefTrack
 1. **Memory Allocation & Request**: InferenceInstance allocates CUDA memory and issues `MaterializeByKey` with the GPU `device_id`, optional `pinned_allocation_timeout_ms`, the caller `pid`, and a `replica_uuid` used for `ConfirmReplica`/`UnloadReplica`. Variant-aware callers can still invoke `MaterializeReplica` directly with a `view` / `view_id` and placement hint; those flows return `view_index_json` / `view_data_hash` to describe non-canonical byte spaces.
 2. **Key Resolution & Disk Hints**: The daemon resolves the human key via Global Store (`ResolveKeyMapping`) to learn the canonical `artifact_id`. If disk fallback is allowed, it then resolves a managed disk location and, when available, populates `used_disk_path`. These identifiers are echoed in `MaterializeByKeyResponse` so SDK caches and logging stay aligned.
 3. **Lease-In-Place Reuse**: `LipManager::try_satisfy_from_lip` checks whether the target GPU already holds the replica. On a hit, the daemon reuses the resident CUDA IPC handle, marks the status as `ALLOCATED`, and immediately responds with the original `artifact_id` and any `used_disk_path` while still tracking the caller’s PID/lease.
-4. **Replica Selection & Transfer**: LIP misses call into `StoreEngine::materialize_replica`, which routes through `MaterializationFacade` and `MaterializeOrchestrator` to request a remote replica (`RequestReplicaTransport` / `RequestViewTransport`). Successful transports stream bytes over the communicator; failures fall back to `ingest_from_disk` using the resolved disk path when available.
+4. **Replica Selection & Transfer**: LIP misses call into `StoreEngine::materialize_replica`, which routes through `MaterializationFacade` and `MaterializeOrchestrator` to request a remote replica (`RequestReplicaTransport`). Successful transports stream bytes over the communicator; failures fall back to `ingest_from_disk` using the resolved disk path when available.
 5. **Lease Binding & Reference Tracking**: Every granted replica increments `RefTracker` for the caller PID and acquires a GPU `UseLease` from `SessionLifecycleManager`. These handles block eviction until the PID drops its reference or TTL expires, keeping telemetry and scheduler state consistent.
 6. **GPU Transfer & Confirmation**: `MaterializeByKey` returns as soon as memory is allocated (resident or freshly loaded). The client must call `ConfirmReplica` with the `replica_uuid`; the daemon waits (up to the gRPC deadline, capped at 30s) for the ingestion future before confirming success, surfacing any loader failures back to the caller.
 7. **Registration & Publish**: Once ingestion completes, `MaterializationFacade` marks the Global Store transport session finished, registers or refreshes the replica metadata, and publishes `ingestion_completed` events with the original `publish_context_id` so ReplicaRuntime and MetadataGateway stay in lock-step.
