@@ -55,56 +55,66 @@ class AssemblyViewRpcMixin:
         request: global_store_pb2.PutLayoutSpecRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.PutLayoutSpecResponse:
-        return self.layout_rpc_handler.put_layout_spec(request, context)
+        return self.layout_spec_rpc_handler.put_layout_spec(request, context)
 
     def GetLayoutSpec(
         self: Any,
         request: global_store_pb2.GetLayoutSpecRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetLayoutSpecResponse:
-        return self.layout_rpc_handler.get_layout_spec(request, context)
+        return self.layout_spec_rpc_handler.get_layout_spec(request, context)
 
     def GetAssemblyLayoutBinding(
         self: Any,
         request: global_store_pb2.GetAssemblyLayoutBindingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetAssemblyLayoutBindingResponse:
-        return self.layout_rpc_handler.get_assembly_layout_binding(request, context)
+        return self.layout_binding_rpc_handler.get_assembly_layout_binding(
+            request, context
+        )
 
     def UpdateAssemblyLayoutBinding(
         self: Any,
         request: global_store_pb2.UpdateAssemblyLayoutBindingRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpdateAssemblyLayoutBindingResponse:
-        return self.layout_rpc_handler.update_assembly_layout_binding(request, context)
+        return self.layout_binding_rpc_handler.update_assembly_layout_binding(
+            request, context
+        )
 
     def AttachLayoutToArtifact(
         self: Any,
         request: global_store_pb2.AttachLayoutToArtifactRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.AttachLayoutToArtifactResponse:
-        return self.layout_rpc_handler.attach_layout_to_artifact(request, context)
+        return self.layout_binding_rpc_handler.attach_layout_to_artifact(
+            request, context
+        )
 
     def ListArtifactLayouts(
         self: Any,
         request: global_store_pb2.ListArtifactLayoutsRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListArtifactLayoutsResponse:
-        return self.layout_rpc_handler.list_artifact_layouts(request, context)
+        return self.layout_binding_rpc_handler.list_artifact_layouts(request, context)
 
     def GetAssemblyRuntimePolicy(
         self: Any,
         request: global_store_pb2.GetAssemblyRuntimePolicyRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.GetAssemblyRuntimePolicyResponse:
-        return self.layout_rpc_handler.get_assembly_runtime_policy(request, context)
+        return self.layout_runtime_policy_rpc_handler.get_assembly_runtime_policy(
+            request, context
+        )
 
     def UpdateAssemblyRuntimePolicy(
         self: Any,
         request: global_store_pb2.UpdateAssemblyRuntimePolicyRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UpdateAssemblyRuntimePolicyResponse:
-        return self.layout_rpc_handler.update_assembly_runtime_policy(request, context)
+        return self.layout_runtime_policy_rpc_handler.update_assembly_runtime_policy(
+            request, context
+        )
 
 
 class WorkflowOrchestrationRpcMixin:
@@ -313,63 +323,63 @@ class ClusterRuntimeRpcMixin:
         request: global_store_pb2.RegisterWorkerRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterWorkerResponse:
-        return self.worker_instance_rpc_handler.register_worker(request, context)
+        return self.worker_rpc_handler.register_worker(request, context)
 
     def WorkerHeartbeat(
         self: Any,
         request: global_store_pb2.WorkerHeartbeatRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.WorkerHeartbeatResponse:
-        return self.worker_instance_rpc_handler.worker_heartbeat(request, context)
+        return self.worker_rpc_handler.worker_heartbeat(request, context)
 
     def UnregisterWorker(
         self: Any,
         request: global_store_pb2.UnregisterWorkerRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterWorkerResponse:
-        return self.worker_instance_rpc_handler.unregister_worker(request, context)
+        return self.worker_rpc_handler.unregister_worker(request, context)
 
     def ListActiveWorkers(
         self: Any,
         request: global_store_pb2.ListActiveWorkersRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListActiveWorkersResponse:
-        return self.worker_instance_rpc_handler.list_active_workers(request, context)
+        return self.worker_rpc_handler.list_active_workers(request, context)
 
     def RegisterInstance(
         self: Any,
         request: global_store_pb2.RegisterInstanceRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterInstanceResponse:
-        return self.worker_instance_rpc_handler.register_instance(request, context)
+        return self.instance_rpc_handler.register_instance(request, context)
 
     def InstanceHeartbeat(
         self: Any,
         request: global_store_pb2.InstanceHeartbeatRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.InstanceHeartbeatResponse:
-        return self.worker_instance_rpc_handler.instance_heartbeat(request, context)
+        return self.instance_rpc_handler.instance_heartbeat(request, context)
 
     def UnregisterInstance(
         self: Any,
         request: global_store_pb2.UnregisterInstanceRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterInstanceResponse:
-        return self.worker_instance_rpc_handler.unregister_instance(request, context)
+        return self.instance_rpc_handler.unregister_instance(request, context)
 
     def ListActiveInstances(
         self: Any,
         request: global_store_pb2.ListActiveInstancesRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.ListActiveInstancesResponse:
-        return self.worker_instance_rpc_handler.list_active_instances(request, context)
+        return self.instance_rpc_handler.list_active_instances(request, context)
 
     def SynchronizeWorkerState(
         self: Any,
         request: global_store_pb2.SynchronizeWorkerStateRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.SynchronizeWorkerStateResponse:
-        return self.worker_instance_rpc_handler.synchronize_worker_state(
+        return self.worker_state_sync_rpc_handler.synchronize_worker_state(
             request, context
         )
 
@@ -378,7 +388,7 @@ class ClusterRuntimeRpcMixin:
         request: global_store_pb2.RequestFullStateSyncRequest,
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RequestFullStateSyncResponse:
-        return self.worker_instance_rpc_handler.request_full_state_sync(
+        return self.worker_state_sync_rpc_handler.request_full_state_sync(
             request, context
         )
 
