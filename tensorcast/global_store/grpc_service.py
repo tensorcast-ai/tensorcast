@@ -29,7 +29,6 @@ from tensorcast.global_store.grpc_helpers import (
     sha256_digest_to_multibase,
     timestamp_to_datetime,
 )
-from tensorcast.global_store.grpc_method_binding import bind_global_store_rpc_methods
 from tensorcast.global_store.maintenance_coordinator import (
     GlobalStoreMaintenanceCoordinator,
 )
@@ -111,6 +110,12 @@ from tensorcast.global_store.rpc.worker_rpc_handler import WorkerRpcHandler
 from tensorcast.global_store.rpc.worker_state_sync_rpc_handler import (
     WorkerStateSyncRpcHandler,
 )
+from tensorcast.global_store.rpc_servicer_mixins import (
+    ArtifactCatalogRpcServicerMixin,
+    AssemblyViewRpcServicerMixin,
+    ClusterRuntimeRpcServicerMixin,
+    WorkflowOrchestrationRpcServicerMixin,
+)
 from tensorcast.global_store.services import (
     ArtifactService,
     ChunkService,
@@ -132,6 +137,10 @@ logger = init_logger(__name__)
 
 
 class GlobalStoreServicer(
+    ClusterRuntimeRpcServicerMixin,
+    ArtifactCatalogRpcServicerMixin,
+    AssemblyViewRpcServicerMixin,
+    WorkflowOrchestrationRpcServicerMixin,
     global_store_pb2_grpc.ClusterRuntimeServiceServicer,
     global_store_pb2_grpc.ArtifactCatalogServiceServicer,
     global_store_pb2_grpc.AssemblyViewServiceServicer,
@@ -336,7 +345,6 @@ class GlobalStoreServicer(
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
-        bind_global_store_rpc_methods(self)
 
         self._maintenance_coordinator = GlobalStoreMaintenanceCoordinator(
             config=self.config,
@@ -610,7 +618,7 @@ class GlobalStoreServicer(
         except Exception as e:
             logger.exception(f"Error during startup recovery: {e}")
 
-    # RPC methods are bound dynamically to domain handlers in __init__.
+    # RPC methods are implemented by domain servicer mixins.
 
     # ========== Helper Methods ==========
 
