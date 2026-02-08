@@ -6,23 +6,16 @@ gRPC service implementation for Global Store.
 This provides the gRPC interface layer, delegating business logic to services.
 """
 
-import base64
-import binascii
-import hashlib
 import json
-import threading
 import time
-from datetime import datetime, timedelta, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import duckdb  # DuckDB is a runtime dependency; ignore missing stubs in type checker
 import grpc
-from google.protobuf import timestamp_pb2
 
-from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.config import get_config
-from tensorcast.global_store.db_utils import init_db, optimize_db
+from tensorcast.global_store.db_utils import init_db
 from tensorcast.global_store.exceptions import (
     ValidationError,
 )
@@ -32,6 +25,19 @@ from tensorcast.global_store.grpc_domain_servicers import (
     ClusterAdminRpcMixin,
     ClusterRuntimeRpcMixin,
     WorkflowOrchestrationRpcMixin,
+)
+from tensorcast.global_store.grpc_helpers import (
+    coerce_db_datetime,
+    datetime_to_timestamp,
+    hex_sha256_to_multibase,
+    index_bytes_to_multibase_sha256,
+    is_safe_relative_path,
+    multibase_sha256_to_hex,
+    sha256_digest_to_multibase,
+    timestamp_to_datetime,
+)
+from tensorcast.global_store.maintenance_coordinator import (
+    GlobalStoreMaintenanceCoordinator,
 )
 from tensorcast.global_store.models import (
     ExportState,
@@ -253,13 +259,13 @@ class GlobalStoreServicer(
             min_status_update_interval_ms=int(
                 self.config.limits.operation_writes.min_status_update_interval_ms
             ),
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
         self.artifact_binding_rpc_handler = ArtifactBindingRpcHandler(
             binding_repository=self.binding_repository,
-            datetime_to_timestamp=self._datetime_to_timestamp,
+            datetime_to_timestamp=datetime_to_timestamp,
             logger=logger,
         )
         self.key_mapping_rpc_handler = KeyMappingRpcHandler(
@@ -269,7 +275,7 @@ class GlobalStoreServicer(
         self.artifact_index_rpc_handler = ArtifactIndexRpcHandler(
             artifact_index_repository=self.artifact_indices,
             artifact_repository=self.artifacts_repo,
-            multibase_sha256_to_hex=self._multibase_sha256_to_hex,
+            multibase_sha256_to_hex=multibase_sha256_to_hex,
             logger=logger,
         )
 
@@ -291,8 +297,8 @@ class GlobalStoreServicer(
             view_coverage_repository=self.view_coverage_repository,
             proof_repository=self.proof_repository,
             view_state_service=self.view_state_service,
-            timestamp_to_datetime=self._timestamp_to_datetime,
-            datetime_to_timestamp=self._datetime_to_timestamp,
+            timestamp_to_datetime=timestamp_to_datetime,
+            datetime_to_timestamp=datetime_to_timestamp,
             get_tensor_intervals_for_artifact_id=self._get_tensor_intervals_for_artifact_id,
             logger=logger,
         )
@@ -304,10 +310,10 @@ class GlobalStoreServicer(
             assembly_layout_binding_repository=self.assembly_layout_binding_repository,
             artifact_layout_attachment_repository=self.artifact_layout_attachment_repository,
             assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
-            multibase_sha256_to_hex=self._multibase_sha256_to_hex,
-            sha256_digest_to_multibase=self._sha256_digest_to_multibase,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
+            multibase_sha256_to_hex=multibase_sha256_to_hex,
+            sha256_digest_to_multibase=sha256_digest_to_multibase,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
 
@@ -317,17 +323,23 @@ class GlobalStoreServicer(
         self.disk_location_rpc_handler = DiskLocationRpcHandler(
             disk_location_repository=self.disk_location_repository,
             cluster_id=self.cluster_id,
-            is_safe_relative_path=self._is_safe_relative_path,
+            is_safe_relative_path=is_safe_relative_path,
             disk_location_kind_from_proto=self._DISK_LOCATION_KIND_FROM_PROTO,
             disk_location_kind_to_proto=self._DISK_LOCATION_KIND_TO_PROTO,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
 
-        # Start background cleanup thread
-        self._start_cleanup_thread()
-        # Cleanup and optimization are now handled by a single maintenance thread
+        self._maintenance_coordinator = GlobalStoreMaintenanceCoordinator(
+            config=self.config,
+            connection=self.connection,
+            get_worker_service=lambda: self.worker_service,
+            get_instance_service=lambda: self.instance_service,
+            get_transport_service=lambda: self.transport_service,
+            logger=logger,
+        )
+        self.cleanup_thread = self._maintenance_coordinator.start()
 
     def _rebuild_runtime_services_and_handlers(self) -> None:
         """Rebuild services/handlers that depend on mutable worker/replica repositories."""
@@ -337,8 +349,8 @@ class GlobalStoreServicer(
             artifact_repository=self.artifacts_repo,
             artifact_index_repository=self.artifact_indices,
             memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
-            index_bytes_to_multibase_sha256=self._index_bytes_to_multibase_sha256,
-            hex_sha256_to_multibase=self._hex_sha256_to_multibase,
+            index_bytes_to_multibase_sha256=index_bytes_to_multibase_sha256,
+            hex_sha256_to_multibase=hex_sha256_to_multibase,
             logger=logger,
         )
         self.transport_service = TransportService(
@@ -384,8 +396,8 @@ class GlobalStoreServicer(
             artifact_repository=self.artifacts_repo,
             view_state_service=self.view_state_service,
             replica_to_memory_info=self._replica_to_memory_info,
-            datetime_to_timestamp=self._datetime_to_timestamp,
-            coerce_db_datetime=self._coerce_db_datetime,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
         self.chunk_rpc_handler = ChunkRpcHandler(
@@ -427,102 +439,6 @@ class GlobalStoreServicer(
             "version": version,
         }
 
-    @staticmethod
-    def _timestamp_to_datetime(ts: timestamp_pb2.Timestamp | None) -> datetime | None:
-        """Convert protobuf Timestamp to timezone-aware datetime (UTC)."""
-        if ts is None:
-            return None
-        return ts.ToDatetime(tzinfo=timezone.utc)
-
-    @staticmethod
-    def _datetime_to_timestamp(dt: datetime | None) -> timestamp_pb2.Timestamp | None:
-        """Convert datetime to protobuf Timestamp (UTC)."""
-        if dt is None:
-            return None
-        normalized = (
-            dt.astimezone(timezone.utc)
-            if dt.tzinfo
-            else dt.replace(tzinfo=timezone.utc)
-        )
-        proto = timestamp_pb2.Timestamp()
-        proto.FromDatetime(normalized)
-        return proto
-
-    @staticmethod
-    def _coerce_db_datetime(value: object) -> datetime | None:
-        """Best-effort conversion for DuckDB timestamp outputs."""
-        if value is None:
-            return None
-        if isinstance(value, datetime):
-            candidate = value
-        elif isinstance(value, str):
-            candidate = datetime.fromisoformat(value)
-        else:
-            raise ValueError(f"Unsupported datetime value: {value!r}")
-        return (
-            candidate.astimezone(timezone.utc)
-            if candidate.tzinfo
-            else candidate.replace(tzinfo=timezone.utc)
-        )
-
-    @staticmethod
-    def _is_safe_relative_path(path: str) -> bool:
-        if not path:
-            return False
-        if "\\" in path:
-            return False
-        pure = PurePosixPath(path)
-        if pure.is_absolute():
-            return False
-        return ".." not in pure.parts
-
-    @staticmethod
-    def _multibase_sha256_to_hex(value: str) -> str | None:
-        """Convert multibase base32 multihash (sha2-256) to lowercase hex digest."""
-        if not value or value[0] != "b":
-            return None
-        payload = value[1:]
-        if not payload:
-            return None
-        padding_needed = (-len(payload)) % 8
-        padded = payload + ("=" * padding_needed)
-        try:
-            decoded = base64.b32decode(padded.upper(), casefold=True)
-        except binascii.Error:
-            return None
-        if len(decoded) != 34 or decoded[0] != 0x12 or decoded[1] != 0x20:
-            return None
-        digest = decoded[2:]
-        if len(digest) != 32:
-            return None
-        return digest.hex()
-
-    @staticmethod
-    def _sha256_digest_to_multibase(digest: bytes) -> str | None:
-        """Convert raw SHA-256 digest bytes to multibase base32 multihash."""
-        if len(digest) != 32:
-            return None
-        multihash = b"\x12\x20" + digest
-        b32 = base64.b32encode(multihash).decode("ascii").lower().rstrip("=")
-        return f"b{b32}"
-
-    @classmethod
-    def _index_bytes_to_multibase_sha256(cls, data: bytes) -> str | None:
-        if not data:
-            return None
-        digest = hashlib.sha256(data).digest()
-        return cls._sha256_digest_to_multibase(digest)
-
-    @classmethod
-    def _hex_sha256_to_multibase(cls, value: str) -> str | None:
-        if not value:
-            return None
-        try:
-            digest = bytes.fromhex(value)
-        except ValueError:
-            return None
-        return cls._sha256_digest_to_multibase(digest)
-
     def _get_tensor_intervals_for_artifact_id(
         self, *, artifact_id: str
     ) -> dict[str, tuple[int, int]]:
@@ -532,7 +448,7 @@ class GlobalStoreServicer(
         index_multihash = row.get("index_multihash")
         if not index_multihash:
             raise ValidationError("canonical index not recorded for artifact_id")
-        index_key = self._multibase_sha256_to_hex(str(index_multihash))
+        index_key = multibase_sha256_to_hex(str(index_multihash))
         if not index_key:
             raise ValidationError("invalid index_multihash stored for artifact_id")
         data = self.artifact_indices.get(index_key)
@@ -627,137 +543,6 @@ class GlobalStoreServicer(
         except Exception as e:
             logger.exception(f"Error during startup recovery: {e}")
 
-    def _start_cleanup_thread(self):
-        """Start background maintenance thread that performs both cleanup and periodic database optimizations."""
-
-        def maintenance_loop():
-            # Allow workers some time to register before first maintenance pass
-            time.sleep(self.config.heartbeat_timeout_ms / 1000 * 2)
-
-            optimize_interval_sec = self.config.optimize_interval_ms / 1000
-            cleanup_interval_sec = self.config.cleanup_interval_ms / 1000
-            last_optimize_ts = time.time()
-
-            while True:
-                try:
-                    # -------- Cleanup inactive workers --------
-                    self.worker_service.cleanup_inactive_workers()
-                    # -------- Cleanup inactive instances --------
-                    if self.instance_service:
-                        try:
-                            self.instance_service.cleanup_inactive_instances()
-                        except Exception:
-                            logger.exception("Error cleaning up inactive instances")
-
-                    # -------- Cleanup expired transports --------
-                    if self.transport_service:
-                        try:
-                            self.transport_service.cleanup_expired_transports()
-                        except Exception:
-                            logger.exception("Error cleaning up expired transports")
-
-                    # -------- Retention / GC (v2) --------
-                    try:
-                        self._run_retention_gc()
-                    except Exception:
-                        logger.exception("Error applying retention / GC policies")
-
-                    # -------- Periodic database optimization --------
-                    if time.time() - last_optimize_ts >= optimize_interval_sec:
-                        try:
-                            optimize_db(self.connection)
-                        except Exception:
-                            # optimize_db already logs; safeguard thread
-                            logger.exception("Error optimizing database")
-                        last_optimize_ts = time.time()
-
-                except Exception:
-                    logger.exception("Error in maintenance thread")
-
-                # Sleep until the next cleanup interval
-                time.sleep(cleanup_interval_sec)
-
-        self.cleanup_thread = threading.Thread(target=maintenance_loop, daemon=True)
-        self.cleanup_thread.start()
-
-    def _run_retention_gc(self) -> None:
-        retention = self.config.limits.retention
-        now = datetime.now(timezone.utc)
-
-        # Terminal operations and snapshots
-        if retention.operations_ttl_ms > 0:
-            cutoff = now - timedelta(milliseconds=int(retention.operations_ttl_ms))
-            row = self.connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM operations
-                WHERE state IN ('success','failed','cancelled','degraded')
-                  AND updated_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self.connection.execute(
-                    """
-                    DELETE FROM operations
-                    WHERE state IN ('success','failed','cancelled','degraded')
-                      AND updated_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(table="operations", count=count)
-
-        # Assembly-scoped proof commitments (post-seal cleanup / bounded retention)
-        if retention.assembly_proof_commitments_ttl_ms > 0:
-            cutoff = now - timedelta(
-                milliseconds=int(retention.assembly_proof_commitments_ttl_ms)
-            )
-            row = self.connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM assembly_proof_commitments
-                WHERE created_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self.connection.execute(
-                    """
-                    DELETE FROM assembly_proof_commitments
-                    WHERE created_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(
-                    table="assembly_proof_commitments", count=count
-                )
-
-        # Per-piece proof digests (audit/debug)
-        if retention.piece_proof_digests_ttl_ms > 0:
-            cutoff = now - timedelta(
-                milliseconds=int(retention.piece_proof_digests_ttl_ms)
-            )
-            row = self.connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM piece_proof_digests
-                WHERE created_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self.connection.execute(
-                    """
-                    DELETE FROM piece_proof_digests
-                    WHERE created_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(table="piece_proof_digests", count=count)
-
     # RPC method implementations are organized in domain mixins:
     # ClusterRuntimeRpcMixin, ArtifactCatalogRpcMixin, AssemblyViewRpcMixin,
     # WorkflowOrchestrationRpcMixin, and ClusterAdminRpcMixin.
@@ -818,7 +603,7 @@ class GlobalStoreServicer(
         """Convert Replica to MemoryInfo proto."""
         return replica_to_memory_info(
             replica=replica,
-            datetime_to_timestamp=self._datetime_to_timestamp,
+            datetime_to_timestamp=datetime_to_timestamp,
         )
 
     def _memory_info_to_replica_artifact_id(
