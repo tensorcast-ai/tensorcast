@@ -974,6 +974,7 @@ sc_cc_library(
     hdrs = ["service/controllers/registration_controller.h"],
     deps = [
         ":lip_manager_lib",
+        ":materialization_policy_utils_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
         ":rpc_context_hdr",
