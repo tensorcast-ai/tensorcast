@@ -155,6 +155,111 @@ void record_local_stable_tier_metrics(
     const char* op,
     const char* status,
     const char* requirement,
+    std::optional<double> seconds);
+
+absl::StatusOr<store::StoreEngine::StableCacheAdmissionResult> ensure_local_stable_admission(
+    store::StoreEngine& engine,
+    LipManager& lip_mgr,
+    IpcRegionRegistry& regions,
+    const ResolvedStorePolicy& policy,
+    std::string_view artifact_id,
+    tensorcast::common::ArtifactIdKind id_kind,
+    uint64_t total_size,
+    int owner_pid,
+    std::string_view canonical_index_json,
+    std::string_view index_key_hex);
+
+absl::StatusOr<ResolvedStorePolicy> resolve_effective_store_policy(const RegistrationManager::RegMeta& meta) {
+  if (meta.resolved_policy.has_value()) {
+    return *meta.resolved_policy;
+  }
+  return resolve_store_policy(nullptr);
+}
+
+absl::Status apply_local_stable_tier(
+    store::StoreEngine& engine,
+    LipManager& lip,
+    IpcRegionRegistry& regions,
+    const RegistrationManager::RegMeta& meta,
+    std::string_view artifact_id,
+    tensorcast::common::ArtifactIdKind id_kind,
+    uint64_t total_size,
+    v2::LocalStableTierResult* local_stable,
+    const std::function<void()>& on_must_failure_cleanup) {
+  auto resolved_or = resolve_effective_store_policy(meta);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
+  }
+  const ResolvedStorePolicy& resolved = *resolved_or;
+  const char* op_label = local_stable_op_label(meta.plan);
+  const char* requirement = requirement_level_label(resolved.local_requirement);
+
+  if (meta.view_registration) {
+    local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+    local_stable->set_message("view registrations do not satisfy the local stable tier");
+    record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    return absl::OkStatus();
+  }
+  if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
+    local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+    record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+    return absl::OkStatus();
+  }
+
+  const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
+  const auto local_stable_start = std::chrono::steady_clock::now();
+  auto admit_or = ensure_local_stable_admission(
+      engine,
+      lip,
+      regions,
+      resolved,
+      artifact_id,
+      id_kind,
+      total_size,
+      meta.owner_pid,
+      meta.index_data,
+      meta.index_key_hex);
+  const double local_stable_seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - local_stable_start).count();
+  if (!admit_or.ok() || admit_or->skipped) {
+    const std::string message = admit_or.ok()
+        ? "local stable tier admission skipped"
+        : std::string(admit_or.status().message().data(), admit_or.status().message().size());
+    const char* retention =
+        stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+    const char* overflow =
+        stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+    const char* outcome = resolved.local_requirement == RequirementLevel::kMust ? "failed" : "degraded";
+    LOG(WARNING) << "local_stable_tier." << outcome << ": artifact_id=" << artifact_id << " op=" << op_label
+                 << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+                 << " seconds=" << local_stable_seconds << " message=\"" << message << "\"";
+    if (resolved.local_requirement == RequirementLevel::kMust) {
+      record_local_stable_tier_metrics(op_label, "failed", requirement, local_stable_seconds);
+      on_must_failure_cleanup();
+      return admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status();
+    }
+    local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
+    local_stable->set_message(message);
+    record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
+    return absl::OkStatus();
+  }
+
+  local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
+  const char* retention =
+      stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
+  const char* overflow =
+      stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
+  LOG(INFO) << "local_stable_tier.ready: artifact_id=" << artifact_id << " op=" << op_label
+            << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
+            << " seconds=" << local_stable_seconds;
+  record_local_stable_tier_metrics(op_label, "ready", requirement, local_stable_seconds);
+  return absl::OkStatus();
+}
+
+void record_local_stable_tier_metrics(
+    const char* op,
+    const char* status,
+    const char* requirement,
     std::optional<double> seconds) {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -2086,22 +2191,20 @@ grpc::Status RegistrationController::commit(
       }
       resp.set_allow_partial(true);
 
-      ResolvedStorePolicy resolved;
-      if (meta.resolved_policy.has_value()) {
-        resolved = *meta.resolved_policy;
-      } else {
-        auto default_or = resolve_store_policy(nullptr);
-        if (!default_or.ok()) {
-          return to_grpc_status(default_or.status());
-        }
-        resolved = *default_or;
-      }
       auto* local_stable = resp.mutable_local_stable_tier();
-      const char* op_label = local_stable_op_label(meta.plan);
-      const char* requirement = requirement_level_label(resolved.local_requirement);
-      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
-      local_stable->set_message("view registrations do not satisfy the local stable tier");
-      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
+      auto local_stable_status = apply_local_stable_tier(
+          d_.engine,
+          d_.lip,
+          d_.regions,
+          meta,
+          meta.client_artifact_id,
+          tensorcast::common::ArtifactIdKind::kCgid,
+          view_total,
+          local_stable,
+          []() {});
+      if (!local_stable_status.ok()) {
+        return to_grpc_status(local_stable_status);
+      }
 
       lip_rollback.release();
       replica_rollback.release();
@@ -2163,75 +2266,15 @@ grpc::Status RegistrationController::commit(
     desc->set_total_size(out.total_size);
     desc->set_id_kind(ToProtoKind(out.id_kind));
 
-    ResolvedStorePolicy resolved;
-    if (meta.resolved_policy.has_value()) {
-      resolved = *meta.resolved_policy;
-    } else {
-      auto default_or = resolve_store_policy(nullptr);
-      if (!default_or.ok()) {
-        return to_grpc_status(default_or.status());
-      }
-      resolved = *default_or;
-    }
     auto* local_stable = resp.mutable_local_stable_tier();
-    const char* op_label = local_stable_op_label(meta.plan);
-    const char* requirement = requirement_level_label(resolved.local_requirement);
-    if (meta.view_registration) {
-      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
-      local_stable->set_message("view registrations do not satisfy the local stable tier");
-      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
-    } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
-      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
-    } else {
-      const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
-      const auto local_stable_start = std::chrono::steady_clock::now();
-      auto admit_or = ensure_local_stable_admission(
-          d_.engine,
-          d_.lip,
-          d_.regions,
-          resolved,
-          out.artifact_id,
-          out.id_kind,
-          out.total_size,
-          meta.owner_pid,
-          meta.index_data,
-          meta.index_key_hex);
-      const double local_stable_seconds =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - local_stable_start).count();
-      if (!admit_or.ok() || admit_or->skipped) {
-        const std::string message = admit_or.ok()
-            ? "local stable tier admission skipped"
-            : std::string(admit_or.status().message().data(), admit_or.status().message().size());
-        const char* retention =
-            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
-        const char* overflow =
-            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
-        const char* outcome = resolved.local_requirement == RequirementLevel::kMust ? "failed" : "degraded";
-        LOG(WARNING) << "local_stable_tier." << outcome << ": artifact_id=" << out.artifact_id << " op=" << op_label
-                     << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
-                     << " seconds=" << local_stable_seconds << " message=\"" << message << "\"";
-        if (resolved.local_requirement == RequirementLevel::kMust) {
-          record_local_stable_tier_metrics(op_label, "failed", requirement, local_stable_seconds);
+    auto local_stable_status = apply_local_stable_tier(
+        d_.engine, d_.lip, d_.regions, meta, out.artifact_id, out.id_kind, out.total_size, local_stable, [&]() {
           (void)d_.lip.revoke_by_registration_id(req.registration_id());
           auto refs = d_.reg.erase_all_for(req.registration_id());
           ReleaseRegionRefs(d_.regions, refs);
-          return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
-        }
-        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
-        local_stable->set_message(message);
-        record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
-      } else {
-        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
-        const char* retention =
-            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
-        const char* overflow =
-            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
-        LOG(INFO) << "local_stable_tier.ready: artifact_id=" << out.artifact_id << " op=" << op_label
-                  << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
-                  << " seconds=" << local_stable_seconds;
-        record_local_stable_tier_metrics(op_label, "ready", requirement, local_stable_seconds);
-      }
+        });
+    if (!local_stable_status.ok()) {
+      return to_grpc_status(local_stable_status);
     }
 
     try {
@@ -2318,56 +2361,9 @@ grpc::Status RegistrationController::commit(
       }
     }
 
-    ResolvedStorePolicy resolved;
-    if (meta.resolved_policy.has_value()) {
-      resolved = *meta.resolved_policy;
-    } else {
-      auto default_or = resolve_store_policy(nullptr);
-      if (!default_or.ok()) {
-        return to_grpc_status(default_or.status());
-      }
-      resolved = *default_or;
-    }
     auto* local_stable = resp.mutable_local_stable_tier();
-    const char* op_label = local_stable_op_label(meta.plan);
-    const char* requirement = requirement_level_label(resolved.local_requirement);
-    if (meta.view_registration) {
-      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
-      local_stable->set_message("view registrations do not satisfy the local stable tier");
-      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
-    } else if (static_cast<int>(resolved.local_requirement) < static_cast<int>(RequirementLevel::kShould)) {
-      local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
-      record_local_stable_tier_metrics(op_label, "skipped", requirement, std::nullopt);
-    } else {
-      const auto stable_policy_opt = stable_cache_policy_from_resolved(resolved);
-      const auto local_stable_start = std::chrono::steady_clock::now();
-      auto admit_or = ensure_local_stable_admission(
-          d_.engine,
-          d_.lip,
-          d_.regions,
-          resolved,
-          out.artifact_id,
-          out.id_kind,
-          out.size_bytes,
-          meta.owner_pid,
-          meta.index_data,
-          meta.index_key_hex);
-      const double local_stable_seconds =
-          std::chrono::duration<double>(std::chrono::steady_clock::now() - local_stable_start).count();
-      if (!admit_or.ok() || admit_or->skipped) {
-        const std::string message = admit_or.ok()
-            ? "local stable tier admission skipped"
-            : std::string(admit_or.status().message().data(), admit_or.status().message().size());
-        const char* retention =
-            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
-        const char* overflow =
-            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
-        const char* outcome = resolved.local_requirement == RequirementLevel::kMust ? "failed" : "degraded";
-        LOG(WARNING) << "local_stable_tier." << outcome << ": artifact_id=" << out.artifact_id << " op=" << op_label
-                     << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
-                     << " seconds=" << local_stable_seconds << " message=\"" << message << "\"";
-        if (resolved.local_requirement == RequirementLevel::kMust) {
-          record_local_stable_tier_metrics(op_label, "failed", requirement, local_stable_seconds);
+    auto local_stable_status = apply_local_stable_tier(
+        d_.engine, d_.lip, d_.regions, meta, out.artifact_id, out.id_kind, out.size_bytes, local_stable, [&]() {
           if (!out.existed) {
             store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
             (void)d_.engine.unload_replica(base_key);
@@ -2379,22 +2375,9 @@ grpc::Status RegistrationController::commit(
             }
           }
           d_.reg.erase_meta(req.registration_id());
-          return to_grpc_status(admit_or.ok() ? absl::FailedPreconditionError(message) : admit_or.status());
-        }
-        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_DEGRADED);
-        local_stable->set_message(message);
-        record_local_stable_tier_metrics(op_label, "degraded", requirement, local_stable_seconds);
-      } else {
-        local_stable->set_status(v2::LOCAL_STABLE_TIER_STATUS_READY);
-        const char* retention =
-            stable_policy_opt.has_value() ? stable_retention_label(stable_policy_opt->retention_policy) : "unknown";
-        const char* overflow =
-            stable_policy_opt.has_value() ? stable_overflow_label(stable_policy_opt->overflow_policy) : "unknown";
-        LOG(INFO) << "local_stable_tier.ready: artifact_id=" << out.artifact_id << " op=" << op_label
-                  << " requirement=" << requirement << " retention=" << retention << " overflow=" << overflow
-                  << " seconds=" << local_stable_seconds;
-        record_local_stable_tier_metrics(op_label, "ready", requirement, local_stable_seconds);
-      }
+        });
+    if (!local_stable_status.ok()) {
+      return to_grpc_status(local_stable_status);
     }
 
     if (out.existed) {
