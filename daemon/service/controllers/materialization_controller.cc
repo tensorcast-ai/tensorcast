@@ -869,6 +869,108 @@ void record_materialize_into_target_verification_skipped() {
   }
 }
 
+struct TargetLayoutTensorSelection {
+  absl::flat_hash_set<std::string> layout_name_set;
+  std::vector<std::string> layout_names;
+  std::vector<std::string> request_names;
+};
+
+Status collect_target_layout_tensor_selection(
+    const v2::MaterializeIntoTargetRequest& req,
+    const std::vector<TargetOffsetEntry>& offsets,
+    TargetLayoutTensorSelection& selection) {
+  selection.layout_name_set.clear();
+  selection.layout_names.clear();
+  selection.request_names.clear();
+
+  selection.layout_name_set.reserve(offsets.size());
+  selection.layout_names.reserve(offsets.size());
+  for (const auto& entry : offsets) {
+    if (entry.name.empty()) {
+      record_materialize_into_target(
+          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
+    }
+    if (!selection.layout_name_set.insert(entry.name).second) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
+    }
+    selection.layout_names.push_back(entry.name);
+  }
+
+  if (req.tensor_names_size() == 0) {
+    return Status::OK;
+  }
+
+  absl::flat_hash_set<std::string> request_name_set;
+  selection.request_names.reserve(req.tensor_names_size());
+  request_name_set.reserve(req.tensor_names_size());
+  for (const auto& name : req.tensor_names()) {
+    selection.request_names.push_back(name);
+    request_name_set.insert(name);
+  }
+  if (request_name_set.size() != static_cast<size_t>(req.tensor_names_size())) {
+    record_materialize_into_target(
+        "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "tensor_names must not contain duplicates"};
+  }
+  if (request_name_set.size() != selection.layout_name_set.size()) {
+    record_materialize_into_target(
+        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+  }
+  for (const auto& name : selection.layout_name_set) {
+    if (!request_name_set.contains(name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+    }
+  }
+
+  return Status::OK;
+}
+
+Status validate_layout_names_exist_in_index(
+    const absl::flat_hash_set<std::string>& layout_name_set,
+    const CanonicalIndexTable& index_table,
+    std::string_view error_message) {
+  for (const auto& name : layout_name_set) {
+    if (!index_table.entries.contains(name)) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, std::string(error_message)};
+    }
+  }
+  return Status::OK;
+}
+
+Status validate_selected_index_matches_layout(
+    const absl::flat_hash_set<std::string>& layout_name_set,
+    const CanonicalIndexTable& index_table) {
+  if (index_table.entries.size() != layout_name_set.size()) {
+    record_materialize_into_target(
+        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout must include every selected tensor"};
+  }
+  return validate_layout_names_exist_in_index(
+      layout_name_set, index_table, "target_layout includes unknown tensor name");
+}
+
+bool is_layout_subset_of_canonical_index(
+    const CanonicalIndexTable& canonical_table,
+    const absl::flat_hash_set<std::string>& layout_name_set) {
+  if (canonical_table.entries.size() != layout_name_set.size()) {
+    return true;
+  }
+  for (const auto& [name, _] : canonical_table.entries) {
+    if (!layout_name_set.contains(name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 absl::Status validate_descriptor_against_index(
     const DescriptorMetadata& descriptor,
     const store::loader::IndexInfo& index_info,
@@ -2047,51 +2149,14 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
-  absl::flat_hash_set<std::string> layout_name_set;
-  layout_name_set.reserve(offsets.size());
-  std::vector<std::string> layout_names;
-  layout_names.reserve(offsets.size());
-  for (const auto& entry : offsets) {
-    if (entry.name.empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
-    }
-    if (!layout_name_set.insert(entry.name).second) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
-    }
-    layout_names.push_back(entry.name);
+  TargetLayoutTensorSelection tensor_selection;
+  auto tensor_selection_status = collect_target_layout_tensor_selection(req, offsets, tensor_selection);
+  if (!tensor_selection_status.ok()) {
+    return tensor_selection_status;
   }
-
-  std::vector<std::string> request_names;
-  absl::flat_hash_set<std::string> request_name_set;
-  if (req.tensor_names_size() > 0) {
-    request_names.reserve(req.tensor_names_size());
-    request_name_set.reserve(req.tensor_names_size());
-    for (const auto& name : req.tensor_names()) {
-      request_names.push_back(name);
-      request_name_set.insert(name);
-    }
-    if (request_name_set.size() != static_cast<size_t>(req.tensor_names_size())) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "tensor_names must not contain duplicates"};
-    }
-    if (request_name_set.size() != layout_name_set.size()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
-    }
-    for (const auto& name : layout_name_set) {
-      if (!request_name_set.contains(name)) {
-        record_materialize_into_target(
-            "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
-      }
-    }
-  }
+  const auto& layout_name_set = tensor_selection.layout_name_set;
+  const auto& layout_names = tensor_selection.layout_names;
+  const auto& request_names = tensor_selection.request_names;
 
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
@@ -2107,23 +2172,12 @@ grpc::Status MaterializationController::materialize_into_target(
     return to_grpc_status(canonical_table_or.status());
   }
   const CanonicalIndexTable& canonical_table = *canonical_table_or;
-  for (const auto& name : layout_name_set) {
-    if (!canonical_table.entries.contains(name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
-    }
+  auto canonical_layout_validation_status = validate_layout_names_exist_in_index(
+      layout_name_set, canonical_table, "target_layout includes unknown tensor name");
+  if (!canonical_layout_validation_status.ok()) {
+    return canonical_layout_validation_status;
   }
-
-  bool has_subset = canonical_table.entries.size() != layout_name_set.size();
-  if (!has_subset) {
-    for (const auto& [name, _] : canonical_table.entries) {
-      if (!layout_name_set.contains(name)) {
-        has_subset = true;
-        break;
-      }
-    }
-  }
+  const bool has_subset = is_layout_subset_of_canonical_index(canonical_table, layout_name_set);
   const bool has_ordered_selection = !request_names.empty();
 
   std::optional<ViewSpec> view_spec;
@@ -2278,17 +2332,9 @@ grpc::Status MaterializationController::materialize_into_target(
   }
   const CanonicalIndexTable& index_table = *index_table_or;
   const uint64_t logical_total_size = index_table.logical_total_size;
-  if (index_table.entries.size() != layout_name_set.size()) {
-    record_materialize_into_target(
-        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout must include every selected tensor"};
-  }
-  for (const auto& name : layout_name_set) {
-    if (!index_table.entries.contains(name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
-    }
+  auto selected_index_validation_status = validate_selected_index_matches_layout(layout_name_set, index_table);
+  if (!selected_index_validation_status.ok()) {
+    return selected_index_validation_status;
   }
   if (view_plan.has_value() && view_plan->view_size_bytes > 0 && view_plan->view_size_bytes != logical_total_size) {
     record_materialize_into_target(
