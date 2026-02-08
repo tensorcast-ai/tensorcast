@@ -1708,6 +1708,272 @@ grpc::Status commit_piece_view_registration(
   return Status::OK;
 }
 
+grpc::Status validate_piece_assembly_not_sealed(
+    RegistrationController::Dep& dep,
+    const std::string& registration_id,
+    const RegistrationManager::RegMeta& meta) {
+  if (!dep.global_store_client || !dep.global_store_client->is_connected()) {
+    return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+  if (meta.client_artifact_id.empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
+  }
+  auto binding_or = dep.global_store_client->get_artifact_binding(meta.client_artifact_id);
+  if (binding_or.ok()) {
+    absl::Status abort_status = dep.engine.abort_registered_artifact(registration_id);
+    if (!abort_status.ok()) {
+      LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
+    }
+    EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+    return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
+  }
+  if (!absl::IsNotFound(binding_or.status())) {
+    return to_grpc_status(binding_or.status());
+  }
+  return Status::OK;
+}
+
+grpc::Status commit_lease_registration(
+    RegistrationController::Dep& dep,
+    RpcContext& rctx,
+    const std::string& registration_id,
+    const RegistrationManager::RegMeta& meta,
+    v2::CommitRegisteredArtifactResponse& resp) {
+  // Only LIP (in_place=true) is supported in current release.
+  if (!meta.lease_in_place) {
+    return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
+  }
+  if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
+    EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+    try {
+      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+      static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
+      counter->Add(1.0);
+    } catch (...) {
+      VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
+    }
+    return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
+  }
+
+  // Always commit lease in-place: do not allocate destination GPU memory.
+  auto lease_vec = dep.reg.get_lease_segments(registration_id);
+  if (lease_vec.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
+  }
+
+  auto storage_entries = dep.reg.get_storage_entries(registration_id);
+  if (storage_entries.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "registration missing storage_entries payload"};
+  }
+
+  if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
+    return commit_piece_view_registration(
+        dep, rctx, registration_id, meta, std::move(lease_vec), std::move(storage_entries), resp);
+  }
+
+  auto alias_vec = dep.reg.get_tensor_aliases(registration_id);
+  if (alias_vec.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "registration missing tensor_aliases payload"};
+  }
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto storage_counter = meter->CreateDoubleCounter("tc_register_storage_count");
+    static auto alias_counter = meter->CreateDoubleCounter("tc_register_tensor_count");
+    storage_counter->Add(static_cast<double>(storage_entries.size()));
+    alias_counter->Add(static_cast<double>(alias_vec.size()));
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_storage_count/tc_register_tensor_count unavailable";
+  }
+
+  auto out_or = dep.lip.commit_lease_in_place(
+      registration_id,
+      meta.device_id,
+      meta.owner_pid,
+      meta.ttl_ms,
+      meta.epoch,
+      meta.total_size,
+      meta.id_kind,
+      meta.client_artifact_id,
+      meta.index_data,
+      meta.index_key_hex,
+      std::move(lease_vec),
+      std::move(storage_entries),
+      std::move(alias_vec));
+  if (!out_or.ok()) {
+    if (absl::IsAlreadyExists(out_or.status())) {
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto counter = meter->CreateDoubleCounter("tc_register_commit_denied_total");
+        counter->Add(1.0);
+      } catch (...) {
+        VLOG(1) << "metrics counter tc_register_commit_denied_total unavailable";
+      }
+    }
+    return to_grpc_status(out_or.status());
+  }
+
+  const auto& out = *out_or;
+  auto* desc = resp.mutable_artifact_descriptor();
+  desc->set_artifact_id(out.artifact_id);
+  desc->set_index_multihash(out.index_multihash);
+  desc->set_data_multihash(out.data_multihash);
+  desc->set_schema_version(out.schema_version);
+  desc->set_encoding(out.encoding);
+  desc->set_total_size(out.total_size);
+  desc->set_id_kind(ToProtoKind(out.id_kind));
+
+  auto* local_stable = resp.mutable_local_stable_tier();
+  auto local_stable_status = apply_local_stable_tier(
+      dep.engine, dep.lip, dep.regions, meta, out.artifact_id, out.id_kind, out.total_size, local_stable, [&]() {
+        (void)dep.lip.revoke_by_registration_id(registration_id);
+        EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+      });
+  if (!local_stable_status.ok()) {
+    return to_grpc_status(local_stable_status);
+  }
+
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_commit_lip_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_commit_lip_total unavailable";
+  }
+  // Create CommitLease for VRAM_LEASED in-place ownership (device-unique).
+  if (dep.lifecycle) {
+    SessionLifecycleManager::CommitSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
+    auto lid_or = dep.lifecycle->create_commit_lease(subj, meta.owner_pid);
+    if (!lid_or.ok()) {
+      LOG(WARNING) << "create_commit_lease failed: artifact_id=" << out.artifact_id << " dev=" << meta.device_id << ": "
+                   << lid_or.status();
+      try {
+        static auto meter =
+            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+        static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
+        ctr->Add(1.0);
+      } catch (...) {
+      }
+    }
+  }
+  LOG(INFO) << "Registered memory replica: " << out.artifact_id
+            << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
+  EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status commit_engine_registration(
+    RegistrationController::Dep& dep,
+    RpcContext& rctx,
+    const std::string& registration_id,
+    RegistrationManager::RegMeta meta,
+    v2::CommitRegisteredArtifactResponse& resp) {
+  auto commit_or = dep.engine.commit_registered_artifact(registration_id);
+  if (!commit_or.ok()) {
+    return to_grpc_status(commit_or.status());
+  }
+  const auto& out = commit_or.value();
+  auto* desc = resp.mutable_artifact_descriptor();
+  desc->set_artifact_id(out.artifact_id);
+  desc->set_index_multihash(out.index_multihash);
+  desc->set_data_multihash(out.data_multihash);
+  desc->set_schema_version(out.schema_version);
+  desc->set_encoding(out.encoding);
+  desc->set_total_size(out.size_bytes);
+  desc->set_id_kind(ToProtoKind(out.id_kind));
+  resp.set_existed(out.existed);
+  if (out.view_id.has_value()) {
+    resp.set_view_id(*out.view_id);
+  }
+  if (out.view_index_json.has_value()) {
+    resp.set_view_index_json(*out.view_index_json);
+  }
+  if (out.view_data_multihash.has_value()) {
+    resp.set_view_data_hash(*out.view_data_multihash);
+  }
+  for (const auto& range : out.canonical_ranges) {
+    auto* r = resp.add_canonical_ranges();
+    r->set_offset(range.offset);
+    r->set_length(range.length);
+  }
+  resp.set_allow_partial(out.registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece);
+  if (out.view_id.has_value()) {
+    meta.view_registration = true;
+    meta.view_id = *out.view_id;
+    meta.view_canonical_ranges = out.canonical_ranges;
+    meta.view_data_multihash = out.view_data_multihash;
+    meta.view_registration_kind = out.registration_kind;
+    uint64_t covered_bytes = 0;
+    for (const auto& range : out.canonical_ranges) {
+      covered_bytes += range.length;
+    }
+    uint64_t canonical_size_bytes =
+        meta.view_canonical_size_bytes > 0 ? meta.view_canonical_size_bytes : out.size_bytes;
+    if (!out.existed && covered_bytes < canonical_size_bytes) {
+      record_view_partial_metric();
+      LOG(INFO) << "View registration partial coverage: artifact_id=" << out.artifact_id << " view_id=" << *out.view_id
+                << " covered_bytes=" << covered_bytes << " canonical_bytes=" << canonical_size_bytes
+                << " ingested_view_bytes=" << meta.view_ingested_bytes;
+    } else {
+      VLOG(1) << "View registration coverage: artifact_id=" << out.artifact_id << " view_id=" << *out.view_id
+              << " covered_bytes=" << covered_bytes << " canonical_bytes=" << canonical_size_bytes
+              << " ingested_view_bytes=" << meta.view_ingested_bytes;
+    }
+  }
+
+  auto* local_stable = resp.mutable_local_stable_tier();
+  auto local_stable_status = apply_local_stable_tier(
+      dep.engine, dep.lip, dep.regions, meta, out.artifact_id, out.id_kind, out.size_bytes, local_stable, [&]() {
+        if (!out.existed) {
+          store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
+          (void)dep.engine.unload_replica(base_key);
+          auto unreg_status = dep.engine.unregister_replica_from_global_store(out.artifact_id, out.device.ordinal);
+          if (!unreg_status.ok()) {
+            LOG(WARNING) << "unregister_replica_from_global_store failed after must local stable failure: artifact_id="
+                         << out.artifact_id << " dev=" << out.device.ordinal << ": " << unreg_status;
+          }
+        }
+        dep.reg.erase_meta(registration_id);
+      });
+  if (!local_stable_status.ok()) {
+    return to_grpc_status(local_stable_status);
+  }
+
+  if (out.existed) {
+    store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
+    dep.refs.add_ref(key, meta.owner_pid);
+    if (dep.lifecycle && meta.ttl_ms > 0 && out.device.type == DeviceType::GPU) {
+      auto lease_or = dep.lifecycle->create_ttl_use_lease(key, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
+      if (lease_or.ok()) {
+        meta.use_lease_id = *lease_or;
+      } else {
+        LOG(ERROR) << "failed to create ttl use lease: " << lease_or.status();
+      }
+    }
+    meta.device_id = out.device.ordinal;
+    meta.joined_existing = true;
+    meta.artifact_id_mi2 = out.artifact_id;
+    dep.reg.set_meta(registration_id, meta);
+  } else {
+    dep.reg.erase_meta(registration_id);
+  }
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
+    static auto stable_counter = meter->CreateDoubleCounter("tc_register_commit_stable_dram_total");
+    if (meta.plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+      stable_counter->Add(1.0);
+    } else {
+      coalesced_counter->Add(1.0);
+    }
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_commit_(stable_dram|coalesced)_total unavailable";
+  }
+  rctx.mark_success();
+  return Status::OK;
+}
+
 } // namespace
 
 grpc::Status RegistrationController::begin(
@@ -1987,254 +2253,16 @@ grpc::Status RegistrationController::commit(
   }
 
   if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
-    if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-      return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
-    }
-    auto binding_or = d_.global_store_client->get_artifact_binding(meta.client_artifact_id);
-    if (binding_or.ok()) {
-      absl::Status abort_status = d_.engine.abort_registered_artifact(req.registration_id());
-      if (!abort_status.ok()) {
-        LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
-      }
-      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
-      return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
-    }
-    if (!absl::IsNotFound(binding_or.status())) {
-      return to_grpc_status(binding_or.status());
+    auto validate_status = validate_piece_assembly_not_sealed(d_, req.registration_id(), meta);
+    if (!validate_status.ok()) {
+      return validate_status;
     }
   }
 
   if (meta.plan == RegistrationManager::RegPlan::LEASE) {
-    // Only LIP (in_place=true) is supported in current release
-    if (!meta.lease_in_place) {
-      return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
-    }
-    if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
-      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
-      try {
-        static auto meter =
-            opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-        static auto counter = meter->CreateDoubleCounter("tc_register_ttl_expired_commit_total");
-        counter->Add(1.0);
-      } catch (...) {
-        VLOG(1) << "metrics counter tc_register_ttl_expired_commit_total unavailable";
-      }
-      return {StatusCode::DEADLINE_EXCEEDED, "registration expired (TTL)"};
-    }
-
-    // Always commit lease in-place: do not allocate destination GPU memory
-    auto lease_vec = d_.reg.get_lease_segments(req.registration_id());
-    if (lease_vec.empty()) {
-      return {StatusCode::FAILED_PRECONDITION, "no lease segments fed"};
-    }
-
-    auto storage_entries = d_.reg.get_storage_entries(req.registration_id());
-    if (storage_entries.empty()) {
-      return {StatusCode::FAILED_PRECONDITION, "registration missing storage_entries payload"};
-    }
-
-    if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
-      return commit_piece_view_registration(
-          d_, rctx, req.registration_id(), meta, std::move(lease_vec), std::move(storage_entries), resp);
-    }
-
-    auto alias_vec = d_.reg.get_tensor_aliases(req.registration_id());
-    if (alias_vec.empty()) {
-      return {StatusCode::FAILED_PRECONDITION, "registration missing tensor_aliases payload"};
-    }
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto storage_counter = meter->CreateDoubleCounter("tc_register_storage_count");
-      static auto alias_counter = meter->CreateDoubleCounter("tc_register_tensor_count");
-      storage_counter->Add(static_cast<double>(storage_entries.size()));
-      alias_counter->Add(static_cast<double>(alias_vec.size()));
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_storage_count/tc_register_tensor_count unavailable";
-    }
-
-    auto out_or = d_.lip.commit_lease_in_place(
-        req.registration_id(),
-        meta.device_id,
-        meta.owner_pid,
-        meta.ttl_ms,
-        meta.epoch,
-        meta.total_size,
-        meta.id_kind,
-        meta.client_artifact_id,
-        meta.index_data,
-        meta.index_key_hex,
-        std::move(lease_vec),
-        std::move(storage_entries),
-        std::move(alias_vec));
-    if (!out_or.ok()) {
-      if (absl::IsAlreadyExists(out_or.status())) {
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto counter = meter->CreateDoubleCounter("tc_register_commit_denied_total");
-          counter->Add(1.0);
-        } catch (...) {
-          VLOG(1) << "metrics counter tc_register_commit_denied_total unavailable";
-        }
-      }
-      return to_grpc_status(out_or.status());
-    }
-
-    const auto& out = *out_or;
-    auto* desc = resp.mutable_artifact_descriptor();
-    desc->set_artifact_id(out.artifact_id);
-    desc->set_index_multihash(out.index_multihash);
-    desc->set_data_multihash(out.data_multihash);
-    desc->set_schema_version(out.schema_version);
-    desc->set_encoding(out.encoding);
-    desc->set_total_size(out.total_size);
-    desc->set_id_kind(ToProtoKind(out.id_kind));
-
-    auto* local_stable = resp.mutable_local_stable_tier();
-    auto local_stable_status = apply_local_stable_tier(
-        d_.engine, d_.lip, d_.regions, meta, out.artifact_id, out.id_kind, out.total_size, local_stable, [&]() {
-          (void)d_.lip.revoke_by_registration_id(req.registration_id());
-          EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
-        });
-    if (!local_stable_status.ok()) {
-      return to_grpc_status(local_stable_status);
-    }
-
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_commit_lip_total");
-      counter->Add(1.0);
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_commit_lip_total unavailable";
-    }
-    // Create CommitLease for VRAM_LEASED in-place ownership (device-unique)
-    if (d_.lifecycle) {
-      SessionLifecycleManager::CommitSubject subj{.artifact_id = out.artifact_id, .device_id = meta.device_id};
-      auto lid_or = d_.lifecycle->create_commit_lease(subj, meta.owner_pid);
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_commit_lease failed: artifact_id=" << out.artifact_id << " dev=" << meta.device_id
-                     << ": " << lid_or.status();
-        try {
-          static auto meter =
-              opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-          static auto ctr = meter->CreateDoubleCounter("tc_lease_create_failed_total");
-          ctr->Add(1.0);
-        } catch (...) {
-        }
-      }
-    }
-    // Log lease-in-place registration summary including plan.
-    LOG(INFO) << "Registered memory replica: " << out.artifact_id
-              << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
-    EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
-    rctx.mark_success();
-    return Status::OK;
+    return commit_lease_registration(d_, rctx, req.registration_id(), meta, resp);
   }
-  {
-    auto commit_or = d_.engine.commit_registered_artifact(req.registration_id());
-    if (!commit_or.ok())
-      return to_grpc_status(commit_or.status());
-    const auto& out = commit_or.value();
-    auto* desc = resp.mutable_artifact_descriptor();
-    desc->set_artifact_id(out.artifact_id);
-    desc->set_index_multihash(out.index_multihash);
-    desc->set_data_multihash(out.data_multihash);
-    desc->set_schema_version(out.schema_version);
-    desc->set_encoding(out.encoding);
-    desc->set_total_size(out.size_bytes);
-    desc->set_id_kind(ToProtoKind(out.id_kind));
-    resp.set_existed(out.existed);
-    if (out.view_id.has_value()) {
-      resp.set_view_id(*out.view_id);
-    }
-    if (out.view_index_json.has_value()) {
-      resp.set_view_index_json(*out.view_index_json);
-    }
-    if (out.view_data_multihash.has_value()) {
-      resp.set_view_data_hash(*out.view_data_multihash);
-    }
-    for (const auto& range : out.canonical_ranges) {
-      auto* r = resp.add_canonical_ranges();
-      r->set_offset(range.offset);
-      r->set_length(range.length);
-    }
-    resp.set_allow_partial(out.registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece);
-    if (out.view_id.has_value()) {
-      meta.view_registration = true;
-      meta.view_id = *out.view_id;
-      meta.view_canonical_ranges = out.canonical_ranges;
-      meta.view_data_multihash = out.view_data_multihash;
-      meta.view_registration_kind = out.registration_kind;
-      uint64_t covered_bytes = 0;
-      for (const auto& range : out.canonical_ranges) {
-        covered_bytes += range.length;
-      }
-      uint64_t canonical_size_bytes =
-          meta.view_canonical_size_bytes > 0 ? meta.view_canonical_size_bytes : out.size_bytes;
-      if (!out.existed && covered_bytes < canonical_size_bytes) {
-        record_view_partial_metric();
-        LOG(INFO) << "View registration partial coverage: artifact_id=" << out.artifact_id
-                  << " view_id=" << *out.view_id << " covered_bytes=" << covered_bytes
-                  << " canonical_bytes=" << canonical_size_bytes << " ingested_view_bytes=" << meta.view_ingested_bytes;
-      } else {
-        VLOG(1) << "View registration coverage: artifact_id=" << out.artifact_id << " view_id=" << *out.view_id
-                << " covered_bytes=" << covered_bytes << " canonical_bytes=" << canonical_size_bytes
-                << " ingested_view_bytes=" << meta.view_ingested_bytes;
-      }
-    }
-
-    auto* local_stable = resp.mutable_local_stable_tier();
-    auto local_stable_status = apply_local_stable_tier(
-        d_.engine, d_.lip, d_.regions, meta, out.artifact_id, out.id_kind, out.size_bytes, local_stable, [&]() {
-          if (!out.existed) {
-            store::loading::ReplicaKey base_key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
-            (void)d_.engine.unload_replica(base_key);
-            auto unreg_status = d_.engine.unregister_replica_from_global_store(out.artifact_id, out.device.ordinal);
-            if (!unreg_status.ok()) {
-              LOG(WARNING)
-                  << "unregister_replica_from_global_store failed after must local stable failure: artifact_id="
-                  << out.artifact_id << " dev=" << out.device.ordinal << ": " << unreg_status;
-            }
-          }
-          d_.reg.erase_meta(req.registration_id());
-        });
-    if (!local_stable_status.ok()) {
-      return to_grpc_status(local_stable_status);
-    }
-
-    if (out.existed) {
-      store::loading::ReplicaKey key{.artifact_id = out.artifact_id, .device = out.device, .replica = 0};
-      d_.refs.add_ref(key, meta.owner_pid);
-      if (d_.lifecycle && meta.ttl_ms > 0 && out.device.type == DeviceType::GPU) {
-        auto lease_or = d_.lifecycle->create_ttl_use_lease(key, meta.owner_pid, absl::Milliseconds(meta.ttl_ms));
-        if (lease_or.ok()) {
-          meta.use_lease_id = *lease_or;
-        } else {
-          LOG(ERROR) << "failed to create ttl use lease: " << lease_or.status();
-        }
-      }
-      meta.device_id = out.device.ordinal;
-      meta.joined_existing = true;
-      meta.artifact_id_mi2 = out.artifact_id;
-      d_.reg.set_meta(req.registration_id(), meta);
-    } else {
-      d_.reg.erase_meta(req.registration_id());
-    }
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_commit_coalesced_total");
-      static auto stable_counter = meter->CreateDoubleCounter("tc_register_commit_stable_dram_total");
-      if (meta.plan == RegistrationManager::RegPlan::STABLE_DRAM) {
-        stable_counter->Add(1.0);
-      } else {
-        coalesced_counter->Add(1.0);
-      }
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_commit_(stable_dram|coalesced)_total unavailable";
-    }
-    rctx.mark_success();
-    return Status::OK;
-  }
+  return commit_engine_registration(d_, rctx, req.registration_id(), meta, resp);
 }
 
 grpc::Status RegistrationController::abort(
