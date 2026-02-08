@@ -145,6 +145,124 @@ absl::StatusOr<artifact_retire::DrainOutcome> drain_and_revoke_active_lease(
   return *drain_or;
 }
 
+struct DrainedLeaseResolution {
+  ArtifactDeviceKey key;
+  LipLeaseEntry lease;
+  artifact_retire::DrainOutcome drain;
+  std::optional<std::string> view_id;
+};
+
+absl::StatusOr<DrainedLeaseResolution> drain_lease_for_deregister(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    const v2::DeregisterArtifactRequest& req) {
+  auto view_id_or = parse_view_id(req.byte_space());
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  std::optional<std::string> view_id = *view_id_or;
+
+  std::optional<int32_t> device_id;
+  if (req.has_device_id()) {
+    device_id = req.device_id();
+  }
+  auto active_lease_or = resolve_active_lease_by_artifact(lip_manager, req.artifact_id(), view_id, device_id);
+  if (!active_lease_or.ok()) {
+    return active_lease_or.status();
+  }
+  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
+
+  std::optional<int32_t> owner_pid;
+  if (req.has_owner_pid()) {
+    owner_pid = req.owner_pid();
+  }
+  auto owner_status = ensure_owner_pid_matches(owner_pid, active_lease.lease);
+  if (!owner_status.ok()) {
+    return owner_status;
+  }
+
+  if (req.has_extend_ttl_ms() && req.extend_ttl_ms() > 0) {
+    auto st = lip_manager->extend_ttl_for_artifact(req.artifact_id(), req.extend_ttl_ms(), view_id);
+    if (!st.ok()) {
+      return st;
+    }
+  }
+
+  lip_manager->quiesce_lease(active_lease.key);
+
+  const uint32_t timeout_ms = req.has_drain_timeout_ms() ? req.drain_timeout_ms() : 30000U;
+  auto drain_or = drain_and_revoke_active_lease(
+      lip_manager,
+      global_store_client,
+      req.artifact_id(),
+      active_lease.key,
+      active_lease.lease,
+      req.wait_for_drain(),
+      timeout_ms,
+      req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return drain_or.status();
+  }
+
+  DrainedLeaseResolution out{
+      .key = std::move(active_lease.key),
+      .lease = std::move(active_lease.lease),
+      .drain = std::move(*drain_or),
+      .view_id = std::move(view_id),
+  };
+  return out;
+}
+
+absl::StatusOr<DrainedLeaseResolution> drain_lease_for_retire(
+    LipManager* lip_manager,
+    store::components::IGlobalStoreClient* global_store_client,
+    const v2::RetirePublishedReplicaRequest& req) {
+  auto view_id_or = parse_view_id(req.byte_space());
+  if (!view_id_or.ok()) {
+    return view_id_or.status();
+  }
+  std::optional<std::string> view_id = *view_id_or;
+
+  auto active_lease_or = resolve_active_lease_for_retire(lip_manager, req, view_id);
+  if (!active_lease_or.ok()) {
+    return active_lease_or.status();
+  }
+  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
+
+  std::optional<int32_t> owner_pid;
+  if (req.has_owner_pid()) {
+    owner_pid = req.owner_pid();
+  }
+  auto owner_status = ensure_owner_pid_matches(owner_pid, active_lease.lease);
+  if (!owner_status.ok()) {
+    return owner_status;
+  }
+
+  lip_manager->quiesce_lease(active_lease.key);
+
+  const uint32_t timeout_ms = req.has_drain_timeout_ms() ? req.drain_timeout_ms() : 30000U;
+  auto drain_or = drain_and_revoke_active_lease(
+      lip_manager,
+      global_store_client,
+      req.artifact_id(),
+      active_lease.key,
+      active_lease.lease,
+      req.wait_for_drain(),
+      timeout_ms,
+      req.has_operation_id() ? std::optional<std::string_view>(req.operation_id()) : std::nullopt);
+  if (!drain_or.ok()) {
+    return drain_or.status();
+  }
+
+  DrainedLeaseResolution out{
+      .key = std::move(active_lease.key),
+      .lease = std::move(active_lease.lease),
+      .drain = std::move(*drain_or),
+      .view_id = std::move(view_id),
+  };
+  return out;
+}
+
 } // namespace
 
 StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
@@ -525,57 +643,16 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   const std::string artifact_id = req->artifact_id();
   const bool keep_shared_disk_copy = req->has_keep_shared_disk_copy() ? req->keep_shared_disk_copy() : false;
 
-  auto view_id_or = parse_view_id(req->byte_space());
-  if (!view_id_or.ok()) {
-    return to_grpc_status(view_id_or.status());
+  auto drained_or = drain_lease_for_deregister(lip_manager_, global_store_client_.get(), *req);
+  if (!drained_or.ok()) {
+    return to_grpc_status(drained_or.status());
   }
-  std::optional<std::string> view_id = *view_id_or;
+  DrainedLeaseResolution drained = std::move(*drained_or);
+  const ArtifactDeviceKey& key = drained.key;
+  const LipLeaseEntry& lease = drained.lease;
+  const auto& drain = drained.drain;
+  const std::optional<std::string>& view_id = drained.view_id;
 
-  std::optional<int32_t> device_id;
-  if (req->has_device_id()) {
-    device_id = req->device_id();
-  }
-  auto active_lease_or = resolve_active_lease_by_artifact(lip_manager_, artifact_id, view_id, device_id);
-  if (!active_lease_or.ok()) {
-    return to_grpc_status(active_lease_or.status());
-  }
-  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
-  const ArtifactDeviceKey& key = active_lease.key;
-  const LipLeaseEntry& lease = active_lease.lease;
-
-  std::optional<int32_t> owner_pid;
-  if (req->has_owner_pid()) {
-    owner_pid = req->owner_pid();
-  }
-  auto owner_status = ensure_owner_pid_matches(owner_pid, lease);
-  if (!owner_status.ok()) {
-    return to_grpc_status(owner_status);
-  }
-
-  if (req->has_extend_ttl_ms() && req->extend_ttl_ms() > 0) {
-    auto st = lip_manager_->extend_ttl_for_artifact(artifact_id, req->extend_ttl_ms(), view_id);
-    if (!st.ok()) {
-      return to_grpc_status(st);
-    }
-  }
-
-  lip_manager_->quiesce_lease(key);
-
-  const bool wait_for_drain = req->wait_for_drain();
-  const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-  auto drain_or = drain_and_revoke_active_lease(
-      lip_manager_,
-      global_store_client_.get(),
-      artifact_id,
-      key,
-      lease,
-      wait_for_drain,
-      timeout_ms,
-      req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-  if (!drain_or.ok()) {
-    return to_grpc_status(drain_or.status());
-  }
-  const auto& drain = *drain_or;
   resp->set_drained(drain.drained);
   resp->set_removed(true);
 
@@ -631,47 +708,12 @@ Status StoreDaemonServiceImpl::RetirePublishedReplica(
   if (req->artifact_id().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
   }
-
-  auto view_id_or = parse_view_id(req->byte_space());
-  if (!view_id_or.ok()) {
-    return to_grpc_status(view_id_or.status());
+  auto drained_or = drain_lease_for_retire(lip_manager_, global_store_client_.get(), *req);
+  if (!drained_or.ok()) {
+    return to_grpc_status(drained_or.status());
   }
-  std::optional<std::string> view_id = *view_id_or;
+  const auto& drain = drained_or->drain;
 
-  auto active_lease_or = resolve_active_lease_for_retire(lip_manager_, *req, view_id);
-  if (!active_lease_or.ok()) {
-    return to_grpc_status(active_lease_or.status());
-  }
-  ActiveLeaseResolution active_lease = std::move(*active_lease_or);
-  const ArtifactDeviceKey& key = active_lease.key;
-  const LipLeaseEntry& lease = active_lease.lease;
-
-  std::optional<int32_t> owner_pid;
-  if (req->has_owner_pid()) {
-    owner_pid = req->owner_pid();
-  }
-  auto owner_status = ensure_owner_pid_matches(owner_pid, lease);
-  if (!owner_status.ok()) {
-    return to_grpc_status(owner_status);
-  }
-
-  lip_manager_->quiesce_lease(key);
-
-  const bool wait_for_drain = req->wait_for_drain();
-  const uint32_t timeout_ms = req->has_drain_timeout_ms() ? req->drain_timeout_ms() : 30000U;
-  auto drain_or = drain_and_revoke_active_lease(
-      lip_manager_,
-      global_store_client_.get(),
-      req->artifact_id(),
-      key,
-      lease,
-      wait_for_drain,
-      timeout_ms,
-      req->has_operation_id() ? std::optional<std::string_view>(req->operation_id()) : std::nullopt);
-  if (!drain_or.ok()) {
-    return to_grpc_status(drain_or.status());
-  }
-  const auto& drain = *drain_or;
   resp->set_drained(drain.drained);
   resp->set_removed(true);
   rctx.mark_success();
