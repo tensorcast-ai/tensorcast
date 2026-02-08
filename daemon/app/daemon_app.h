@@ -73,6 +73,8 @@ class DaemonApp {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<KeyMappingController> key_mapping_controller_;
+  std::unique_ptr<PersistenceRpcController> persistence_rpc_controller_;
   std::unique_ptr<ReplicaSessionController> replica_session_controller_;
   std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;

@@ -32,6 +32,8 @@ DaemonServiceHarness::DaemonServiceHarness(
     std::unique_ptr<RegistrationController> registration_controller,
     std::unique_ptr<TransportController> transport_controller,
     std::unique_ptr<StatusController> status_controller,
+    std::unique_ptr<KeyMappingController> key_mapping_controller,
+    std::unique_ptr<PersistenceRpcController> persistence_rpc_controller,
     std::unique_ptr<ReplicaSessionController> replica_session_controller,
     std::unique_ptr<LeaseController> lease_controller,
     std::unique_ptr<StoreDaemonServiceImpl> service,
@@ -42,6 +44,8 @@ DaemonServiceHarness::DaemonServiceHarness(
       registration_controller_(std::move(registration_controller)),
       transport_controller_(std::move(transport_controller)),
       status_controller_(std::move(status_controller)),
+      key_mapping_controller_(std::move(key_mapping_controller)),
+      persistence_rpc_controller_(std::move(persistence_rpc_controller)),
       replica_session_controller_(std::move(replica_session_controller)),
       lease_controller_(std::move(lease_controller)),
       service_(std::move(service)),
@@ -138,6 +142,18 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
+  KeyMappingController::Dep kmdep{
+      .engine = kernel->engine(),
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto key_mapping_controller = std::make_unique<KeyMappingController>(kmdep);
+
+  PersistenceRpcController::Dep prdep{
+      .persistence_manager = kernel->persistence_manager(),
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto persistence_rpc_controller = std::make_unique<PersistenceRpcController>(prdep);
+
   ReplicaSessionController::Dep rsdep{
       .sessions = kernel->sessions_service(),
       .lifecycle = kernel->lifecycle_manager(),
@@ -164,8 +180,9 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .region_registry = kernel->region_registry(),
       .lip_manager = kernel->lip_manager(),
       .global_store_client = global_store_client,
-      .persistence_manager = kernel->persistence_manager(),
       .lifecycle_manager = kernel->lifecycle_manager(),
+      .key_mapping_controller = *key_mapping_controller,
+      .persistence_rpc_controller = *persistence_rpc_controller,
       .replica_session_controller = *replica_session_controller,
       .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
@@ -197,6 +214,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       std::move(registration_controller),
       std::move(transport_controller),
       std::move(status_controller),
+      std::move(key_mapping_controller),
+      std::move(persistence_rpc_controller),
       std::move(replica_session_controller),
       std::move(lease_controller),
       std::move(service),

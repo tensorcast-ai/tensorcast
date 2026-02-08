@@ -7,15 +7,16 @@
 #include <vector>
 
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/key_mapping_controller.h"
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/persistence_rpc_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/persistence_manager.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/shutdown_signal.h"
 #include "grpcpp/grpcpp.h"
@@ -40,8 +41,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
-    PersistenceManager* persistence_manager{nullptr};
     SessionLifecycleManager& lifecycle_manager;
+    KeyMappingController& key_mapping_controller;
+    PersistenceRpcController& persistence_rpc_controller;
     ReplicaSessionController& replica_session_controller;
     LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
@@ -282,8 +284,9 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
-  PersistenceManager* persistence_manager_;
   SessionLifecycleManager* lifecycle_manager_;
+  KeyMappingController* key_mapping_controller_;
+  PersistenceRpcController* persistence_rpc_controller_;
   ReplicaSessionController* replica_session_controller_;
   LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
