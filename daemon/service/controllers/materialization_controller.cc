@@ -49,6 +49,8 @@
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
+#include "daemon/service/controllers/materialization_mapped_target_layout_utils.h"
+#include "daemon/service/controllers/materialization_mapped_view_narrow_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
@@ -68,16 +70,19 @@ using status_utils::to_grpc_status;
 namespace {
 
 using materialization_layout::CanonicalIndexTable;
-using materialization_layout::dtype_element_size;
 using materialization_layout::parse_canonical_index;
-using materialization_layout::product_dims;
 using materialization_layout::resolve_target_offsets;
 using materialization_layout::TargetOffsetEntry;
 using materialization_mapped_copy_plan::build_copy_plan;
 using materialization_mapped_copy_plan::BuildCopyPlanResult;
-using materialization_mapped_copy_plan::is_contiguous;
-using materialization_mapped_copy_plan::MappedTensorSpec;
 using materialization_mapped_copy_plan::ViewNarrowSpec;
+using materialization_mapped_target_layout::validate_mapped_target_layout;
+using materialization_mapped_target_layout::ValidatedMappedTargetLayout;
+using materialization_mapped_target_layout::validation_error_reason;
+using materialization_mapped_target_layout::ValidationErrorReason;
+using materialization_mapped_view_narrow::build_view_narrows;
+using materialization_mapped_view_narrow::view_narrow_error_reason;
+using materialization_mapped_view_narrow::ViewNarrowErrorReason;
 using materialization_payload::compute_generation_from_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
@@ -95,7 +100,6 @@ using materialization_policy::validate_source_policy;
 using materialization_target_storage::acquire_error_reason;
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
-using store::loader::ViewOp;
 using store::loader::ViewSpec;
 
 constexpr absl::Duration kTargetWriteTokenTtl = absl::Minutes(5);
@@ -2772,127 +2776,19 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
-  absl::flat_hash_map<std::string, TargetOffsetEntry> offsets_by_name;
-  offsets_by_name.reserve(offsets.size());
-  for (const auto& entry : offsets) {
-    if (entry.name.empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
-    }
-    if (offsets_by_name.contains(entry.name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
-    }
-    offsets_by_name.emplace(entry.name, entry);
-  }
-
-  absl::flat_hash_map<std::string, MappedTensorSpec> dst_specs;
-  dst_specs.reserve(req.dst_tensors_size());
-  for (const auto& spec : req.dst_tensors()) {
-    if (spec.name().empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors include empty tensor name"};
-    }
-    if (dst_specs.contains(spec.name())) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors include duplicate tensor name"};
-    }
-    if (spec.shape_size() != spec.stride_size()) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors shape/stride size mismatch"};
-    }
-    auto elem_or = dtype_element_size(spec.dtype());
-    if (!elem_or.ok()) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(elem_or.status());
-    }
-    std::vector<int64_t> shape;
-    shape.reserve(spec.shape_size());
-    for (const auto& dim : spec.shape()) {
-      shape.push_back(dim);
-    }
-    std::vector<int64_t> stride;
-    stride.reserve(spec.stride_size());
-    for (const auto& dim : spec.stride()) {
-      stride.push_back(dim);
-    }
-    if (!is_contiguous(shape, stride)) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors must be contiguous"};
-    }
-    if (spec.storage_offset() != 0) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors storage_offset must be 0"};
-    }
-    uint64_t expected_bytes = *elem_or;
-    if (!shape.empty()) {
-      auto count_or = product_dims(shape);
-      if (!count_or.ok()) {
-        record_materialize_into_target(
-            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(count_or.status());
-      }
-      expected_bytes = (*count_or) * (*elem_or);
-    }
-    if (expected_bytes != spec.logical_length()) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors logical_length mismatch"};
-    }
-    dst_specs.emplace(
-        spec.name(),
-        MappedTensorSpec{
-            .shape = std::move(shape),
-            .stride = std::move(stride),
-            .dtype = spec.dtype(),
-            .storage_offset = spec.storage_offset(),
-            .logical_length = spec.logical_length(),
-            .element_size = *elem_or,
-        });
-  }
-
-  if (dst_specs.empty()) {
+  ValidationErrorReason mapped_layout_reason = ValidationErrorReason::kUnknown;
+  auto mapped_layout_or = validate_mapped_target_layout(req, offsets, &mapped_layout_reason);
+  if (!mapped_layout_or.ok()) {
     record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "dst_tensors must be non-empty"};
+        "error",
+        validation_error_reason(mapped_layout_reason),
+        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(mapped_layout_or.status());
   }
-
-  if (offsets_by_name.size() != dst_specs.size()) {
-    record_materialize_into_target(
-        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "dst_tensors must match target_layout offsets"};
-  }
-  for (const auto& [name, _] : dst_specs) {
-    if (!offsets_by_name.contains(name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "dst_tensors must match target_layout offsets"};
-    }
-  }
-
-  absl::flat_hash_set<std::string> mapped_dst_names;
-  mapped_dst_names.reserve(req.copy_plan().entries_size());
-  for (const auto& entry : req.copy_plan().entries()) {
-    if (entry.dst_name().empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing dst_name"};
-    }
-    mapped_dst_names.insert(entry.dst_name());
-  }
-  if (mapped_dst_names.size() != dst_specs.size()) {
-    record_materialize_into_target(
-        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "copy_plan must cover every dst tensor"};
-  }
+  ValidatedMappedTargetLayout mapped_layout = std::move(*mapped_layout_or);
+  auto dst_specs = std::move(mapped_layout.dst_specs);
+  auto dst_base_offsets = std::move(mapped_layout.dst_base_offsets);
+  const uint64_t logical_total_size = mapped_layout.logical_total_size;
 
   auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
     if (!normalized_disk_path.has_value()) {
@@ -2963,34 +2859,16 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     view_spec = std::move(*spec_or);
   }
 
-  absl::flat_hash_map<std::string, ViewNarrowSpec> view_narrows;
-  if (view_spec.has_value()) {
-    for (const auto& [tensor_name, ops] : view_spec->tensors) {
-      bool saw_narrow = false;
-      for (const auto& op : ops.ops) {
-        if (op.kind == ViewOp::Kind::kTranspose) {
-          record_materialize_into_target(
-              "error", "view_transpose", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-          return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support transpose views"};
-        }
-        if (op.kind == ViewOp::Kind::kNarrow) {
-          if (saw_narrow) {
-            record_materialize_into_target(
-                "error", "view_narrow", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-            return {StatusCode::INVALID_ARGUMENT, "mapped binding supports one narrow per tensor"};
-          }
-          saw_narrow = true;
-          view_narrows.emplace(
-              tensor_name,
-              ViewNarrowSpec{
-                  .dim = op.narrow.dim,
-                  .start = op.narrow.start,
-                  .end = static_cast<int64_t>(op.narrow.start + op.narrow.length),
-              });
-        }
-      }
-    }
+  ViewNarrowErrorReason view_narrow_reason = ViewNarrowErrorReason::kUnknown;
+  auto view_narrows_or = build_view_narrows(view_spec, &view_narrow_reason);
+  if (!view_narrows_or.ok()) {
+    record_materialize_into_target(
+        "error",
+        view_narrow_error_reason(view_narrow_reason),
+        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(view_narrows_or.status());
   }
+  absl::flat_hash_map<std::string, ViewNarrowSpec> view_narrows = std::move(*view_narrows_or);
 
   std::optional<store::loader::ViewPlan> view_plan;
   if (view_spec.has_value()) {
@@ -3014,74 +2892,6 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     return to_grpc_status(source_table_or.status());
   }
   const CanonicalIndexTable& source_table = *source_table_or;
-
-  struct StorageRange {
-    std::string storage_id;
-    uint64_t base_offset{0};
-    uint64_t length{0};
-  };
-
-  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
-  storage_ranges.reserve(layout.storages_size());
-  uint64_t range_cursor = 0;
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_id().empty()) {
-      record_materialize_into_target(
-          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
-    }
-    if (storage.storage_length() == 0) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
-    }
-    if (storage_ranges.contains(storage.storage_id())) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
-    }
-    StorageRange range;
-    range.storage_id = storage.storage_id();
-    range.base_offset = range_cursor;
-    range.length = storage.storage_length();
-    storage_ranges.emplace(range.storage_id, range);
-    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
-    }
-    range_cursor += storage.storage_length();
-  }
-  const uint64_t logical_total_size = range_cursor;
-
-  absl::flat_hash_map<std::string, uint64_t> dst_base_offsets;
-  dst_base_offsets.reserve(offsets_by_name.size());
-  for (const auto& [name, entry] : offsets_by_name) {
-    const auto range_it = storage_ranges.find(entry.storage_id);
-    if (range_it == storage_ranges.end()) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
-    }
-    const auto& range = range_it->second;
-    if (entry.storage_offset + entry.logical_length > range.length) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
-    }
-    const auto& spec = dst_specs.at(name);
-    if (entry.logical_length != spec.logical_length) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
-    }
-    if (entry.storage_offset != spec.storage_offset * spec.element_size) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
-    }
-    dst_base_offsets.emplace(name, range.base_offset + entry.storage_offset);
-  }
 
   auto copy_plan_or = build_copy_plan(req.copy_plan(), source_table, dst_specs, dst_base_offsets, view_narrows);
   if (!copy_plan_or.ok()) {
