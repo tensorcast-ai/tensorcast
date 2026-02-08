@@ -831,9 +831,9 @@ sc_cc_library(
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
         ":materialization_replica_handle_utils_lib",
+        ":materialization_request_common_utils_lib",
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
-        ":path_utils_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
@@ -856,6 +856,29 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
         "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_request_common_utils_lib",
+    srcs = ["service/controllers/materialization_request_common_utils.cc"],
+    hdrs = ["service/controllers/materialization_request_common_utils.h"],
+    deps = [
+        ":deadline_utils_hdr",
+        ":grpc_peer_utils_lib",
+        ":handle_lease_registry_lib",
+        ":lip_bridge_lib",
+        ":local_disk_import_catalog_lib",
+        ":materialization_replica_handle_utils_lib",
+        ":path_utils_lib",
+        ":ref_tracker_hdr",
+        ":session_lifecycle_lib",
+        ":sessions_service_hdr",
+        "//core/common:artifact_identity_lib",
+        "//core/store:global_store_client",
+        "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 

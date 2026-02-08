@@ -208,3 +208,55 @@ TEST_CASE(
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
   REQUIRE(gs_client->list_calls.load() >= 3);
 }
+
+TEST_CASE(
+    "MaterializeByKey waits for managed shared-disk and retries disk-only",
+    "[daemon][materialize][by-key][disk][wait]") {
+  auto gs_client = std::make_shared<WaitForSharedDiskGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->ready_after_calls = 2;
+
+  const auto storage_root = test_tmpdir() / "storage_ready_by_key";
+  std::filesystem::create_directories(storage_root);
+
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact_wait_ready_by_key";
+  const auto artifact_dir = storage_root / artifact_rel;
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data_0", 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_artifact_id(artifact_dir);
+  REQUIRE_FALSE(artifact_id.empty());
+  gs_client->key_mappings.emplace("key_wait_ready", artifact_id);
+  register_disk_location(*gs_client, artifact_id, artifact_rel);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::MaterializeByKeyRequest req;
+  req.set_key("key_wait_ready");
+  req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  req.set_device_id(0);
+  req.set_wait_for_shared_disk_ms(200);
+  req.mutable_source_policy()->set_allow_disk(true);
+  req.mutable_source_policy()->set_allow_p2p(true);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::MaterializeByKeyResponse resp;
+  const auto status = svc.MaterializeByKey(&ctx, &req, &resp);
+  REQUIRE(status.ok());
+  REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE_FALSE(resp.used_disk_path().empty());
+  REQUIRE(gs_client->list_calls.load() >= 3);
+}
