@@ -933,3 +933,62 @@ TEST_CASE(
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   REQUIRE(status.error_message().find("one narrow per tensor") != std::string::npos);
 }
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects unknown view_id metadata",
+    "[daemon][materialize][mapped_target][validation]") {
+  MappedFixture fix;
+
+  const std::string canonical_index_json = R"({"src":[0,4,[4],[1],"torch.uint8",0]})";
+  fix.global_store_client->canonical_index_json = canonical_index_json;
+
+  MaterializeIntoMappedTargetRequest req;
+  req.set_artifact_id("artifact_mapped_unknown_view");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.set_view_id("missing-view-id");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage0 = layout->add_storages();
+  storage0->set_storage_id("storage-0");
+  storage0->set_device_id(0);
+  storage0->set_storage_length(4);
+  storage0->set_vram_region_id("region-0");
+  storage0->set_mapping_base_offset(0);
+
+  auto* offset0 = layout->add_offsets();
+  offset0->set_name("a");
+  offset0->set_storage_id("storage-0");
+  offset0->set_storage_offset(0);
+  offset0->set_logical_length(4);
+
+  auto* spec0 = req.add_dst_tensors();
+  spec0->set_name("a");
+  spec0->add_shape(4);
+  spec0->add_stride(1);
+  spec0->set_dtype("torch.uint8");
+  spec0->set_storage_offset(0);
+  spec0->set_logical_length(4);
+
+  CopyPlan plan;
+  plan.set_version(1);
+  auto* entry = plan.add_entries();
+  entry->set_ckpt_name("src");
+  entry->set_dst_name("a");
+  entry->mutable_ckpt_range()->set_dim(0);
+  entry->mutable_ckpt_range()->set_start(0);
+  entry->mutable_ckpt_range()->set_end(4);
+  entry->mutable_dst_range()->set_dim(0);
+  entry->mutable_dst_range()->set_start(0);
+  entry->mutable_dst_range()->set_end(4);
+  req.mutable_copy_plan()->CopyFrom(plan);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::UNIMPLEMENTED);
+}

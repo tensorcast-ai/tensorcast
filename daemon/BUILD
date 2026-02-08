@@ -829,6 +829,7 @@ sc_cc_library(
         ":materialization_mapped_copy_plan_utils_lib",
         ":materialization_mapped_target_layout_utils_lib",
         ":materialization_mapped_view_narrow_utils_lib",
+        ":materialization_mapped_view_spec_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
         ":materialization_target_storage_utils_lib",
@@ -905,6 +906,19 @@ sc_cc_library(
         ":materialization_mapped_copy_plan_utils_lib",
         "//core/store/materialization/dataplane:view_planner",
         "@abseil-cpp//absl/container:flat_hash_map",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_mapped_view_spec_utils_lib",
+    srcs = ["service/controllers/materialization_mapped_view_spec_utils.cc"],
+    hdrs = ["service/controllers/materialization_mapped_view_spec_utils.h"],
+    deps = [
+        ":materialization_policy_utils_lib",
+        "//core/store:store_engine",
+        "//core/store:view_utils",
+        "//core/store/materialization/dataplane:view_planner",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
     ],
 )
 

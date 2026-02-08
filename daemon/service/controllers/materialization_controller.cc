@@ -51,6 +51,7 @@
 #include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
 #include "daemon/service/controllers/materialization_mapped_target_layout_utils.h"
 #include "daemon/service/controllers/materialization_mapped_view_narrow_utils.h"
+#include "daemon/service/controllers/materialization_mapped_view_spec_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
@@ -83,6 +84,9 @@ using materialization_mapped_target_layout::ValidationErrorReason;
 using materialization_mapped_view_narrow::build_view_narrows;
 using materialization_mapped_view_narrow::view_narrow_error_reason;
 using materialization_mapped_view_narrow::ViewNarrowErrorReason;
+using materialization_mapped_view_spec::resolve_mapped_view_spec;
+using materialization_mapped_view_spec::resolve_view_spec_error_reason;
+using materialization_mapped_view_spec::ResolveViewSpecErrorReason;
 using materialization_payload::compute_generation_from_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
@@ -2819,45 +2823,16 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(canonical_json_or.status());
   }
-  std::optional<ViewSpec> view_spec;
-  std::optional<std::string> request_view_id;
-  bool view_id_requested = false;
-
-  switch (req.view_identity_case()) {
-    case v2::MaterializeIntoMappedTargetRequest::kView: {
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        return to_grpc_status(spec_or.status());
-      }
-      view_spec = std::move(*spec_or);
-      break;
-    }
-    case v2::MaterializeIntoMappedTargetRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        view_id_requested = true;
-        request_view_id = req.view_id();
-      }
-      break;
-    }
-    case v2::MaterializeIntoMappedTargetRequest::VIEW_IDENTITY_NOT_SET:
-      break;
+  ResolveViewSpecErrorReason resolve_view_reason = ResolveViewSpecErrorReason::kUnknown;
+  auto view_spec_or = resolve_mapped_view_spec(req, resolved_artifact_id, d_.engine, &resolve_view_reason);
+  if (!view_spec_or.ok()) {
+    record_materialize_into_target(
+        "error",
+        resolve_view_spec_error_reason(resolve_view_reason),
+        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(view_spec_or.status());
   }
-
-  if (view_id_requested && request_view_id.has_value()) {
-    auto view_meta_or = d_.engine.get_view_metadata(req.artifact_id(), *request_view_id);
-    if (!view_meta_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(view_meta_or.status());
-    }
-    auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
-    if (!spec_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(spec_or.status());
-    }
-    view_spec = std::move(*spec_or);
-  }
+  std::optional<ViewSpec> view_spec = std::move(*view_spec_or);
 
   ViewNarrowErrorReason view_narrow_reason = ViewNarrowErrorReason::kUnknown;
   auto view_narrows_or = build_view_narrows(view_spec, &view_narrow_reason);
