@@ -1567,6 +1567,20 @@ cc_test(
 )
 
 cc_test(
+    name = "grpc_service_impl_start_seal_assembly_test",
+    srcs = ["service/grpc_service_impl_start_seal_assembly_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/store:store_engine",
+        "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "grpc_service_impl_deregister_purge_shared_disk_test",
     srcs = ["service/grpc_service_impl_deregister_purge_shared_disk_test.cc"],
     deps = [

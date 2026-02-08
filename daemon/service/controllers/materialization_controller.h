@@ -6,10 +6,10 @@
 
 #include <filesystem>
 #include <memory>
+#include <string>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/random/random.h"
 #include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
@@ -120,15 +120,18 @@ class MaterializationController {
   TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
 
  private:
+  struct SealOperationTracker {
+    absl::Mutex mu;
+    absl::flat_hash_set<std::string> active_operations ABSL_GUARDED_BY(mu);
+  };
+
   Dep d_;
   std::filesystem::path storage_path_;
 
-  absl::Mutex seal_mu_;
-  absl::flat_hash_set<std::string> active_seal_operations_ ABSL_GUARDED_BY(seal_mu_);
+  std::shared_ptr<SealOperationTracker> seal_operation_tracker_;
 
   common::CapabilityTokenManager* capability_tokens_{nullptr};
   TargetWriteRegistry target_write_registry_;
-  absl::BitGen bitgen_;
 };
 
 } // namespace tensorcast::daemon
