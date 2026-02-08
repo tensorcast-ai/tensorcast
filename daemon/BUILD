@@ -828,6 +828,7 @@ sc_cc_library(
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
+        ":materialization_target_storage_utils_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
@@ -895,6 +896,20 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
         "@nlohmann_json//:json",
+        "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_target_storage_utils_lib",
+    srcs = ["service/controllers/materialization_target_storage_utils.cc"],
+    hdrs = ["service/controllers/materialization_target_storage_utils.h"],
+    deps = [
+        ":ipc_region_registry_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
         "@protobuf",
     ],
 )
