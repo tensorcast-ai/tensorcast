@@ -19,7 +19,6 @@
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
 #include "core/store/components/global_store_client.h"
-#include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/path_utils.h"
 #include "daemon/util/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
@@ -225,8 +224,9 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       region_registry_(&deps.region_registry),
       lip_manager_(&deps.lip_manager),
       global_store_client_(std::move(deps.global_store_client)),
-      persistence_manager_(deps.persistence_manager),
       lifecycle_manager_(&deps.lifecycle_manager),
+      key_mapping_controller_(&deps.key_mapping_controller),
+      persistence_rpc_controller_(&deps.persistence_rpc_controller),
       replica_session_controller_(&deps.replica_session_controller),
       lease_controller_(&deps.lease_controller),
       shutdown_signal_(&deps.shutdown_signal),
@@ -359,31 +359,7 @@ Status StoreDaemonServiceImpl::PublishReplicaKey(
     const v2::PublishReplicaKeyRequest* req,
     v2::PublishReplicaKeyResponse* resp) {
   RpcContext rctx{"PublishReplicaKey", *ctx, opts_.allow_high_card_attrs};
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req->key());
-
-  if (req->key().empty() || !req->has_artifact_descriptor() || req->artifact_descriptor().artifact_id().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key and artifact_descriptor.artifact_id are required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-
-  // Use engine's configured Global Store client for upsert.
-  auto up = engine_->upsert_key_mapping(req->key(), req->artifact_descriptor().artifact_id());
-  if (!up.ok()) {
-    // For conflicts, return OK with ok=false for idempotency.
-    if (absl::IsAlreadyExists(up)) {
-      resp->set_ok(false);
-      resp->set_conflict_reason(std::string(up.message()));
-      rctx.mark_success();
-      return grpc::Status::OK;
-    }
-    return to_grpc_status(up);
-  }
-  resp->set_ok(true);
-  rctx.mark_success();
-  return grpc::Status::OK;
+  return key_mapping_controller_->publish_replica_key(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::ResolveKeyMapping(
@@ -391,26 +367,7 @@ Status StoreDaemonServiceImpl::ResolveKeyMapping(
     const v2::ResolveKeyMappingRequest* req,
     v2::ResolveKeyMappingResponse* resp) {
   RpcContext rctx{"ResolveKeyMapping", *ctx, opts_.allow_high_card_attrs};
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req->key());
-
-  if (req->key().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-
-  auto mapping_or = engine_->resolve_key_mapping(req->key());
-  if (!mapping_or.ok()) {
-    return to_grpc_status(mapping_or.status());
-  }
-  const auto& m = *mapping_or;
-  resp->set_artifact_id(m.artifact_id);
-  resp->set_generation(m.generation);
-  resp->set_cache_ttl_seconds(m.cache_ttl_seconds);
-  rctx.mark_success();
-  return grpc::Status::OK;
+  return key_mapping_controller_->resolve_key_mapping(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::SwapKeyMapping(
@@ -418,37 +375,7 @@ Status StoreDaemonServiceImpl::SwapKeyMapping(
     const v2::SwapKeyMappingRequest* req,
     v2::SwapKeyMappingResponse* resp) {
   RpcContext rctx{"SwapKeyMapping", *ctx, opts_.allow_high_card_attrs};
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req->key());
-  if (req->key().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "key is required"};
-  }
-  if (req->new_artifact_id().empty()) {
-    return {grpc::StatusCode::INVALID_ARGUMENT, "new_artifact_id is required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {grpc::StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-  std::optional<std::string_view> expected_artifact_id;
-  if (!req->expected_artifact_id().empty()) {
-    expected_artifact_id = req->expected_artifact_id();
-  }
-  std::optional<uint64_t> expected_generation;
-  if (req->has_expected_generation()) {
-    expected_generation = req->expected_generation();
-  }
-
-  auto result_or =
-      engine_->swap_key_mapping(req->key(), req->new_artifact_id(), expected_artifact_id, expected_generation);
-  if (!result_or.ok()) {
-    return to_grpc_status(result_or.status());
-  }
-  const auto& result = *result_or;
-  resp->set_ok(result.ok);
-  resp->set_artifact_id(result.artifact_id);
-  resp->set_generation(result.generation);
-  rctx.mark_success();
-  return grpc::Status::OK;
+  return key_mapping_controller_->swap_key_mapping(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::GetArtifactIndexById(
@@ -496,34 +423,7 @@ Status StoreDaemonServiceImpl::StartPersistence(
     const v2::StartPersistenceRequest* req,
     v2::StartPersistenceResponse* resp) {
   RpcContext rctx{"StartPersistence", *ctx, opts_.allow_high_card_attrs};
-  if (req->artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
-  }
-  if (shutdown_signal_->is_shutting_down()) {
-    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-  if (!persistence_manager_) {
-    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
-  }
-  auto policy_or = resolve_store_policy(req->has_policy() ? &req->policy() : nullptr);
-  if (!policy_or.ok()) {
-    return to_grpc_status(policy_or.status());
-  }
-  auto task_or = persistence_manager_->start_task(req->artifact_id(), *policy_or, req->key_hint());
-  if (!task_or.ok()) {
-    return to_grpc_status(task_or.status());
-  }
-  const auto& task = *task_or;
-
-  resp->set_task_id(task.task_id);
-  resp->set_plan_id(task.plan_id);
-  resp->set_state(task.state);
-  resp->set_progress(task.progress);
-  if (!task.degraded_reason.empty()) {
-    resp->set_degraded_reason(task.degraded_reason);
-  }
-  rctx.mark_success();
-  return Status::OK;
+  return persistence_rpc_controller_->start_persistence(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::QueryPersistenceStatus(
@@ -531,58 +431,7 @@ Status StoreDaemonServiceImpl::QueryPersistenceStatus(
     const v2::QueryPersistenceStatusRequest* req,
     v2::QueryPersistenceStatusResponse* resp) {
   RpcContext rctx{"QueryPersistenceStatus", *ctx, opts_.allow_high_card_attrs};
-  if (req->task_id().empty() && req->artifact_id().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "task_id or artifact_id is required"};
-  }
-  std::optional<std::string> task_key;
-  if (!req->task_id().empty()) {
-    task_key = req->task_id();
-  }
-  if (!persistence_manager_) {
-    return {StatusCode::FAILED_PRECONDITION, "persistence manager unavailable"};
-  }
-  absl::optional<PersistenceTaskState> task;
-  if (task_key.has_value()) {
-    task = persistence_manager_->get_by_task_id(*task_key);
-  } else {
-    task = persistence_manager_->get_latest_for_artifact(req->artifact_id());
-  }
-
-  if (!task.has_value()) {
-    return {StatusCode::NOT_FOUND, "persistence task not found"};
-  }
-  resp->set_task_id(task_key.value_or(task->task_id));
-  resp->set_artifact_id(task->artifact_id);
-  resp->set_plan_id(task->plan_id);
-  resp->set_state(task->state);
-  resp->set_progress(task->progress);
-  if (!task->degraded_reason.empty()) {
-    resp->set_degraded_reason(task->degraded_reason);
-  }
-  if (!task->last_error.empty()) {
-    resp->set_last_error(task->last_error);
-  }
-  for (const auto& shard : task->shards) {
-    auto* out = resp->add_shards();
-    out->set_shard_id(shard.shard_id);
-    out->set_shard_idx(shard.shard_idx);
-    out->set_state(shard.state);
-    out->set_progress(shard.progress);
-    if (!shard.degraded_reason.empty()) {
-      out->set_degraded_reason(shard.degraded_reason);
-    }
-    if (!shard.last_error.empty()) {
-      out->set_last_error(shard.last_error);
-    }
-    out->mutable_target_nodes()->Reserve(static_cast<int>(shard.targets.size()));
-    out->mutable_lease_ids()->Reserve(static_cast<int>(shard.targets.size()));
-    for (const auto& target : shard.targets) {
-      out->add_target_nodes(target.node_id);
-      out->add_lease_ids(target.lease_id);
-    }
-  }
-  rctx.mark_success();
-  return Status::OK;
+  return persistence_rpc_controller_->query_persistence_status(rctx, *req, *resp);
 }
 
 Status StoreDaemonServiceImpl::UnloadReplica(

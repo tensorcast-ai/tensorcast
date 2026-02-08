@@ -11,8 +11,10 @@
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/key_mapping_controller.h"
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/persistence_rpc_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
@@ -64,6 +66,8 @@ class DaemonServiceHarness {
       std::unique_ptr<RegistrationController> registration_controller,
       std::unique_ptr<TransportController> transport_controller,
       std::unique_ptr<StatusController> status_controller,
+      std::unique_ptr<KeyMappingController> key_mapping_controller,
+      std::unique_ptr<PersistenceRpcController> persistence_rpc_controller,
       std::unique_ptr<ReplicaSessionController> replica_session_controller,
       std::unique_ptr<LeaseController> lease_controller,
       std::unique_ptr<StoreDaemonServiceImpl> service,
@@ -75,6 +79,8 @@ class DaemonServiceHarness {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<KeyMappingController> key_mapping_controller_;
+  std::unique_ptr<PersistenceRpcController> persistence_rpc_controller_;
   std::unique_ptr<ReplicaSessionController> replica_session_controller_;
   std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;
