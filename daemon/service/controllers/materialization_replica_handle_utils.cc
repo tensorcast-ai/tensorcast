@@ -69,6 +69,43 @@ absl::StatusOr<std::vector<uint32_t>> build_export_chunks_for_replica(
   return chunks;
 }
 
+absl::Status attach_cuda_lease_for_replica_key(
+    const store::loading::ReplicaKey& replica_key,
+    int32_t effective_pid,
+    HandleLeaseRegistry* handle_leases,
+    SessionLifecycleManager* lifecycle,
+    std::string_view lease_log_context,
+    const std::function<void()>& on_lease_create_failed,
+    v2::MemCopyHandle& out_mem_handle) {
+  bool lease_created = false;
+  if (handle_leases != nullptr && effective_pid > 0) {
+    auto token_or = handle_leases->mint_cuda_ipc_lease(replica_key, effective_pid);
+    if (token_or.ok()) {
+      out_mem_handle.set_lease_token(*token_or);
+      lease_created = true;
+    } else {
+      LOG(WARNING) << "mint_cuda_ipc_lease failed (" << lease_log_context << "): key=" << replica_key
+                   << " pid=" << effective_pid << ": " << token_or.status();
+      if (on_lease_create_failed) {
+        on_lease_create_failed();
+      }
+    }
+  }
+
+  if (!lease_created && lifecycle != nullptr && effective_pid > 0) {
+    auto lid_or = lifecycle->create_use_lease(replica_key, effective_pid);
+    if (!lid_or.ok()) {
+      LOG(WARNING) << "create_use_lease failed (" << lease_log_context << "): key=" << replica_key
+                   << " pid=" << effective_pid << ": " << lid_or.status();
+      if (on_lease_create_failed) {
+        on_lease_create_failed();
+      }
+    }
+  }
+
+  return absl::OkStatus();
+}
+
 absl::Status bind_replica_handle_for_response(
     store::StoreEngine& engine,
     SessionsService& sessions,
@@ -135,33 +172,14 @@ absl::Status bind_replica_handle_for_response(
     out_mem_handle.set_cuda_ipc_handle(handle_view.data(), handle_view.size());
   }
 
-  bool lease_created = false;
-  if (handle_leases != nullptr && effective_pid > 0) {
-    auto token_or = handle_leases->mint_cuda_ipc_lease(handle.replica_key, effective_pid);
-    if (token_or.ok()) {
-      out_mem_handle.set_lease_token(*token_or);
-      lease_created = true;
-    } else {
-      LOG(WARNING) << "mint_cuda_ipc_lease failed (" << lease_log_context << "): key=" << handle.replica_key
-                   << " pid=" << effective_pid << ": " << token_or.status();
-      if (on_lease_create_failed) {
-        on_lease_create_failed();
-      }
-    }
-  }
-
-  if (!lease_created && lifecycle != nullptr && effective_pid > 0) {
-    auto lid_or = lifecycle->create_use_lease(handle.replica_key, effective_pid);
-    if (!lid_or.ok()) {
-      LOG(WARNING) << "create_use_lease failed (" << lease_log_context << "): key=" << handle.replica_key
-                   << " pid=" << effective_pid << ": " << lid_or.status();
-      if (on_lease_create_failed) {
-        on_lease_create_failed();
-      }
-    }
-  }
-
-  return absl::OkStatus();
+  return attach_cuda_lease_for_replica_key(
+      handle.replica_key,
+      effective_pid,
+      handle_leases,
+      lifecycle,
+      lease_log_context,
+      on_lease_create_failed,
+      out_mem_handle);
 }
 
 } // namespace tensorcast::daemon::materialization_replica_handle
