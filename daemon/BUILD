@@ -903,6 +903,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
+        ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
@@ -996,6 +997,22 @@ sc_cc_library(
         ":status_utils",
         "//core/store:store_engine",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_disk_resolve_utils_lib",
+    srcs = ["service/controllers/materialization_disk_resolve_utils.cc"],
+    hdrs = ["service/controllers/materialization_disk_resolve_utils.h"],
+    deps = [
+        ":materialization_index_source_utils_lib",
+        ":materialization_payload_utils_lib",
+        ":path_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store/materialization/dataplane:disk_dir_hash",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
     ],
 )
 
