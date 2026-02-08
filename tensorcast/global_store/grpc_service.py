@@ -198,35 +198,8 @@ class GlobalStoreServicer(
         "IMPORTED": global_store_pb2.DISK_LOCATION_KIND_IMPORTED,
     }
 
-    def __init__(self, db_file: str | None = None):
-        """
-        Initialize the Global Store with DuckDB backend.
-
-        Args:
-            db_file: Path to DuckDB file. None for in-memory database.
-        """
-        # Initialize configuration
-        self.config = get_config()
-        self._runtime_info: dict[str, Any] = {}
-
-        # Initialize database connection
-        db_path: Path | None = None
-        if db_file:
-            db_path = Path(db_file).expanduser()
-            db_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if db_path is None:
-            logger.info("Using in-memory DuckDB database")
-            self.connection = duckdb.connect()
-        else:
-            logger.info("Using persistent DuckDB database at: %s", db_path)
-            self.connection = duckdb.connect(str(db_path))
-
-        # Initialize database schema
-        cursor = self.connection.cursor()
-        init_db(cursor)
-
-        # Initialize repositories
+    def _init_repositories(self) -> None:
+        """Initialize repository objects used by all domains."""
         self.replica_repository = ReplicaRepository(self.connection)
 
         self.artifacts_repo = ArtifactRepository(self.connection)
@@ -258,6 +231,9 @@ class GlobalStoreServicer(
         )
         self.proof_repository = ProofRepository(self.connection)
         self.operation_repository = OperationRepository(self.connection)
+
+    def _init_catalog_handlers(self) -> None:
+        """Initialize handlers for artifact catalog and workflow metadata."""
         self.operation_rpc_handler = OperationRpcHandler(
             operation_repository=self.operation_repository,
             default_ttl_ms=int(self.config.limits.operation_leases.default_ttl_ms),
@@ -285,7 +261,8 @@ class GlobalStoreServicer(
             logger=logger,
         )
 
-        # Initialize services
+    def _init_view_and_layout_handlers(self) -> None:
+        """Initialize assembly/view/layout services and handlers."""
         self.chunk_service = ChunkService(self.chunk_directory_repository)
         self.view_state_service = ViewStateService(
             self.view_repository,
@@ -295,7 +272,6 @@ class GlobalStoreServicer(
             self.assembly_layout_binding_repository,
             self.proof_repository,
         )
-        self._rebuild_runtime_services_and_handlers()
         self.view_proof_rpc_handler = ViewProofRpcHandler(
             config=self.config,
             artifact_repository=self.artifacts_repo,
@@ -332,8 +308,8 @@ class GlobalStoreServicer(
             logger=logger,
         )
 
-        self._initiate_startup_recovery()
-
+    def _init_disk_location_handler(self) -> None:
+        """Initialize disk-location metadata handler for managed persistence."""
         self.cluster_id = self.cluster_info_repository.get_or_create_cluster_id()
         self.disk_location_rpc_handler = DiskLocationRpcHandler(
             disk_location_repository=self.disk_location_repository,
@@ -346,6 +322,8 @@ class GlobalStoreServicer(
             logger=logger,
         )
 
+    def _start_maintenance(self) -> None:
+        """Start periodic background maintenance."""
         self._maintenance_coordinator = GlobalStoreMaintenanceCoordinator(
             config=self.config,
             connection=self.connection,
@@ -355,6 +333,44 @@ class GlobalStoreServicer(
             logger=logger,
         )
         self.cleanup_thread = self._maintenance_coordinator.start()
+
+    def __init__(self, db_file: str | None = None):
+        """
+        Initialize the Global Store with DuckDB backend.
+
+        Args:
+            db_file: Path to DuckDB file. None for in-memory database.
+        """
+        # Initialize configuration
+        self.config = get_config()
+        self._runtime_info: dict[str, Any] = {}
+
+        # Initialize database connection
+        db_path: Path | None = None
+        if db_file:
+            db_path = Path(db_file).expanduser()
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if db_path is None:
+            logger.info("Using in-memory DuckDB database")
+            self.connection = duckdb.connect()
+        else:
+            logger.info("Using persistent DuckDB database at: %s", db_path)
+            self.connection = duckdb.connect(str(db_path))
+
+        # Initialize database schema
+        cursor = self.connection.cursor()
+        init_db(cursor)
+
+        self._init_repositories()
+        self._init_catalog_handlers()
+        self._init_view_and_layout_handlers()
+        self._rebuild_runtime_services_and_handlers()
+
+        self._initiate_startup_recovery()
+
+        self._init_disk_location_handler()
+        self._start_maintenance()
 
     def _rebuild_runtime_services_and_handlers(self) -> None:
         """Rebuild services/handlers that depend on mutable worker/replica repositories."""
