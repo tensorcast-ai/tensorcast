@@ -4,10 +4,8 @@
 
 #pragma once
 
-#include <atomic>
 #include <filesystem>
 #include <memory>
-#include <vector>
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_set.h"

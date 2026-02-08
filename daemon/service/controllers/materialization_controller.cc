@@ -48,12 +48,9 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
-#include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
-#include "daemon/service/controllers/materialization_mapped_target_layout_utils.h"
-#include "daemon/service/controllers/materialization_mapped_view_narrow_utils.h"
-#include "daemon/service/controllers/materialization_mapped_view_spec_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
@@ -75,19 +72,6 @@ using materialization_layout::CanonicalIndexTable;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
 using materialization_layout::TargetOffsetEntry;
-using materialization_mapped_copy_plan::build_copy_plan;
-using materialization_mapped_copy_plan::BuildCopyPlanResult;
-using materialization_mapped_copy_plan::ViewNarrowSpec;
-using materialization_mapped_target_layout::validate_mapped_target_layout;
-using materialization_mapped_target_layout::ValidatedMappedTargetLayout;
-using materialization_mapped_target_layout::validation_error_reason;
-using materialization_mapped_target_layout::ValidationErrorReason;
-using materialization_mapped_view_narrow::build_view_narrows;
-using materialization_mapped_view_narrow::view_narrow_error_reason;
-using materialization_mapped_view_narrow::ViewNarrowErrorReason;
-using materialization_mapped_view_spec::resolve_mapped_view_spec;
-using materialization_mapped_view_spec::resolve_view_spec_error_reason;
-using materialization_mapped_view_spec::ResolveViewSpecErrorReason;
 using materialization_payload::compute_generation_from_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
@@ -102,6 +86,10 @@ using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
+using materialization_target_plan::build_mapped_target_materialization_plan;
+using materialization_target_plan::build_target_materialization_plan;
+using materialization_target_plan::MappedTargetMaterializationPlan;
+using materialization_target_plan::TargetMaterializationPlan;
 using materialization_target_storage::acquire_error_reason;
 using materialization_target_storage::AcquireTargetStoragesError;
 using materialization_target_storage::TargetStorageLease;
@@ -868,660 +856,6 @@ void record_materialize_into_target_verification_skipped() {
     }
   } catch (...) {
   }
-}
-
-struct TargetLayoutTensorSelection {
-  absl::flat_hash_set<std::string> layout_name_set;
-  std::vector<std::string> layout_names;
-  std::vector<std::string> request_names;
-};
-
-Status collect_target_layout_tensor_selection(
-    const v2::MaterializeIntoTargetRequest& req,
-    const std::vector<TargetOffsetEntry>& offsets,
-    TargetLayoutTensorSelection& selection) {
-  selection.layout_name_set.clear();
-  selection.layout_names.clear();
-  selection.request_names.clear();
-
-  selection.layout_name_set.reserve(offsets.size());
-  selection.layout_names.reserve(offsets.size());
-  for (const auto& entry : offsets) {
-    if (entry.name.empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes empty tensor name"};
-    }
-    if (!selection.layout_name_set.insert(entry.name).second) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
-    }
-    selection.layout_names.push_back(entry.name);
-  }
-
-  if (req.tensor_names_size() == 0) {
-    return Status::OK;
-  }
-
-  absl::flat_hash_set<std::string> request_name_set;
-  selection.request_names.reserve(req.tensor_names_size());
-  request_name_set.reserve(req.tensor_names_size());
-  for (const auto& name : req.tensor_names()) {
-    selection.request_names.push_back(name);
-    request_name_set.insert(name);
-  }
-  if (request_name_set.size() != static_cast<size_t>(req.tensor_names_size())) {
-    record_materialize_into_target(
-        "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "tensor_names must not contain duplicates"};
-  }
-  if (request_name_set.size() != selection.layout_name_set.size()) {
-    record_materialize_into_target(
-        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
-  }
-  for (const auto& name : selection.layout_name_set) {
-    if (!request_name_set.contains(name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
-    }
-  }
-
-  return Status::OK;
-}
-
-Status validate_layout_names_exist_in_index(
-    const absl::flat_hash_set<std::string>& layout_name_set,
-    const CanonicalIndexTable& index_table,
-    std::string_view error_message) {
-  for (const auto& name : layout_name_set) {
-    if (!index_table.entries.contains(name)) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, std::string(error_message)};
-    }
-  }
-  return Status::OK;
-}
-
-Status validate_selected_index_matches_layout(
-    const absl::flat_hash_set<std::string>& layout_name_set,
-    const CanonicalIndexTable& index_table) {
-  if (index_table.entries.size() != layout_name_set.size()) {
-    record_materialize_into_target(
-        "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout must include every selected tensor"};
-  }
-  return validate_layout_names_exist_in_index(
-      layout_name_set, index_table, "target_layout includes unknown tensor name");
-}
-
-bool is_layout_subset_of_canonical_index(
-    const CanonicalIndexTable& canonical_table,
-    const absl::flat_hash_set<std::string>& layout_name_set) {
-  if (canonical_table.entries.size() != layout_name_set.size()) {
-    return true;
-  }
-  for (const auto& [name, _] : canonical_table.entries) {
-    if (!layout_name_set.contains(name)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-struct StorageRange {
-  std::string storage_id;
-  uint64_t base_offset{0};
-  uint64_t length{0};
-};
-
-struct PreparedTargetStorageLayout {
-  std::vector<RegisterStorageMeta> publish_storages;
-  std::vector<LeaseSegMeta> publish_segments;
-  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
-  uint64_t total_storage_bytes{0};
-};
-
-Status build_target_storage_layout(const v2::TargetLayout& layout, PreparedTargetStorageLayout& prepared) {
-  prepared.publish_storages.clear();
-  prepared.publish_segments.clear();
-  prepared.storage_ranges.clear();
-  prepared.total_storage_bytes = 0;
-
-  prepared.publish_storages.reserve(layout.storages_size());
-  prepared.publish_segments.reserve(layout.storages_size());
-  prepared.storage_ranges.reserve(layout.storages_size());
-
-  uint64_t range_cursor = 0;
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_id().empty()) {
-      record_materialize_into_target(
-          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
-    }
-    if (storage.storage_length() == 0) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
-    }
-    if (prepared.storage_ranges.contains(storage.storage_id())) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
-    }
-
-    StorageRange range;
-    range.storage_id = storage.storage_id();
-    range.base_offset = range_cursor;
-    range.length = storage.storage_length();
-    prepared.storage_ranges.emplace(range.storage_id, range);
-
-    RegisterStorageMeta meta;
-    meta.storage_id = storage.storage_id();
-    meta.device_id = storage.device_id();
-    meta.storage_length = storage.storage_length();
-    if (!storage.vram_region_id().empty()) {
-      meta.region_id = storage.vram_region_id();
-    }
-    if (!storage.cuda_ipc_handle().empty()) {
-      meta.handle_bytes = storage.cuda_ipc_handle();
-    }
-    meta.mapping_base_offset = storage.mapping_base_offset();
-    prepared.publish_storages.push_back(std::move(meta));
-
-    LeaseSegMeta seg;
-    seg.storage_id = storage.storage_id();
-    seg.storage_offset = 0;
-    seg.artifact_offset = range_cursor;
-    seg.length = storage.storage_length();
-    prepared.publish_segments.push_back(std::move(seg));
-
-    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
-    }
-    range_cursor += storage.storage_length();
-  }
-  prepared.total_storage_bytes = range_cursor;
-  return Status::OK;
-}
-
-Status validate_storage_span_matches_index(uint64_t total_storage_bytes, uint64_t logical_total_size) {
-  if (total_storage_bytes != logical_total_size) {
-    record_materialize_into_target(
-        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "storage_length must span logical byte space"};
-  }
-  return Status::OK;
-}
-
-Status validate_target_offsets_against_layout(
-    const std::vector<TargetOffsetEntry>& offsets,
-    const CanonicalIndexTable& index_table,
-    const absl::flat_hash_map<std::string, StorageRange>& storage_ranges) {
-  absl::flat_hash_set<std::string> seen_offsets;
-  seen_offsets.reserve(offsets.size());
-  for (const auto& entry : offsets) {
-    if (!seen_offsets.insert(entry.name).second) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
-    }
-    auto it = index_table.entries.find(entry.name);
-    if (it == index_table.entries.end()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
-    }
-    const auto range_it = storage_ranges.find(entry.storage_id);
-    if (range_it == storage_ranges.end()) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
-    }
-    const auto& range = range_it->second;
-    const auto& index_entry = it->second;
-    if (entry.logical_length != index_entry.logical_length) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
-    }
-    if (index_entry.logical_offset < range.base_offset) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout offset out of storage bounds"};
-    }
-    const uint64_t expected_storage_offset = index_entry.logical_offset - range.base_offset;
-    if (entry.storage_offset != expected_storage_offset) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
-    }
-    if (expected_storage_offset + entry.logical_length > range.length) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
-    }
-  }
-  return Status::OK;
-}
-
-struct TargetViewResolution {
-  std::optional<ViewSpec> view_spec;
-  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
-  std::optional<std::string> request_view_id;
-  std::optional<std::string> view_data_hash;
-  std::optional<store::loader::ViewPlan> view_plan;
-  std::optional<std::string> resolved_view_id;
-  bool view_id_requested{false};
-  bool has_view_transform{false};
-};
-
-Status parse_target_view_identity(const v2::MaterializeIntoTargetRequest& req, TargetViewResolution& view_resolution) {
-  switch (req.view_identity_case()) {
-    case v2::MaterializeIntoTargetRequest::kView: {
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        return to_grpc_status(spec_or.status());
-      }
-      view_resolution.view_spec = std::move(*spec_or);
-      view_resolution.view_spec_proto = req.view();
-      break;
-    }
-    case v2::MaterializeIntoTargetRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        view_resolution.view_id_requested = true;
-        view_resolution.request_view_id = req.view_id();
-      }
-      break;
-    }
-    case v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET:
-      break;
-  }
-  return Status::OK;
-}
-
-Status hydrate_target_view_from_metadata(
-    store::StoreEngine& engine,
-    const v2::MaterializeIntoTargetRequest& req,
-    TargetViewResolution& view_resolution) {
-  if (!view_resolution.view_id_requested || !view_resolution.request_view_id.has_value()) {
-    return Status::OK;
-  }
-
-  auto view_meta_or = engine.get_view_metadata(req.artifact_id(), *view_resolution.request_view_id);
-  if (!view_meta_or.ok()) {
-    record_materialize_into_target(
-        "error", "view_meta_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(view_meta_or.status());
-  }
-  auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
-  if (!spec_or.ok()) {
-    record_materialize_into_target(
-        "error", "view_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(spec_or.status());
-  }
-  view_resolution.view_spec = std::move(*spec_or);
-  view_resolution.view_spec_proto = build_view_spec_proto(*view_resolution.view_spec);
-  view_resolution.view_data_hash = view_meta_or->view_data_hash;
-  return Status::OK;
-}
-
-Status compute_target_view_plan(
-    std::string_view canonical_json,
-    bool has_subset,
-    bool has_ordered_selection,
-    const std::vector<std::string>& layout_names,
-    const std::vector<std::string>& request_names,
-    v2::TargetLayout::IndexKind index_kind,
-    TargetViewResolution& view_resolution) {
-  if (!view_resolution.view_spec.has_value() && !has_subset && index_kind != v2::TargetLayout::INDEX_KIND_VIEW &&
-      !has_ordered_selection) {
-    return Status::OK;
-  }
-
-  ViewSpec plan_spec = view_resolution.view_spec.value_or(ViewSpec{});
-  std::vector<std::string> subset_names;
-  if (has_ordered_selection) {
-    subset_names = request_names;
-  } else if (has_subset) {
-    subset_names = layout_names;
-  }
-  auto plan_or = store::StoreEngine::compute_view_plan(std::string(canonical_json), plan_spec, subset_names);
-  if (!plan_or.ok()) {
-    record_materialize_into_target(
-        "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(plan_or.status());
-  }
-  view_resolution.view_plan = std::move(*plan_or);
-  return Status::OK;
-}
-
-Status validate_target_index_kind_mode(
-    const v2::TargetLayout& layout,
-    bool has_subset,
-    bool has_ordered_selection,
-    TargetViewResolution& view_resolution) {
-  view_resolution.has_view_transform = view_resolution.view_id_requested ||
-      (view_resolution.view_spec.has_value() && view_resolution.view_plan.has_value() &&
-       !view_resolution.view_plan->is_identity);
-  if (view_resolution.view_id_requested && view_resolution.view_plan.has_value() &&
-      view_resolution.view_plan->is_identity && !has_subset) {
-    record_materialize_into_target(
-        "error", "view_identity_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_id requires a non-identity view spec"};
-  }
-
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED) {
-    if (view_resolution.has_view_transform || has_subset || has_ordered_selection) {
-      record_materialize_into_target(
-          "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "index_kind CANONICAL cannot be used with view/subset selection"};
-    }
-    return Status::OK;
-  }
-  if (!view_resolution.has_view_transform && !has_subset && !has_ordered_selection) {
-    record_materialize_into_target(
-        "error", "index_kind_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "index_kind VIEW requires view or selection order"};
-  }
-  return Status::OK;
-}
-
-Status resolve_target_view_id(std::string_view canonical_json, TargetViewResolution& view_resolution) {
-  if (!view_resolution.has_view_transform) {
-    return Status::OK;
-  }
-  if (!view_resolution.view_spec_proto.has_value()) {
-    record_materialize_into_target(
-        "error", "view_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view spec required for view transforms"};
-  }
-  auto view_id_or = compute_view_id_from_spec(*view_resolution.view_spec_proto, std::string(canonical_json));
-  if (!view_id_or.ok()) {
-    return to_grpc_status(view_id_or.status());
-  }
-  if (view_resolution.request_view_id.has_value() && *view_resolution.request_view_id != *view_id_or) {
-    record_materialize_into_target(
-        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
-  }
-  view_resolution.resolved_view_id = *view_id_or;
-  return Status::OK;
-}
-
-Status validate_target_layout_view_binding(
-    const v2::TargetLayout& layout,
-    const TargetViewResolution& view_resolution) {
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    if (view_resolution.has_view_transform) {
-      if (layout.view_id().empty() ||
-          (view_resolution.resolved_view_id.has_value() && layout.view_id() != *view_resolution.resolved_view_id)) {
-        record_materialize_into_target(
-            "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must match resolved view_id"};
-      }
-      return Status::OK;
-    }
-    if (!layout.view_id().empty()) {
-      record_materialize_into_target(
-          "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id must be empty for subset-only layouts"};
-    }
-    return Status::OK;
-  }
-  if (!layout.view_id().empty()) {
-    record_materialize_into_target(
-        "error", "view_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout.view_id not allowed for canonical layout"};
-  }
-  return Status::OK;
-}
-
-Status choose_target_selected_index_json(
-    const v2::TargetLayout& layout,
-    std::string_view canonical_index_json,
-    const TargetViewResolution& view_resolution,
-    std::string& selected_index_json) {
-  if (layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
-    if (!view_resolution.view_plan.has_value()) {
-      record_materialize_into_target(
-          "error", "view_plan_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "view plan missing for VIEW layout"};
-    }
-    selected_index_json = view_resolution.view_plan->view_index_json;
-    return Status::OK;
-  }
-  selected_index_json = std::string(canonical_index_json);
-  return Status::OK;
-}
-
-Status validate_target_alias_against_entry(const v2::TensorAlias& alias, const CanonicalIndexEntry& entry) {
-  if (alias.logical_length() != entry.logical_length) {
-    record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout alias logical_length mismatch"};
-  }
-  if (alias.dtype() != entry.dtype) {
-    record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout alias dtype mismatch"};
-  }
-  if (alias.shape_size() != static_cast<int>(entry.shape.size()) ||
-      alias.stride_size() != static_cast<int>(entry.stride.size())) {
-    record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape/stride mismatch"};
-  }
-  for (int i = 0; i < alias.shape_size(); ++i) {
-    if (alias.shape(i) != entry.shape[static_cast<size_t>(i)]) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape mismatch"};
-    }
-  }
-  for (int i = 0; i < alias.stride_size(); ++i) {
-    if (alias.stride(i) != entry.stride[static_cast<size_t>(i)]) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout alias stride mismatch"};
-    }
-  }
-  return Status::OK;
-}
-
-Status validate_target_layout_aliases(const v2::TargetLayout& layout, const CanonicalIndexTable& index_table) {
-  if (layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
-    return Status::OK;
-  }
-  for (const auto& alias : layout.aliases()) {
-    auto it = index_table.entries.find(alias.name());
-    if (it == index_table.entries.end()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout alias includes unknown tensor name"};
-    }
-    auto alias_status = validate_target_alias_against_entry(alias, it->second);
-    if (!alias_status.ok()) {
-      return alias_status;
-    }
-  }
-  return Status::OK;
-}
-
-Status validate_target_view_subset_hash(
-    const v2::MaterializeIntoTargetRequest& req,
-    bool has_subset,
-    bool has_ordered_selection,
-    const std::vector<std::string>& layout_names,
-    const std::vector<std::string>& request_names,
-    std::string& view_subset_hash) {
-  view_subset_hash.clear();
-  if (has_subset) {
-    const auto& subset_names = has_ordered_selection ? request_names : layout_names;
-    view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(subset_names));
-    if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
-      record_materialize_into_target(
-          "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
-    }
-    return Status::OK;
-  }
-  if (!req.view_subset_hash().empty()) {
-    record_materialize_into_target(
-        "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash must be empty for full selection"};
-  }
-  return Status::OK;
-}
-
-struct TargetMaterializationPlan {
-  TargetLayoutTensorSelection tensor_selection;
-  TargetViewResolution view_resolution;
-  std::string canonical_index_json;
-  std::string selected_index_json;
-  CanonicalIndexTable index_table;
-  PreparedTargetStorageLayout prepared_storage_layout;
-  std::string view_subset_hash;
-  bool has_subset{false};
-  bool has_ordered_selection{false};
-  uint64_t logical_total_size{0};
-};
-
-Status build_target_materialization_plan(
-    store::StoreEngine& engine,
-    const v2::MaterializeIntoTargetRequest& req,
-    const v2::TargetLayout& layout,
-    const std::string& resolved_artifact_id,
-    const std::optional<std::filesystem::path>& normalized_disk_path,
-    int device_ordinal,
-    bool gs_connected,
-    const std::vector<TargetOffsetEntry>& offsets,
-    TargetMaterializationPlan& plan) {
-  plan = TargetMaterializationPlan{};
-
-  auto tensor_selection_status = collect_target_layout_tensor_selection(req, offsets, plan.tensor_selection);
-  if (!tensor_selection_status.ok()) {
-    return tensor_selection_status;
-  }
-  const auto& layout_name_set = plan.tensor_selection.layout_name_set;
-  const auto& layout_names = plan.tensor_selection.layout_names;
-  const auto& request_names = plan.tensor_selection.request_names;
-
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      engine, resolved_artifact_id, normalized_disk_path, device_ordinal, gs_connected);
-  if (!canonical_json_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(canonical_json_or.status());
-  }
-  plan.canonical_index_json = std::move(*canonical_json_or);
-
-  auto canonical_table_or = parse_canonical_index(plan.canonical_index_json);
-  if (!canonical_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(canonical_table_or.status());
-  }
-  const CanonicalIndexTable& canonical_table = *canonical_table_or;
-
-  auto canonical_layout_validation_status = validate_layout_names_exist_in_index(
-      layout_name_set, canonical_table, "target_layout includes unknown tensor name");
-  if (!canonical_layout_validation_status.ok()) {
-    return canonical_layout_validation_status;
-  }
-  plan.has_subset = is_layout_subset_of_canonical_index(canonical_table, layout_name_set);
-  plan.has_ordered_selection = !request_names.empty();
-
-  auto parse_view_status = parse_target_view_identity(req, plan.view_resolution);
-  if (!parse_view_status.ok()) {
-    return parse_view_status;
-  }
-  auto hydrate_view_status = hydrate_target_view_from_metadata(engine, req, plan.view_resolution);
-  if (!hydrate_view_status.ok()) {
-    return hydrate_view_status;
-  }
-  auto view_plan_status = compute_target_view_plan(
-      plan.canonical_index_json,
-      plan.has_subset,
-      plan.has_ordered_selection,
-      layout_names,
-      request_names,
-      layout.index_kind(),
-      plan.view_resolution);
-  if (!view_plan_status.ok()) {
-    return view_plan_status;
-  }
-  auto index_kind_status =
-      validate_target_index_kind_mode(layout, plan.has_subset, plan.has_ordered_selection, plan.view_resolution);
-  if (!index_kind_status.ok()) {
-    return index_kind_status;
-  }
-  auto resolve_view_id_status = resolve_target_view_id(plan.canonical_index_json, plan.view_resolution);
-  if (!resolve_view_id_status.ok()) {
-    return resolve_view_id_status;
-  }
-  auto layout_view_binding_status = validate_target_layout_view_binding(layout, plan.view_resolution);
-  if (!layout_view_binding_status.ok()) {
-    return layout_view_binding_status;
-  }
-
-  auto selected_index_status = choose_target_selected_index_json(
-      layout, plan.canonical_index_json, plan.view_resolution, plan.selected_index_json);
-  if (!selected_index_status.ok()) {
-    return selected_index_status;
-  }
-
-  auto index_table_or = parse_canonical_index(plan.selected_index_json);
-  if (!index_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(index_table_or.status());
-  }
-  plan.index_table = std::move(*index_table_or);
-  plan.logical_total_size = plan.index_table.logical_total_size;
-
-  auto selected_index_validation_status = validate_selected_index_matches_layout(layout_name_set, plan.index_table);
-  if (!selected_index_validation_status.ok()) {
-    return selected_index_validation_status;
-  }
-  if (plan.view_resolution.view_plan.has_value() && plan.view_resolution.view_plan->view_size_bytes > 0 &&
-      plan.view_resolution.view_plan->view_size_bytes != plan.logical_total_size) {
-    record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view plan size does not match selected index"};
-  }
-
-  auto alias_validation_status = validate_target_layout_aliases(layout, plan.index_table);
-  if (!alias_validation_status.ok()) {
-    return alias_validation_status;
-  }
-
-  auto storage_layout_status = build_target_storage_layout(layout, plan.prepared_storage_layout);
-  if (!storage_layout_status.ok()) {
-    return storage_layout_status;
-  }
-  auto storage_span_status =
-      validate_storage_span_matches_index(plan.prepared_storage_layout.total_storage_bytes, plan.logical_total_size);
-  if (!storage_span_status.ok()) {
-    return storage_span_status;
-  }
-  auto offset_validation_status =
-      validate_target_offsets_against_layout(offsets, plan.index_table, plan.prepared_storage_layout.storage_ranges);
-  if (!offset_validation_status.ok()) {
-    return offset_validation_status;
-  }
-
-  auto subset_hash_status = validate_target_view_subset_hash(
-      req, plan.has_subset, plan.has_ordered_selection, layout_names, request_names, plan.view_subset_hash);
-  if (!subset_hash_status.ok()) {
-    return subset_hash_status;
-  }
-  return Status::OK;
 }
 
 absl::Status validate_descriptor_against_index(
@@ -2702,27 +2036,38 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
+  if (!canonical_json_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_json_or.status());
+  }
+
   TargetMaterializationPlan plan;
   auto build_plan_status = build_target_materialization_plan(
-      d_.engine, req, layout, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected, offsets, plan);
+      d_.engine, req, layout, offsets, std::move(*canonical_json_or), record_materialize_into_target, plan);
   if (!build_plan_status.ok()) {
     return build_plan_status;
   }
 
-  const auto& layout_names = plan.tensor_selection.layout_names;
+  const auto& layout_names = plan.layout_names;
   const bool has_subset = plan.has_subset;
-  auto& view_resolution = plan.view_resolution;
-  auto& view_spec = view_resolution.view_spec;
-  auto& view_plan = view_resolution.view_plan;
-  auto& resolved_view_id = view_resolution.resolved_view_id;
-  auto& view_data_hash = view_resolution.view_data_hash;
-  const bool has_view_transform = view_resolution.has_view_transform;
+  auto& view_spec = plan.view_spec;
+  auto& view_plan = plan.view_plan;
+  auto& resolved_view_id = plan.resolved_view_id;
+  auto& view_data_hash = plan.view_data_hash;
+  const bool has_view_transform = plan.has_view_transform;
   const std::string& canonical_index_json = plan.canonical_index_json;
   const std::string& selected_index_json = plan.selected_index_json;
   const uint64_t logical_total_size = plan.logical_total_size;
-  std::vector<RegisterStorageMeta> publish_storages = std::move(plan.prepared_storage_layout.publish_storages);
-  std::vector<LeaseSegMeta> publish_segments = std::move(plan.prepared_storage_layout.publish_segments);
+  std::vector<RegisterStorageMeta> publish_storages = std::move(plan.publish_storages);
+  std::vector<LeaseSegMeta> publish_segments = std::move(plan.publish_segments);
   std::string view_subset_hash = std::move(plan.view_subset_hash);
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
+  if (view_spec.has_value()) {
+    view_spec_proto = build_view_spec_proto(*view_spec);
+  }
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
@@ -2896,8 +2241,8 @@ grpc::Status MaterializationController::materialize_into_target(
     for (const auto& name : req.tensor_names()) {
       selection.add_tensor_names(name);
     }
-    if (view_resolution.view_spec_proto.has_value()) {
-      selection.mutable_view_spec()->CopyFrom(*view_resolution.view_spec_proto);
+    if (view_spec_proto.has_value()) {
+      selection.mutable_view_spec()->CopyFrom(*view_spec_proto);
     }
 
     tensorcast::common::v1::ByteSpaceRef byte_space;
@@ -3059,20 +2404,6 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
-  ValidationErrorReason mapped_layout_reason = ValidationErrorReason::kUnknown;
-  auto mapped_layout_or = validate_mapped_target_layout(req, offsets, &mapped_layout_reason);
-  if (!mapped_layout_or.ok()) {
-    record_materialize_into_target(
-        "error",
-        validation_error_reason(mapped_layout_reason),
-        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(mapped_layout_or.status());
-  }
-  ValidatedMappedTargetLayout mapped_layout = std::move(*mapped_layout_or);
-  auto dst_specs = std::move(mapped_layout.dst_specs);
-  auto dst_base_offsets = std::move(mapped_layout.dst_base_offsets);
-  const uint64_t logical_total_size = mapped_layout.logical_total_size;
-
   auto canonical_json_or = load_canonical_index_with_disk_fallback(
       d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
   if (!canonical_json_or.ok()) {
@@ -3080,59 +2411,24 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
     return to_grpc_status(canonical_json_or.status());
   }
-  ResolveViewSpecErrorReason resolve_view_reason = ResolveViewSpecErrorReason::kUnknown;
-  auto view_spec_or = resolve_mapped_view_spec(req, resolved_artifact_id, d_.engine, &resolve_view_reason);
-  if (!view_spec_or.ok()) {
-    record_materialize_into_target(
-        "error",
-        resolve_view_spec_error_reason(resolve_view_reason),
-        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(view_spec_or.status());
-  }
-  std::optional<ViewSpec> view_spec = std::move(*view_spec_or);
 
-  ViewNarrowErrorReason view_narrow_reason = ViewNarrowErrorReason::kUnknown;
-  auto view_narrows_or = build_view_narrows(view_spec, &view_narrow_reason);
-  if (!view_narrows_or.ok()) {
-    record_materialize_into_target(
-        "error",
-        view_narrow_error_reason(view_narrow_reason),
-        v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(view_narrows_or.status());
+  MappedTargetMaterializationPlan mapped_plan;
+  auto build_mapped_plan_status = build_mapped_target_materialization_plan(
+      d_.engine,
+      req,
+      resolved_artifact_id,
+      offsets,
+      std::move(*canonical_json_or),
+      record_materialize_into_target,
+      mapped_plan);
+  if (!build_mapped_plan_status.ok()) {
+    return build_mapped_plan_status;
   }
-  absl::flat_hash_map<std::string, ViewNarrowSpec> view_narrows = std::move(*view_narrows_or);
-
-  std::optional<store::loader::ViewPlan> view_plan;
-  if (view_spec.has_value()) {
-    auto plan_or = store::StoreEngine::compute_view_plan(*canonical_json_or, *view_spec);
-    if (!plan_or.ok()) {
-      record_materialize_into_target(
-          "error", "view_plan_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(plan_or.status());
-    }
-    view_plan = std::move(*plan_or);
-  }
-
-  std::string source_index_json = *canonical_json_or;
-  if (view_plan.has_value() && !view_plan->is_identity) {
-    source_index_json = view_plan->view_index_json;
-  }
-  auto source_table_or = parse_canonical_index(source_index_json);
-  if (!source_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(source_table_or.status());
-  }
-  const CanonicalIndexTable& source_table = *source_table_or;
-
-  auto copy_plan_or = build_copy_plan(req.copy_plan(), source_table, dst_specs, dst_base_offsets, view_narrows);
-  if (!copy_plan_or.ok()) {
-    record_materialize_into_target(
-        "error", "mapping_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(copy_plan_or.status());
-  }
-  BuildCopyPlanResult copy_plan = std::move(*copy_plan_or);
-  copy_plan.map.total_bytes = logical_total_size;
+  const uint64_t logical_total_size = mapped_plan.logical_total_size;
+  const std::string& canonical_index_json = mapped_plan.canonical_index_json;
+  auto& view_spec = mapped_plan.view_spec;
+  auto& view_plan = mapped_plan.view_plan;
+  auto copy_plan = std::move(mapped_plan.copy_plan);
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
   auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
@@ -3169,7 +2465,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
       variant.view_spec = view_spec;
     }
     variant.cached_plan = view_plan;
-    variant.canonical_index_json = *canonical_json_or;
+    variant.canonical_index_json = canonical_index_json;
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
@@ -3178,9 +2474,9 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
 
-  const uint64_t generation = compute_generation_from_index(*canonical_json_or);
+  const uint64_t generation = compute_generation_from_index(canonical_index_json);
   auto result_or = d_.engine.materialize_mapped_into_target(
-      device, target_layout, copy_plan.map, *canonical_json_or, generation, hints, disk_source);
+      device, target_layout, copy_plan.map, canonical_index_json, generation, hints, disk_source);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
       for (const auto& region_id : storage_lease.acquired_region_ids()) {
@@ -3198,7 +2494,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   resp.set_artifact_id(resolved_artifact_id);
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
-  resp.set_canonical_index_bytes(*canonical_json_or);
+  resp.set_canonical_index_bytes(canonical_index_json);
   if (view_plan.has_value() && !view_plan->is_identity) {
     resp.set_view_index_bytes(view_plan->view_index_json);
   }
