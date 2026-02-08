@@ -1213,6 +1213,22 @@ grpc::Status process_feed_requests(
   return Status::OK;
 }
 
+absl::StatusOr<bool> is_piece_assembly_sealed(
+    store::components::IGlobalStoreClient* global_store_client,
+    std::string_view client_artifact_id) {
+  if (global_store_client == nullptr || !global_store_client->is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  auto binding_or = global_store_client->get_artifact_binding(std::string(client_artifact_id));
+  if (binding_or.ok()) {
+    return true;
+  }
+  if (absl::IsNotFound(binding_or.status())) {
+    return false;
+  }
+  return binding_or.status();
+}
+
 grpc::Status commit_piece_view_registration(
     RegistrationController::Dep& dep,
     RpcContext& rctx,
@@ -1712,23 +1728,20 @@ grpc::Status validate_piece_assembly_not_sealed(
     RegistrationController::Dep& dep,
     const std::string& registration_id,
     const RegistrationManager::RegMeta& meta) {
-  if (!dep.global_store_client || !dep.global_store_client->is_connected()) {
-    return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
-  }
   if (meta.client_artifact_id.empty()) {
     return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
   }
-  auto binding_or = dep.global_store_client->get_artifact_binding(meta.client_artifact_id);
-  if (binding_or.ok()) {
+  auto sealed_or = is_piece_assembly_sealed(dep.global_store_client.get(), meta.client_artifact_id);
+  if (!sealed_or.ok()) {
+    return to_grpc_status(sealed_or.status());
+  }
+  if (*sealed_or) {
     absl::Status abort_status = dep.engine.abort_registered_artifact(registration_id);
     if (!abort_status.ok()) {
       LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
     }
     EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
     return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
-  }
-  if (!absl::IsNotFound(binding_or.status())) {
-    return to_grpc_status(binding_or.status());
   }
   return Status::OK;
 }
@@ -2096,15 +2109,12 @@ grpc::Status RegistrationController::begin(
     if (meta.client_artifact_id.empty()) {
       return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
     }
-    if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-      return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+    auto sealed_or = is_piece_assembly_sealed(d_.global_store_client.get(), meta.client_artifact_id);
+    if (!sealed_or.ok()) {
+      return to_grpc_status(sealed_or.status());
     }
-    auto binding_or = d_.global_store_client->get_artifact_binding(meta.client_artifact_id);
-    if (binding_or.ok()) {
+    if (*sealed_or) {
       return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
-    }
-    if (!absl::IsNotFound(binding_or.status())) {
-      return to_grpc_status(binding_or.status());
     }
   }
 

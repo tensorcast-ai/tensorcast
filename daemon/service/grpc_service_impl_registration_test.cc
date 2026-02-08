@@ -395,6 +395,43 @@ TEST_CASE("BeginRegisterArtifact rejects full coverage piece", "[daemon][registr
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+TEST_CASE("BeginRegisterArtifact rejects piece begin when assembly is already sealed", "[daemon][registration][view]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto harness_with_gs = make_harness_with_global_store(engine);
+  auto& service = harness_with_gs.harness->service();
+  auto& gs_client = *harness_with_gs.global_store_client;
+
+  tensorcast::store::components::ArtifactBinding binding;
+  binding.from_artifact_id = "cgid:piece-sealed-begin";
+  binding.to_artifact_id = "mi2:sealed";
+  binding.kind = tensorcast::global_store::v1::ARTIFACT_BINDING_KIND_SEAL;
+  gs_client.artifact_binding = std::move(binding);
+
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
+  breq.set_device_id(0);
+  breq.set_total_size(16);
+  breq.set_owner_pid(getpid());
+  breq.set_client_artifact_id("cgid:piece-sealed-begin");
+  auto* idx = breq.mutable_tensor_index_data();
+  idx->set_data(R"({"weights":[0,32,[8],[1],"torch.float32",0]})");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  auto* view = breq.mutable_view();
+  view->set_canonical_size_bytes(32);
+  view->set_placement(tensorcast::daemon::v2::TRANSFORM_PLACEMENT_SERVER);
+  view->set_registration_kind(tensorcast::daemon::v2::VIEW_REGISTRATION_KIND_PIECE);
+  view->mutable_spec()->CopyFrom(make_narrow_view_spec(0, 4));
+  breq.mutable_lease()->set_in_place(true);
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
+  auto status = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
+  REQUIRE(status.error_message().find("already sealed") != std::string::npos);
+}
+
 TEST_CASE(
     "CommitRegisteredArtifact rejects piece commit when assembly is already sealed",
     "[daemon][registration][view]") {
