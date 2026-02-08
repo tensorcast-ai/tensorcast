@@ -50,6 +50,7 @@
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/path_utils.h"
@@ -86,6 +87,9 @@ using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
+using materialization_target_storage::acquire_error_reason;
+using materialization_target_storage::AcquireTargetStoragesError;
+using materialization_target_storage::TargetStorageLease;
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
 
@@ -2463,88 +2467,20 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::CANCELLED, "request cancelled before transfer"};
   }
 
-  struct RegionReleaseGuard {
-    IpcRegionRegistry& registry;
-    std::vector<std::string>& region_ids;
-    bool active{true};
-
-    ~RegionReleaseGuard() {
-      if (active) {
-        for (const auto& region_id : region_ids) {
-          (void)registry.release(region_id);
-        }
-      }
-    }
-  };
-
-  struct RegionMapping {
-    IpcRegionRegistry::RegionDescriptor desc;
-    std::unique_ptr<cuda::IpcMapping> mapping;
-  };
-
-  absl::flat_hash_map<std::string, RegionMapping> region_map;
-  region_map.reserve(layout.storages_size());
-  std::vector<std::string> acquired_regions;
-  acquired_regions.reserve(layout.storages_size());
-  RegionReleaseGuard guard{d_.regions, acquired_regions, true};
-
-  std::vector<store::loading::IntoTargetStorage> target_storages;
-  target_storages.reserve(layout.storages_size());
-  for (const auto& storage : layout.storages()) {
-    auto it = region_map.find(storage.vram_region_id());
-    if (it == region_map.end()) {
-      auto region_desc_or = d_.regions.acquire(storage.vram_region_id(), req.pid());
-      if (!region_desc_or.ok()) {
-        const absl::Status& st = region_desc_or.status();
-        const bool poisoned = absl::IsFailedPrecondition(st) && st.message() == "region is poisoned";
-        record_materialize_into_target(
-            "error",
-            poisoned ? "region_poisoned" : "region_missing",
-            v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(st);
-      }
-      auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
-      if (!handle_or.ok()) {
-        record_materialize_into_target(
-            "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(handle_or.status());
-      }
-      auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
-      if (!map_or.ok()) {
-        record_materialize_into_target(
-            "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(map_or.status());
-      }
-      RegionMapping mapping{.desc = *region_desc_or, .mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or))};
-      auto [inserted_it, _] = region_map.emplace(storage.vram_region_id(), std::move(mapping));
-      it = inserted_it;
-      acquired_regions.push_back(storage.vram_region_id());
-    }
-    const auto& region_desc = it->second.desc;
-    if (region_desc.device_id != storage.device_id()) {
-      record_materialize_into_target(
-          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
-    }
-    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
-    if (region_end > region_desc.size_bytes) {
-      record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
-    }
-    void* region_base_ptr =
-        static_cast<uint8_t*>(it->second.mapping->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
-    target_storages.push_back(
-        store::loading::IntoTargetStorage{
-            .base_ptr = gsl::not_null<void*>{region_base_ptr},
-            .length = storage.storage_length(),
-        });
+  AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
+  auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
+  if (!storage_lease_or.ok()) {
+    record_materialize_into_target(
+        "error", acquire_error_reason(acquire_error), v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(storage_lease_or.status());
   }
+  TargetStorageLease storage_lease = std::move(*storage_lease_or);
 
   std::vector<TargetLayoutSpan> verification_spans;
   if (verify_external_target) {
-    verification_spans.reserve(target_storages.size());
+    verification_spans.reserve(storage_lease.storages().size());
     uint64_t cursor = 0;
-    for (const auto& storage : target_storages) {
+    for (const auto& storage : storage_lease.storages()) {
       verification_spans.push_back(
           TargetLayoutSpan{
               .base_ptr = storage.base_ptr,
@@ -2588,13 +2524,13 @@ grpc::Status MaterializationController::materialize_into_target(
 
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
   store::loading::IntoTargetLayout target_layout;
-  target_layout.storages = std::move(target_storages);
+  target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
   auto result_or =
       d_.engine.materialize_into_target(device, target_layout, *canonical_json_or, generation, hints, disk_source);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
-      for (const auto& region_id : acquired_regions) {
+      for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
       }
       record_materialize_into_target(
@@ -2610,7 +2546,7 @@ grpc::Status MaterializationController::materialize_into_target(
     auto actual_hash_or =
         compute_target_layout_multihash(std::move(verification_spans), logical_total_size, device.ordinal);
     if (!actual_hash_or.ok()) {
-      for (const auto& region_id : acquired_regions) {
+      for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
       }
       record_materialize_into_target(
@@ -2620,7 +2556,7 @@ grpc::Status MaterializationController::materialize_into_target(
               absl::StrCat("external target verification failed: ", actual_hash_or.status().message())));
     }
     if (expected_data_hash.has_value() && *expected_data_hash != *actual_hash_or) {
-      for (const auto& region_id : acquired_regions) {
+      for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
       }
       record_materialize_into_target(
@@ -3570,82 +3506,14 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     map.segments.push_back(entry.seg);
   }
 
-  struct RegionReleaseGuard {
-    IpcRegionRegistry& registry;
-    std::vector<std::string>& region_ids;
-    bool active{true};
-
-    ~RegionReleaseGuard() {
-      if (active) {
-        for (const auto& region_id : region_ids) {
-          (void)registry.release(region_id);
-        }
-      }
-    }
-  };
-
-  struct RegionMapping {
-    IpcRegionRegistry::RegionDescriptor desc;
-    std::unique_ptr<cuda::IpcMapping> mapping;
-  };
-
-  absl::flat_hash_map<std::string, RegionMapping> region_map;
-  region_map.reserve(layout.storages_size());
-  std::vector<std::string> acquired_regions;
-  acquired_regions.reserve(layout.storages_size());
-  RegionReleaseGuard guard{d_.regions, acquired_regions, true};
-
-  std::vector<store::loading::IntoTargetStorage> target_storages;
-  target_storages.reserve(layout.storages_size());
-  for (const auto& storage : layout.storages()) {
-    auto it = region_map.find(storage.vram_region_id());
-    if (it == region_map.end()) {
-      auto region_desc_or = d_.regions.acquire(storage.vram_region_id(), req.pid());
-      if (!region_desc_or.ok()) {
-        const absl::Status& st = region_desc_or.status();
-        const bool poisoned = absl::IsFailedPrecondition(st) && st.message() == "region is poisoned";
-        record_materialize_into_target(
-            "error",
-            poisoned ? "region_poisoned" : "region_missing",
-            v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(st);
-      }
-      auto handle_or = d_.regions.get_handle_bytes(storage.vram_region_id());
-      if (!handle_or.ok()) {
-        record_materialize_into_target(
-            "error", "region_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(handle_or.status());
-      }
-      auto map_or = cuda::IpcMapping::open(*handle_or, cuda::OpenOptions{.flags = cudaIpcMemLazyEnablePeerAccess});
-      if (!map_or.ok()) {
-        record_materialize_into_target(
-            "error", "map_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return to_grpc_status(map_or.status());
-      }
-      RegionMapping mapping{.desc = *region_desc_or, .mapping = std::make_unique<cuda::IpcMapping>(std::move(*map_or))};
-      auto [inserted_it, _] = region_map.emplace(storage.vram_region_id(), std::move(mapping));
-      it = inserted_it;
-      acquired_regions.push_back(storage.vram_region_id());
-    }
-    const auto& region_desc = it->second.desc;
-    if (region_desc.device_id != storage.device_id()) {
-      record_materialize_into_target(
-          "error", "device_uuid_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "region device does not match storage device"};
-    }
-    const uint64_t region_end = storage.mapping_base_offset() + storage.storage_length();
-    if (region_end > region_desc.size_bytes) {
-      record_materialize_into_target("error", "bounds", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::FAILED_PRECONDITION, "region-backed storage exceeds region bounds"};
-    }
-    void* region_base_ptr =
-        static_cast<uint8_t*>(it->second.mapping->get()) + static_cast<uint64_t>(storage.mapping_base_offset());
-    target_storages.push_back(
-        store::loading::IntoTargetStorage{
-            .base_ptr = gsl::not_null<void*>{region_base_ptr},
-            .length = storage.storage_length(),
-        });
+  AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
+  auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
+  if (!storage_lease_or.ok()) {
+    record_materialize_into_target(
+        "error", acquire_error_reason(acquire_error), v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(storage_lease_or.status());
   }
+  TargetStorageLease storage_lease = std::move(*storage_lease_or);
 
   std::optional<store::loading::DiskSource> disk_source;
   if (normalized_disk_path.has_value()) {
@@ -3679,7 +3547,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   }
 
   store::loading::IntoTargetLayout target_layout;
-  target_layout.storages = std::move(target_storages);
+  target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
 
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
@@ -3687,7 +3555,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
       device, target_layout, map, *canonical_json_or, generation, hints, disk_source);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
-      for (const auto& region_id : acquired_regions) {
+      for (const auto& region_id : storage_lease.acquired_region_ids()) {
         d_.regions.mark_poisoned(region_id).IgnoreError();
       }
       record_materialize_into_target(
