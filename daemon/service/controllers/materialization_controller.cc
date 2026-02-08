@@ -1353,6 +1353,32 @@ Status validate_target_layout_aliases(const v2::TargetLayout& layout, const Cano
   return Status::OK;
 }
 
+Status validate_target_view_subset_hash(
+    const v2::MaterializeIntoTargetRequest& req,
+    bool has_subset,
+    bool has_ordered_selection,
+    const std::vector<std::string>& layout_names,
+    const std::vector<std::string>& request_names,
+    std::string& view_subset_hash) {
+  view_subset_hash.clear();
+  if (has_subset) {
+    const auto& subset_names = has_ordered_selection ? request_names : layout_names;
+    view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(subset_names));
+    if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
+      record_materialize_into_target(
+          "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
+    }
+    return Status::OK;
+  }
+  if (!req.view_subset_hash().empty()) {
+    record_materialize_into_target(
+        "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash must be empty for full selection"};
+  }
+  return Status::OK;
+}
+
 absl::Status validate_descriptor_against_index(
     const DescriptorMetadata& descriptor,
     const store::loader::IndexInfo& index_info,
@@ -2661,18 +2687,10 @@ grpc::Status MaterializationController::materialize_into_target(
   std::vector<LeaseSegMeta> publish_segments = std::move(prepared_storage_layout.publish_segments);
 
   std::string view_subset_hash;
-  if (has_subset) {
-    const auto& subset_names = has_ordered_selection ? request_names : layout_names;
-    view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(subset_names));
-    if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
-      record_materialize_into_target(
-          "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
-    }
-  } else if (!req.view_subset_hash().empty()) {
-    record_materialize_into_target(
-        "error", "subset_hash_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash must be empty for full selection"};
+  auto subset_hash_status = validate_target_view_subset_hash(
+      req, has_subset, has_ordered_selection, layout_names, request_names, view_subset_hash);
+  if (!subset_hash_status.ok()) {
+    return subset_hash_status;
   }
 
   std::optional<std::string> expected_data_hash;
