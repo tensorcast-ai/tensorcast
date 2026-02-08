@@ -826,6 +826,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
+        ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
@@ -842,7 +843,6 @@ sc_cc_library(
         ":worker_identity_store_lib",
         "//core/common:capability_token_lib",
         "//core/common:selection_identity_lib",
-        "//core/cuda:cuda_api_lib",
         "//core/cuda:cuda_ipc_lib",
         "//core/store:store_engine",
         "//core/store:view_utils",
@@ -855,6 +855,21 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
         "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_index_source_utils_lib",
+    srcs = ["service/controllers/materialization_index_source_utils.cc"],
+    hdrs = ["service/controllers/materialization_index_source_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/cuda:cuda_api_lib",
+        "//core/store:store_engine",
+        "//core/store/materialization/dataplane:index_reader",
+        "//core/store/materialization/dataplane:source_hash",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
     ],
 )
 
