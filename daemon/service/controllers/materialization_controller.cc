@@ -29,8 +29,6 @@
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
-#include "google/protobuf/io/coded_stream.h"
-#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
 #include "google/protobuf/util/time_util.h"
 #include "gsl/pointers"
 #include "opentelemetry/metrics/provider.h"
@@ -50,6 +48,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/path_utils.h"
@@ -72,6 +71,16 @@ using materialization_layout::parse_canonical_index;
 using materialization_layout::product_dims;
 using materialization_layout::resolve_target_offsets;
 using materialization_layout::TargetOffsetEntry;
+using materialization_policy::build_view_spec_proto;
+using materialization_policy::compute_view_id_from_spec;
+using materialization_policy::convert_view_spec;
+using materialization_policy::resolve_source_policy;
+using materialization_policy::resolve_transform_placement;
+using materialization_policy::ResolvedSourcePolicy;
+using materialization_policy::spec_includes_transpose;
+using materialization_policy::to_hint_export_policy;
+using materialization_policy::to_hint_preference;
+using materialization_policy::validate_source_policy;
 using store::loader::ViewOp;
 using store::loader::ViewSpec;
 
@@ -82,7 +91,6 @@ absl::StatusOr<bool> check_post_seal_view_reuse_safe(
     std::string_view assembly_id,
     std::string_view mi2_id);
 using store::loading::MaterializationSource;
-using store::loading::SourcePreference;
 
 std::string mint_write_id(absl::BitGen& bitgen) {
   std::string raw;
@@ -793,68 +801,6 @@ absl::Status validate_descriptor_against_index(
   return absl::OkStatus();
 }
 
-SourcePreference to_hint_preference(v2::SourcePreference preference) {
-  switch (preference) {
-    case v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P:
-      return SourcePreference::kPreferP2P;
-    case v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK:
-      return SourcePreference::kPreferDisk;
-    case v2::SourcePreference::SOURCE_PREFERENCE_AUTO:
-    case v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED:
-    default:
-      return SourcePreference::kAuto;
-  }
-}
-
-store::loading::ExportPolicy to_hint_export_policy(v2::ExportPolicy policy) {
-  switch (policy) {
-    case v2::ExportPolicy::EXPORT_POLICY_FORCE:
-      return store::loading::ExportPolicy::kForce;
-    case v2::ExportPolicy::EXPORT_POLICY_AUTO:
-      return store::loading::ExportPolicy::kAuto;
-    case v2::ExportPolicy::EXPORT_POLICY_NEVER:
-    case v2::ExportPolicy::EXPORT_POLICY_UNSPECIFIED:
-    default:
-      return store::loading::ExportPolicy::kNever;
-  }
-}
-
-struct ResolvedSourcePolicy {
-  v2::SourcePreference preference{v2::SourcePreference::SOURCE_PREFERENCE_AUTO};
-  bool allow_p2p{true};
-  bool allow_disk{true};
-};
-
-ResolvedSourcePolicy resolve_source_policy(const v2::SourcePolicy* policy, v2::SourcePreference legacy_preference) {
-  ResolvedSourcePolicy resolved;
-  resolved.preference = legacy_preference;
-  if (policy != nullptr) {
-    if (policy->preference() != v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
-      resolved.preference = policy->preference();
-    }
-    if (policy->has_allow_p2p()) {
-      resolved.allow_p2p = policy->allow_p2p();
-    }
-    if (policy->has_allow_disk()) {
-      resolved.allow_disk = policy->allow_disk();
-    }
-  }
-  if (resolved.preference == v2::SourcePreference::SOURCE_PREFERENCE_UNSPECIFIED) {
-    resolved.preference = v2::SourcePreference::SOURCE_PREFERENCE_AUTO;
-  }
-  return resolved;
-}
-
-absl::Status validate_source_policy(const ResolvedSourcePolicy& policy) {
-  if (!policy.allow_p2p && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P) {
-    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
-  }
-  if (!policy.allow_disk && policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK) {
-    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
-  }
-  return absl::OkStatus();
-}
-
 v2::MaterializationSource to_proto_source(MaterializationSource source) {
   switch (source) {
     case MaterializationSource::kDisk:
@@ -882,163 +828,6 @@ uint64_t compute_generation_from_index(std::string_view canonical_index_json) {
     value = (value << 8) | static_cast<uint64_t>(digest[i]);
   }
   return value;
-}
-
-absl::StatusOr<ViewSpec> convert_view_spec(const tensorcast::common::v1::ViewSpec& proto) {
-  ViewSpec spec;
-  for (const auto& [tensor_name, ops_proto] : proto.tensors()) {
-    store::loader::TensorViewOps ops;
-    for (const auto& op_proto : ops_proto.ops()) {
-      switch (op_proto.kind_case()) {
-        case tensorcast::common::v1::Op::kNarrow: {
-          const auto& narrow = op_proto.narrow();
-          store::loader::NarrowOp op{
-              .dim = static_cast<int32_t>(narrow.dim()),
-              .start = narrow.start(),
-              .length = narrow.length(),
-          };
-          ops.ops.push_back(ViewOp::Narrow(op));
-          break;
-        }
-        case tensorcast::common::v1::Op::kTranspose: {
-          const auto& transpose = op_proto.transpose();
-          store::loader::TransposeOp op{
-              .dim0 = static_cast<int32_t>(transpose.dim0()),
-              .dim1 = static_cast<int32_t>(transpose.dim1()),
-          };
-          ops.ops.push_back(ViewOp::Transpose(op));
-          break;
-        }
-        case tensorcast::common::v1::Op::KIND_NOT_SET:
-          return absl::InvalidArgumentError("view op kind not set");
-      }
-    }
-    spec.tensors.emplace(tensor_name, std::move(ops));
-  }
-  return spec;
-}
-
-absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf::Message& message) {
-  const size_t size = message.ByteSizeLong();
-  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    return absl::OutOfRangeError("proto message too large for deterministic serialization");
-  }
-  std::string buffer;
-  buffer.resize(size);
-  google::protobuf::io::ArrayOutputStream stream(buffer.data(), static_cast<int>(size));
-  google::protobuf::io::CodedOutputStream coded(&stream);
-  coded.SetSerializationDeterministic(true);
-  if (!message.SerializeToCodedStream(&coded) || coded.HadError()) {
-    return absl::InternalError("deterministic proto serialization failed");
-  }
-  return buffer;
-}
-
-absl::StatusOr<std::string> compute_view_id_from_spec(
-    const tensorcast::common::v1::ViewSpec& view_spec,
-    std::string_view canonical_index_json) {
-  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
-  if (!index_mh_or.ok()) {
-    return index_mh_or.status();
-  }
-  auto proto_bytes_or = serialize_deterministic_proto(view_spec);
-  if (!proto_bytes_or.ok()) {
-    return proto_bytes_or.status();
-  }
-  std::vector<uint8_t> buffer;
-  buffer.reserve(proto_bytes_or->size() + index_mh_or->size());
-  buffer.insert(buffer.end(), proto_bytes_or->begin(), proto_bytes_or->end());
-  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
-  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer));
-  return common::multibase_multihash_sha256(digest);
-}
-
-tensorcast::common::v1::ViewSpec build_view_spec_proto(const ViewSpec& spec) {
-  tensorcast::common::v1::ViewSpec proto;
-  auto* tensors = proto.mutable_tensors();
-  for (const auto& [tensor_name, ops] : spec.tensors) {
-    auto& container = (*tensors)[tensor_name];
-    for (const auto& op : ops.ops) {
-      auto* op_proto = container.add_ops();
-      switch (op.kind) {
-        case ViewOp::Kind::kNarrow:
-          op_proto->mutable_narrow()->set_dim(static_cast<uint32_t>(op.narrow.dim));
-          op_proto->mutable_narrow()->set_start(op.narrow.start);
-          op_proto->mutable_narrow()->set_length(op.narrow.length);
-          break;
-        case ViewOp::Kind::kTranspose:
-          op_proto->mutable_transpose()->set_dim0(static_cast<uint32_t>(op.transpose.dim0));
-          op_proto->mutable_transpose()->set_dim1(static_cast<uint32_t>(op.transpose.dim1));
-          break;
-      }
-    }
-  }
-  return proto;
-}
-
-bool spec_includes_transpose(const ViewSpec& spec) {
-  for (const auto& [_, ops] : spec.tensors) {
-    for (const auto& op : ops.ops) {
-      if (op.kind == ViewOp::Kind::kTranspose) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-store::loading::TransformPlacement resolve_placement(
-    const v2::MaterializeReplicaRequest& req,
-    const std::optional<ViewSpec>& spec) {
-  switch (req.placement()) {
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
-      return store::loading::TransformPlacement::kServer;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
-      return store::loading::TransformPlacement::kClient;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
-    default:
-      break;
-  }
-  if (spec.has_value() && spec_includes_transpose(*spec)) {
-    return store::loading::TransformPlacement::kClient;
-  }
-  return store::loading::TransformPlacement::kServer;
-}
-
-store::loading::TransformPlacement resolve_placement(
-    const v2::MaterializeIntoTargetRequest& req,
-    const std::optional<ViewSpec>& spec) {
-  switch (req.placement()) {
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
-      return store::loading::TransformPlacement::kServer;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
-      return store::loading::TransformPlacement::kClient;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
-    default:
-      break;
-  }
-  if (spec.has_value() && spec_includes_transpose(*spec)) {
-    return store::loading::TransformPlacement::kClient;
-  }
-  return store::loading::TransformPlacement::kServer;
-}
-
-store::loading::TransformPlacement resolve_placement(
-    const v2::MaterializeIntoMappedTargetRequest& req,
-    const std::optional<ViewSpec>& spec) {
-  switch (req.placement()) {
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_SERVER:
-      return store::loading::TransformPlacement::kServer;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_CLIENT:
-      return store::loading::TransformPlacement::kClient;
-    case v2::TransformPlacement::TRANSFORM_PLACEMENT_UNSPECIFIED:
-    default:
-      break;
-  }
-  if (spec.has_value() && spec_includes_transpose(*spec)) {
-    return store::loading::TransformPlacement::kClient;
-  }
-  return store::loading::TransformPlacement::kServer;
 }
 
 struct DescriptorBuildResult {
@@ -1771,7 +1560,7 @@ grpc::Status MaterializationController::materialize_replica(
     if (request_view_id.has_value()) {
       variant.view_id = request_view_id;
     }
-    variant.placement = resolve_placement(req, view_spec);
+    variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
   const auto mode = (has_disk && !has_artifact && !prefer_disk) ? store::StoreEngine::MaterializeMode::LOAD_ONLY
@@ -3088,7 +2877,7 @@ grpc::Status MaterializationController::materialize_into_target(
     }
     variant.cached_plan = view_plan;
     variant.canonical_index_json = *canonical_json_or;
-    variant.placement = resolve_placement(req, view_spec);
+    variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
 
@@ -4180,7 +3969,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     }
     variant.cached_plan = view_plan;
     variant.canonical_index_json = *canonical_json_or;
-    variant.placement = resolve_placement(req, view_spec);
+    variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
 
