@@ -830,6 +830,7 @@ sc_cc_library(
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
+        ":materialization_replica_handle_utils_lib",
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
         ":path_utils_lib",
@@ -895,6 +896,22 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_replica_handle_utils_lib",
+    srcs = ["service/controllers/materialization_replica_handle_utils.cc"],
+    hdrs = ["service/controllers/materialization_replica_handle_utils.h"],
+    deps = [
+        ":handle_lease_registry_lib",
+        ":ref_tracker_hdr",
+        ":session_lifecycle_lib",
+        ":sessions_service_hdr",
+        "//core/common:ready_signal_lib",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
     ],
 )
 
