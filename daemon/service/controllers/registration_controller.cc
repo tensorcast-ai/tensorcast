@@ -2131,6 +2131,98 @@ grpc::Status begin_lease_registration(
   return Status::OK;
 }
 
+store::StoreEngine::ArtifactRegistration make_begin_registration(const v2::BeginRegisterArtifactRequest& req) {
+  store::StoreEngine::ArtifactRegistration reg;
+  reg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
+  reg.device_id = req.device_id();
+  reg.total_size_bytes = req.total_size();
+  reg.enable_p2p = true;
+  if (req.has_ttl_ms()) {
+    reg.ttl_ms = req.ttl_ms();
+  }
+  return reg;
+}
+
+RegistrationManager::RegPlan select_begin_plan(const v2::BeginRegisterArtifactRequest& req) {
+  RegistrationManager::RegPlan plan = RegistrationManager::RegPlan::COALESCED;
+  if (req.has_lease()) {
+    plan = RegistrationManager::RegPlan::LEASE;
+  }
+  if (req.has_stable_dram()) {
+    plan = RegistrationManager::RegPlan::STABLE_DRAM;
+  }
+  return plan;
+}
+
+absl::StatusOr<RegistrationManager::RegMeta> build_begin_meta_from_request(
+    const v2::BeginRegisterArtifactRequest& req,
+    RegistrationManager::RegPlan plan,
+    store::StoreEngine::ArtifactRegistration& reg) {
+  RegistrationManager::RegMeta meta;
+  meta.plan = plan;
+  meta.total_size = req.total_size();
+  meta.device_id = req.device_id();
+  meta.owner_pid = req.owner_pid();
+
+  auto policy_or = resolve_store_policy(req.has_policy() ? &req.policy() : nullptr);
+  if (!policy_or.ok()) {
+    return policy_or.status();
+  }
+  meta.resolved_policy = *policy_or;
+  if (plan == RegistrationManager::RegPlan::STABLE_DRAM && policy_or->local_requirement == RequirementLevel::kMust) {
+    reg.stable_cache_policy = stable_cache_policy_from_resolved(*policy_or);
+  }
+
+  if (!req.client_artifact_id().empty()) {
+    auto id_status = common::validate_client_generated_id(req.client_artifact_id());
+    if (!id_status.ok()) {
+      return absl::InvalidArgumentError(std::string(id_status.message()));
+    }
+    meta.id_kind = common::ArtifactIdKind::kCgid;
+    meta.client_artifact_id = req.client_artifact_id();
+  } else {
+    meta.id_kind = common::ArtifactIdKind::kMi2;
+    meta.client_artifact_id.clear();
+  }
+
+  if (req.has_lease()) {
+    meta.lease_in_place = req.lease().in_place();
+  }
+  if (req.has_stable_dram()) {
+    meta.stage_on_gpu = req.stable_dram().stage_on_gpu();
+    meta.release_gpu_on_commit = req.stable_dram().release_gpu_on_commit();
+  }
+  if (req.has_ttl_ms() && req.ttl_ms() > 0) {
+    meta.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req.ttl_ms());
+    meta.ttl_ms = static_cast<uint32_t>(req.ttl_ms());
+  }
+  if (req.has_tensor_index_key()) {
+    meta.index_key_hex = req.tensor_index_key();
+  } else if (req.has_tensor_index_data()) {
+    meta.index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
+  }
+  return meta;
+}
+
+grpc::Status validate_piece_begin_registration(
+    RegistrationController::Dep& dep,
+    const RegistrationManager::RegMeta& meta) {
+  if (!meta.view_registration || meta.view_registration_kind != store::StoreEngine::ViewRegistrationKind::kPiece) {
+    return Status::OK;
+  }
+  if (meta.client_artifact_id.empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
+  }
+  auto sealed_or = is_piece_assembly_sealed(dep.global_store_client.get(), meta.client_artifact_id);
+  if (!sealed_or.ok()) {
+    return to_grpc_status(sealed_or.status());
+  }
+  if (*sealed_or) {
+    return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
+  }
+  return Status::OK;
+}
+
 } // namespace
 
 grpc::Status RegistrationController::begin(
@@ -2141,78 +2233,26 @@ grpc::Status RegistrationController::begin(
   span->SetAttribute("tc.device.id", static_cast<int64_t>(req.device_id()));
   span->SetAttribute("tc.size.bytes", static_cast<int64_t>(req.total_size()));
 
-  store::StoreEngine::ArtifactRegistration reg;
-  reg.artifact_id = absl::StrCat("mem_reg:", absl::ToUnixNanos(absl::Now()), ":", getpid());
-  reg.device_id = req.device_id();
-  reg.total_size_bytes = req.total_size();
-  reg.enable_p2p = true;
-  if (req.has_ttl_ms())
-    reg.ttl_ms = req.ttl_ms();
   if (req.owner_pid() <= 0) {
     return {StatusCode::INVALID_ARGUMENT, "owner_pid is required (>0)"};
   }
-  RegistrationManager::RegPlan plan = RegistrationManager::RegPlan::COALESCED;
-  if (req.has_lease())
-    plan = RegistrationManager::RegPlan::LEASE;
-  if (req.has_stable_dram())
-    plan = RegistrationManager::RegPlan::STABLE_DRAM;
-  RegistrationManager::RegMeta meta;
-  meta.plan = plan;
-  meta.total_size = req.total_size();
-  meta.device_id = req.device_id();
-  meta.owner_pid = req.owner_pid();
-  {
-    auto policy_or = resolve_store_policy(req.has_policy() ? &req.policy() : nullptr);
-    if (!policy_or.ok()) {
-      return to_grpc_status(policy_or.status());
-    }
-    meta.resolved_policy = *policy_or;
-    if (plan == RegistrationManager::RegPlan::STABLE_DRAM && policy_or->local_requirement == RequirementLevel::kMust) {
-      reg.stable_cache_policy = stable_cache_policy_from_resolved(*policy_or);
-    }
+
+  store::StoreEngine::ArtifactRegistration reg = make_begin_registration(req);
+  const RegistrationManager::RegPlan plan = select_begin_plan(req);
+  auto meta_or = build_begin_meta_from_request(req, plan, reg);
+  if (!meta_or.ok()) {
+    return to_grpc_status(meta_or.status());
   }
-  if (!req.client_artifact_id().empty()) {
-    auto id_status = common::validate_client_generated_id(req.client_artifact_id());
-    if (!id_status.ok()) {
-      return {StatusCode::INVALID_ARGUMENT, std::string(id_status.message())};
-    }
-    meta.id_kind = common::ArtifactIdKind::kCgid;
-    meta.client_artifact_id = req.client_artifact_id();
-  } else {
-    meta.id_kind = common::ArtifactIdKind::kMi2;
-    meta.client_artifact_id.clear();
-  }
-  if (req.has_lease())
-    meta.lease_in_place = req.lease().in_place();
-  if (req.has_stable_dram()) {
-    meta.stage_on_gpu = req.stable_dram().stage_on_gpu();
-    meta.release_gpu_on_commit = req.stable_dram().release_gpu_on_commit();
-  }
-  if (req.has_ttl_ms() && req.ttl_ms() > 0) {
-    meta.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(req.ttl_ms());
-    meta.ttl_ms = static_cast<uint32_t>(req.ttl_ms());
-  }
-  if (req.has_tensor_index_key())
-    meta.index_key_hex = req.tensor_index_key();
-  else if (req.has_tensor_index_data())
-    meta.index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
+  RegistrationManager::RegMeta meta = *meta_or;
 
   auto view_status = apply_begin_view_registration(req, meta, reg);
   if (!view_status.ok()) {
     return view_status;
   }
 
-  if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
-    if (meta.client_artifact_id.empty()) {
-      return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
-    }
-    auto sealed_or = is_piece_assembly_sealed(d_.global_store_client.get(), meta.client_artifact_id);
-    if (!sealed_or.ok()) {
-      return to_grpc_status(sealed_or.status());
-    }
-    if (*sealed_or) {
-      return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
-    }
+  auto piece_validation_status = validate_piece_begin_registration(d_, meta);
+  if (!piece_validation_status.ok()) {
+    return piece_validation_status;
   }
 
   if (plan == RegistrationManager::RegPlan::COALESCED || plan == RegistrationManager::RegPlan::STABLE_DRAM) {
