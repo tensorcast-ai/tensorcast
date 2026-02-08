@@ -15,6 +15,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/disk_artifact_service.h"
 #include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
 #include "daemon/service/rpc_context.h"
@@ -131,6 +132,7 @@ class MaterializationController {
   std::filesystem::path storage_path_;
 
   std::shared_ptr<SealOperationTracker> seal_operation_tracker_;
+  DiskArtifactService disk_artifact_service_;
   ReplicaLifecycleService replica_lifecycle_service_;
   TargetMaterializationService target_materialization_service_;
 };
