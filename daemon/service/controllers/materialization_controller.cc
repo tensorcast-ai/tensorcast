@@ -49,6 +49,7 @@
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/deadline_utils.h"
@@ -94,6 +95,9 @@ using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
+using materialization_replica_handle::bind_replica_handle_for_response;
+using materialization_replica_handle::build_export_chunks_for_replica;
+using materialization_replica_handle::register_session_and_refs;
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
 using materialization_target_plan::MappedTargetMaterializationPlan;
@@ -503,60 +507,6 @@ absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
     return std::nullopt;
   }
   return binding_or.status();
-}
-
-absl::Status register_session_and_refs(
-    SessionsService& sessions,
-    RefTracker& refs,
-    const store::loading::ReplicaKey& replica_key,
-    std::shared_ptr<tensorcast::common::ReadySignal<absl::Status>> ready_signal,
-    const std::string& replica_uuid,
-    int32_t pid,
-    bool allow_pid_ref) {
-  if (!replica_uuid.empty()) {
-    auto st = sessions.put_with_verification(replica_uuid, replica_key, std::move(ready_signal));
-    if (!st.ok()) {
-      return st;
-    }
-  }
-  if (!allow_pid_ref || pid <= 0) {
-    return absl::OkStatus();
-  }
-  refs.add_ref(replica_key, pid);
-  return absl::OkStatus();
-}
-
-absl::StatusOr<std::vector<uint32_t>> build_export_chunks_for_replica(
-    store::StoreEngine& engine,
-    const store::loading::ReplicaKey& key,
-    std::optional<uint64_t> size_bytes_override = std::nullopt) {
-  uint64_t size_bytes = 0;
-  if (size_bytes_override.has_value()) {
-    size_bytes = *size_bytes_override;
-  } else {
-    auto size_or = engine.get_replica_size(key);
-    if (!size_or.ok()) {
-      return size_or.status();
-    }
-    size_bytes = *size_or;
-  }
-  const uint64_t chunk_bytes = static_cast<uint64_t>(engine.get_artifact_chunk_bytes());
-  if (chunk_bytes == 0) {
-    return absl::FailedPreconditionError("artifact_chunk_bytes is zero");
-  }
-  const uint64_t num_chunks = (size_bytes + chunk_bytes - 1) / chunk_bytes;
-  if (num_chunks == 0) {
-    return absl::InvalidArgumentError("replica size is zero");
-  }
-  if (num_chunks > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
-    return absl::InvalidArgumentError("replica has too many chunks");
-  }
-  std::vector<uint32_t> chunks;
-  chunks.reserve(static_cast<size_t>(num_chunks));
-  for (uint32_t i = 0; i < static_cast<uint32_t>(num_chunks); ++i) {
-    chunks.push_back(i);
-  }
-  return chunks;
 }
 
 void record_materialize_into_target(
@@ -1205,87 +1155,31 @@ grpc::Status MaterializationController::materialize_replica(
   const auto& handle = *result;
   resp.set_source(to_proto_source(handle.source));
   span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  {
-    const absl::Status session_status = register_session_and_refs(
-        d_.sessions,
-        d_.refs,
-        handle.replica_key,
-        handle.ready_signal,
-        req.replica_uuid(),
-        effective_pid,
-        loopback_peer);
-    if (!session_status.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(session_status);
-    }
-  }
   if (normalized_disk_path.has_value()) {
     resp.set_disk_path(normalized_disk_path->string());
   }
-  if (cpu_target) {
-    if (!handle.cpu_memfd_region.has_value()) {
-      LOG(WARNING) << "MaterializationController: cpu_target but engine handle missing cpu_memfd_region for key="
-                   << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
-                   << " gpu_state=" << static_cast<int>(handle.gpu_state);
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "CPU memfd handle unavailable for replica"};
-    }
-    const auto& region = *handle.cpu_memfd_region;
-    auto chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key);
-    if (!chunks_or.ok()) {
-      chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key, region.size_bytes);
-    }
-    if (!chunks_or.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(chunks_or.status());
-    }
-    HandleLeaseRegistry::CpuMemfdDescriptor memfd_desc{
-        .fd = region.fd,
-        .size_bytes = region.size_bytes,
-        .offset_bytes = region.offset_bytes,
-    };
-    auto token_or = d_.handle_leases->mint_cpu_memfd_lease(handle.replica_key, effective_pid, memfd_desc, *chunks_or);
-    if (!token_or.ok()) {
-      // Best-effort rollback: drop ref and unload.
-      if (!req.replica_uuid().empty()) {
-        (void)d_.sessions.erase(req.replica_uuid());
-      }
-      if (effective_pid > 0) {
-        d_.refs.drop_ref(handle.replica_key, effective_pid);
-      }
-      (void)d_.engine.unload_replica(handle.replica_key);
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(token_or.status());
-    }
-    auto* cpu = resp.mutable_mem_handle()->mutable_cpu_memfd();
-    cpu->set_size_bytes(region.size_bytes);
-    cpu->set_offset_bytes(region.offset_bytes);
-    resp.mutable_mem_handle()->set_lease_token(*token_or);
-  } else {
-    if (handle.cuda_ipc_handle.is_valid()) {
-      auto handle_view = handle.cuda_ipc_handle.as_string_view();
-      resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
-    }
-    bool lease_created = false;
-    if (d_.handle_leases != nullptr && effective_pid > 0) {
-      auto token_or = d_.handle_leases->mint_cuda_ipc_lease(handle.replica_key, effective_pid);
-      if (token_or.ok()) {
-        resp.mutable_mem_handle()->set_lease_token(*token_or);
-        lease_created = true;
-      } else {
-        LOG(WARNING) << "mint_cuda_ipc_lease failed (engine path): key=" << handle.replica_key
-                     << " pid=" << effective_pid << ": " << token_or.status();
-        record_lease_create_failed();
-      }
-    }
-    if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0) {
-      auto lid_or = d_.lifecycle->create_use_lease(handle.replica_key, effective_pid);
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine path): key=" << handle.replica_key << " pid=" << effective_pid
-                     << ": " << lid_or.status();
-        record_lease_create_failed();
-      }
-    }
+  if (cpu_target && !handle.cpu_memfd_region.has_value()) {
+    LOG(WARNING) << "MaterializationController: cpu_target but engine handle missing cpu_memfd_region for key="
+                 << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
+                 << " gpu_state=" << static_cast<int>(handle.gpu_state);
+  }
+  auto bind_status = bind_replica_handle_for_response(
+      d_.engine,
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      d_.handle_leases,
+      handle,
+      req.replica_uuid(),
+      effective_pid,
+      loopback_peer,
+      cpu_target,
+      "engine path",
+      [&]() { record_lease_create_failed(); },
+      *resp.mutable_mem_handle());
+  if (!bind_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(bind_status);
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   if (handle.view_index_json.has_value()) {
