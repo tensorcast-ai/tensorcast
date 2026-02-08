@@ -117,7 +117,13 @@ from tensorcast.proto.operation.v1 import operation_pb2
 logger = init_logger(__name__)
 
 
-class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
+class GlobalStoreServicer(
+    global_store_pb2_grpc.ClusterRuntimeServiceServicer,
+    global_store_pb2_grpc.ArtifactCatalogServiceServicer,
+    global_store_pb2_grpc.AssemblyViewServiceServicer,
+    global_store_pb2_grpc.WorkflowOrchestrationServiceServicer,
+    global_store_pb2_grpc.ClusterAdminServiceServicer,
+):
     """
     gRPC service implementation for the Global Store.
 
@@ -1370,3 +1376,16 @@ class GlobalStoreServicer(global_store_pb2_grpc.GlobalStoreServiceServicer):
         self._rebuild_runtime_services_and_handlers()
 
         logger.debug("GlobalStoreServicer state has been reset for the next test run")
+
+
+def register_global_store_servicers(
+    server: grpc.Server, servicer: GlobalStoreServicer
+) -> None:
+    """Register all Global Store domain services on a gRPC server."""
+    global_store_pb2_grpc.add_ClusterRuntimeServiceServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_ArtifactCatalogServiceServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_AssemblyViewServiceServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_WorkflowOrchestrationServiceServicer_to_server(
+        servicer, server
+    )
+    global_store_pb2_grpc.add_ClusterAdminServiceServicer_to_server(servicer, server)

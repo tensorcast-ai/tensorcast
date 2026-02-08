@@ -793,7 +793,11 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   const GlobalStoreClientConfig config_;
   const gsl::not_null<std::shared_ptr<grpc::Channel>> channel_;
-  const gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>> stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ClusterRuntimeService::Stub>> cluster_runtime_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ArtifactCatalogService::Stub>> artifact_catalog_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::AssemblyViewService::Stub>> assembly_view_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::WorkflowOrchestrationService::Stub>> workflow_orchestration_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ClusterAdminService::Stub>> cluster_admin_stub_;
   const gsl::not_null<std::unique_ptr<tensorcast::memory_tier::v1::MemoryTierService::Stub>> memory_tier_stub_;
   std::string worker_id_;
   std::string node_id_;

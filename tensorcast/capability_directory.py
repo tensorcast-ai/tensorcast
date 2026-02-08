@@ -10,7 +10,8 @@ from typing import Callable, Generic, TypeVar
 import grpc
 
 from tensorcast.error_reporting import debug_errors_enabled
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 _T = TypeVar("_T")
 
@@ -38,7 +39,7 @@ class CapabilityDirectoryClient:
     def __init__(self, options: CapabilityDirectoryOptions) -> None:
         self._options = options
         self._channel = grpc.insecure_channel(options.target)
-        self._stub = global_store_pb2_grpc.GlobalStoreServiceStub(self._channel)
+        self._stub = GlobalStoreCompositeStub(self._channel)
         self._lock = threading.RLock()
         self._worker_cache: dict[
             bool, _CacheState[global_store_pb2.ListActiveWorkersResponse.WorkerInfo]

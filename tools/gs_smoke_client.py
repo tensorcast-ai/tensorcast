@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Global Store gRPC one-shot client with OpenTelemetry.
 
@@ -20,14 +20,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 
 import grpc
 from opentelemetry import trace
 
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.observability.otel import setup_otel
 from tensorcast.proto.global_store.v1 import (
     global_store_pb2,
-    global_store_pb2_grpc,
 )
 
 
@@ -60,10 +61,13 @@ def main() -> None:
     with tracer.start_as_current_span("Smoke/GSClient"):
         channel = grpc.insecure_channel(address)
         try:
-            stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+            stub = GlobalStoreCompositeStub(channel)
             # HealthCheck
             try:
-                resp = stub.HealthCheck(global_store_pb2.HealthCheckRequest(), timeout=min(2.0, args.timeout))
+                resp = stub.HealthCheck(
+                    global_store_pb2.HealthCheckRequest(),
+                    timeout=min(2.0, args.timeout),
+                )
                 print("HealthCheck status:", resp.status)
             except grpc.RpcError as e:  # noqa: BLE001
                 print("HealthCheck RPC error:", e)
@@ -71,7 +75,9 @@ def main() -> None:
             if args.list_workers:
                 try:
                     lr = stub.ListActiveWorkers(
-                        global_store_pb2.ListActiveWorkersRequest(include_unavailable=True),
+                        global_store_pb2.ListActiveWorkersRequest(
+                            include_unavailable=True
+                        ),
                         timeout=args.timeout,
                     )
                     print("ListActiveWorkers count:", len(lr.workers))
@@ -85,10 +91,8 @@ def main() -> None:
     for meth in ("force_flush", "shutdown"):
         fn = getattr(provider, meth, None)
         if callable(fn):
-            try:
+            with contextlib.suppress(Exception):
                 fn()
-            except Exception:  # noqa: BLE001
-                pass
 
 
 if __name__ == "__main__":

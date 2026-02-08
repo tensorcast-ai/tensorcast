@@ -1,19 +1,23 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
+import os
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Sequence
-from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 import pytest
 import torch
-import os
-import tempfile
 
 from tensorcast import FallbackOptions, from_disk, startup
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.global_store.grpc_service import (
+    GlobalStoreServicer,
+    register_global_store_servicers,
+)
+from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.testing.io_disk import save_dict
 from tests.python.utils.daemon import start_daemon_binary
 from tests.python.utils.ports import get_free_port
@@ -69,16 +73,14 @@ def test_shared_storage_roundtrip(tmp_path):
     set_config(GlobalStoreConfig())
     gs_servicer = GlobalStoreServicer()
     gs_server = grpc.server(ThreadPoolExecutor(max_workers=4))
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(
-        gs_servicer, gs_server
-    )
+    register_global_store_servicers(gs_server, gs_servicer)
     gs_port = gs_server.add_insecure_port("127.0.0.1:0")
     if gs_port <= 0:
         raise RuntimeError("failed to bind Global Store server port")
     gs_server.start()
     try:
         channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+        stub = GlobalStoreCompositeStub(channel)
         try:
             info = stub.GetServerInfo(global_store_pb2.GetServerInfoRequest())
             cluster_id = info.cluster_id
@@ -112,7 +114,11 @@ def test_shared_storage_roundtrip(tmp_path):
                     allow_p2p=False,
                     verify_checksums=False,
                 )
-                device_selector = "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
+                device_selector = (
+                    "cpu"
+                    if cpu_target
+                    else ("cuda:0" if torch.cuda.is_available() else "cpu")
+                )
                 artifact_handle = from_disk(
                     str(save_path),
                     verify_checksums=False,
@@ -138,9 +144,9 @@ def test_shared_storage_roundtrip(tmp_path):
     # (1) Value equality check for every tensor
     # -----------------------
     for name, original in state_dict.items():
-        assert torch.equal(
-            original, loaded_for_compare[name]
-        ), f"Tensor content mismatch for {name}, {original} != {loaded_for_compare[name]}"
+        assert torch.equal(original, loaded_for_compare[name]), (
+            f"Tensor content mismatch for {name}, {original} != {loaded_for_compare[name]}"
+        )
 
     # -----------------------
     # (2) Storage sharing semantics helpers
@@ -148,9 +154,9 @@ def test_shared_storage_roundtrip(tmp_path):
     def assert_shared(names: Sequence[str]):
         """Assert tensors referenced by `names` share storage in `loaded_state_dict`."""
         ptrs = {loaded_state_dict[n].storage().data_ptr() for n in names}
-        assert (
-            len(ptrs) == 1
-        ), f"Tensors {names} are expected to share storage after load but found {len(ptrs)} distinct storages"
+        assert len(ptrs) == 1, (
+            f"Tensors {names} are expected to share storage after load but found {len(ptrs)} distinct storages"
+        )
 
     # Group 1 should share
     assert_shared(["base1", "view1_a", "view1_b"])
@@ -160,7 +166,9 @@ def test_shared_storage_roundtrip(tmp_path):
     # Groups should not share with each other
     ptr_group1 = loaded_state_dict["base1"].storage().data_ptr()
     ptr_group2 = loaded_state_dict["base2"].storage().data_ptr()
-    assert ptr_group1 != ptr_group2, "Separate storage groups share the same backing storage unexpectedly"
+    assert ptr_group1 != ptr_group2, (
+        "Separate storage groups share the same backing storage unexpectedly"
+    )
 
     # Independent tensors should each have unique storage
     indep_ptrs = {
@@ -197,11 +205,15 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
     try:
         startup.init(mode="connect", address=listen)
         try:
-            artifact_handle = from_disk(str(save_path), verify_checksums=False).with_fallback(
+            artifact_handle = from_disk(
+                str(save_path), verify_checksums=False
+            ).with_fallback(
                 FallbackOptions(prefer="disk", allow_p2p=False, verify_checksums=False)
             )
             device_selector = (
-                "cpu" if cpu_target else ("cuda:0" if torch.cuda.is_available() else "cpu")
+                "cpu"
+                if cpu_target
+                else ("cuda:0" if torch.cuda.is_available() else "cpu")
             )
             loaded = artifact_handle.tensor_dict(device=device_selector)
         finally:
@@ -213,8 +225,11 @@ def test_from_disk_tensor_dict_without_global_store(tmp_path):
         except Exception:
             pass
 
-    loaded_cpu = loaded["weights"].cpu() if loaded["weights"].is_cuda else loaded["weights"]
+    loaded_cpu = (
+        loaded["weights"].cpu() if loaded["weights"].is_cuda else loaded["weights"]
+    )
     assert torch.equal(loaded_cpu, expected["weights"])
+
 
 if __name__ == "__main__":
     test_shared_storage_roundtrip(tmp_path="/tmp/test_shared_storage")
