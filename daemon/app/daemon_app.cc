@@ -119,6 +119,17 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
+  LeaseController::Dep ldep{
+      .engine = app->kernel_->engine(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
+      .capability_tokens = app->kernel_->capability_tokens(),
+      .retention_registry = app->kernel_->retention_registry(),
+      .daemon_id = app->options_.daemon_options.daemon_id,
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->lease_controller_ = std::make_unique<LeaseController>(std::move(ldep));
+
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = app->kernel_->engine(),
       .materialization_controller = *app->materialization_controller_,
@@ -131,10 +142,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .persistence_manager = app->kernel_->persistence_manager(),
       .sessions_service = app->kernel_->sessions_service(),
       .lifecycle_manager = app->kernel_->lifecycle_manager(),
-      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
-      .capability_tokens = app->kernel_->capability_tokens(),
-      .retention_registry = app->kernel_->retention_registry(),
-      .daemon_id = app->options_.daemon_options.daemon_id,
+      .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

@@ -6,8 +6,8 @@
 #include <memory>
 #include <vector>
 
-#include "core/common/capability_token.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/status_controller.h"
@@ -15,8 +15,6 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
-#include "daemon/state/placement_lease_tokens.h"
-#include "daemon/state/retention_registry.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
@@ -45,10 +43,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     PersistenceManager* persistence_manager{nullptr};
     SessionsService& sessions_service;
     SessionLifecycleManager& lifecycle_manager;
-    PlacementLeaseTokens& placement_lease_tokens;
-    common::CapabilityTokenManager* capability_tokens{nullptr};
-    RetentionRegistry* retention_registry{nullptr};
-    std::string daemon_id;
+    LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
   };
 
@@ -290,10 +285,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   PersistenceManager* persistence_manager_;
   SessionsService* sessions_service_;
   SessionLifecycleManager* lifecycle_manager_;
-  PlacementLeaseTokens* placement_lease_tokens_;
-  common::CapabilityTokenManager* capability_tokens_;
-  RetentionRegistry* retention_registry_;
-  std::string daemon_id_;
+  LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
   Options opts_;
 };
