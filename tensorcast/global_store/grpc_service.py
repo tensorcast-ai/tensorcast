@@ -19,13 +19,6 @@ from tensorcast.global_store.db_utils import init_db
 from tensorcast.global_store.exceptions import (
     ValidationError,
 )
-from tensorcast.global_store.grpc_domain_servicers import (
-    ArtifactCatalogRpcMixin,
-    AssemblyViewRpcMixin,
-    ClusterAdminRpcMixin,
-    ClusterRuntimeRpcMixin,
-    WorkflowOrchestrationRpcMixin,
-)
 from tensorcast.global_store.grpc_helpers import (
     coerce_db_datetime,
     datetime_to_timestamp,
@@ -36,6 +29,7 @@ from tensorcast.global_store.grpc_helpers import (
     sha256_digest_to_multibase,
     timestamp_to_datetime,
 )
+from tensorcast.global_store.grpc_method_binding import bind_global_store_rpc_methods
 from tensorcast.global_store.maintenance_coordinator import (
     GlobalStoreMaintenanceCoordinator,
 )
@@ -138,11 +132,6 @@ logger = init_logger(__name__)
 
 
 class GlobalStoreServicer(
-    ClusterRuntimeRpcMixin,
-    ArtifactCatalogRpcMixin,
-    AssemblyViewRpcMixin,
-    WorkflowOrchestrationRpcMixin,
-    ClusterAdminRpcMixin,
     global_store_pb2_grpc.ClusterRuntimeServiceServicer,
     global_store_pb2_grpc.ArtifactCatalogServiceServicer,
     global_store_pb2_grpc.AssemblyViewServiceServicer,
@@ -347,6 +336,7 @@ class GlobalStoreServicer(
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,
         )
+        bind_global_store_rpc_methods(self)
 
         self._maintenance_coordinator = GlobalStoreMaintenanceCoordinator(
             config=self.config,
@@ -464,6 +454,58 @@ class GlobalStoreServicer(
             "version": version,
         }
 
+    def HealthCheck(
+        self,
+        request: global_store_pb2.HealthCheckRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.HealthCheckResponse:
+        """Minimal health check endpoint (status + cluster token)."""
+        info = getattr(self, "_runtime_info", {}) or {}
+        cluster_token = info.get("cluster_token") or self.config.cluster_token
+        return global_store_pb2.HealthCheckResponse(
+            status=global_store_pb2.Status.STATUS_OK,
+            cluster_token=cluster_token or "",
+        )
+
+    def GetServerInfo(
+        self,
+        request: global_store_pb2.GetServerInfoRequest,
+        context: grpc.ServicerContext,
+    ) -> global_store_pb2.GetServerInfoResponse:
+        """Server metadata endpoint for advertised/bind addresses and diagnostics."""
+        info = getattr(self, "_runtime_info", {}) or {}
+        listen_host = info.get("listen_host") or self.config.listen_host
+        listen_port = info.get("listen_port") or self.config.listen_port
+        advertise_host = info.get("advertise_host") or self.config.advertise_host
+        advertise_port = info.get("advertise_port") or self.config.advertise_port
+        metrics_port = info.get("metrics_port") or self.config.metrics_port
+        db_file = info.get("db_file") or (
+            str(self.config.db_file) if self.config.db_file else ""
+        )
+        cluster_id = info.get("cluster_id") or self.cluster_id or ""
+        version = info.get("version") or ""
+        listen_address = (
+            f"{listen_host}:{listen_port}" if listen_host and listen_port else ""
+        )
+        advertise_address = (
+            f"{advertise_host}:{advertise_port}"
+            if advertise_host and advertise_port
+            else ""
+        )
+        return global_store_pb2.GetServerInfoResponse(
+            status=global_store_pb2.Status.STATUS_OK,
+            advertise_address=advertise_address,
+            advertise_host=advertise_host or "",
+            advertise_port=int(advertise_port or 0),
+            listen_address=listen_address,
+            listen_host=listen_host or "",
+            listen_port=int(listen_port or 0),
+            metrics_port=int(metrics_port or 0),
+            version=version,
+            db_file=db_file or "",
+            cluster_id=cluster_id,
+        )
+
     def _get_tensor_intervals_for_artifact_id(
         self, *, artifact_id: str
     ) -> dict[str, tuple[int, int]]:
@@ -568,9 +610,7 @@ class GlobalStoreServicer(
         except Exception as e:
             logger.exception(f"Error during startup recovery: {e}")
 
-    # RPC method implementations are organized in domain mixins:
-    # ClusterRuntimeRpcMixin, ArtifactCatalogRpcMixin, AssemblyViewRpcMixin,
-    # WorkflowOrchestrationRpcMixin, and ClusterAdminRpcMixin.
+    # RPC methods are bound dynamically to domain handlers in __init__.
 
     # ========== Helper Methods ==========
 
