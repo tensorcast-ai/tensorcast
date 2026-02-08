@@ -92,8 +92,15 @@ from tensorcast.global_store.rpc.artifact_query_rpc_handler import (
 )
 from tensorcast.global_store.rpc.chunk_rpc_handler import ChunkRpcHandler
 from tensorcast.global_store.rpc.disk_location_rpc_handler import DiskLocationRpcHandler
+from tensorcast.global_store.rpc.instance_rpc_handler import InstanceRpcHandler
 from tensorcast.global_store.rpc.key_mapping_rpc_handler import KeyMappingRpcHandler
-from tensorcast.global_store.rpc.layout_rpc_handler import LayoutRpcHandler
+from tensorcast.global_store.rpc.layout_binding_rpc_handler import (
+    LayoutBindingRpcHandler,
+)
+from tensorcast.global_store.rpc.layout_runtime_policy_rpc_handler import (
+    LayoutRuntimePolicyRpcHandler,
+)
+from tensorcast.global_store.rpc.layout_spec_rpc_handler import LayoutSpecRpcHandler
 from tensorcast.global_store.rpc.operation_rpc_handler import OperationRpcHandler
 from tensorcast.global_store.rpc.placement_persistence_rpc_handler import (
     PlacementPersistenceRpcHandler,
@@ -106,8 +113,9 @@ from tensorcast.global_store.rpc.replica_registration_rpc_handler import (
 )
 from tensorcast.global_store.rpc.transport_rpc_handler import TransportRpcHandler
 from tensorcast.global_store.rpc.view_proof_rpc_handler import ViewProofRpcHandler
-from tensorcast.global_store.rpc.worker_instance_rpc_handler import (
-    WorkerInstanceRpcHandler,
+from tensorcast.global_store.rpc.worker_rpc_handler import WorkerRpcHandler
+from tensorcast.global_store.rpc.worker_state_sync_rpc_handler import (
+    WorkerStateSyncRpcHandler,
 )
 from tensorcast.global_store.services import (
     ArtifactService,
@@ -302,16 +310,25 @@ class GlobalStoreServicer(
             get_tensor_intervals_for_artifact_id=self._get_tensor_intervals_for_artifact_id,
             logger=logger,
         )
-        self.layout_rpc_handler = LayoutRpcHandler(
-            connection=self.connection,
+        self.layout_spec_rpc_handler = LayoutSpecRpcHandler(
             artifact_indices=self.artifact_indices,
+            layout_spec_repository=self.layout_spec_repository,
+            multibase_sha256_to_hex=multibase_sha256_to_hex,
+            sha256_digest_to_multibase=sha256_digest_to_multibase,
+            logger=logger,
+        )
+        self.layout_binding_rpc_handler = LayoutBindingRpcHandler(
+            connection=self.connection,
             artifact_repository=self.artifacts_repo,
             layout_spec_repository=self.layout_spec_repository,
             assembly_layout_binding_repository=self.assembly_layout_binding_repository,
             artifact_layout_attachment_repository=self.artifact_layout_attachment_repository,
+            datetime_to_timestamp=datetime_to_timestamp,
+            coerce_db_datetime=coerce_db_datetime,
+            logger=logger,
+        )
+        self.layout_runtime_policy_rpc_handler = LayoutRuntimePolicyRpcHandler(
             assembly_runtime_policy_repository=self.assembly_runtime_policy_repository,
-            multibase_sha256_to_hex=multibase_sha256_to_hex,
-            sha256_digest_to_multibase=sha256_digest_to_multibase,
             datetime_to_timestamp=datetime_to_timestamp,
             coerce_db_datetime=coerce_db_datetime,
             logger=logger,
@@ -404,14 +421,22 @@ class GlobalStoreServicer(
             chunk_service=self.chunk_service,
             logger=logger,
         )
-        self.worker_instance_rpc_handler = WorkerInstanceRpcHandler(
+        self.worker_rpc_handler = WorkerRpcHandler(
             worker_service=self.worker_service,
             worker_repository=self.worker_repository,
             recovery_service=self.recovery_service,
-            instance_service=self.instance_service,
             default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
             determine_worker_status=self._determine_worker_status,
+            logger=logger,
+        )
+        self.instance_rpc_handler = InstanceRpcHandler(
+            instance_service=self.instance_service,
+            default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
             determine_instance_status=self._determine_instance_status,
+            logger=logger,
+        )
+        self.worker_state_sync_rpc_handler = WorkerStateSyncRpcHandler(
+            recovery_service=self.recovery_service,
             logger=logger,
         )
 
