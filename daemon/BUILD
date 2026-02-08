@@ -826,6 +826,7 @@ sc_cc_library(
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
         ":materialization_layout_utils_lib",
+        ":materialization_mapped_copy_plan_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
         ":materialization_target_storage_utils_lib",
@@ -865,6 +866,19 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_mapped_copy_plan_utils_lib",
+    srcs = ["service/controllers/materialization_mapped_copy_plan_utils.cc"],
+    hdrs = ["service/controllers/materialization_mapped_copy_plan_utils.h"],
+    deps = [
+        ":materialization_layout_utils_lib",
+        "//core/store/materialization/contracts:byte_range_map",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
