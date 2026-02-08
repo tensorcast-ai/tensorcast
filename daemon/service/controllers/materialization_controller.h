@@ -8,13 +8,11 @@
 #include <memory>
 #include <string>
 
-#include "absl/base/thread_annotations.h"
-#include "absl/container/flat_hash_set.h"
-#include "absl/synchronization/mutex.h"
 #include "core/common/async_runtime.h"
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/assembly_operation_service.h"
 #include "daemon/service/controllers/disk_artifact_service.h"
 #include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
@@ -123,15 +121,10 @@ class MaterializationController {
   TargetWriteRegistry::Record insert_target_write_for_testing(TargetWriteRegistry::Record record);
 
  private:
-  struct SealOperationTracker {
-    absl::Mutex mu;
-    absl::flat_hash_set<std::string> active_operations ABSL_GUARDED_BY(mu);
-  };
-
   Dep d_;
   std::filesystem::path storage_path_;
 
-  std::shared_ptr<SealOperationTracker> seal_operation_tracker_;
+  AssemblyOperationService assembly_operation_service_;
   DiskArtifactService disk_artifact_service_;
   ReplicaLifecycleService replica_lifecycle_service_;
   TargetMaterializationService target_materialization_service_;

@@ -819,6 +819,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_controller.cc"],
     hdrs = ["service/controllers/materialization_controller.h"],
     deps = [
+        ":assembly_operation_service_lib",
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":disk_artifact_service_lib",
@@ -852,6 +853,33 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "assembly_operation_service_lib",
+    srcs = ["service/controllers/assembly_operation_service.cc"],
+    hdrs = ["service/controllers/assembly_operation_service.h"],
+    deps = [
+        ":daemon_options_hdr",
+        ":device_resolver_hdr",
+        ":materialization_policy_utils_lib",
+        ":rpc_context_hdr",
+        ":shutdown_signal_hdr",
+        ":status_utils",
+        ":worker_identity_store_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/common:async_runtime_lib",
+        "//core/store:global_store_client",
+        "//core/store:store_engine",
+        "//core/store/materialization/contracts:loading_spec",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "//proto/tensorcast/operation/v1:operation_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/time",
+        "@folly//folly/futures:core",
+        "@nlohmann_json//:json",
         "@protobuf",
     ],
 )
