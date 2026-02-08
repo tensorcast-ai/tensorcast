@@ -1379,6 +1379,151 @@ Status validate_target_view_subset_hash(
   return Status::OK;
 }
 
+struct TargetMaterializationPlan {
+  TargetLayoutTensorSelection tensor_selection;
+  TargetViewResolution view_resolution;
+  std::string canonical_index_json;
+  std::string selected_index_json;
+  CanonicalIndexTable index_table;
+  PreparedTargetStorageLayout prepared_storage_layout;
+  std::string view_subset_hash;
+  bool has_subset{false};
+  bool has_ordered_selection{false};
+  uint64_t logical_total_size{0};
+};
+
+Status build_target_materialization_plan(
+    store::StoreEngine& engine,
+    const v2::MaterializeIntoTargetRequest& req,
+    const v2::TargetLayout& layout,
+    const std::string& resolved_artifact_id,
+    const std::optional<std::filesystem::path>& normalized_disk_path,
+    int device_ordinal,
+    bool gs_connected,
+    const std::vector<TargetOffsetEntry>& offsets,
+    TargetMaterializationPlan& plan) {
+  plan = TargetMaterializationPlan{};
+
+  auto tensor_selection_status = collect_target_layout_tensor_selection(req, offsets, plan.tensor_selection);
+  if (!tensor_selection_status.ok()) {
+    return tensor_selection_status;
+  }
+  const auto& layout_name_set = plan.tensor_selection.layout_name_set;
+  const auto& layout_names = plan.tensor_selection.layout_names;
+  const auto& request_names = plan.tensor_selection.request_names;
+
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      engine, resolved_artifact_id, normalized_disk_path, device_ordinal, gs_connected);
+  if (!canonical_json_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_json_or.status());
+  }
+  plan.canonical_index_json = std::move(*canonical_json_or);
+
+  auto canonical_table_or = parse_canonical_index(plan.canonical_index_json);
+  if (!canonical_table_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(canonical_table_or.status());
+  }
+  const CanonicalIndexTable& canonical_table = *canonical_table_or;
+
+  auto canonical_layout_validation_status = validate_layout_names_exist_in_index(
+      layout_name_set, canonical_table, "target_layout includes unknown tensor name");
+  if (!canonical_layout_validation_status.ok()) {
+    return canonical_layout_validation_status;
+  }
+  plan.has_subset = is_layout_subset_of_canonical_index(canonical_table, layout_name_set);
+  plan.has_ordered_selection = !request_names.empty();
+
+  auto parse_view_status = parse_target_view_identity(req, plan.view_resolution);
+  if (!parse_view_status.ok()) {
+    return parse_view_status;
+  }
+  auto hydrate_view_status = hydrate_target_view_from_metadata(engine, req, plan.view_resolution);
+  if (!hydrate_view_status.ok()) {
+    return hydrate_view_status;
+  }
+  auto view_plan_status = compute_target_view_plan(
+      plan.canonical_index_json,
+      plan.has_subset,
+      plan.has_ordered_selection,
+      layout_names,
+      request_names,
+      layout.index_kind(),
+      plan.view_resolution);
+  if (!view_plan_status.ok()) {
+    return view_plan_status;
+  }
+  auto index_kind_status =
+      validate_target_index_kind_mode(layout, plan.has_subset, plan.has_ordered_selection, plan.view_resolution);
+  if (!index_kind_status.ok()) {
+    return index_kind_status;
+  }
+  auto resolve_view_id_status = resolve_target_view_id(plan.canonical_index_json, plan.view_resolution);
+  if (!resolve_view_id_status.ok()) {
+    return resolve_view_id_status;
+  }
+  auto layout_view_binding_status = validate_target_layout_view_binding(layout, plan.view_resolution);
+  if (!layout_view_binding_status.ok()) {
+    return layout_view_binding_status;
+  }
+
+  auto selected_index_status = choose_target_selected_index_json(
+      layout, plan.canonical_index_json, plan.view_resolution, plan.selected_index_json);
+  if (!selected_index_status.ok()) {
+    return selected_index_status;
+  }
+
+  auto index_table_or = parse_canonical_index(plan.selected_index_json);
+  if (!index_table_or.ok()) {
+    record_materialize_into_target(
+        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(index_table_or.status());
+  }
+  plan.index_table = std::move(*index_table_or);
+  plan.logical_total_size = plan.index_table.logical_total_size;
+
+  auto selected_index_validation_status = validate_selected_index_matches_layout(layout_name_set, plan.index_table);
+  if (!selected_index_validation_status.ok()) {
+    return selected_index_validation_status;
+  }
+  if (plan.view_resolution.view_plan.has_value() && plan.view_resolution.view_plan->view_size_bytes > 0 &&
+      plan.view_resolution.view_plan->view_size_bytes != plan.logical_total_size) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "view plan size does not match selected index"};
+  }
+
+  auto alias_validation_status = validate_target_layout_aliases(layout, plan.index_table);
+  if (!alias_validation_status.ok()) {
+    return alias_validation_status;
+  }
+
+  auto storage_layout_status = build_target_storage_layout(layout, plan.prepared_storage_layout);
+  if (!storage_layout_status.ok()) {
+    return storage_layout_status;
+  }
+  auto storage_span_status =
+      validate_storage_span_matches_index(plan.prepared_storage_layout.total_storage_bytes, plan.logical_total_size);
+  if (!storage_span_status.ok()) {
+    return storage_span_status;
+  }
+  auto offset_validation_status =
+      validate_target_offsets_against_layout(offsets, plan.index_table, plan.prepared_storage_layout.storage_ranges);
+  if (!offset_validation_status.ok()) {
+    return offset_validation_status;
+  }
+
+  auto subset_hash_status = validate_target_view_subset_hash(
+      req, plan.has_subset, plan.has_ordered_selection, layout_names, request_names, plan.view_subset_hash);
+  if (!subset_hash_status.ok()) {
+    return subset_hash_status;
+  }
+  return Status::OK;
+}
+
 absl::Status validate_descriptor_against_index(
     const DescriptorMetadata& descriptor,
     const store::loader::IndexInfo& index_info,
@@ -2557,71 +2702,27 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "target_layout offsets are required"};
   }
 
-  TargetLayoutTensorSelection tensor_selection;
-  auto tensor_selection_status = collect_target_layout_tensor_selection(req, offsets, tensor_selection);
-  if (!tensor_selection_status.ok()) {
-    return tensor_selection_status;
-  }
-  const auto& layout_name_set = tensor_selection.layout_name_set;
-  const auto& layout_names = tensor_selection.layout_names;
-  const auto& request_names = tensor_selection.request_names;
-
-  auto canonical_json_or = load_canonical_index_with_disk_fallback(
-      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
-  if (!canonical_json_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(canonical_json_or.status());
-  }
-  auto canonical_table_or = parse_canonical_index(*canonical_json_or);
-  if (!canonical_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(canonical_table_or.status());
-  }
-  const CanonicalIndexTable& canonical_table = *canonical_table_or;
-  auto canonical_layout_validation_status = validate_layout_names_exist_in_index(
-      layout_name_set, canonical_table, "target_layout includes unknown tensor name");
-  if (!canonical_layout_validation_status.ok()) {
-    return canonical_layout_validation_status;
-  }
-  const bool has_subset = is_layout_subset_of_canonical_index(canonical_table, layout_name_set);
-  const bool has_ordered_selection = !request_names.empty();
-
-  TargetViewResolution view_resolution;
-  auto parse_view_status = parse_target_view_identity(req, view_resolution);
-  if (!parse_view_status.ok()) {
-    return parse_view_status;
-  }
-  auto hydrate_view_status = hydrate_target_view_from_metadata(d_.engine, req, view_resolution);
-  if (!hydrate_view_status.ok()) {
-    return hydrate_view_status;
-  }
-  auto plan_status = compute_target_view_plan(
-      *canonical_json_or,
-      has_subset,
-      has_ordered_selection,
-      layout_names,
-      request_names,
-      layout.index_kind(),
-      view_resolution);
-  if (!plan_status.ok()) {
-    return plan_status;
-  }
-  auto index_kind_status = validate_target_index_kind_mode(layout, has_subset, has_ordered_selection, view_resolution);
-  if (!index_kind_status.ok()) {
-    return index_kind_status;
-  }
-  auto resolved_view_status = resolve_target_view_id(*canonical_json_or, view_resolution);
-  if (!resolved_view_status.ok()) {
-    return resolved_view_status;
+  TargetMaterializationPlan plan;
+  auto build_plan_status = build_target_materialization_plan(
+      d_.engine, req, layout, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected, offsets, plan);
+  if (!build_plan_status.ok()) {
+    return build_plan_status;
   }
 
+  const auto& layout_names = plan.tensor_selection.layout_names;
+  const bool has_subset = plan.has_subset;
+  auto& view_resolution = plan.view_resolution;
   auto& view_spec = view_resolution.view_spec;
   auto& view_plan = view_resolution.view_plan;
   auto& resolved_view_id = view_resolution.resolved_view_id;
   auto& view_data_hash = view_resolution.view_data_hash;
   const bool has_view_transform = view_resolution.has_view_transform;
+  const std::string& canonical_index_json = plan.canonical_index_json;
+  const std::string& selected_index_json = plan.selected_index_json;
+  const uint64_t logical_total_size = plan.logical_total_size;
+  std::vector<RegisterStorageMeta> publish_storages = std::move(plan.prepared_storage_layout.publish_storages);
+  std::vector<LeaseSegMeta> publish_segments = std::move(plan.prepared_storage_layout.publish_segments);
+  std::string view_subset_hash = std::move(plan.view_subset_hash);
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
@@ -2630,67 +2731,6 @@ grpc::Status MaterializationController::materialize_into_target(
     } else {
       VLOG(1) << "MaterializeIntoTarget: view metadata unavailable for verification: " << view_meta_or.status();
     }
-  }
-
-  auto layout_view_binding_status = validate_target_layout_view_binding(layout, view_resolution);
-  if (!layout_view_binding_status.ok()) {
-    return layout_view_binding_status;
-  }
-
-  std::string selected_index_json;
-  auto selected_index_status =
-      choose_target_selected_index_json(layout, *canonical_json_or, view_resolution, selected_index_json);
-  if (!selected_index_status.ok()) {
-    return selected_index_status;
-  }
-
-  auto index_table_or = parse_canonical_index(selected_index_json);
-  if (!index_table_or.ok()) {
-    record_materialize_into_target(
-        "error", "index_parse_failed", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(index_table_or.status());
-  }
-  const CanonicalIndexTable& index_table = *index_table_or;
-  const uint64_t logical_total_size = index_table.logical_total_size;
-  auto selected_index_validation_status = validate_selected_index_matches_layout(layout_name_set, index_table);
-  if (!selected_index_validation_status.ok()) {
-    return selected_index_validation_status;
-  }
-  if (view_plan.has_value() && view_plan->view_size_bytes > 0 && view_plan->view_size_bytes != logical_total_size) {
-    record_materialize_into_target(
-        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "view plan size does not match selected index"};
-  }
-
-  auto alias_validation_status = validate_target_layout_aliases(layout, index_table);
-  if (!alias_validation_status.ok()) {
-    return alias_validation_status;
-  }
-
-  PreparedTargetStorageLayout prepared_storage_layout;
-  auto storage_layout_status = build_target_storage_layout(layout, prepared_storage_layout);
-  if (!storage_layout_status.ok()) {
-    return storage_layout_status;
-  }
-  auto storage_span_status =
-      validate_storage_span_matches_index(prepared_storage_layout.total_storage_bytes, logical_total_size);
-  if (!storage_span_status.ok()) {
-    return storage_span_status;
-  }
-  auto offset_validation_status =
-      validate_target_offsets_against_layout(offsets, index_table, prepared_storage_layout.storage_ranges);
-  if (!offset_validation_status.ok()) {
-    return offset_validation_status;
-  }
-
-  std::vector<RegisterStorageMeta> publish_storages = std::move(prepared_storage_layout.publish_storages);
-  std::vector<LeaseSegMeta> publish_segments = std::move(prepared_storage_layout.publish_segments);
-
-  std::string view_subset_hash;
-  auto subset_hash_status = validate_target_view_subset_hash(
-      req, has_subset, has_ordered_selection, layout_names, request_names, view_subset_hash);
-  if (!subset_hash_status.ok()) {
-    return subset_hash_status;
   }
 
   std::optional<std::string> expected_data_hash;
@@ -2767,17 +2807,17 @@ grpc::Status MaterializationController::materialize_into_target(
       variant.view_spec = view_spec;
     }
     variant.cached_plan = view_plan;
-    variant.canonical_index_json = *canonical_json_or;
+    variant.canonical_index_json = canonical_index_json;
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
 
-  const uint64_t generation = compute_generation_from_index(*canonical_json_or);
+  const uint64_t generation = compute_generation_from_index(canonical_index_json);
   store::loading::IntoTargetLayout target_layout;
   target_layout.storages.assign(storage_lease.storages().begin(), storage_lease.storages().end());
   target_layout.total_size = logical_total_size;
   auto result_or =
-      d_.engine.materialize_into_target(device, target_layout, *canonical_json_or, generation, hints, disk_source);
+      d_.engine.materialize_into_target(device, target_layout, canonical_index_json, generation, hints, disk_source);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
       for (const auto& region_id : storage_lease.acquired_region_ids()) {
@@ -2818,7 +2858,7 @@ grpc::Status MaterializationController::materialize_into_target(
   resp.set_artifact_id(resolved_artifact_id);
   resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_source(to_proto_source(result_or->source));
-  resp.set_canonical_index_bytes(*canonical_json_or);
+  resp.set_canonical_index_bytes(canonical_index_json);
   if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
     resp.set_view_index_bytes(view_plan->view_index_json);
   }
@@ -2873,7 +2913,7 @@ grpc::Status MaterializationController::materialize_into_target(
     const std::string write_id = mint_write_id(bitgen_);
     const absl::Time expires_at = absl::Now() + kTargetWriteTokenTtl;
 
-    auto stable_index_or = store::loader::rebuild_stable_canonical_index(*canonical_json_or, device.ordinal);
+    auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
     if (!stable_index_or.ok()) {
       VLOG(1) << "MaterializeIntoTarget: failed to rebuild canonical index for target write token: "
               << stable_index_or.status();
