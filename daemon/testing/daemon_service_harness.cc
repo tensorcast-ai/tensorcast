@@ -32,6 +32,7 @@ DaemonServiceHarness::DaemonServiceHarness(
     std::unique_ptr<RegistrationController> registration_controller,
     std::unique_ptr<TransportController> transport_controller,
     std::unique_ptr<StatusController> status_controller,
+    std::unique_ptr<LeaseController> lease_controller,
     std::unique_ptr<StoreDaemonServiceImpl> service,
     std::unique_ptr<LocalHandleServer> local_handle_server)
     : async_runtime_(std::move(async_runtime)),
@@ -40,6 +41,7 @@ DaemonServiceHarness::DaemonServiceHarness(
       registration_controller_(std::move(registration_controller)),
       transport_controller_(std::move(transport_controller)),
       status_controller_(std::move(status_controller)),
+      lease_controller_(std::move(lease_controller)),
       service_(std::move(service)),
       local_handle_server_(std::move(local_handle_server)) {}
 
@@ -134,6 +136,17 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
+  LeaseController::Dep ldep{
+      .engine = kernel->engine(),
+      .lifecycle = kernel->lifecycle_manager(),
+      .placement_lease_tokens = kernel->placement_lease_tokens(),
+      .capability_tokens = kernel->capability_tokens(),
+      .retention_registry = kernel->retention_registry(),
+      .daemon_id = options.daemon_id,
+      .shutdown_signal = kernel->shutdown_signal(),
+  };
+  auto lease_controller = std::make_unique<LeaseController>(std::move(ldep));
+
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = kernel->engine(),
       .materialization_controller = *materialization_controller,
@@ -146,10 +159,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .persistence_manager = kernel->persistence_manager(),
       .sessions_service = kernel->sessions_service(),
       .lifecycle_manager = kernel->lifecycle_manager(),
-      .placement_lease_tokens = kernel->placement_lease_tokens(),
-      .capability_tokens = kernel->capability_tokens(),
-      .retention_registry = kernel->retention_registry(),
-      .daemon_id = options.daemon_id,
+      .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
@@ -179,6 +189,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       std::move(registration_controller),
       std::move(transport_controller),
       std::move(status_controller),
+      std::move(lease_controller),
       std::move(service),
       std::move(local_handle_server)));
 }

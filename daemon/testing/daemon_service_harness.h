@@ -11,6 +11,7 @@
 #include "core/common/async_runtime.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
 #include "daemon/service/controllers/status_controller.h"
@@ -62,6 +63,7 @@ class DaemonServiceHarness {
       std::unique_ptr<RegistrationController> registration_controller,
       std::unique_ptr<TransportController> transport_controller,
       std::unique_ptr<StatusController> status_controller,
+      std::unique_ptr<LeaseController> lease_controller,
       std::unique_ptr<StoreDaemonServiceImpl> service,
       std::unique_ptr<LocalHandleServer> local_handle_server);
 
@@ -71,6 +73,7 @@ class DaemonServiceHarness {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;
   std::unique_ptr<LocalHandleServer> local_handle_server_;
   std::atomic<bool> stop_called_{false};
