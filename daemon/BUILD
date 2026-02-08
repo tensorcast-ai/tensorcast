@@ -43,8 +43,14 @@ sc_cc_library(
 
 sc_cc_library(
     name = "grpc_service_impl",
-    srcs = ["service/grpc_service_impl.cc"],
-    hdrs = ["service/grpc_service_impl.h"],
+    srcs = [
+        "service/artifact_retire_utils.cc",
+        "service/grpc_service_impl.cc",
+    ],
+    hdrs = [
+        "service/artifact_retire_utils.h",
+        "service/grpc_service_impl.h",
+    ],
     copts = [],
     deps = [
         ":background_scheduler_hdr",
