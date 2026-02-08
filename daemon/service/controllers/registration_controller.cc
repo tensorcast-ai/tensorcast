@@ -1987,6 +1987,150 @@ grpc::Status commit_engine_registration(
   return Status::OK;
 }
 
+grpc::Status apply_begin_view_registration(
+    const v2::BeginRegisterArtifactRequest& req,
+    RegistrationManager::RegMeta& meta,
+    store::StoreEngine::ArtifactRegistration& reg) {
+  if (!req.has_view()) {
+    return Status::OK;
+  }
+  if (req.view().allow_partial()) {
+    return {
+        StatusCode::INVALID_ARGUMENT,
+        "allow_partial is deprecated; use registration_kind=VIEW_REGISTRATION_KIND_PIECE"};
+  }
+  if (!req.has_tensor_index_data()) {
+    return {StatusCode::INVALID_ARGUMENT, "view registration requires tensor_index_data"};
+  }
+  if (req.view().spec().tensors().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "view registration requires non-empty view spec"};
+  }
+  auto placement = ToPlacement(req.view().placement());
+  if (placement == store::StoreEngine::ViewPlacement::kUnspecified) {
+    return {StatusCode::INVALID_ARGUMENT, "view placement must be specified"};
+  }
+  auto registration_kind = ToRegistrationKind(req.view().registration_kind());
+  if (registration_kind == store::StoreEngine::ViewRegistrationKind::kUnspecified) {
+    return {StatusCode::INVALID_ARGUMENT, "view.registration_kind must be specified"};
+  }
+  if (registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece && req.view().ranges_size() > 0) {
+    return {StatusCode::INVALID_ARGUMENT, "view.ranges not supported for piece registration"};
+  }
+  auto spec_or = convert_view_spec(req.view().spec());
+  if (!spec_or.ok()) {
+    return to_grpc_status(spec_or.status());
+  }
+  store::StoreEngine::ViewRegistration view_reg;
+  auto view_id_or = compute_view_id_from_spec(req.view().spec(), meta.index_data);
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
+  }
+  std::string resolved_view_id = req.view().view_id();
+  if (resolved_view_id.empty()) {
+    resolved_view_id = *view_id_or;
+  } else if (resolved_view_id != *view_id_or) {
+    return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
+  }
+  view_reg.view_id = resolved_view_id;
+  view_reg.spec = std::move(*spec_or);
+  meta.view_spec_json = store::view::build_view_spec_json(view_reg.spec);
+  view_reg.placement = placement;
+  view_reg.canonical_size_bytes = req.view().canonical_size_bytes();
+  view_reg.registration_kind = registration_kind;
+  reg.view = view_reg;
+  meta.view_registration = true;
+  meta.view_placement = placement;
+  meta.view_id = view_reg.view_id;
+  meta.view_registration_kind = registration_kind;
+  meta.view_canonical_size_bytes = view_reg.canonical_size_bytes;
+  return Status::OK;
+}
+
+grpc::Status begin_coalesced_or_stable_registration(
+    RegistrationController::Dep& dep,
+    RpcContext& rctx,
+    const v2::BeginRegisterArtifactRequest& req,
+    RegistrationManager::RegPlan plan,
+    RegistrationManager::RegMeta& meta,
+    store::StoreEngine::ArtifactRegistration& reg,
+    v2::BeginRegisterArtifactResponse& resp) {
+  if (req.has_tensor_index_key()) {
+    reg.tensor_index_key = req.tensor_index_key();
+  }
+  if (req.has_tensor_index_data()) {
+    reg.tensor_index_data = meta.index_data;
+    reg.schema_version = req.tensor_index_data().schema_version();
+    reg.encoding = req.tensor_index_data().encoding();
+  }
+  if (!meta.client_artifact_id.empty()) {
+    reg.client_artifact_id = meta.client_artifact_id;
+  }
+  if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+    reg.plan = store::runtime::metadata::RegistrationPlan::kStableDram;
+    reg.stable_dram.stage_on_gpu = meta.stage_on_gpu;
+    reg.stable_dram.release_gpu_on_commit = meta.release_gpu_on_commit;
+    if (!meta.stage_on_gpu) {
+      return {StatusCode::UNIMPLEMENTED, "dram_stable with stage_on_gpu=false is not implemented"};
+    }
+  }
+  auto begin_or = dep.engine.begin_register_artifact(reg);
+  if (!begin_or.ok()) {
+    return to_grpc_status(begin_or.status());
+  }
+  const auto& out = begin_or.value();
+  resp.set_registration_id(out.registration_id);
+  auto handle_view = out.cuda_ipc_handle_bytes.as_string_view();
+  if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+    auto* hs = resp.mutable_stable_dram();
+    hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
+  } else {
+    auto* hs = resp.mutable_coalesced();
+    hs->set_daemon_ipc_handle(handle_view.data(), handle_view.size());
+  }
+  resp.set_device_id(out.device_id);
+  resp.set_total_size(out.size_bytes);
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_begin_coalesced_total");
+    static auto stable_counter = meter->CreateDoubleCounter("tc_register_begin_stable_dram_total");
+    if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
+      stable_counter->Add(1.0);
+    } else {
+      coalesced_counter->Add(1.0);
+    }
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_begin_(stable_dram|coalesced)_total unavailable";
+  }
+  dep.reg.set_meta(out.registration_id, meta);
+  rctx.mark_success();
+  return Status::OK;
+}
+
+grpc::Status begin_lease_registration(
+    RegistrationController::Dep& dep,
+    RpcContext& rctx,
+    const RegistrationManager::RegMeta& meta,
+    v2::BeginRegisterArtifactResponse& resp) {
+  if (!meta.lease_in_place) {
+    return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
+  }
+  std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
+  resp.set_registration_id(reg_id);
+  resp.mutable_lease();
+  resp.set_device_id(meta.device_id);
+  resp.set_total_size(meta.total_size);
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto counter = meter->CreateDoubleCounter("tc_register_begin_lease_total");
+    counter->Add(1.0);
+  } catch (...) {
+    VLOG(1) << "metrics counter tc_register_begin_lease_total unavailable";
+  }
+  dep.reg.set_meta(reg_id, meta);
+  rctx.mark_success();
+  return Status::OK;
+}
+
 } // namespace
 
 grpc::Status RegistrationController::begin(
@@ -2053,56 +2197,9 @@ grpc::Status RegistrationController::begin(
   else if (req.has_tensor_index_data())
     meta.index_data = std::string(req.tensor_index_data().data().begin(), req.tensor_index_data().data().end());
 
-  if (req.has_view()) {
-    if (req.view().allow_partial()) {
-      return {
-          StatusCode::INVALID_ARGUMENT,
-          "allow_partial is deprecated; use registration_kind=VIEW_REGISTRATION_KIND_PIECE"};
-    }
-    if (!req.has_tensor_index_data()) {
-      return {StatusCode::INVALID_ARGUMENT, "view registration requires tensor_index_data"};
-    }
-    if (req.view().spec().tensors().empty()) {
-      return {StatusCode::INVALID_ARGUMENT, "view registration requires non-empty view spec"};
-    }
-    auto placement = ToPlacement(req.view().placement());
-    if (placement == store::StoreEngine::ViewPlacement::kUnspecified) {
-      return {StatusCode::INVALID_ARGUMENT, "view placement must be specified"};
-    }
-    auto registration_kind = ToRegistrationKind(req.view().registration_kind());
-    if (registration_kind == store::StoreEngine::ViewRegistrationKind::kUnspecified) {
-      return {StatusCode::INVALID_ARGUMENT, "view.registration_kind must be specified"};
-    }
-    if (registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece && req.view().ranges_size() > 0) {
-      return {StatusCode::INVALID_ARGUMENT, "view.ranges not supported for piece registration"};
-    }
-    auto spec_or = convert_view_spec(req.view().spec());
-    if (!spec_or.ok()) {
-      return to_grpc_status(spec_or.status());
-    }
-    store::StoreEngine::ViewRegistration view_reg;
-    auto view_id_or = compute_view_id_from_spec(req.view().spec(), meta.index_data);
-    if (!view_id_or.ok()) {
-      return to_grpc_status(view_id_or.status());
-    }
-    std::string resolved_view_id = req.view().view_id();
-    if (resolved_view_id.empty()) {
-      resolved_view_id = *view_id_or;
-    } else if (resolved_view_id != *view_id_or) {
-      return {StatusCode::INVALID_ARGUMENT, "view_id does not match view spec"};
-    }
-    view_reg.view_id = resolved_view_id;
-    view_reg.spec = std::move(*spec_or);
-    meta.view_spec_json = store::view::build_view_spec_json(view_reg.spec);
-    view_reg.placement = placement;
-    view_reg.canonical_size_bytes = req.view().canonical_size_bytes();
-    view_reg.registration_kind = registration_kind;
-    reg.view = view_reg;
-    meta.view_registration = true;
-    meta.view_placement = placement;
-    meta.view_id = view_reg.view_id;
-    meta.view_registration_kind = registration_kind;
-    meta.view_canonical_size_bytes = view_reg.canonical_size_bytes;
+  auto view_status = apply_begin_view_registration(req, meta, reg);
+  if (!view_status.ok()) {
+    return view_status;
   }
 
   if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
@@ -2119,76 +2216,10 @@ grpc::Status RegistrationController::begin(
   }
 
   if (plan == RegistrationManager::RegPlan::COALESCED || plan == RegistrationManager::RegPlan::STABLE_DRAM) {
-    if (req.has_tensor_index_key())
-      reg.tensor_index_key = req.tensor_index_key();
-    if (req.has_tensor_index_data()) {
-      reg.tensor_index_data = meta.index_data;
-      reg.schema_version = req.tensor_index_data().schema_version();
-      reg.encoding = req.tensor_index_data().encoding();
-    }
-    if (!meta.client_artifact_id.empty()) {
-      reg.client_artifact_id = meta.client_artifact_id;
-    }
-    if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
-      reg.plan = store::runtime::metadata::RegistrationPlan::kStableDram;
-      reg.stable_dram.stage_on_gpu = meta.stage_on_gpu;
-      reg.stable_dram.release_gpu_on_commit = meta.release_gpu_on_commit;
-      if (!meta.stage_on_gpu) {
-        return {StatusCode::UNIMPLEMENTED, "dram_stable with stage_on_gpu=false is not implemented"};
-      }
-    }
-    auto begin_or = d_.engine.begin_register_artifact(reg);
-    if (!begin_or.ok())
-      return to_grpc_status(begin_or.status());
-    const auto& out = begin_or.value();
-    resp.set_registration_id(out.registration_id);
-    auto handle_view = out.cuda_ipc_handle_bytes.as_string_view();
-    if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
-      auto* hs = resp.mutable_stable_dram();
-      hs->set_staging_cuda_ipc_handle(handle_view.data(), handle_view.size());
-    } else {
-      auto* hs = resp.mutable_coalesced();
-      hs->set_daemon_ipc_handle(handle_view.data(), handle_view.size());
-    }
-    resp.set_device_id(out.device_id);
-    resp.set_total_size(out.size_bytes);
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto coalesced_counter = meter->CreateDoubleCounter("tc_register_begin_coalesced_total");
-      static auto stable_counter = meter->CreateDoubleCounter("tc_register_begin_stable_dram_total");
-      if (plan == RegistrationManager::RegPlan::STABLE_DRAM) {
-        stable_counter->Add(1.0);
-      } else {
-        coalesced_counter->Add(1.0);
-      }
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_begin_(stable_dram|coalesced)_total unavailable";
-    }
-    d_.reg.set_meta(out.registration_id, meta);
-    rctx.mark_success();
-    return Status::OK;
+    return begin_coalesced_or_stable_registration(d_, rctx, req, plan, meta, reg, resp);
   }
-  // CPU plan removed
   if (plan == RegistrationManager::RegPlan::LEASE) {
-    // Only LIP (in_place=true) is supported in current release
-    if (!meta.lease_in_place) {
-      return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
-    }
-    std::string reg_id = absl::StrCat("reg_", absl::ToUnixNanos(absl::Now()), "_", getpid());
-    resp.set_registration_id(reg_id);
-    resp.mutable_lease();
-    resp.set_device_id(req.device_id());
-    resp.set_total_size(req.total_size());
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto counter = meter->CreateDoubleCounter("tc_register_begin_lease_total");
-      counter->Add(1.0);
-    } catch (...) {
-      VLOG(1) << "metrics counter tc_register_begin_lease_total unavailable";
-    }
-    d_.reg.set_meta(reg_id, meta);
-    rctx.mark_success();
-    return Status::OK;
+    return begin_lease_registration(d_, rctx, meta, resp);
   }
   return Status::OK;
 }
