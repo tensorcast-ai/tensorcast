@@ -1580,21 +1580,19 @@ grpc::Status RegistrationController::keep_alive(
     RpcContext& rctx,
     const v2::KeepAliveRegisterArtifactRequest& req,
     v2::KeepAliveRegisterArtifactResponse& /*resp*/) {
-  {
-    auto st = d_.reg.keepalive_precommit(
-        req.registration_id(), req.owner_pid(), req.epoch(), req.ttl_ms() > 0 ? req.ttl_ms() : 0, d_.engine);
-    if (st.ok())
-      goto KEEPALIVE_OK;
-    else if (!absl::IsNotFound(st))
+  auto st = d_.reg.keepalive_precommit(
+      req.registration_id(), req.owner_pid(), req.epoch(), req.ttl_ms() > 0 ? req.ttl_ms() : 0, d_.engine);
+  if (!st.ok()) {
+    if (!absl::IsNotFound(st)) {
       return to_grpc_status(st);
-  }
-  {
-    auto st = d_.lip.keepalive_lease(
+    }
+    st = d_.lip.keepalive_lease(
         req.registration_id(), req.owner_pid(), req.epoch(), req.ttl_ms() > 0 ? req.ttl_ms() : 0);
-    if (!st.ok())
+    if (!st.ok()) {
       return to_grpc_status(st);
+    }
   }
-KEEPALIVE_OK:
+
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateDoubleCounter("tc_register_keepalive_total");
@@ -1630,8 +1628,7 @@ grpc::Status RegistrationController::commit(
       if (!abort_status.ok()) {
         LOG(WARNING) << "abort_registered_artifact failed after sealed binding: " << abort_status;
       }
-      auto refs = d_.reg.erase_all_for(req.registration_id());
-      ReleaseRegionRefs(d_.regions, refs);
+      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
       return {StatusCode::FAILED_PRECONDITION, "assembly is already sealed; new pieces are not allowed"};
     }
     if (!absl::IsNotFound(binding_or.status())) {
@@ -1645,8 +1642,7 @@ grpc::Status RegistrationController::commit(
       return {StatusCode::UNIMPLEMENTED, "vram_leased (in_place=false) is not implemented; set lease_in_place=true"};
     }
     if (meta.expiry.time_since_epoch().count() > 0 && std::chrono::steady_clock::now() > meta.expiry) {
-      auto refs = d_.reg.erase_all_for(req.registration_id());
-      ReleaseRegionRefs(d_.regions, refs);
+      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
       try {
         static auto meter =
             opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -2155,8 +2151,7 @@ grpc::Status RegistrationController::commit(
 
       lip_rollback.release();
       replica_rollback.release();
-      auto refs = d_.reg.erase_all_for(req.registration_id());
-      ReleaseRegionRefs(d_.regions, refs);
+      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
       rctx.mark_success();
       return Status::OK;
     }
@@ -2217,8 +2212,7 @@ grpc::Status RegistrationController::commit(
     auto local_stable_status = apply_local_stable_tier(
         d_.engine, d_.lip, d_.regions, meta, out.artifact_id, out.id_kind, out.total_size, local_stable, [&]() {
           (void)d_.lip.revoke_by_registration_id(req.registration_id());
-          auto refs = d_.reg.erase_all_for(req.registration_id());
-          ReleaseRegionRefs(d_.regions, refs);
+          EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
         });
     if (!local_stable_status.ok()) {
       return to_grpc_status(local_stable_status);
@@ -2250,8 +2244,7 @@ grpc::Status RegistrationController::commit(
     // Log lease-in-place registration summary including plan.
     LOG(INFO) << "Registered memory replica: " << out.artifact_id
               << " plan=vram_leased(in_place) device=gpu:" << meta.device_id << " size=" << out.total_size << "B";
-    auto refs = d_.reg.erase_all_for(req.registration_id());
-    ReleaseRegionRefs(d_.regions, refs);
+    EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
     rctx.mark_success();
     return Status::OK;
   }

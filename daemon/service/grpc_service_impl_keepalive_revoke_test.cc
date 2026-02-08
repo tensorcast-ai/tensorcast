@@ -83,3 +83,20 @@ TEST_CASE("RevokeRegisteredArtifact is a no-op for unknown registration", "[daem
   auto st = service.RevokeRegisteredArtifact(&ctx, &rreq, &rresp);
   REQUIRE(st.ok());
 }
+
+TEST_CASE("KeepAliveRegisterArtifact rejects unknown registration", "[daemon][registration]") {
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
+  auto harness = make_harness(engine);
+  auto& service = harness->service();
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactRequest kreq;
+  tensorcast::daemon::v2::KeepAliveRegisterArtifactResponse kresp;
+  kreq.set_registration_id("missing-registration");
+  kreq.set_ttl_ms(2000);
+  kreq.set_epoch(1);
+  kreq.set_owner_pid(getpid());
+  auto st = service.KeepAliveRegisterArtifact(&ctx, &kreq, &kresp);
+  REQUIRE_FALSE(st.ok());
+  REQUIRE(st.error_code() == grpc::StatusCode::NOT_FOUND);
+}
