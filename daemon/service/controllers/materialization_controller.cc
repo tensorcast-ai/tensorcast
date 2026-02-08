@@ -70,6 +70,7 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+using materialization_layout::CanonicalIndexEntry;
 using materialization_layout::CanonicalIndexTable;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::resolve_target_offsets;
@@ -1296,6 +1297,59 @@ Status choose_target_selected_index_json(
     return Status::OK;
   }
   selected_index_json = std::string(canonical_index_json);
+  return Status::OK;
+}
+
+Status validate_target_alias_against_entry(const v2::TensorAlias& alias, const CanonicalIndexEntry& entry) {
+  if (alias.logical_length() != entry.logical_length) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout alias logical_length mismatch"};
+  }
+  if (alias.dtype() != entry.dtype) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout alias dtype mismatch"};
+  }
+  if (alias.shape_size() != static_cast<int>(entry.shape.size()) ||
+      alias.stride_size() != static_cast<int>(entry.stride.size())) {
+    record_materialize_into_target(
+        "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape/stride mismatch"};
+  }
+  for (int i = 0; i < alias.shape_size(); ++i) {
+    if (alias.shape(i) != entry.shape[static_cast<size_t>(i)]) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape mismatch"};
+    }
+  }
+  for (int i = 0; i < alias.stride_size(); ++i) {
+    if (alias.stride(i) != entry.stride[static_cast<size_t>(i)]) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout alias stride mismatch"};
+    }
+  }
+  return Status::OK;
+}
+
+Status validate_target_layout_aliases(const v2::TargetLayout& layout, const CanonicalIndexTable& index_table) {
+  if (layout.tensor_spec_kind() != v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
+    return Status::OK;
+  }
+  for (const auto& alias : layout.aliases()) {
+    auto it = index_table.entries.find(alias.name());
+    if (it == index_table.entries.end()) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout alias includes unknown tensor name"};
+    }
+    auto alias_status = validate_target_alias_against_entry(alias, it->second);
+    if (!alias_status.ok()) {
+      return alias_status;
+    }
+  }
   return Status::OK;
 }
 
@@ -2582,46 +2636,9 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::INVALID_ARGUMENT, "view plan size does not match selected index"};
   }
 
-  if (layout.tensor_spec_kind() == v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED) {
-    for (const auto& alias : layout.aliases()) {
-      auto it = index_table.entries.find(alias.name());
-      if (it == index_table.entries.end()) {
-        record_materialize_into_target(
-            "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout alias includes unknown tensor name"};
-      }
-      const auto& entry = it->second;
-      if (alias.logical_length() != entry.logical_length) {
-        record_materialize_into_target(
-            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout alias logical_length mismatch"};
-      }
-      if (alias.dtype() != entry.dtype) {
-        record_materialize_into_target(
-            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout alias dtype mismatch"};
-      }
-      if (alias.shape_size() != static_cast<int>(entry.shape.size()) ||
-          alias.stride_size() != static_cast<int>(entry.stride.size())) {
-        record_materialize_into_target(
-            "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-        return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape/stride mismatch"};
-      }
-      for (int i = 0; i < alias.shape_size(); ++i) {
-        if (alias.shape(i) != entry.shape[static_cast<size_t>(i)]) {
-          record_materialize_into_target(
-              "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-          return {StatusCode::INVALID_ARGUMENT, "target_layout alias shape mismatch"};
-        }
-      }
-      for (int i = 0; i < alias.stride_size(); ++i) {
-        if (alias.stride(i) != entry.stride[static_cast<size_t>(i)]) {
-          record_materialize_into_target(
-              "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-          return {StatusCode::INVALID_ARGUMENT, "target_layout alias stride mismatch"};
-        }
-      }
-    }
+  auto alias_validation_status = validate_target_layout_aliases(layout, index_table);
+  if (!alias_validation_status.ok()) {
+    return alias_validation_status;
   }
 
   PreparedTargetStorageLayout prepared_storage_layout;
