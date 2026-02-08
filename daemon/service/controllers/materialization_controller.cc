@@ -456,6 +456,92 @@ std::optional<std::filesystem::path> resolve_managed_disk_path(
   return *normalized_or;
 }
 
+absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& client,
+    std::string_view artifact_id);
+
+void record_materialize_into_target(std::string_view result, std::string_view reason, v2::MaterializationSource source);
+
+struct TargetMaterializationCommonContext {
+  ResolvedSourcePolicy effective_policy;
+  std::string resolved_artifact_id;
+  bool gs_connected{false};
+  std::optional<std::filesystem::path> normalized_disk_path;
+};
+
+template <typename RequestT>
+absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materialization_common(
+    const RequestT& req,
+    std::string_view peer,
+    std::string_view rpc_name,
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    LocalDiskImportCatalog& disk_imports,
+    const std::filesystem::path& storage_path) {
+  TargetMaterializationCommonContext context;
+  context.effective_policy =
+      resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  const absl::Status policy_status = validate_source_policy(context.effective_policy);
+  if (!policy_status.ok()) {
+    record_materialize_into_target(
+        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return policy_status;
+  }
+  if (!is_loopback_grpc_peer(peer)) {
+    record_materialize_into_target(
+        "error", "non_loopback_peer", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::PermissionDeniedError(std::format("{} is local-only (loopback/UDS)", rpc_name));
+  }
+
+  const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
+  const bool has_key = req.has_key() && !req.key().empty();
+  if (has_key) {
+    record_materialize_into_target(
+        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError(std::format("key-based requests not supported for {}", rpc_name));
+  }
+  if (!has_artifact_id) {
+    record_materialize_into_target(
+        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError(std::format("artifact_id is required for {}", rpc_name));
+  }
+
+  context.resolved_artifact_id = req.artifact_id();
+  auto binding_or = resolve_artifact_binding(global_store_client, context.resolved_artifact_id);
+  if (!binding_or.ok()) {
+    record_materialize_into_target(
+        "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return binding_or.status();
+  }
+  if (binding_or->has_value()) {
+    context.resolved_artifact_id = binding_or->value();
+  }
+  context.gs_connected = global_store_client && global_store_client->is_connected();
+  context.normalized_disk_path = resolve_managed_disk_path(
+      global_store_client.get(), storage_path, context.resolved_artifact_id, context.effective_policy.allow_disk);
+  if (!context.normalized_disk_path.has_value() && !context.gs_connected && context.effective_policy.allow_disk) {
+    auto entry = disk_imports.lookup_import(context.resolved_artifact_id);
+    if (entry.has_value()) {
+      context.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
+    }
+  }
+  if (!req.has_target_layout()) {
+    record_materialize_into_target(
+        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError("target_layout is required");
+  }
+  if (req.device_uuid().empty()) {
+    record_materialize_into_target(
+        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError("device_uuid is required");
+  }
+  if (req.pid() <= 0) {
+    record_materialize_into_target(
+        "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError(std::format("pid is required for {}", rpc_name));
+  }
+  return context;
+}
+
 void record_lease_create_failed() {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -1889,67 +1975,21 @@ grpc::Status MaterializationController::materialize_into_target(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  ResolvedSourcePolicy effective_policy = policy;
-  absl::Status policy_status = validate_source_policy(effective_policy);
-  if (!policy_status.ok()) {
-    record_materialize_into_target(
-        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(policy_status);
+  auto common_or = prepare_target_materialization_common(
+      req,
+      rctx.server_context().peer(),
+      "MaterializeIntoTarget",
+      d_.global_store_client,
+      d_.disk_imports,
+      storage_path_);
+  if (!common_or.ok()) {
+    return to_grpc_status(common_or.status());
   }
-  if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
-    record_materialize_into_target(
-        "error", "non_loopback_peer", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::PERMISSION_DENIED, "MaterializeIntoTarget is local-only (loopback/UDS)"};
-  }
-
-  const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
-  const bool has_key = req.has_key() && !req.key().empty();
-  if (has_key) {
-    record_materialize_into_target(
-        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "key-based requests not supported for MaterializeIntoTarget"};
-  }
-  if (!has_artifact_id) {
-    record_materialize_into_target(
-        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required for MaterializeIntoTarget"};
-  }
-
-  std::string resolved_artifact_id = req.artifact_id();
-  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
-  if (!binding_or.ok()) {
-    record_materialize_into_target(
-        "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(binding_or.status());
-  }
-  if (binding_or->has_value()) {
-    resolved_artifact_id = binding_or->value();
-  }
-  const bool gs_connected = d_.global_store_client && d_.global_store_client->is_connected();
-  std::optional<std::filesystem::path> normalized_disk_path = resolve_managed_disk_path(
-      d_.global_store_client.get(), storage_path_, resolved_artifact_id, effective_policy.allow_disk);
-  if (!normalized_disk_path.has_value() && !gs_connected && effective_policy.allow_disk) {
-    auto entry = d_.disk_imports.lookup_import(resolved_artifact_id);
-    if (entry.has_value()) {
-      normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
-    }
-  }
-  if (!req.has_target_layout()) {
-    record_materialize_into_target(
-        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
-  }
-  if (req.device_uuid().empty()) {
-    record_materialize_into_target(
-        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "device_uuid is required"};
-  }
-  if (req.pid() <= 0) {
-    record_materialize_into_target(
-        "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "pid is required for MaterializeIntoTarget"};
-  }
+  auto common = std::move(*common_or);
+  ResolvedSourcePolicy effective_policy = std::move(common.effective_policy);
+  std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
+  const bool gs_connected = common.gs_connected;
+  std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
 
   const auto& layout = req.target_layout();
   if (layout.layout_kind() != v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED) {
@@ -2698,67 +2738,22 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  ResolvedSourcePolicy effective_policy = policy;
-  absl::Status policy_status = validate_source_policy(effective_policy);
-  if (!policy_status.ok()) {
-    record_materialize_into_target(
-        "error", "policy_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(policy_status);
+  auto common_or = prepare_target_materialization_common(
+      req,
+      rctx.server_context().peer(),
+      "MaterializeIntoMappedTarget",
+      d_.global_store_client,
+      d_.disk_imports,
+      storage_path_);
+  if (!common_or.ok()) {
+    return to_grpc_status(common_or.status());
   }
-  if (!is_loopback_grpc_peer(rctx.server_context().peer())) {
-    record_materialize_into_target(
-        "error", "non_loopback_peer", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::PERMISSION_DENIED, "MaterializeIntoMappedTarget is local-only (loopback/UDS)"};
-  }
+  auto common = std::move(*common_or);
+  ResolvedSourcePolicy effective_policy = std::move(common.effective_policy);
+  std::string resolved_artifact_id = std::move(common.resolved_artifact_id);
+  const bool gs_connected = common.gs_connected;
+  std::optional<std::filesystem::path> normalized_disk_path = std::move(common.normalized_disk_path);
 
-  const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
-  const bool has_key = req.has_key() && !req.key().empty();
-  if (has_key) {
-    record_materialize_into_target(
-        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "key-based requests not supported for MaterializeIntoMappedTarget"};
-  }
-  if (!has_artifact_id) {
-    record_materialize_into_target(
-        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required for MaterializeIntoMappedTarget"};
-  }
-
-  std::string resolved_artifact_id = req.artifact_id();
-  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
-  if (!binding_or.ok()) {
-    record_materialize_into_target(
-        "error", "binding_error", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return to_grpc_status(binding_or.status());
-  }
-  if (binding_or->has_value()) {
-    resolved_artifact_id = binding_or->value();
-  }
-  const bool gs_connected = d_.global_store_client && d_.global_store_client->is_connected();
-  std::optional<std::filesystem::path> normalized_disk_path = resolve_managed_disk_path(
-      d_.global_store_client.get(), storage_path_, resolved_artifact_id, effective_policy.allow_disk);
-  if (!normalized_disk_path.has_value() && !gs_connected && effective_policy.allow_disk) {
-    auto entry = d_.disk_imports.lookup_import(resolved_artifact_id);
-    if (entry.has_value()) {
-      normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
-    }
-  }
-  if (!req.has_target_layout()) {
-    record_materialize_into_target(
-        "error", "layout_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "target_layout is required"};
-  }
-  if (req.device_uuid().empty()) {
-    record_materialize_into_target(
-        "error", "device_uuid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "device_uuid is required"};
-  }
-  if (req.pid() <= 0) {
-    record_materialize_into_target(
-        "error", "owner_pid_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "pid is required for MaterializeIntoMappedTarget"};
-  }
   if (!req.has_copy_plan() || req.copy_plan().entries_size() == 0) {
     record_materialize_into_target(
         "error", "mapping_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
