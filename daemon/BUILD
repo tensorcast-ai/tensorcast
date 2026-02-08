@@ -820,7 +820,6 @@ sc_cc_library(
     hdrs = ["service/controllers/materialization_controller.h"],
     deps = [
         ":daemon_options_hdr",
-        ":deadline_utils_hdr",
         ":device_resolver_hdr",
         ":grpc_peer_utils_lib",
         ":handle_lease_registry_lib",
@@ -836,6 +835,7 @@ sc_cc_library(
         ":materialization_target_plan_utils_lib",
         ":materialization_target_storage_utils_lib",
         ":ref_tracker_hdr",
+        ":replica_lifecycle_service_lib",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":sessions_service_hdr",
@@ -857,6 +857,23 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@opentelemetry-cpp//api:api",
         "@protobuf",
+    ],
+)
+
+sc_cc_library(
+    name = "replica_lifecycle_service_lib",
+    srcs = ["service/controllers/replica_lifecycle_service.cc"],
+    hdrs = ["service/controllers/replica_lifecycle_service.h"],
+    deps = [
+        ":deadline_utils_hdr",
+        ":device_resolver_hdr",
+        ":ref_tracker_hdr",
+        ":rpc_context_hdr",
+        ":session_lifecycle_lib",
+        ":sessions_service_hdr",
+        ":status_utils",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
     ],
 )
 
@@ -1382,6 +1399,19 @@ cc_test(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "grpc_service_impl_replica_lifecycle_test",
+    srcs = ["service/grpc_service_impl_replica_lifecycle_test.cc"],
+    deps = [
+        ":daemon_service_harness_lib",
+        ":grpc_service_impl",
+        "//core/common:ready_signal_lib",
+        "//core/store:store_engine",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@catch2//:catch2_main",
     ],
 )
 

@@ -15,6 +15,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/replica_lifecycle_service.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
@@ -129,6 +130,7 @@ class MaterializationController {
   std::filesystem::path storage_path_;
 
   std::shared_ptr<SealOperationTracker> seal_operation_tracker_;
+  ReplicaLifecycleService replica_lifecycle_service_;
 
   common::CapabilityTokenManager* capability_tokens_{nullptr};
   TargetWriteRegistry target_write_registry_;
