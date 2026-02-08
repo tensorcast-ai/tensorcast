@@ -3,6 +3,7 @@
 #include "daemon/service/controllers/materialization_controller.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -95,8 +96,8 @@ using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
+using materialization_replica_handle::attach_cuda_lease_for_replica_key;
 using materialization_replica_handle::bind_replica_handle_for_response;
-using materialization_replica_handle::build_export_chunks_for_replica;
 using materialization_replica_handle::register_session_and_refs;
 using materialization_target_plan::build_mapped_target_materialization_plan;
 using materialization_target_plan::build_target_materialization_plan;
@@ -479,6 +480,157 @@ void record_lease_create_failed() {
   }
 }
 
+struct LeaseContext {
+  bool loopback_peer{false};
+  bool no_lease{false};
+  int32_t effective_pid{0};
+};
+
+absl::StatusOr<ResolvedSourcePolicy> resolve_and_validate_effective_policy(
+    const v2::SourcePolicy* source_policy,
+    v2::SourcePreference preference) {
+  ResolvedSourcePolicy effective_policy = resolve_source_policy(source_policy, preference);
+  const absl::Status policy_status = validate_source_policy(effective_policy);
+  if (!policy_status.ok()) {
+    return policy_status;
+  }
+  return effective_policy;
+}
+
+absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
+    std::string_view peer,
+    v2::LeaseMode lease_mode,
+    bool wait_for_completion,
+    int32_t request_pid,
+    bool cpu_target,
+    bool cpu_shared_memory_enabled,
+    bool handle_leases_available) {
+  LeaseContext lease_context;
+  lease_context.loopback_peer = is_loopback_grpc_peer(peer);
+  lease_context.no_lease = lease_mode == v2::LeaseMode::LEASE_MODE_NO_LEASE;
+  lease_context.effective_pid = (lease_context.loopback_peer && !lease_context.no_lease) ? request_pid : 0;
+
+  if (wait_for_completion && !lease_context.loopback_peer) {
+    return absl::PermissionDeniedError("wait_for_completion materialization is local-only (loopback/UDS)");
+  }
+  if (lease_context.no_lease && wait_for_completion) {
+    return absl::InvalidArgumentError("lease_mode=NO_LEASE requires wait_for_completion=false");
+  }
+  if (!cpu_target) {
+    return lease_context;
+  }
+  if (!lease_context.loopback_peer) {
+    return absl::PermissionDeniedError("CPU shared-memory materialization is local-only");
+  }
+  if (lease_context.effective_pid <= 0) {
+    return absl::InvalidArgumentError("pid is required for CPU handle leases");
+  }
+  if (!cpu_shared_memory_enabled) {
+    return absl::FailedPreconditionError("cpu_shared_memory is disabled");
+  }
+  if (!handle_leases_available) {
+    return absl::FailedPreconditionError("local handle plane is disabled (no handle leases)");
+  }
+  return lease_context;
+}
+
+struct ArtifactResolution {
+  std::string resolved_artifact_id;
+  std::optional<std::string> fallback_artifact_id;
+  std::optional<std::string> bound_artifact_id;
+  bool gs_connected{false};
+  std::optional<std::filesystem::path> normalized_disk_path;
+  std::optional<LocalDiskImportCatalog::Entry> local_import;
+  std::optional<store::loading::DiskSource> disk_source;
+};
+
+absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
+    const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
+    LocalDiskImportCatalog* disk_imports,
+    const std::filesystem::path& storage_path,
+    std::string artifact_id,
+    bool allow_disk,
+    bool allow_local_import_fallback,
+    bool loopback_peer,
+    std::optional<uint64_t> disk_expected_size = std::nullopt) {
+  ArtifactResolution resolution;
+  resolution.resolved_artifact_id = std::move(artifact_id);
+
+  auto binding_or = resolve_artifact_binding(global_store_client, resolution.resolved_artifact_id);
+  if (!binding_or.ok()) {
+    return binding_or.status();
+  }
+  if (binding_or->has_value()) {
+    resolution.fallback_artifact_id = resolution.resolved_artifact_id;
+    resolution.bound_artifact_id = binding_or->value();
+    resolution.resolved_artifact_id = binding_or->value();
+  }
+
+  resolution.gs_connected = global_store_client && global_store_client->is_connected();
+  resolution.normalized_disk_path =
+      resolve_managed_disk_path(global_store_client.get(), storage_path, resolution.resolved_artifact_id, allow_disk);
+  if (!resolution.normalized_disk_path.has_value() && !resolution.gs_connected && allow_disk &&
+      allow_local_import_fallback && disk_imports != nullptr) {
+    auto entry = disk_imports->lookup_import(resolution.resolved_artifact_id);
+    if (entry.has_value()) {
+      if (!loopback_peer) {
+        return absl::PermissionDeniedError("standalone disk materialization is local-only (loopback/UDS)");
+      }
+      resolution.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
+      resolution.local_import = std::move(entry);
+    }
+  }
+  if (resolution.normalized_disk_path.has_value()) {
+    resolution.disk_source = store::loading::DiskSource{
+        .path = *resolution.normalized_disk_path,
+        .expected_size = disk_expected_size,
+        .require_descriptor = true,
+    };
+  }
+  return resolution;
+}
+
+using MaterializeAttemptFn =
+    std::function<absl::StatusOr<store::loading::ReplicaHandle>(const std::optional<store::loading::DiskSource>&)>;
+using PrepareRetryDiskSourceFn =
+    std::function<absl::StatusOr<std::optional<store::loading::DiskSource>>(const std::filesystem::path&)>;
+
+absl::StatusOr<store::loading::ReplicaHandle> materialize_with_shared_disk_retry(
+    const absl::Status& initial_status,
+    store::components::IGlobalStoreClient* global_store_client,
+    const std::filesystem::path& storage_path,
+    std::string_view resolved_artifact_id,
+    int wait_for_shared_disk_ms,
+    bool allow_disk,
+    const grpc::ServerContext& server_context,
+    std::optional<std::filesystem::path>& normalized_disk_path,
+    const MaterializeAttemptFn& materialize_retry_once,
+    const PrepareRetryDiskSourceFn& prepare_retry_disk_source) {
+  if (wait_for_shared_disk_ms <= 0 || !allow_disk) {
+    return initial_status;
+  }
+
+  auto wait_or = wait_for_local_managed_disk_path(
+      global_store_client,
+      storage_path,
+      resolved_artifact_id,
+      std::chrono::milliseconds(wait_for_shared_disk_ms),
+      server_context);
+  if (!wait_or.ok()) {
+    if (absl::IsUnavailable(wait_or.status())) {
+      return initial_status;
+    }
+    return wait_or.status();
+  }
+
+  normalized_disk_path = std::move(*wait_or);
+  auto retry_disk_source_or = prepare_retry_disk_source(*normalized_disk_path);
+  if (!retry_disk_source_or.ok()) {
+    return retry_disk_source_or.status();
+  }
+  return materialize_retry_once(*retry_disk_source_or);
+}
+
 void record_materialize_into_target_verification_enabled() {
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
@@ -576,8 +728,13 @@ grpc::Status MaterializationController::materialize_replica(
     const v2::MaterializeReplicaRequest& req,
     v2::MaterializeReplicaResponse& resp) {
   auto& span = rctx.span();
-  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  ResolvedSourcePolicy effective_policy = policy;
+  auto policy_or =
+      resolve_and_validate_effective_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  if (!policy_or.ok()) {
+    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_or.status());
+  }
+  ResolvedSourcePolicy effective_policy = *policy_or;
   const bool prefer_disk = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK;
   const bool prefer_p2p = effective_policy.preference == v2::SourcePreference::SOURCE_PREFERENCE_PREFER_P2P;
   bool verify_checksums = true;
@@ -598,12 +755,6 @@ grpc::Status MaterializationController::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  absl::Status policy_status = validate_source_policy(effective_policy);
-  if (!policy_status.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(policy_status);
-  }
-
   const bool request_has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
   if (!request_has_artifact) {
     return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
@@ -611,70 +762,51 @@ grpc::Status MaterializationController::materialize_replica(
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
   const bool cpu_target = dev.type == DeviceType::CPU;
-  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  const bool no_lease = req.lease_mode() == v2::LeaseMode::LEASE_MODE_NO_LEASE;
-  const int32_t effective_pid = (loopback_peer && !no_lease) ? req.pid() : 0;
-  if (req.wait_for_completion() && !loopback_peer) {
+  auto lease_context_or = validate_and_compute_lease_context(
+      rctx.server_context().peer(),
+      req.lease_mode(),
+      req.wait_for_completion(),
+      req.pid(),
+      cpu_target,
+      d_.cpu_shared_memory_enabled,
+      d_.handle_leases != nullptr);
+  if (!lease_context_or.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
-  }
-  if (no_lease && req.wait_for_completion()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return {StatusCode::INVALID_ARGUMENT, "lease_mode=NO_LEASE requires wait_for_completion=false"};
-  }
-  if (cpu_target) {
-    if (!loopback_peer) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::PERMISSION_DENIED, "CPU shared-memory materialization is local-only"};
-    }
-    if (effective_pid <= 0) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::INVALID_ARGUMENT, "pid is required for CPU handle leases"};
-    }
-    if (!d_.cpu_shared_memory_enabled) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "cpu_shared_memory is disabled"};
-    }
-    if (d_.handle_leases == nullptr) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
-    }
+    return to_grpc_status(lease_context_or.status());
   }
 
-  std::string resolved_artifact_id = req.artifact_id();
-  std::optional<std::string> bound_artifact_id;
-  std::optional<std::string> fallback_artifact_id;
-  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
-  if (!binding_or.ok()) {
+  const LeaseContext lease_context = *lease_context_or;
+  const bool loopback_peer = lease_context.loopback_peer;
+  const bool no_lease = lease_context.no_lease;
+  const int32_t effective_pid = lease_context.effective_pid;
+
+  auto artifact_resolution_or = resolve_artifact_and_disk_source(
+      d_.global_store_client,
+      &d_.disk_imports,
+      storage_path_,
+      req.artifact_id(),
+      effective_policy.allow_disk,
+      /*allow_local_import_fallback=*/true,
+      loopback_peer);
+  if (!artifact_resolution_or.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(binding_or.status());
+    return to_grpc_status(artifact_resolution_or.status());
   }
-  if (binding_or->has_value()) {
-    fallback_artifact_id = resolved_artifact_id;
-    bound_artifact_id = binding_or->value();
-    resolved_artifact_id = binding_or->value();
-  }
+  auto artifact_resolution = std::move(*artifact_resolution_or);
+  std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
+  std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
+  std::optional<std::string> fallback_artifact_id = std::move(artifact_resolution.fallback_artifact_id);
+  const bool gs_connected = artifact_resolution.gs_connected;
+  std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
+  std::optional<LocalDiskImportCatalog::Entry> local_import = std::move(artifact_resolution.local_import);
+  std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
+
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
   resp.set_artifact_id(resolved_artifact_id);
   if (bound_artifact_id.has_value()) {
     span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
   }
 
-  const bool gs_connected = d_.global_store_client && d_.global_store_client->is_connected();
-  std::optional<std::filesystem::path> normalized_disk_path = resolve_managed_disk_path(
-      d_.global_store_client.get(), storage_path_, resolved_artifact_id, effective_policy.allow_disk);
-  std::optional<LocalDiskImportCatalog::Entry> local_import;
-  if (!normalized_disk_path.has_value() && !gs_connected && effective_policy.allow_disk) {
-    auto entry = d_.disk_imports.lookup_import(resolved_artifact_id);
-    if (entry.has_value()) {
-      if (!loopback_peer) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::PERMISSION_DENIED, "standalone disk materialization is local-only (loopback/UDS)"};
-      }
-      normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
-      local_import = std::move(entry);
-    }
-  }
   if (normalized_disk_path.has_value()) {
     resp.set_disk_path(normalized_disk_path->string());
     if (rctx.allow_high_card_attrs()) {
@@ -764,7 +896,6 @@ grpc::Status MaterializationController::materialize_replica(
     }
   }
 
-  std::optional<store::loading::DiskSource> disk_source;
   if (normalized_disk_path.has_value()) {
     std::optional<uint64_t> expected_size;
     if (disk_metadata.has_value() && disk_metadata->logical_total_size.has_value()) {
@@ -938,24 +1069,18 @@ grpc::Status MaterializationController::materialize_replica(
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      bool lease_created = false;
-      if (d_.handle_leases != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
-        auto token_or = d_.handle_leases->mint_cuda_ipc_lease(*lip_replica_key, effective_pid);
-        if (token_or.ok()) {
-          resp.mutable_mem_handle()->set_lease_token(*token_or);
-          lease_created = true;
-        } else {
-          LOG(WARNING) << "mint_cuda_ipc_lease failed (LIP path): key=" << *lip_replica_key << " pid=" << effective_pid
-                       << ": " << token_or.status();
-          record_lease_create_failed();
-        }
-      }
-      if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
-        auto lid_or = d_.lifecycle->create_use_lease(*lip_replica_key, effective_pid);
-        if (!lid_or.ok()) {
-          LOG(WARNING) << "create_use_lease failed (LIP path): key=" << *lip_replica_key << " pid=" << effective_pid
-                       << ": " << lid_or.status();
-          record_lease_create_failed();
+      if (lip_replica_key.has_value()) {
+        auto lease_status = attach_cuda_lease_for_replica_key(
+            *lip_replica_key,
+            effective_pid,
+            d_.handle_leases,
+            d_.lifecycle,
+            "LIP path",
+            [&]() { record_lease_create_failed(); },
+            *resp.mutable_mem_handle());
+        if (!lease_status.ok()) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return to_grpc_status(lease_status);
         }
       }
       return finalize_response();
@@ -1042,108 +1167,85 @@ grpc::Status MaterializationController::materialize_replica(
       }
     }
   }
-  if (!result.ok() && req.wait_for_shared_disk_ms() > 0 && effective_policy.allow_disk) {
-    auto wait_or = wait_for_local_managed_disk_path(
+  if (!result.ok()) {
+    auto retry_or = materialize_with_shared_disk_retry(
+        result.status(),
         d_.global_store_client.get(),
         storage_path_,
         resolved_artifact_id,
-        std::chrono::milliseconds(req.wait_for_shared_disk_ms()),
-        rctx.server_context());
-    if (wait_or.ok()) {
-      normalized_disk_path = std::move(*wait_or);
+        static_cast<int>(req.wait_for_shared_disk_ms()),
+        effective_policy.allow_disk,
+        rctx.server_context(),
+        normalized_disk_path,
+        [&](const std::optional<store::loading::DiskSource>& retry_disk_source) {
+          return d_.engine.materialize_replica(
+              dev, store::StoreEngine::MaterializeMode::AUTO, hints, retry_disk_source);
+        },
+        [&](const std::filesystem::path& ready_disk_path) -> absl::StatusOr<std::optional<store::loading::DiskSource>> {
+          auto descriptor_or = load_descriptor_metadata(ready_disk_path);
+          if (!descriptor_or.ok()) {
+            return descriptor_or.status();
+          }
+          descriptor_meta = *descriptor_or;
+
+          auto index_or = store::loader::read_from_artifact_dir(ready_disk_path, dev.ordinal);
+          if (!index_or.ok()) {
+            return index_or.status();
+          }
+          if (!descriptor_meta.found) {
+            return absl::FailedPreconditionError("artifact_descriptor.json required for managed shared-disk loads");
+          }
+          auto validation_status =
+              validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
+          if (!validation_status.ok()) {
+            return validation_status;
+          }
+          if (descriptor_meta.artifact_id.has_value() && resolved_artifact_id != *descriptor_meta.artifact_id) {
+            return absl::FailedPreconditionError("artifact_id mismatch between request and artifact_descriptor.json");
+          }
+
+          disk_index = std::move(*index_or);
+          store::loading::DiskMetadata metadata;
+          metadata.descriptor_present = descriptor_meta.found;
+          metadata.schema_version = descriptor_meta.schema_version;
+          metadata.index_multihash = descriptor_meta.index_multihash;
+          metadata.data_multihash = descriptor_meta.data_multihash;
+          metadata.canonical_index_json = disk_index->canonical_index_json;
+          if (disk_index->source_index_json.has_value()) {
+            metadata.source_index_json = disk_index->source_index_json;
+          }
+          if (!disk_index->index_multihash.empty()) {
+            metadata.index_multihash = disk_index->index_multihash;
+          }
+          if (disk_index->total_size_bytes > 0) {
+            metadata.logical_total_size = disk_index->total_size_bytes;
+          }
+          if (disk_index->source_total_size_bytes > 0) {
+            metadata.source_total_size_bytes = disk_index->source_total_size_bytes;
+          }
+          metadata.is_safetensors = disk_index->is_safetensors;
+
+          hints.disk_metadata = std::move(metadata);
+          hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+          hints.allow_p2p = false;
+          hints.allow_disk = true;
+
+          std::optional<uint64_t> expected_size;
+          if (hints.disk_metadata.has_value() && hints.disk_metadata->logical_total_size.has_value()) {
+            expected_size = hints.disk_metadata->logical_total_size;
+          }
+          disk_source_artifact_id = resolved_artifact_id;
+          return store::loading::DiskSource{
+              .path = ready_disk_path,
+              .expected_size = expected_size,
+              .require_descriptor = true,
+          };
+        });
+    result = std::move(retry_or);
+    if (normalized_disk_path.has_value()) {
       resp.set_disk_path(normalized_disk_path->string());
       if (rctx.allow_high_card_attrs()) {
         span->SetAttribute("tc.disk.path", normalized_disk_path->string());
-      }
-
-      // Validate descriptor/index for the managed disk directory and pass metadata to the engine.
-      auto descriptor_or = load_descriptor_metadata(*normalized_disk_path);
-      if (!descriptor_or.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(descriptor_or.status());
-      }
-      descriptor_meta = *descriptor_or;
-
-      auto index_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
-      if (!index_or.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(index_or.status());
-      }
-      if (!descriptor_meta.found) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::FAILED_PRECONDITION, "artifact_descriptor.json required for managed shared-disk loads"};
-      }
-      auto validation_status = validate_descriptor_against_index(descriptor_meta, *index_or, /*verify_checksums=*/true);
-      if (!validation_status.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(validation_status);
-      }
-      disk_index = std::move(*index_or);
-
-      if (descriptor_meta.artifact_id.has_value() && resolved_artifact_id != *descriptor_meta.artifact_id) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::FAILED_PRECONDITION, "artifact_id mismatch between request and artifact_descriptor.json"};
-      }
-
-      store::loading::DiskMetadata metadata;
-      metadata.descriptor_present = descriptor_meta.found;
-      metadata.schema_version = descriptor_meta.schema_version;
-      metadata.index_multihash = descriptor_meta.index_multihash;
-      metadata.data_multihash = descriptor_meta.data_multihash;
-      metadata.canonical_index_json = disk_index->canonical_index_json;
-      if (disk_index->source_index_json.has_value()) {
-        metadata.source_index_json = disk_index->source_index_json;
-      }
-      if (!disk_index->index_multihash.empty()) {
-        metadata.index_multihash = disk_index->index_multihash;
-      }
-      if (disk_index->total_size_bytes > 0) {
-        metadata.logical_total_size = disk_index->total_size_bytes;
-      }
-      if (disk_index->source_total_size_bytes > 0) {
-        metadata.source_total_size_bytes = disk_index->source_total_size_bytes;
-      }
-      metadata.is_safetensors = disk_index->is_safetensors;
-
-      // Disk-only retry: prefer disk and disallow P2P.
-      hints.disk_metadata = std::move(metadata);
-      hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
-      hints.allow_p2p = false;
-      hints.allow_disk = true;
-
-      std::optional<uint64_t> expected_size;
-      if (hints.disk_metadata.has_value() && hints.disk_metadata->logical_total_size.has_value()) {
-        expected_size = hints.disk_metadata->logical_total_size;
-      }
-      disk_source = store::loading::DiskSource{
-          .path = *normalized_disk_path,
-          .expected_size = expected_size,
-          .require_descriptor = true,
-      };
-      disk_source_artifact_id = resolved_artifact_id;
-
-      auto retry_or = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
-      if (!retry_or.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(retry_or.status());
-      }
-      result = std::move(retry_or);
-    } else {
-      if (absl::IsDeadlineExceeded(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::DEADLINE_EXCEEDED, std::string(wait_or.status().message())};
-      }
-      if (absl::IsCancelled(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::CANCELLED, std::string(wait_or.status().message())};
-      }
-      if (absl::IsFailedPrecondition(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(wait_or.status());
-      }
-      if (!absl::IsUnavailable(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(wait_or.status());
       }
     }
   }
@@ -1228,54 +1330,42 @@ grpc::Status MaterializationController::materialize_by_key(
       ? v2::DeviceType::DEVICE_TYPE_CPU
       : v2::DeviceType::DEVICE_TYPE_GPU;
   const bool cpu_target = requested_type == v2::DeviceType::DEVICE_TYPE_CPU;
-  const bool loopback_peer = is_loopback_grpc_peer(rctx.server_context().peer());
-  const bool no_lease = req.lease_mode() == v2::LeaseMode::LEASE_MODE_NO_LEASE;
-  const int32_t effective_pid = (loopback_peer && !no_lease) ? req.pid() : 0;
-  if (req.wait_for_completion() && !loopback_peer) {
-    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return {StatusCode::PERMISSION_DENIED, "wait_for_completion materialization is local-only (loopback/UDS)"};
-  }
-  if (no_lease && req.wait_for_completion()) {
-    resp.set_status(v2::MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return {StatusCode::INVALID_ARGUMENT, "lease_mode=NO_LEASE requires wait_for_completion=false"};
-  }
   span->SetAttribute("tc.device.type", static_cast<int64_t>(requested_type));
-  const auto policy = resolve_source_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  ResolvedSourcePolicy effective_policy = policy;
+  using v2::MaterializeReplicaStatus;
+  auto lease_context_or = validate_and_compute_lease_context(
+      rctx.server_context().peer(),
+      req.lease_mode(),
+      req.wait_for_completion(),
+      req.pid(),
+      cpu_target,
+      d_.cpu_shared_memory_enabled,
+      d_.handle_leases != nullptr);
+  if (!lease_context_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(lease_context_or.status());
+  }
+  const LeaseContext lease_context = *lease_context_or;
+  const bool loopback_peer = lease_context.loopback_peer;
+  const bool no_lease = lease_context.no_lease;
+  const int32_t effective_pid = lease_context.effective_pid;
+
+  auto policy_or =
+      resolve_and_validate_effective_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
+  if (!policy_or.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(policy_or.status());
+  }
+  ResolvedSourcePolicy effective_policy = *policy_or;
   span->SetAttribute("tc.store.preference", static_cast<int64_t>(effective_policy.preference));
   span->SetAttribute("tc.store.allow_p2p", effective_policy.allow_p2p);
   span->SetAttribute("tc.store.allow_disk", effective_policy.allow_disk);
 
-  using v2::MaterializeReplicaStatus;
   if (d_.shutdown_signal.is_shutting_down()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
-  absl::Status policy_status = validate_source_policy(effective_policy);
-  if (!policy_status.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(policy_status);
-  }
   if (req.key().empty()) {
     return {StatusCode::INVALID_ARGUMENT, "key is required"};
-  }
-  if (cpu_target) {
-    if (!loopback_peer) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::PERMISSION_DENIED, "CPU shared-memory materialization is local-only"};
-    }
-    if (effective_pid <= 0) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::INVALID_ARGUMENT, "pid is required for CPU handle leases"};
-    }
-    if (!d_.cpu_shared_memory_enabled) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "cpu_shared_memory is disabled"};
-    }
-    if (d_.handle_leases == nullptr) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "local handle plane is disabled (no handle leases)"};
-    }
   }
 
   auto finalize_response = [&]() -> grpc::Status {
@@ -1311,32 +1401,28 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(mapping_or.status());
   }
   const auto& mapping = *mapping_or;
-  std::string resolved_artifact_id = mapping.artifact_id;
-  auto binding_or = resolve_artifact_binding(d_.global_store_client, resolved_artifact_id);
-  if (!binding_or.ok()) {
+  auto artifact_resolution_or = resolve_artifact_and_disk_source(
+      d_.global_store_client,
+      /*disk_imports=*/nullptr,
+      storage_path_,
+      mapping.artifact_id,
+      effective_policy.allow_disk,
+      /*allow_local_import_fallback=*/false,
+      loopback_peer);
+  if (!artifact_resolution_or.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(binding_or.status());
+    return to_grpc_status(artifact_resolution_or.status());
   }
-  if (binding_or->has_value()) {
-    const auto& bound = binding_or->value();
-    span->SetAttribute("tc.artifact.bound", bound);
-    resolved_artifact_id = bound;
+  auto artifact_resolution = std::move(*artifact_resolution_or);
+  std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
+  std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
+  if (bound_artifact_id.has_value()) {
+    span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
   }
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
-  std::string used_disk_path;
-  std::optional<std::filesystem::path> normalized_disk_path = resolve_managed_disk_path(
-      d_.global_store_client.get(), storage_path_, resolved_artifact_id, effective_policy.allow_disk);
-  if (normalized_disk_path.has_value()) {
-    used_disk_path = normalized_disk_path->string();
-  }
-  std::optional<store::loading::DiskSource> disk_source;
-  if (normalized_disk_path.has_value()) {
-    disk_source = store::loading::DiskSource{
-        .path = *normalized_disk_path,
-        .expected_size = std::nullopt,
-        .require_descriptor = true,
-    };
-  }
+  std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
+  std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
+  std::string used_disk_path = normalized_disk_path.has_value() ? normalized_disk_path->string() : std::string();
 
   // Try LIP fast path first (GPU only)
   std::optional<store::loading::ReplicaKey> lip_replica_key;
@@ -1360,33 +1446,28 @@ grpc::Status MaterializationController::materialize_by_key(
       // Only propagate errors that indicate a broader failure.
       // For simple parity, we treat FailedPrecondition as a miss and continue.
       if (!absl::IsFailedPrecondition(satisfied.status())) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
         return to_grpc_status(satisfied.status());
       }
     }
-    if (*satisfied) {
+    if (satisfied.ok() && *satisfied) {
       resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
       resp.set_artifact_id(mapping.artifact_id);
       resp.set_used_disk_path(used_disk_path);
       resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
       span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      bool lease_created = false;
-      if (d_.handle_leases != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
-        auto token_or = d_.handle_leases->mint_cuda_ipc_lease(*lip_replica_key, effective_pid);
-        if (token_or.ok()) {
-          resp.mutable_mem_handle()->set_lease_token(*token_or);
-          lease_created = true;
-        } else {
-          LOG(WARNING) << "mint_cuda_ipc_lease failed (LIP by-key): key=" << *lip_replica_key
-                       << " pid=" << effective_pid << ": " << token_or.status();
-          record_lease_create_failed();
-        }
-      }
-      if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0 && lip_replica_key.has_value()) {
-        auto lid_or = d_.lifecycle->create_use_lease(*lip_replica_key, effective_pid);
-        if (!lid_or.ok()) {
-          LOG(WARNING) << "create_use_lease failed (LIP by-key): key=" << *lip_replica_key << " pid=" << effective_pid
-                       << ": " << lid_or.status();
-          record_lease_create_failed();
+      if (lip_replica_key.has_value()) {
+        auto lease_status = attach_cuda_lease_for_replica_key(
+            *lip_replica_key,
+            effective_pid,
+            d_.handle_leases,
+            d_.lifecycle,
+            "LIP by-key",
+            [&]() { record_lease_create_failed(); },
+            *resp.mutable_mem_handle());
+        if (!lease_status.ok()) {
+          resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+          return to_grpc_status(lease_status);
         }
       }
       return finalize_response();
@@ -1414,51 +1495,33 @@ grpc::Status MaterializationController::materialize_by_key(
   hints.allow_disk = effective_policy.allow_disk;
 
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
-  if (!result.ok() && req.wait_for_shared_disk_ms() > 0 && effective_policy.allow_disk) {
-    auto wait_or = wait_for_local_managed_disk_path(
+  if (!result.ok()) {
+    auto retry_or = materialize_with_shared_disk_retry(
+        result.status(),
         d_.global_store_client.get(),
         storage_path_,
         resolved_artifact_id,
-        std::chrono::milliseconds(req.wait_for_shared_disk_ms()),
-        rctx.server_context());
-    if (wait_or.ok()) {
-      normalized_disk_path = std::move(*wait_or);
+        static_cast<int>(req.wait_for_shared_disk_ms()),
+        effective_policy.allow_disk,
+        rctx.server_context(),
+        normalized_disk_path,
+        [&](const std::optional<store::loading::DiskSource>& retry_disk_source) {
+          return d_.engine.materialize_replica(
+              dev, store::StoreEngine::MaterializeMode::AUTO, hints, retry_disk_source);
+        },
+        [&](const std::filesystem::path& ready_disk_path) -> absl::StatusOr<std::optional<store::loading::DiskSource>> {
+          hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+          hints.allow_p2p = false;
+          hints.allow_disk = true;
+          return store::loading::DiskSource{
+              .path = ready_disk_path,
+              .expected_size = std::nullopt,
+              .require_descriptor = true,
+          };
+        });
+    result = std::move(retry_or);
+    if (normalized_disk_path.has_value()) {
       used_disk_path = normalized_disk_path->string();
-
-      // Disk-only retry: prefer disk and disallow P2P.
-      hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
-      hints.allow_p2p = false;
-      hints.allow_disk = true;
-
-      disk_source = store::loading::DiskSource{
-          .path = *normalized_disk_path,
-          .expected_size = std::nullopt,
-          .require_descriptor = true,
-      };
-
-      auto retry_or = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
-      if (!retry_or.ok()) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(retry_or.status());
-      }
-      result = std::move(retry_or);
-    } else {
-      if (absl::IsDeadlineExceeded(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::DEADLINE_EXCEEDED, std::string(wait_or.status().message())};
-      }
-      if (absl::IsCancelled(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return {StatusCode::CANCELLED, std::string(wait_or.status().message())};
-      }
-      if (absl::IsFailedPrecondition(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(wait_or.status());
-      }
-      if (!absl::IsUnavailable(wait_or.status())) {
-        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-        return to_grpc_status(wait_or.status());
-      }
     }
   }
   if (!result.ok()) {
@@ -1466,80 +1529,23 @@ grpc::Status MaterializationController::materialize_by_key(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
-  {
-    const absl::Status session_status = register_session_and_refs(
-        d_.sessions,
-        d_.refs,
-        handle.replica_key,
-        handle.ready_signal,
-        req.replica_uuid(),
-        effective_pid,
-        loopback_peer);
-    if (!session_status.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(session_status);
-    }
-  }
-  if (cpu_target) {
-    if (!handle.cpu_memfd_region.has_value()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return {StatusCode::FAILED_PRECONDITION, "CPU memfd handle unavailable for replica"};
-    }
-    const auto& region = *handle.cpu_memfd_region;
-    auto chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key);
-    if (!chunks_or.ok()) {
-      chunks_or = build_export_chunks_for_replica(d_.engine, handle.replica_key, region.size_bytes);
-    }
-    if (!chunks_or.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(chunks_or.status());
-    }
-    HandleLeaseRegistry::CpuMemfdDescriptor memfd_desc{
-        .fd = region.fd,
-        .size_bytes = region.size_bytes,
-        .offset_bytes = region.offset_bytes,
-    };
-    auto token_or = d_.handle_leases->mint_cpu_memfd_lease(handle.replica_key, effective_pid, memfd_desc, *chunks_or);
-    if (!token_or.ok()) {
-      if (!req.replica_uuid().empty()) {
-        (void)d_.sessions.erase(req.replica_uuid());
-      }
-      if (effective_pid > 0) {
-        d_.refs.drop_ref(handle.replica_key, effective_pid);
-      }
-      (void)d_.engine.unload_replica(handle.replica_key);
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(token_or.status());
-    }
-    auto* cpu = resp.mutable_mem_handle()->mutable_cpu_memfd();
-    cpu->set_size_bytes(region.size_bytes);
-    cpu->set_offset_bytes(region.offset_bytes);
-    resp.mutable_mem_handle()->set_lease_token(*token_or);
-  } else {
-    if (handle.cuda_ipc_handle.is_valid()) {
-      auto handle_view = handle.cuda_ipc_handle.as_string_view();
-      resp.mutable_mem_handle()->set_cuda_ipc_handle(handle_view.data(), handle_view.size());
-    }
-    bool lease_created = false;
-    if (d_.handle_leases != nullptr && effective_pid > 0) {
-      auto token_or = d_.handle_leases->mint_cuda_ipc_lease(handle.replica_key, effective_pid);
-      if (token_or.ok()) {
-        resp.mutable_mem_handle()->set_lease_token(*token_or);
-        lease_created = true;
-      } else {
-        LOG(WARNING) << "mint_cuda_ipc_lease failed (engine by-key): key=" << handle.replica_key
-                     << " pid=" << effective_pid << ": " << token_or.status();
-        record_lease_create_failed();
-      }
-    }
-    if (!lease_created && d_.lifecycle != nullptr && effective_pid > 0) {
-      auto lid_or = d_.lifecycle->create_use_lease(handle.replica_key, effective_pid);
-      if (!lid_or.ok()) {
-        LOG(WARNING) << "create_use_lease failed (engine by-key): key=" << handle.replica_key
-                     << " pid=" << effective_pid << ": " << lid_or.status();
-        record_lease_create_failed();
-      }
-    }
+  auto bind_status = bind_replica_handle_for_response(
+      d_.engine,
+      d_.sessions,
+      d_.refs,
+      d_.lifecycle,
+      d_.handle_leases,
+      handle,
+      req.replica_uuid(),
+      effective_pid,
+      loopback_peer,
+      cpu_target,
+      "engine by-key",
+      [&]() { record_lease_create_failed(); },
+      *resp.mutable_mem_handle());
+  if (!bind_status.ok()) {
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+    return to_grpc_status(bind_status);
   }
   resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   resp.set_artifact_id(resolved_artifact_id);
