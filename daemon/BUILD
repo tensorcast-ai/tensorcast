@@ -826,6 +826,7 @@ sc_cc_library(
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
         ":materialization_layout_utils_lib",
+        ":materialization_policy_utils_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
@@ -862,6 +863,20 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_policy_utils_lib",
+    srcs = ["service/controllers/materialization_policy_utils.cc"],
+    hdrs = ["service/controllers/materialization_policy_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store:store_engine",
+        "//core/store/materialization/dataplane:view_planner",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/strings",
+        "@protobuf",
     ],
 )
 
