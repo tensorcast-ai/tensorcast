@@ -14,6 +14,7 @@
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/service/grpc_service_impl.h"
@@ -63,6 +64,7 @@ class DaemonServiceHarness {
       std::unique_ptr<RegistrationController> registration_controller,
       std::unique_ptr<TransportController> transport_controller,
       std::unique_ptr<StatusController> status_controller,
+      std::unique_ptr<ReplicaSessionController> replica_session_controller,
       std::unique_ptr<LeaseController> lease_controller,
       std::unique_ptr<StoreDaemonServiceImpl> service,
       std::unique_ptr<LocalHandleServer> local_handle_server);
@@ -73,6 +75,7 @@ class DaemonServiceHarness {
   std::unique_ptr<RegistrationController> registration_controller_;
   std::unique_ptr<TransportController> transport_controller_;
   std::unique_ptr<StatusController> status_controller_;
+  std::unique_ptr<ReplicaSessionController> replica_session_controller_;
   std::unique_ptr<LeaseController> lease_controller_;
   std::unique_ptr<StoreDaemonServiceImpl> service_;
   std::unique_ptr<LocalHandleServer> local_handle_server_;
