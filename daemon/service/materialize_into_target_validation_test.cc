@@ -470,6 +470,72 @@ TEST_CASE("MaterializeIntoTarget canonical index rejects subset selection", "[da
   REQUIRE(status.error_message() == "index_kind CANONICAL cannot be used with view/subset selection");
 }
 
+TEST_CASE("MaterializeIntoTarget rejects offset referencing unknown storage_id", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-missing");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout references unknown storage_id");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(1);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout storage_offset mismatch");
+}
+
 TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
 

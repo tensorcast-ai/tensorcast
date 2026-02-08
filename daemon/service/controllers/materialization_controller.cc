@@ -971,6 +971,144 @@ bool is_layout_subset_of_canonical_index(
   return false;
 }
 
+struct StorageRange {
+  std::string storage_id;
+  uint64_t base_offset{0};
+  uint64_t length{0};
+};
+
+struct PreparedTargetStorageLayout {
+  std::vector<RegisterStorageMeta> publish_storages;
+  std::vector<LeaseSegMeta> publish_segments;
+  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
+  uint64_t total_storage_bytes{0};
+};
+
+Status build_target_storage_layout(const v2::TargetLayout& layout, PreparedTargetStorageLayout& prepared) {
+  prepared.publish_storages.clear();
+  prepared.publish_segments.clear();
+  prepared.storage_ranges.clear();
+  prepared.total_storage_bytes = 0;
+
+  prepared.publish_storages.reserve(layout.storages_size());
+  prepared.publish_segments.reserve(layout.storages_size());
+  prepared.storage_ranges.reserve(layout.storages_size());
+
+  uint64_t range_cursor = 0;
+  for (const auto& storage : layout.storages()) {
+    if (storage.storage_id().empty()) {
+      record_materialize_into_target(
+          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
+    }
+    if (storage.storage_length() == 0) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
+    }
+    if (prepared.storage_ranges.contains(storage.storage_id())) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
+    }
+
+    StorageRange range;
+    range.storage_id = storage.storage_id();
+    range.base_offset = range_cursor;
+    range.length = storage.storage_length();
+    prepared.storage_ranges.emplace(range.storage_id, range);
+
+    RegisterStorageMeta meta;
+    meta.storage_id = storage.storage_id();
+    meta.device_id = storage.device_id();
+    meta.storage_length = storage.storage_length();
+    if (!storage.vram_region_id().empty()) {
+      meta.region_id = storage.vram_region_id();
+    }
+    if (!storage.cuda_ipc_handle().empty()) {
+      meta.handle_bytes = storage.cuda_ipc_handle();
+    }
+    meta.mapping_base_offset = storage.mapping_base_offset();
+    prepared.publish_storages.push_back(std::move(meta));
+
+    LeaseSegMeta seg;
+    seg.storage_id = storage.storage_id();
+    seg.storage_offset = 0;
+    seg.artifact_offset = range_cursor;
+    seg.length = storage.storage_length();
+    prepared.publish_segments.push_back(std::move(seg));
+
+    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
+      record_materialize_into_target(
+          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
+    }
+    range_cursor += storage.storage_length();
+  }
+  prepared.total_storage_bytes = range_cursor;
+  return Status::OK;
+}
+
+Status validate_storage_span_matches_index(uint64_t total_storage_bytes, uint64_t logical_total_size) {
+  if (total_storage_bytes != logical_total_size) {
+    record_materialize_into_target(
+        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return {StatusCode::INVALID_ARGUMENT, "storage_length must span logical byte space"};
+  }
+  return Status::OK;
+}
+
+Status validate_target_offsets_against_layout(
+    const std::vector<TargetOffsetEntry>& offsets,
+    const CanonicalIndexTable& index_table,
+    const absl::flat_hash_map<std::string, StorageRange>& storage_ranges) {
+  absl::flat_hash_set<std::string> seen_offsets;
+  seen_offsets.reserve(offsets.size());
+  for (const auto& entry : offsets) {
+    if (!seen_offsets.insert(entry.name).second) {
+      record_materialize_into_target(
+          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
+    }
+    auto it = index_table.entries.find(entry.name);
+    if (it == index_table.entries.end()) {
+      record_materialize_into_target(
+          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
+    }
+    const auto range_it = storage_ranges.find(entry.storage_id);
+    if (range_it == storage_ranges.end()) {
+      record_materialize_into_target(
+          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
+    }
+    const auto& range = range_it->second;
+    const auto& index_entry = it->second;
+    if (entry.logical_length != index_entry.logical_length) {
+      record_materialize_into_target(
+          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
+    }
+    if (index_entry.logical_offset < range.base_offset) {
+      record_materialize_into_target(
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout offset out of storage bounds"};
+    }
+    const uint64_t expected_storage_offset = index_entry.logical_offset - range.base_offset;
+    if (entry.storage_offset != expected_storage_offset) {
+      record_materialize_into_target(
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
+    }
+    if (expected_storage_offset + entry.logical_length > range.length) {
+      record_materialize_into_target(
+          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
+    }
+  }
+  return Status::OK;
+}
+
 absl::Status validate_descriptor_against_index(
     const DescriptorMetadata& descriptor,
     const store::loader::IndexInfo& index_info,
@@ -2384,117 +2522,24 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  struct StorageRange {
-    std::string storage_id;
-    uint64_t base_offset{0};
-    uint64_t length{0};
-  };
-
-  std::vector<RegisterStorageMeta> publish_storages;
-  std::vector<LeaseSegMeta> publish_segments;
-  publish_storages.reserve(layout.storages_size());
-  publish_segments.reserve(layout.storages_size());
-
-  absl::flat_hash_map<std::string, StorageRange> storage_ranges;
-  storage_ranges.reserve(layout.storages_size());
-  uint64_t range_cursor = 0;
-  for (const auto& storage : layout.storages()) {
-    if (storage.storage_id().empty()) {
-      record_materialize_into_target(
-          "error", "storage_id_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id is required for each storage entry"};
-    }
-    if (storage.storage_length() == 0) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length must be non-zero"};
-    }
-    if (storage_ranges.contains(storage.storage_id())) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_id must be unique in target_layout"};
-    }
-    StorageRange range;
-    range.storage_id = storage.storage_id();
-    range.base_offset = range_cursor;
-    range.length = storage.storage_length();
-    storage_ranges.emplace(range.storage_id, range);
-    RegisterStorageMeta meta;
-    meta.storage_id = storage.storage_id();
-    meta.device_id = storage.device_id();
-    meta.storage_length = storage.storage_length();
-    if (!storage.vram_region_id().empty()) {
-      meta.region_id = storage.vram_region_id();
-    }
-    if (!storage.cuda_ipc_handle().empty()) {
-      meta.handle_bytes = storage.cuda_ipc_handle();
-    }
-    meta.mapping_base_offset = storage.mapping_base_offset();
-    publish_storages.push_back(std::move(meta));
-
-    LeaseSegMeta seg;
-    seg.storage_id = storage.storage_id();
-    seg.storage_offset = 0;
-    seg.artifact_offset = range_cursor;
-    seg.length = storage.storage_length();
-    publish_segments.push_back(std::move(seg));
-    if (storage.storage_length() > std::numeric_limits<uint64_t>::max() - range_cursor) {
-      record_materialize_into_target(
-          "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "storage_length sum overflow"};
-    }
-    range_cursor += storage.storage_length();
+  PreparedTargetStorageLayout prepared_storage_layout;
+  auto storage_layout_status = build_target_storage_layout(layout, prepared_storage_layout);
+  if (!storage_layout_status.ok()) {
+    return storage_layout_status;
   }
-  if (range_cursor != logical_total_size) {
-    record_materialize_into_target(
-        "error", "storage_length_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return {StatusCode::INVALID_ARGUMENT, "storage_length must span logical byte space"};
+  auto storage_span_status =
+      validate_storage_span_matches_index(prepared_storage_layout.total_storage_bytes, logical_total_size);
+  if (!storage_span_status.ok()) {
+    return storage_span_status;
+  }
+  auto offset_validation_status =
+      validate_target_offsets_against_layout(offsets, index_table, prepared_storage_layout.storage_ranges);
+  if (!offset_validation_status.ok()) {
+    return offset_validation_status;
   }
 
-  absl::flat_hash_set<std::string> seen_offsets;
-  seen_offsets.reserve(offsets.size());
-  for (const auto& entry : offsets) {
-    if (!seen_offsets.insert(entry.name).second) {
-      record_materialize_into_target(
-          "error", "tensor_name_duplicate", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes duplicate tensor name"};
-    }
-    auto it = index_table.entries.find(entry.name);
-    if (it == index_table.entries.end()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout includes unknown tensor name"};
-    }
-    const auto range_it = storage_ranges.find(entry.storage_id);
-    if (range_it == storage_ranges.end()) {
-      record_materialize_into_target(
-          "error", "storage_id_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout references unknown storage_id"};
-    }
-    const auto& range = range_it->second;
-    const auto& index_entry = it->second;
-    if (entry.logical_length != index_entry.logical_length) {
-      record_materialize_into_target(
-          "error", "layout_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout logical_length mismatch"};
-    }
-    if (index_entry.logical_offset < range.base_offset) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout offset out of storage bounds"};
-    }
-    const uint64_t expected_storage_offset = index_entry.logical_offset - range.base_offset;
-    if (entry.storage_offset != expected_storage_offset) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout storage_offset mismatch"};
-    }
-    if (expected_storage_offset + entry.logical_length > range.length) {
-      record_materialize_into_target(
-          "error", "offset_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "target_layout exceeds storage bounds"};
-    }
-  }
+  std::vector<RegisterStorageMeta> publish_storages = std::move(prepared_storage_layout.publish_storages);
+  std::vector<LeaseSegMeta> publish_segments = std::move(prepared_storage_layout.publish_segments);
 
   std::string view_subset_hash;
   if (has_subset) {
