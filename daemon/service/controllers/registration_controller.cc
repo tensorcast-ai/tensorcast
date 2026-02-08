@@ -1213,6 +1213,501 @@ grpc::Status process_feed_requests(
   return Status::OK;
 }
 
+grpc::Status commit_piece_view_registration(
+    RegistrationController::Dep& dep,
+    RpcContext& rctx,
+    const std::string& registration_id,
+    const RegistrationManager::RegMeta& meta,
+    std::vector<LeaseSegMeta> lease_vec,
+    std::vector<RegisterStorageMeta> storage_entries,
+    v2::CommitRegisteredArtifactResponse& resp) {
+  if (!dep.global_store_client || !dep.global_store_client->is_connected()) {
+    return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
+  }
+  if (meta.client_artifact_id.empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
+  }
+  if (meta.view_id.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "piece registration missing view_id"};
+  }
+  if (meta.view_spec_json.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "piece registration missing view_spec_json"};
+  }
+  if (meta.index_data.empty()) {
+    return {StatusCode::FAILED_PRECONDITION, "piece registration missing tensor_index_data"};
+  }
+
+  const auto view_spec_or = store::view::parse_view_spec_json(meta.view_spec_json);
+  if (!view_spec_or.ok()) {
+    return to_grpc_status(view_spec_or.status());
+  }
+  const auto plan_or = store::loader::ViewPlanner::compute_bidirectional_view_plan(meta.index_data, *view_spec_or);
+  if (!plan_or.ok()) {
+    return to_grpc_status(plan_or.status());
+  }
+  const auto& view_plan = *plan_or;
+  const uint64_t view_total = view_plan.forward.view_size_bytes;
+  if (view_total == 0) {
+    return {StatusCode::FAILED_PRECONDITION, "piece registration requires non-empty view_size_bytes"};
+  }
+  if (meta.total_size != 0 && meta.total_size != view_total) {
+    return {
+        StatusCode::FAILED_PRECONDITION,
+        absl::StrCat("piece registration total_size mismatch: requested=", meta.total_size, " computed=", view_total)};
+  }
+
+  // Validate dense segment coverage [0, view_total) so remote keys can be sequenced.
+  {
+    std::vector<LeaseSegMeta> sorted = lease_vec;
+    std::sort(sorted.begin(), sorted.end(), [](const LeaseSegMeta& a, const LeaseSegMeta& b) {
+      return a.artifact_offset < b.artifact_offset;
+    });
+    uint64_t cursor = 0;
+    for (const auto& seg : sorted) {
+      if (seg.length == 0) {
+        continue;
+      }
+      if (seg.artifact_offset != cursor) {
+        return {StatusCode::FAILED_PRECONDITION, "piece LIP segments must densely cover view bytes"};
+      }
+      cursor = seg.artifact_offset + seg.length;
+    }
+    if (cursor != view_total) {
+      return {StatusCode::FAILED_PRECONDITION, "piece LIP segments must densely cover view bytes"};
+    }
+  }
+
+  auto stable_index_or = store::loader::rebuild_stable_canonical_index(meta.index_data, meta.device_id);
+  if (!stable_index_or.ok()) {
+    return to_grpc_status(stable_index_or.status());
+  }
+  const std::string stable_index_json = std::move(*stable_index_or);
+
+  std::string index_key_hex = meta.index_key_hex;
+  if (index_key_hex.empty()) {
+    const auto digest = common::sha256_digest_bytes(
+        absl::Span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
+    index_key_hex.reserve(digest.size() * 2);
+    for (uint8_t byte : digest) {
+      absl::StrAppendFormat(&index_key_hex, "%02x", byte);
+    }
+  }
+  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(stable_index_json), index_key_hex);
+  if (!index_mh_or.ok()) {
+    return to_grpc_status(index_mh_or.status());
+  }
+
+  // Build a seekable view source over the leased view ByteSpace.
+  absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
+  storage_by_id.reserve(storage_entries.size());
+  for (const auto& s : storage_entries) {
+    storage_by_id.emplace(s.storage_id, &s);
+  }
+
+  RegionPinGuard pin_guard(dep.regions);
+  absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
+  mapping_cache.reserve(storage_entries.size());
+
+  std::vector<LipDenseViewSource::Segment> view_segments;
+  view_segments.reserve(lease_vec.size());
+  for (const auto& seg : lease_vec) {
+    auto it = storage_by_id.find(seg.storage_id);
+    if (it == storage_by_id.end()) {
+      return {StatusCode::INVALID_ARGUMENT, "lease segment references unknown storage_id"};
+    }
+    const RegisterStorageMeta* storage = it->second;
+    if (storage->device_id != meta.device_id) {
+      return {StatusCode::FAILED_PRECONDITION, "storage device_id mismatch for piece LIP registration"};
+    }
+    if (seg.length != storage->storage_length) {
+      return {StatusCode::INVALID_ARGUMENT, "segment length does not match storage_length"};
+    }
+    if (seg.storage_offset != 0) {
+      return {StatusCode::INVALID_ARGUMENT, "segment storage_offset must be 0 for full-storage registrations"};
+    }
+    if (seg.artifact_offset > view_total || seg.length > view_total || seg.artifact_offset + seg.length > view_total) {
+      return {StatusCode::OUT_OF_RANGE, "lease segment view range out of bounds"};
+    }
+    auto map_or = get_or_open_mapping_for_storage(*storage, mapping_cache, pin_guard, dep.regions, meta.owner_pid);
+    if (!map_or.ok()) {
+      return to_grpc_status(map_or.status());
+    }
+    LipDenseViewSource::Segment view_segment;
+    view_segment.device_id = storage->device_id;
+    view_segment.mapping = *map_or;
+    view_segment.base_offset = storage->mapping_base_offset + seg.storage_offset;
+    view_segment.view_offset = seg.artifact_offset;
+    view_segment.length = seg.length;
+    view_segments.push_back(view_segment);
+  }
+  LipDenseViewSource view_source(std::move(view_segments), view_total);
+
+  size_t leaf_chunk_bytes = dep.engine.get_artifact_chunk_bytes();
+  if (leaf_chunk_bytes == 0) {
+    leaf_chunk_bytes = static_cast<size_t>(4ULL * 1024 * 1024);
+  }
+
+  auto view_hash_or =
+      store::loader::verification::compute_view_tree_hash_and_leaves(view_source, view_total, leaf_chunk_bytes);
+  if (!view_hash_or.ok()) {
+    return to_grpc_status(view_hash_or.status());
+  }
+  const std::string view_data_hash = view_hash_or->multihash;
+
+  std::vector<tensorcast::global_store::v1::LeafWrite> leaf_writes;
+  leaf_writes.reserve(view_hash_or->leaf_digests.size());
+  for (size_t idx = 0; idx < view_hash_or->leaf_digests.size(); ++idx) {
+    tensorcast::global_store::v1::LeafWrite leaf;
+    auto* hash_space = leaf.mutable_hash_space();
+    hash_space->mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+    hash_space->mutable_byte_space()->set_id(meta.view_id);
+    leaf.set_leaf_idx(static_cast<uint64_t>(idx));
+    const auto& digest = view_hash_or->leaf_digests[idx];
+    leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
+    leaf_writes.push_back(std::move(leaf));
+  }
+
+  const std::vector<store::view::CanonicalRange> canonical_ranges = canonical_ranges_from_write_plan(view_plan.write);
+  uint64_t covered_bytes = 0;
+  for (const auto& range : canonical_ranges) {
+    covered_bytes += range.length;
+  }
+
+  std::vector<tensorcast::global_store::v1::PieceProofDigestWrite> proof_digests;
+  auto intervals_or = parse_tensor_intervals(stable_index_json);
+  if (!intervals_or.ok()) {
+    return to_grpc_status(intervals_or.status());
+  }
+  uint64_t canonical_size_bytes = meta.view_canonical_size_bytes;
+  if (canonical_size_bytes == 0) {
+    for (const auto& interval : *intervals_or) {
+      canonical_size_bytes = std::max(canonical_size_bytes, interval.offset + interval.size_bytes);
+    }
+  }
+  if (canonical_size_bytes > 0 && covered_bytes > canonical_size_bytes) {
+    return {StatusCode::FAILED_PRECONDITION, "canonical_bytes_covered exceeds canonical_size_bytes"};
+  }
+
+  std::unordered_map<std::string, uint64_t> transpose_view_offsets;
+  std::unordered_map<std::string, store::loader::TensorTransformPlan> transpose_inverse_plans;
+  if (view_plan.forward.transform.requires_materialization) {
+    for (const auto& tensor_plan : view_plan.forward.transform.tensors) {
+      transpose_view_offsets.emplace(tensor_plan.tensor_name, tensor_plan.dst_offset);
+    }
+    for (const auto& tensor_plan : view_plan.inverse_transform.tensors) {
+      transpose_inverse_plans.emplace(tensor_plan.tensor_name, tensor_plan);
+    }
+  }
+
+  for (const auto& interval : *intervals_or) {
+    if (interval.size_bytes == 0) {
+      continue;
+    }
+    if (!ranges_cover_interval(canonical_ranges, interval.offset, interval.size_bytes)) {
+      continue;
+    }
+    const auto inverse_it = transpose_inverse_plans.find(interval.tensor_name);
+    if (inverse_it != transpose_inverse_plans.end()) {
+      const auto offset_it = transpose_view_offsets.find(interval.tensor_name);
+      if (offset_it == transpose_view_offsets.end()) {
+        return {StatusCode::FAILED_PRECONDITION, "missing transpose tensor dst_offset for proof digests"};
+      }
+      const uint64_t tensor_view_offset = offset_it->second;
+      if (tensor_view_offset + interval.size_bytes > view_total) {
+        return {StatusCode::OUT_OF_RANGE, "transpose tensor view range exceeds view buffer size"};
+      }
+      if (interval.size_bytes > std::numeric_limits<size_t>::max()) {
+        return {StatusCode::OUT_OF_RANGE, "transpose tensor exceeds host memory limits"};
+      }
+
+      std::vector<uint8_t> view_bytes(static_cast<size_t>(interval.size_bytes));
+      auto read_or = view_source.read_at(tensor_view_offset, view_bytes.data(), view_bytes.size());
+      if (!read_or.ok()) {
+        return to_grpc_status(read_or.status());
+      }
+      if (*read_or != view_bytes.size()) {
+        return {StatusCode::OUT_OF_RANGE, "failed to read full transpose tensor bytes from view source"};
+      }
+
+      std::vector<uint8_t> canonical_bytes = view_bytes;
+      store::loader::ViewWritePlan write_plan;
+      store::loader::ViewWritePlan::Chunk write_chunk;
+      write_chunk.canonical_offset = 0;
+      write_chunk.view_offset = 0;
+      write_chunk.length = interval.size_bytes;
+      write_chunk.segment_aligned = false;
+      write_plan.chunks.push_back(std::move(write_chunk));
+
+      store::loader::TransformPlan inverse_transform;
+      inverse_transform.requires_materialization = true;
+      store::loader::TensorTransformPlan tensor_transform = inverse_it->second;
+      tensor_transform.dst_offset = 0;
+      tensor_transform.canonical_offset = 0;
+      tensor_transform.storage_offset_elements = 0;
+      inverse_transform.tensors.push_back(std::move(tensor_transform));
+
+      store::loader::ViewIngestExecutor executor(
+          std::move(write_plan),
+          std::move(inverse_transform),
+          store::loader::ViewIngestExecutor::IngestTarget::kCanonical);
+      absl::Status ingest_status = executor.ingest_chunk(
+          /*view_offset=*/0,
+          absl::Span<const std::byte>(reinterpret_cast<const std::byte*>(view_bytes.data()), view_bytes.size()),
+          tensorcast::common::memory::MemoryLocation::CPU,
+          canonical_bytes.data(),
+          /*device_id=*/-1);
+      if (!ingest_status.ok()) {
+        return to_grpc_status(ingest_status);
+      }
+      absl::Status finalize_status =
+          executor.finalize(tensorcast::common::memory::MemoryLocation::CPU, canonical_bytes.data(), /*device_id=*/-1);
+      if (!finalize_status.ok()) {
+        return to_grpc_status(finalize_status);
+      }
+
+      const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
+      for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
+        const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
+        const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
+        if (local_end <= local_start) {
+          continue;
+        }
+        if (local_end > std::numeric_limits<size_t>::max()) {
+          return {StatusCode::OUT_OF_RANGE, "proof chunk exceeds host memory limits"};
+        }
+        const size_t chunk_bytes = static_cast<size_t>(local_end - local_start);
+        std::vector<uint8_t> digest =
+            common::sha256_digest_bytes(absl::Span<const uint8_t>(canonical_bytes.data() + local_start, chunk_bytes));
+        if (digest.size() != 32) {
+          return {StatusCode::INTERNAL, "sha256 digest size mismatch"};
+        }
+        tensorcast::global_store::v1::PieceProofDigestWrite proof;
+        proof.set_view_id(meta.view_id);
+        proof.set_tensor_name(interval.tensor_name);
+        proof.set_proof_schema_version(std::string(kProofSchemaV1));
+        proof.set_proof_chunk_idx(proof_chunk_idx);
+        proof.set_digest(digest.data(), static_cast<int>(digest.size()));
+        proof_digests.push_back(std::move(proof));
+      }
+      continue;
+    }
+
+    auto spans_or = canonical_spans_for_tensor(view_plan.write, interval.offset, interval.size_bytes, view_total);
+    if (!spans_or.ok()) {
+      return to_grpc_status(spans_or.status());
+    }
+    std::vector<CanonicalToViewSpan> spans = std::move(*spans_or);
+    size_t span_idx = 0;
+    const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
+    for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
+      const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
+      const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
+      const uint64_t abs_start = interval.offset + local_start;
+      const uint64_t abs_end = interval.offset + local_end;
+      if (abs_end <= abs_start) {
+        continue;
+      }
+      if (abs_end - abs_start > std::numeric_limits<size_t>::max()) {
+        return {StatusCode::OUT_OF_RANGE, "proof chunk exceeds host memory limits"};
+      }
+      std::vector<uint8_t> buffer(static_cast<size_t>(abs_end - abs_start));
+      uint64_t cursor = abs_start;
+      while (cursor < abs_end) {
+        while (span_idx < spans.size() && spans[span_idx].canonical_offset + spans[span_idx].length <= cursor) {
+          ++span_idx;
+        }
+        if (span_idx >= spans.size()) {
+          return {StatusCode::FAILED_PRECONDITION, "missing canonical span while computing proof digests"};
+        }
+        const auto& span = spans[span_idx];
+        if (span.canonical_offset > cursor) {
+          return {StatusCode::FAILED_PRECONDITION, "canonical span gap while computing proof digests"};
+        }
+        const uint64_t take_end = std::min<uint64_t>(abs_end, span.canonical_offset + span.length);
+        const size_t take = static_cast<size_t>(take_end - cursor);
+        const uint64_t src_view_offset = span.view_offset + (cursor - span.canonical_offset);
+        auto dst = absl::MakeSpan(buffer).subspan(static_cast<size_t>(cursor - abs_start), take);
+        auto read_or = view_source.read_at(src_view_offset, dst.data(), dst.size());
+        if (!read_or.ok()) {
+          return to_grpc_status(read_or.status());
+        }
+        if (*read_or != dst.size()) {
+          return {StatusCode::OUT_OF_RANGE, "failed to read full proof span from view source"};
+        }
+        cursor = take_end;
+      }
+      std::vector<uint8_t> digest =
+          common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), buffer.size()));
+      if (digest.size() != 32) {
+        return {StatusCode::INTERNAL, "sha256 digest size mismatch"};
+      }
+      tensorcast::global_store::v1::PieceProofDigestWrite proof;
+      proof.set_view_id(meta.view_id);
+      proof.set_tensor_name(interval.tensor_name);
+      proof.set_proof_schema_version(std::string(kProofSchemaV1));
+      proof.set_proof_chunk_idx(proof_chunk_idx);
+      proof.set_digest(digest.data(), static_cast<int>(digest.size()));
+      proof_digests.push_back(std::move(proof));
+    }
+  }
+
+  struct LipRollback {
+    LipManager* lip{nullptr};
+    std::string registration_id;
+    bool active{true};
+
+    ~LipRollback() {
+      if (!active || lip == nullptr) {
+        return;
+      }
+      absl::Status st = lip->revoke_by_registration_id(registration_id);
+      if (!st.ok()) {
+        LOG(WARNING) << "LipRollback: revoke_by_registration_id failed for id=" << registration_id << ": " << st;
+      }
+    }
+
+    void release() {
+      active = false;
+    }
+  } lip_rollback{.lip = &dep.lip, .registration_id = registration_id};
+
+  auto lease_or = dep.lip.commit_routable_view_lease_in_place(
+      registration_id,
+      meta.client_artifact_id,
+      meta.view_id,
+      meta.device_id,
+      meta.owner_pid,
+      meta.ttl_ms,
+      meta.epoch,
+      view_total,
+      std::move(lease_vec),
+      std::move(storage_entries));
+  if (!lease_or.ok()) {
+    lip_rollback.release();
+    return to_grpc_status(lease_or.status());
+  }
+
+  std::string worker_id = dep.identity->worker_id();
+  if (worker_id.empty()) {
+    worker_id = "local";
+  }
+  const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);
+
+  auto replica_id_or = dep.global_store_client->register_memory_replica(
+      meta.client_artifact_id,
+      worker_id,
+      device,
+      view_total,
+      index_key_hex,
+      lease_or->remote_memory_keys,
+      lease_or->buffer_sizes,
+      stable_index_json,
+      /*encoding=*/"json",
+      /*schema_version=*/"v3",
+      /*max_concurrency=*/1,
+      /*verification_json=*/std::nullopt,
+      std::optional<std::string_view>(meta.view_id));
+  if (!replica_id_or.ok()) {
+    return to_grpc_status(replica_id_or.status());
+  }
+  const std::string replica_id = *replica_id_or;
+  dep.lip.attach_replica_id(registration_id, replica_id);
+
+  struct ReplicaRollback {
+    store::components::IGlobalStoreClient* client{nullptr};
+    std::string artifact_id;
+    std::string replica_id;
+    bool active{true};
+
+    ~ReplicaRollback() {
+      if (!active || client == nullptr || replica_id.empty()) {
+        return;
+      }
+      if (!client->is_connected()) {
+        return;
+      }
+      absl::Status st = client->unregister_replica(artifact_id, replica_id);
+      if (!st.ok()) {
+        LOG(WARNING) << "ReplicaRollback: unregister_replica failed for artifact_id=" << artifact_id
+                     << " replica_id=" << replica_id << ": " << st;
+      }
+    }
+
+    void release() {
+      active = false;
+    }
+  } replica_rollback{
+      .client = dep.global_store_client.get(), .artifact_id = meta.client_artifact_id, .replica_id = replica_id};
+
+  store::components::ViewStateUpdate update;
+  update.artifact_id = meta.client_artifact_id;
+  update.view_id = meta.view_id;
+  update.view_spec_json = meta.view_spec_json;
+  update.view_size_bytes = view_total;
+  update.view_data_hash = view_data_hash;
+  update.mark_verified = true;
+  update.canonical_size_bytes = canonical_size_bytes;
+  update.canonical_bytes_covered = covered_bytes;
+  update.canonical_ranges.reserve(canonical_ranges.size());
+  for (const auto& range : canonical_ranges) {
+    store::components::CanonicalRange canonical_range;
+    canonical_range.offset = range.offset;
+    canonical_range.length = range.length;
+    update.canonical_ranges.push_back(std::move(canonical_range));
+  }
+  update.leaf_writes = std::move(leaf_writes);
+  update.proof_digests = std::move(proof_digests);
+  absl::Status update_status = dep.global_store_client->update_artifact_view_state(update);
+  if (!update_status.ok()) {
+    return to_grpc_status(update_status);
+  }
+
+  // Publish response metadata.
+  auto* desc = resp.mutable_artifact_descriptor();
+  desc->set_artifact_id(meta.client_artifact_id);
+  desc->set_index_multihash(*index_mh_or);
+  desc->set_schema_version("v3");
+  desc->set_encoding("json");
+  desc->set_total_size(view_total);
+  desc->set_id_kind(ToProtoKind(tensorcast::common::ArtifactIdKind::kCgid));
+  resp.set_existed(false);
+  resp.set_view_id(meta.view_id);
+  if (!view_plan.forward.view_index_json.empty()) {
+    resp.set_view_index_json(view_plan.forward.view_index_json);
+  }
+  if (!view_data_hash.empty()) {
+    resp.set_view_data_hash(view_data_hash);
+  }
+  for (const auto& range : canonical_ranges) {
+    auto* response_range = resp.add_canonical_ranges();
+    response_range->set_offset(range.offset);
+    response_range->set_length(range.length);
+  }
+  resp.set_allow_partial(true);
+
+  auto* local_stable = resp.mutable_local_stable_tier();
+  auto local_stable_status = apply_local_stable_tier(
+      dep.engine,
+      dep.lip,
+      dep.regions,
+      meta,
+      meta.client_artifact_id,
+      tensorcast::common::ArtifactIdKind::kCgid,
+      view_total,
+      local_stable,
+      []() {});
+  if (!local_stable_status.ok()) {
+    return to_grpc_status(local_stable_status);
+  }
+
+  lip_rollback.release();
+  replica_rollback.release();
+  EraseRegistrationRegionRefs(dep.reg, dep.regions, registration_id);
+  rctx.mark_success();
+  return Status::OK;
+}
+
 } // namespace
 
 grpc::Status RegistrationController::begin(
@@ -1539,494 +2034,8 @@ grpc::Status RegistrationController::commit(
     }
 
     if (meta.view_registration && meta.view_registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece) {
-      if (!d_.global_store_client || !d_.global_store_client->is_connected()) {
-        return {StatusCode::FAILED_PRECONDITION, "GlobalStoreClient not connected"};
-      }
-      if (meta.client_artifact_id.empty()) {
-        return {StatusCode::INVALID_ARGUMENT, "piece registration requires client_artifact_id (cgid)"};
-      }
-      if (meta.view_id.empty()) {
-        return {StatusCode::FAILED_PRECONDITION, "piece registration missing view_id"};
-      }
-      if (meta.view_spec_json.empty()) {
-        return {StatusCode::FAILED_PRECONDITION, "piece registration missing view_spec_json"};
-      }
-      if (meta.index_data.empty()) {
-        return {StatusCode::FAILED_PRECONDITION, "piece registration missing tensor_index_data"};
-      }
-
-      const auto view_spec_or = store::view::parse_view_spec_json(meta.view_spec_json);
-      if (!view_spec_or.ok()) {
-        return to_grpc_status(view_spec_or.status());
-      }
-      const auto plan_or = store::loader::ViewPlanner::compute_bidirectional_view_plan(meta.index_data, *view_spec_or);
-      if (!plan_or.ok()) {
-        return to_grpc_status(plan_or.status());
-      }
-      const auto& view_plan = *plan_or;
-      const uint64_t view_total = view_plan.forward.view_size_bytes;
-      if (view_total == 0) {
-        return {StatusCode::FAILED_PRECONDITION, "piece registration requires non-empty view_size_bytes"};
-      }
-      if (meta.total_size != 0 && meta.total_size != view_total) {
-        return {
-            StatusCode::FAILED_PRECONDITION,
-            absl::StrCat(
-                "piece registration total_size mismatch: requested=", meta.total_size, " computed=", view_total)};
-      }
-
-      // Validate dense segment coverage [0, view_total) so remote keys can be sequenced.
-      {
-        std::vector<LeaseSegMeta> sorted = lease_vec;
-        std::sort(sorted.begin(), sorted.end(), [](const LeaseSegMeta& a, const LeaseSegMeta& b) {
-          return a.artifact_offset < b.artifact_offset;
-        });
-        uint64_t cursor = 0;
-        for (const auto& seg : sorted) {
-          if (seg.length == 0) {
-            continue;
-          }
-          if (seg.artifact_offset != cursor) {
-            return {StatusCode::FAILED_PRECONDITION, "piece LIP segments must densely cover view bytes"};
-          }
-          cursor = seg.artifact_offset + seg.length;
-        }
-        if (cursor != view_total) {
-          return {StatusCode::FAILED_PRECONDITION, "piece LIP segments must densely cover view bytes"};
-        }
-      }
-
-      absl::StatusOr<std::string> stable_index_or =
-          store::loader::rebuild_stable_canonical_index(meta.index_data, meta.device_id);
-      if (!stable_index_or.ok()) {
-        return to_grpc_status(stable_index_or.status());
-      }
-      const std::string stable_index_json = std::move(*stable_index_or);
-
-      std::string index_key_hex = meta.index_key_hex;
-      if (index_key_hex.empty()) {
-        const auto digest = common::sha256_digest_bytes(
-            absl::Span<const uint8_t>(
-                reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
-        index_key_hex.reserve(digest.size() * 2);
-        for (uint8_t byte : digest) {
-          absl::StrAppendFormat(&index_key_hex, "%02x", byte);
-        }
-      }
-      auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(stable_index_json), index_key_hex);
-      if (!index_mh_or.ok()) {
-        return to_grpc_status(index_mh_or.status());
-      }
-
-      // Build a seekable view source over the leased view ByteSpace.
-      absl::flat_hash_map<std::string, const RegisterStorageMeta*> storage_by_id;
-      storage_by_id.reserve(storage_entries.size());
-      for (const auto& s : storage_entries) {
-        storage_by_id.emplace(s.storage_id, &s);
-      }
-
-      RegionPinGuard pin_guard(d_.regions);
-      absl::flat_hash_map<std::string, std::unique_ptr<cuda::IpcMapping>> mapping_cache;
-      mapping_cache.reserve(storage_entries.size());
-
-      std::vector<LipDenseViewSource::Segment> view_segments;
-      view_segments.reserve(lease_vec.size());
-      for (const auto& seg : lease_vec) {
-        auto it = storage_by_id.find(seg.storage_id);
-        if (it == storage_by_id.end()) {
-          return {StatusCode::INVALID_ARGUMENT, "lease segment references unknown storage_id"};
-        }
-        const RegisterStorageMeta* storage = it->second;
-        if (storage->device_id != meta.device_id) {
-          return {StatusCode::FAILED_PRECONDITION, "storage device_id mismatch for piece LIP registration"};
-        }
-        if (seg.length != storage->storage_length) {
-          return {StatusCode::INVALID_ARGUMENT, "segment length does not match storage_length"};
-        }
-        if (seg.storage_offset != 0) {
-          return {StatusCode::INVALID_ARGUMENT, "segment storage_offset must be 0 for full-storage registrations"};
-        }
-        if (seg.artifact_offset > view_total || seg.length > view_total ||
-            seg.artifact_offset + seg.length > view_total) {
-          return {StatusCode::OUT_OF_RANGE, "lease segment view range out of bounds"};
-        }
-        auto map_or = get_or_open_mapping_for_storage(*storage, mapping_cache, pin_guard, d_.regions, meta.owner_pid);
-        if (!map_or.ok()) {
-          return to_grpc_status(map_or.status());
-        }
-        LipDenseViewSource::Segment s;
-        s.device_id = storage->device_id;
-        s.mapping = *map_or;
-        s.base_offset = storage->mapping_base_offset + seg.storage_offset;
-        s.view_offset = seg.artifact_offset;
-        s.length = seg.length;
-        view_segments.push_back(s);
-      }
-      LipDenseViewSource view_source(std::move(view_segments), view_total);
-
-      size_t leaf_chunk_bytes = d_.engine.get_artifact_chunk_bytes();
-      if (leaf_chunk_bytes == 0) {
-        leaf_chunk_bytes = static_cast<size_t>(4ULL * 1024 * 1024);
-      }
-
-      auto view_hash_or =
-          store::loader::verification::compute_view_tree_hash_and_leaves(view_source, view_total, leaf_chunk_bytes);
-      if (!view_hash_or.ok()) {
-        return to_grpc_status(view_hash_or.status());
-      }
-      const std::string view_data_hash = view_hash_or->multihash;
-
-      std::vector<tensorcast::global_store::v1::LeafWrite> leaf_writes;
-      leaf_writes.reserve(view_hash_or->leaf_digests.size());
-      for (size_t idx = 0; idx < view_hash_or->leaf_digests.size(); ++idx) {
-        tensorcast::global_store::v1::LeafWrite leaf;
-        auto* hash_space = leaf.mutable_hash_space();
-        hash_space->mutable_byte_space()->set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
-        hash_space->mutable_byte_space()->set_id(meta.view_id);
-        leaf.set_leaf_idx(static_cast<uint64_t>(idx));
-        const auto& digest = view_hash_or->leaf_digests[idx];
-        leaf.set_digest(digest.data(), static_cast<int>(digest.size()));
-        leaf_writes.push_back(std::move(leaf));
-      }
-
-      const std::vector<store::view::CanonicalRange> canonical_ranges =
-          canonical_ranges_from_write_plan(view_plan.write);
-      uint64_t covered_bytes = 0;
-      for (const auto& range : canonical_ranges) {
-        covered_bytes += range.length;
-      }
-
-      std::vector<tensorcast::global_store::v1::PieceProofDigestWrite> proof_digests;
-      auto intervals_or = parse_tensor_intervals(stable_index_json);
-      if (!intervals_or.ok()) {
-        return to_grpc_status(intervals_or.status());
-      }
-      uint64_t canonical_size_bytes = meta.view_canonical_size_bytes;
-      if (canonical_size_bytes == 0) {
-        for (const auto& interval : *intervals_or) {
-          canonical_size_bytes = std::max(canonical_size_bytes, interval.offset + interval.size_bytes);
-        }
-      }
-      if (canonical_size_bytes > 0 && covered_bytes > canonical_size_bytes) {
-        return {StatusCode::FAILED_PRECONDITION, "canonical_bytes_covered exceeds canonical_size_bytes"};
-      }
-      std::unordered_map<std::string, uint64_t> transpose_view_offsets;
-      std::unordered_map<std::string, store::loader::TensorTransformPlan> transpose_inverse_plans;
-      if (view_plan.forward.transform.requires_materialization) {
-        for (const auto& tensor_plan : view_plan.forward.transform.tensors) {
-          transpose_view_offsets.emplace(tensor_plan.tensor_name, tensor_plan.dst_offset);
-        }
-        for (const auto& tensor_plan : view_plan.inverse_transform.tensors) {
-          transpose_inverse_plans.emplace(tensor_plan.tensor_name, tensor_plan);
-        }
-      }
-
-      for (const auto& interval : *intervals_or) {
-        if (interval.size_bytes == 0) {
-          continue;
-        }
-        if (!ranges_cover_interval(canonical_ranges, interval.offset, interval.size_bytes)) {
-          continue;
-        }
-        const auto inverse_it = transpose_inverse_plans.find(interval.tensor_name);
-        if (inverse_it != transpose_inverse_plans.end()) {
-          const auto offset_it = transpose_view_offsets.find(interval.tensor_name);
-          if (offset_it == transpose_view_offsets.end()) {
-            return {StatusCode::FAILED_PRECONDITION, "missing transpose tensor dst_offset for proof digests"};
-          }
-          const uint64_t tensor_view_offset = offset_it->second;
-          if (tensor_view_offset + interval.size_bytes > view_total) {
-            return {StatusCode::OUT_OF_RANGE, "transpose tensor view range exceeds view buffer size"};
-          }
-          if (interval.size_bytes > std::numeric_limits<size_t>::max()) {
-            return {StatusCode::OUT_OF_RANGE, "transpose tensor exceeds host memory limits"};
-          }
-
-          std::vector<uint8_t> view_bytes(static_cast<size_t>(interval.size_bytes));
-          auto read_or = view_source.read_at(tensor_view_offset, view_bytes.data(), view_bytes.size());
-          if (!read_or.ok()) {
-            return to_grpc_status(read_or.status());
-          }
-          if (*read_or != view_bytes.size()) {
-            return {StatusCode::OUT_OF_RANGE, "failed to read full transpose tensor bytes from view source"};
-          }
-
-          std::vector<uint8_t> canonical_bytes = view_bytes;
-          store::loader::ViewWritePlan write_plan;
-          store::loader::ViewWritePlan::Chunk write_chunk;
-          write_chunk.canonical_offset = 0;
-          write_chunk.view_offset = 0;
-          write_chunk.length = interval.size_bytes;
-          write_chunk.segment_aligned = false;
-          write_plan.chunks.push_back(std::move(write_chunk));
-
-          store::loader::TransformPlan inverse_transform;
-          inverse_transform.requires_materialization = true;
-          store::loader::TensorTransformPlan tensor_transform = inverse_it->second;
-          tensor_transform.dst_offset = 0;
-          tensor_transform.canonical_offset = 0;
-          tensor_transform.storage_offset_elements = 0;
-          inverse_transform.tensors.push_back(std::move(tensor_transform));
-
-          store::loader::ViewIngestExecutor executor(
-              std::move(write_plan),
-              std::move(inverse_transform),
-              store::loader::ViewIngestExecutor::IngestTarget::kCanonical);
-          absl::Status ingest_status = executor.ingest_chunk(
-              /*view_offset=*/0,
-              absl::Span<const std::byte>(reinterpret_cast<const std::byte*>(view_bytes.data()), view_bytes.size()),
-              tensorcast::common::memory::MemoryLocation::CPU,
-              canonical_bytes.data(),
-              /*device_id=*/-1);
-          if (!ingest_status.ok()) {
-            return to_grpc_status(ingest_status);
-          }
-          absl::Status finalize_status = executor.finalize(
-              tensorcast::common::memory::MemoryLocation::CPU, canonical_bytes.data(), /*device_id=*/-1);
-          if (!finalize_status.ok()) {
-            return to_grpc_status(finalize_status);
-          }
-
-          const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
-          for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
-            const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
-            const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
-            if (local_end <= local_start) {
-              continue;
-            }
-            if (local_end > std::numeric_limits<size_t>::max()) {
-              return {StatusCode::OUT_OF_RANGE, "proof chunk exceeds host memory limits"};
-            }
-            const size_t chunk_bytes = static_cast<size_t>(local_end - local_start);
-            std::vector<uint8_t> digest = common::sha256_digest_bytes(
-                absl::Span<const uint8_t>(canonical_bytes.data() + local_start, chunk_bytes));
-            if (digest.size() != 32) {
-              return {StatusCode::INTERNAL, "sha256 digest size mismatch"};
-            }
-            tensorcast::global_store::v1::PieceProofDigestWrite proof;
-            proof.set_view_id(meta.view_id);
-            proof.set_tensor_name(interval.tensor_name);
-            proof.set_proof_schema_version(std::string(kProofSchemaV1));
-            proof.set_proof_chunk_idx(proof_chunk_idx);
-            proof.set_digest(digest.data(), static_cast<int>(digest.size()));
-            proof_digests.push_back(std::move(proof));
-          }
-          continue;
-        }
-
-        auto spans_or = canonical_spans_for_tensor(view_plan.write, interval.offset, interval.size_bytes, view_total);
-        if (!spans_or.ok()) {
-          return to_grpc_status(spans_or.status());
-        }
-        std::vector<CanonicalToViewSpan> spans = std::move(*spans_or);
-        size_t span_idx = 0;
-        const uint64_t expected_chunks = (interval.size_bytes + kProofChunkBytesV1 - 1) / kProofChunkBytesV1;
-        for (uint64_t proof_chunk_idx = 0; proof_chunk_idx < expected_chunks; ++proof_chunk_idx) {
-          const uint64_t local_start = proof_chunk_idx * kProofChunkBytesV1;
-          const uint64_t local_end = std::min<uint64_t>(interval.size_bytes, local_start + kProofChunkBytesV1);
-          const uint64_t abs_start = interval.offset + local_start;
-          const uint64_t abs_end = interval.offset + local_end;
-          if (abs_end <= abs_start) {
-            continue;
-          }
-          if (abs_end - abs_start > std::numeric_limits<size_t>::max()) {
-            return {StatusCode::OUT_OF_RANGE, "proof chunk exceeds host memory limits"};
-          }
-          std::vector<uint8_t> buffer(static_cast<size_t>(abs_end - abs_start));
-          uint64_t cursor = abs_start;
-          while (cursor < abs_end) {
-            while (span_idx < spans.size() && spans[span_idx].canonical_offset + spans[span_idx].length <= cursor) {
-              ++span_idx;
-            }
-            if (span_idx >= spans.size()) {
-              return {StatusCode::FAILED_PRECONDITION, "missing canonical span while computing proof digests"};
-            }
-            const auto& span = spans[span_idx];
-            if (span.canonical_offset > cursor) {
-              return {StatusCode::FAILED_PRECONDITION, "canonical span gap while computing proof digests"};
-            }
-            const uint64_t take_end = std::min<uint64_t>(abs_end, span.canonical_offset + span.length);
-            const size_t take = static_cast<size_t>(take_end - cursor);
-            const uint64_t src_view_offset = span.view_offset + (cursor - span.canonical_offset);
-            auto dst = absl::MakeSpan(buffer).subspan(static_cast<size_t>(cursor - abs_start), take);
-            auto read_or = view_source.read_at(src_view_offset, dst.data(), dst.size());
-            if (!read_or.ok()) {
-              return to_grpc_status(read_or.status());
-            }
-            if (*read_or != dst.size()) {
-              return {StatusCode::OUT_OF_RANGE, "failed to read full proof span from view source"};
-            }
-            cursor = take_end;
-          }
-          std::vector<uint8_t> digest =
-              common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), buffer.size()));
-          if (digest.size() != 32) {
-            return {StatusCode::INTERNAL, "sha256 digest size mismatch"};
-          }
-          tensorcast::global_store::v1::PieceProofDigestWrite proof;
-          proof.set_view_id(meta.view_id);
-          proof.set_tensor_name(interval.tensor_name);
-          proof.set_proof_schema_version(std::string(kProofSchemaV1));
-          proof.set_proof_chunk_idx(proof_chunk_idx);
-          proof.set_digest(digest.data(), static_cast<int>(digest.size()));
-          proof_digests.push_back(std::move(proof));
-        }
-      }
-
-      struct LipRollback {
-        LipManager* lip{nullptr};
-        std::string registration_id;
-        bool active{true};
-
-        ~LipRollback() {
-          if (!active || lip == nullptr) {
-            return;
-          }
-          absl::Status st = lip->revoke_by_registration_id(registration_id);
-          if (!st.ok()) {
-            LOG(WARNING) << "LipRollback: revoke_by_registration_id failed for id=" << registration_id << ": " << st;
-          }
-        }
-
-        void release() {
-          active = false;
-        }
-      } lip_rollback{.lip = &d_.lip, .registration_id = req.registration_id()};
-
-      auto lease_or = d_.lip.commit_routable_view_lease_in_place(
-          req.registration_id(),
-          meta.client_artifact_id,
-          meta.view_id,
-          meta.device_id,
-          meta.owner_pid,
-          meta.ttl_ms,
-          meta.epoch,
-          view_total,
-          std::move(lease_vec),
-          std::move(storage_entries));
-      if (!lease_or.ok()) {
-        lip_rollback.release();
-        return to_grpc_status(lease_or.status());
-      }
-
-      std::string worker_id = d_.identity->worker_id();
-      if (worker_id.empty()) {
-        worker_id = "local";
-      }
-      const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);
-
-      auto replica_id_or = d_.global_store_client->register_memory_replica(
-          meta.client_artifact_id,
-          worker_id,
-          device,
-          view_total,
-          index_key_hex,
-          lease_or->remote_memory_keys,
-          lease_or->buffer_sizes,
-          stable_index_json,
-          /*encoding=*/"json",
-          /*schema_version=*/"v3",
-          /*max_concurrency=*/1,
-          /*verification_json=*/std::nullopt,
-          std::optional<std::string_view>(meta.view_id));
-      if (!replica_id_or.ok()) {
-        return to_grpc_status(replica_id_or.status());
-      }
-      const std::string replica_id = *replica_id_or;
-      d_.lip.attach_replica_id(req.registration_id(), replica_id);
-
-      struct ReplicaRollback {
-        store::components::IGlobalStoreClient* client{nullptr};
-        std::string artifact_id;
-        std::string replica_id;
-        bool active{true};
-
-        ~ReplicaRollback() {
-          if (!active || client == nullptr || replica_id.empty()) {
-            return;
-          }
-          if (!client->is_connected()) {
-            return;
-          }
-          absl::Status st = client->unregister_replica(artifact_id, replica_id);
-          if (!st.ok()) {
-            LOG(WARNING) << "ReplicaRollback: unregister_replica failed for artifact_id=" << artifact_id
-                         << " replica_id=" << replica_id << ": " << st;
-          }
-        }
-
-        void release() {
-          active = false;
-        }
-      } replica_rollback{
-          .client = d_.global_store_client.get(), .artifact_id = meta.client_artifact_id, .replica_id = replica_id};
-
-      store::components::ViewStateUpdate update;
-      update.artifact_id = meta.client_artifact_id;
-      update.view_id = meta.view_id;
-      update.view_spec_json = meta.view_spec_json;
-      update.view_size_bytes = view_total;
-      update.view_data_hash = view_data_hash;
-      update.mark_verified = true;
-      update.canonical_size_bytes = canonical_size_bytes;
-      update.canonical_bytes_covered = covered_bytes;
-      update.canonical_ranges.reserve(canonical_ranges.size());
-      for (const auto& range : canonical_ranges) {
-        store::components::CanonicalRange r;
-        r.offset = range.offset;
-        r.length = range.length;
-        update.canonical_ranges.push_back(std::move(r));
-      }
-      update.leaf_writes = std::move(leaf_writes);
-      update.proof_digests = std::move(proof_digests);
-      absl::Status update_status = d_.global_store_client->update_artifact_view_state(update);
-      if (!update_status.ok()) {
-        return to_grpc_status(update_status);
-      }
-
-      // Publish response metadata.
-      auto* desc = resp.mutable_artifact_descriptor();
-      desc->set_artifact_id(meta.client_artifact_id);
-      desc->set_index_multihash(*index_mh_or);
-      desc->set_schema_version("v3");
-      desc->set_encoding("json");
-      desc->set_total_size(view_total);
-      desc->set_id_kind(ToProtoKind(tensorcast::common::ArtifactIdKind::kCgid));
-      resp.set_existed(false);
-      resp.set_view_id(meta.view_id);
-      if (!view_plan.forward.view_index_json.empty()) {
-        resp.set_view_index_json(view_plan.forward.view_index_json);
-      }
-      if (!view_data_hash.empty()) {
-        resp.set_view_data_hash(view_data_hash);
-      }
-      for (const auto& range : canonical_ranges) {
-        auto* r = resp.add_canonical_ranges();
-        r->set_offset(range.offset);
-        r->set_length(range.length);
-      }
-      resp.set_allow_partial(true);
-
-      auto* local_stable = resp.mutable_local_stable_tier();
-      auto local_stable_status = apply_local_stable_tier(
-          d_.engine,
-          d_.lip,
-          d_.regions,
-          meta,
-          meta.client_artifact_id,
-          tensorcast::common::ArtifactIdKind::kCgid,
-          view_total,
-          local_stable,
-          []() {});
-      if (!local_stable_status.ok()) {
-        return to_grpc_status(local_stable_status);
-      }
-
-      lip_rollback.release();
-      replica_rollback.release();
-      EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
-      rctx.mark_success();
-      return Status::OK;
+      return commit_piece_view_registration(
+          d_, rctx, req.registration_id(), meta, std::move(lease_vec), std::move(storage_entries), resp);
     }
 
     auto alias_vec = d_.reg.get_tensor_aliases(req.registration_id());
