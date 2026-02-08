@@ -480,5 +480,5 @@ uv run -m tensorcast.global_store --config config/global_store.yaml
 # Programmatically (for tests)
 servicer = GlobalStoreServicer(db_file=None)  # in-memory
 server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+register_global_store_servicers(server, servicer)
 ```

@@ -14,8 +14,9 @@ import grpc
 from google.protobuf import wrappers_pb2
 
 from tensorcast.dashboard.metrics import GRPC_COUNTER, GRPC_LATENCY
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.proto.common.v1 import common_pb2
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.memory_tier.v1 import memory_tier_pb2, memory_tier_pb2_grpc
 
 
@@ -59,7 +60,7 @@ class GlobalStoreClient:
     def __init__(self, config: ClientConfig):
         self._config = config
         self._channel: grpc.aio.Channel | None = None
-        self._stub: global_store_pb2_grpc.GlobalStoreServiceStub | None = None
+        self._stub: GlobalStoreCompositeStub | None = None
         self._memory_tier_stub: memory_tier_pb2_grpc.MemoryTierServiceStub | None = None
         self._lock = asyncio.Lock()
 
@@ -82,7 +83,7 @@ class GlobalStoreClient:
                 channel = grpc.aio.insecure_channel(self._config.target)
 
             self._channel = channel
-            self._stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+            self._stub = GlobalStoreCompositeStub(channel)
             self._memory_tier_stub = memory_tier_pb2_grpc.MemoryTierServiceStub(channel)
 
     async def close(self) -> None:

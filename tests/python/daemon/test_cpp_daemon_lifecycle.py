@@ -18,28 +18,29 @@ import socket
 import subprocess
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import grpc
 import pytest
 import yaml
-import grpc
 
 from tensorcast.cli_utils.proc import (
     build_daemon_process_env,
     ensure_cpp_daemon_binary,
 )
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import (
     GlobalStoreConfig,
 )
 from tensorcast.global_store.config.settings import (
     set_config as set_gs_config,
 )
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from tensorcast.proto.global_store.v1 import (
-    global_store_pb2,
-    global_store_pb2_grpc,
+from tensorcast.global_store.grpc_service import (
+    GlobalStoreServicer,
+    register_global_store_servicers,
 )
-from concurrent.futures import ThreadPoolExecutor
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 pytestmark = pytest.mark.requires_cuda_or_fake
 
@@ -56,7 +57,7 @@ def gs_server():
     set_gs_config(GlobalStoreConfig())
     servicer = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+    register_global_store_servicers(server, servicer)
     port = server.add_insecure_port("127.0.0.1:0")
     if port <= 0:
         raise RuntimeError("failed to bind Global Store server port")
@@ -171,7 +172,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         try:
             # Poll ListActiveWorkers until daemon registers
             channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-            stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+            stub = GlobalStoreCompositeStub(channel)
 
             deadline = time.time() + 15.0
             found = None

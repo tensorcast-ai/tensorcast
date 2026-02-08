@@ -25,10 +25,14 @@ import yaml
 from tensorcast.api.store import FallbackOptions, Store
 from tensorcast.api.store.view_composer import compute_index_multihash
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.grpc_service import (
+    GlobalStoreServicer,
+    register_global_store_servicers,
+)
 from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 pytestmark = [pytest.mark.requires_cuda_or_fake, pytest.mark.integration]
 
@@ -65,7 +69,7 @@ def _wait_ready(addr: str, timeout_s: float = 20.0) -> None:
 def _wait_for_worker(gs_port: int, listen_port: int, timeout_s: float = 20.0) -> None:
     deadline = time.time() + timeout_s
     channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-    stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+    stub = GlobalStoreCompositeStub(channel)
     try:
         while time.time() < deadline:
             resp = stub.ListActiveWorkers(
@@ -155,7 +159,9 @@ def _pack_floats(values: Sequence[float]) -> bytes:
     return struct.pack(f"<{len(values)}f", *values)
 
 
-def _write_artifact_dir(artifact_dir: Path, index_bytes: bytes, data_bytes: bytes) -> None:
+def _write_artifact_dir(
+    artifact_dir: Path, index_bytes: bytes, data_bytes: bytes
+) -> None:
     artifact_dir.mkdir(parents=True, exist_ok=True)
     index_path = artifact_dir / "tensor_index.json"
     index_path.write_bytes(index_bytes)
@@ -223,7 +229,7 @@ def gs_server() -> Iterator[tuple[grpc.Server, int, GlobalStoreServicer]]:
     set_config(GlobalStoreConfig())
     servicer = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+    register_global_store_servicers(server, servicer)
     port = server.add_insecure_port("127.0.0.1:0")
     if port <= 0:
         raise RuntimeError("failed to bind Global Store server port")
@@ -256,16 +262,14 @@ def test_inplace_slot_swap_publish_e2e(
     artifact_a_dir = storage_dir / artifact_a_id
     artifact_b_dir = storage_dir / artifact_b_id
 
-    data_a = _pack_floats([1.0, 2.0, 3.0, 4.0]) + _pack_floats(
-        [5.0, 6.0, 7.0, 8.0]
-    )
+    data_a = _pack_floats([1.0, 2.0, 3.0, 4.0]) + _pack_floats([5.0, 6.0, 7.0, 8.0])
     data_b = _pack_floats([9.0, 10.0, 11.0, 12.0]) + _pack_floats(
         [13.0, 14.0, 15.0, 16.0]
     )
     _write_artifact_dir(artifact_a_dir, index_bytes, data_a)
     _write_artifact_dir(artifact_b_dir, index_bytes, data_b)
     channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-    stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+    stub = GlobalStoreCompositeStub(channel)
     try:
         info = stub.GetServerInfo(global_store_pb2.GetServerInfoRequest())
         cluster_id = info.cluster_id

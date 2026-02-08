@@ -135,7 +135,8 @@ static commonpb::ReplicaInfo make_expected_replica(
 }
 
 // Minimal in-process fake Global Store service
-class FakeGlobalStoreService final : public global_store::GlobalStoreService::Service,
+class FakeGlobalStoreService final : public global_store::ClusterRuntimeService::Service,
+                                     public global_store::ClusterAdminService::Service,
                                      public memory_tier::MemoryTierService::Service {
  public:
   explicit FakeGlobalStoreService(std::vector<std::string> expected_ids, std::string obsolete_id)
@@ -428,7 +429,8 @@ static TestServer start_fake_server(const std::vector<std::string>& expected_ids
   grpc::ServerBuilder builder;
   int port = 0;
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
-  builder.RegisterService(static_cast<global_store::GlobalStoreService::Service*>(ts.service.get()));
+  builder.RegisterService(static_cast<global_store::ClusterRuntimeService::Service*>(ts.service.get()));
+  builder.RegisterService(static_cast<global_store::ClusterAdminService::Service*>(ts.service.get()));
   builder.RegisterService(static_cast<memory_tier::MemoryTierService::Service*>(ts.service.get()));
   ts.server = builder.BuildAndStart();
   ts.selected_port = port;

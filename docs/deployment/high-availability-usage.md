@@ -176,9 +176,9 @@ resp = stub.SynchronizeWorkerState(
 
 - **Metrics**: Global Store exports Prometheus metrics (e.g., `tc_state_sync_total`, `tc_state_sync_seconds`, `tc_active_workers`, `tc_replicas_total`, `tc_grpc_server_handled_total`). Scrape `http://<host>:<metrics_port>/metrics`.
 - **Health**:
-  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/HealthCheck` (status + cluster token)
-  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/GetServerInfo` (bind/advertise endpoints, metrics, version)
-  - Inventory: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.GlobalStoreService/ListActiveWorkers`
+  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.ClusterAdminService/HealthCheck` (status + cluster token)
+  - gRPC: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.ClusterAdminService/GetServerInfo` (bind/advertise endpoints, metrics, version)
+  - Inventory: `grpcurl -plaintext <host>:50051 tensorcast.global_store.v1.ClusterRuntimeService/ListActiveWorkers`
 - **Daemon visibility**: OTEL spans wrap all Global Store RPCs; counters (hb_success/failure, sync_success/failure) are exported via the configured OTEL sink when enabled.
 
 ## Best Practices

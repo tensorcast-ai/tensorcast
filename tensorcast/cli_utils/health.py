@@ -14,11 +14,9 @@ import grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
 
 from tensorcast.cli_utils.network import resolve_connect_host
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
-from tensorcast.proto.global_store.v1 import (
-    global_store_pb2,
-    global_store_pb2_grpc,
-)
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
 @dataclass(frozen=True)
@@ -94,7 +92,7 @@ def ping_global_store(
     target = f"{connect_host}:{port_hint}" if port_hint else address
     channel = grpc.insecure_channel(target)
     try:
-        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+        stub = GlobalStoreCompositeStub(channel)
         resp = stub.HealthCheck(global_store_pb2.HealthCheckRequest(), timeout=timeout)
         if resp.status == global_store_pb2.Status.STATUS_OK:
             listen_host = host_hint or connect_host
@@ -142,7 +140,7 @@ def ping_global_store(
         health_stub = health_pb2_grpc.HealthStub(channel)
         resp = health_stub.Check(
             health_pb2.HealthCheckRequest(
-                service="tensorcast.global_store.v1.GlobalStoreService"
+                service="tensorcast.global_store.v1.ClusterAdminService"
             ),
             timeout=timeout,
         )
