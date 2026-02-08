@@ -52,4 +52,13 @@ absl::Status bind_replica_handle_for_response(
     const std::function<void()>& on_lease_create_failed,
     v2::MemCopyHandle& out_mem_handle);
 
+absl::Status attach_cuda_lease_for_replica_key(
+    const store::loading::ReplicaKey& replica_key,
+    int32_t effective_pid,
+    HandleLeaseRegistry* handle_leases,
+    SessionLifecycleManager* lifecycle,
+    std::string_view lease_log_context,
+    const std::function<void()>& on_lease_create_failed,
+    v2::MemCopyHandle& out_mem_handle);
+
 } // namespace tensorcast::daemon::materialization_replica_handle

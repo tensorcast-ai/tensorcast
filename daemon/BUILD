@@ -1558,6 +1558,7 @@ cc_test(
         ":grpc_service_impl",
         "//core/store:store_engine",
         "//core/store:store_engine_options",
+        "//core/store:testing_global_store_client_stub",
         "//core/store:testing_recording_global_store_client",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
