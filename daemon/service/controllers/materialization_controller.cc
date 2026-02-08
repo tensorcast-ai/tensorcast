@@ -48,6 +48,7 @@
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
+#include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
@@ -66,13 +67,17 @@ using status_utils::to_grpc_status;
 
 namespace {
 
-using materialization_layout::CanonicalIndexEntry;
 using materialization_layout::CanonicalIndexTable;
 using materialization_layout::dtype_element_size;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::product_dims;
 using materialization_layout::resolve_target_offsets;
 using materialization_layout::TargetOffsetEntry;
+using materialization_mapped_copy_plan::build_copy_plan;
+using materialization_mapped_copy_plan::BuildCopyPlanResult;
+using materialization_mapped_copy_plan::is_contiguous;
+using materialization_mapped_copy_plan::MappedTensorSpec;
+using materialization_mapped_copy_plan::ViewNarrowSpec;
 using materialization_payload::compute_generation_from_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
@@ -793,48 +798,6 @@ absl::StatusOr<DescriptorMetadata> load_descriptor_metadata(const std::filesyste
         absl::StrCat("Failed to parse artifact_descriptor.json at ", descriptor_path.string(), ": ", ex.what()));
   }
   return metadata;
-}
-
-struct MappedTensorSpec {
-  std::vector<int64_t> shape;
-  std::vector<int64_t> stride;
-  std::string dtype;
-  uint64_t storage_offset{0};
-  uint64_t logical_length{0};
-  uint64_t element_size{0};
-};
-
-struct RangeSpec {
-  bool has_range{false};
-  int32_t dim{0};
-  int64_t start{0};
-  int64_t end{0};
-};
-
-struct ViewNarrowSpec {
-  int32_t dim{0};
-  int64_t start{0};
-  int64_t end{0};
-};
-
-std::vector<int64_t> compute_compact_stride(const std::vector<int64_t>& shape) {
-  if (shape.empty()) {
-    return {};
-  }
-  std::vector<int64_t> stride(shape.size());
-  int64_t acc = 1;
-  for (int64_t i = static_cast<int64_t>(shape.size()) - 1; i >= 0; --i) {
-    stride[static_cast<size_t>(i)] = acc;
-    acc *= shape[static_cast<size_t>(i)];
-  }
-  return stride;
-}
-
-bool is_contiguous(const std::vector<int64_t>& shape, const std::vector<int64_t>& stride) {
-  if (shape.empty()) {
-    return stride.empty();
-  }
-  return stride == compute_compact_stride(shape);
 }
 
 void record_materialize_into_target(
@@ -3120,386 +3083,14 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
     dst_base_offsets.emplace(name, range.base_offset + entry.storage_offset);
   }
 
-  struct SegmentWithIndex {
-    store::loader::ByteRangeSegment seg;
-    int entry_index{0};
-  };
-
-  std::vector<SegmentWithIndex> mapped_segments;
-  mapped_segments.reserve(req.copy_plan().entries_size());
-
-  absl::flat_hash_map<std::string, int32_t> dst_dim_by_name;
-  absl::flat_hash_map<std::string, std::vector<std::tuple<int64_t, int64_t, int>>> dst_intervals;
-
-  uint64_t total_bytes_copied = 0;
-
-  const auto build_range = [](const v2::CopyPlanRange& range) -> RangeSpec {
-    return RangeSpec{
-        .has_range = true,
-        .dim = static_cast<int32_t>(range.dim()),
-        .start = range.start(),
-        .end = range.end(),
-    };
-  };
-
-  const auto validate_and_build_segments = [&](int idx,
-                                               const v2::CopyPlanEntry& entry,
-                                               const CanonicalIndexEntry& src_entry,
-                                               const MappedTensorSpec& dst_spec,
-                                               uint64_t dst_base_offset,
-                                               RangeSpec src_range,
-                                               RangeSpec dst_range) -> absl::Status {
-    auto elem_or = dtype_element_size(src_entry.dtype);
-    if (!elem_or.ok()) {
-      return elem_or.status();
-    }
-    const uint64_t src_elem_size = *elem_or;
-    if (src_entry.dtype != dst_spec.dtype) {
-      return absl::InvalidArgumentError(
-          std::format(
-              "copy_plan entry {} dtype mismatch: {}({}) -> {}({})",
-              idx,
-              entry.ckpt_name(),
-              src_entry.dtype,
-              entry.dst_name(),
-              dst_spec.dtype));
-    }
-    if (!is_contiguous(src_entry.shape, src_entry.stride)) {
-      return absl::InvalidArgumentError(
-          std::format("copy_plan entry {} source '{}' must be contiguous", idx, entry.ckpt_name()));
-    }
-    if (!is_contiguous(dst_spec.shape, dst_spec.stride)) {
-      return absl::InvalidArgumentError(
-          std::format("copy_plan entry {} target '{}' must be contiguous", idx, entry.dst_name()));
-    }
-
-    if (src_entry.shape.empty()) {
-      if (src_range.has_range) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} source scalar must use full range", idx));
-      }
-    }
-    if (dst_spec.shape.empty()) {
-      if (dst_range.has_range) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} target scalar must use full range", idx));
-      }
-    }
-
-    int32_t dim = 0;
-    bool dim_set = false;
-    if (src_range.has_range) {
-      dim = src_range.dim;
-      dim_set = true;
-    }
-    if (dst_range.has_range) {
-      if (dim_set && dim != dst_range.dim) {
-        return absl::InvalidArgumentError(
-            std::format("copy_plan entry {} range dim mismatch ({} vs {})", idx, dim, dst_range.dim));
-      }
-      dim = dst_range.dim;
-      dim_set = true;
-    }
-    if (!dim_set) {
-      dim = 0;
-    }
-    if (dim < 0 || dim > 1) {
-      return absl::InvalidArgumentError(std::format("copy_plan entry {} dim must be 0 or 1 (got {})", idx, dim));
-    }
-
-    const auto normalize_range =
-        [&](const std::vector<int64_t>& shape, RangeSpec& range, std::string_view role) -> absl::Status {
-      if (shape.empty()) {
-        return absl::OkStatus();
-      }
-      if (dim >= static_cast<int32_t>(shape.size())) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} dim {} out of range", idx, role, dim));
-      }
-      if (!range.has_range) {
-        range.has_range = true;
-        range.dim = dim;
-        range.start = 0;
-        range.end = shape[static_cast<size_t>(dim)];
-        return absl::OkStatus();
-      }
-      if (range.dim != dim) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} dim mismatch", idx, role));
-      }
-      if (range.start < 0 || range.end <= range.start) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} range invalid", idx, role));
-      }
-      if (range.end > shape[static_cast<size_t>(dim)]) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} {} range out of bounds", idx, role));
-      }
-      return absl::OkStatus();
-    };
-
-    auto src_shape = src_entry.shape;
-    auto dst_shape = dst_spec.shape;
-    auto src_stride = src_entry.stride;
-    auto dst_stride = dst_spec.stride;
-    if (src_shape.empty()) {
-      src_shape = {1};
-      src_stride = {1};
-    }
-    if (dst_shape.empty()) {
-      dst_shape = {1};
-      dst_stride = {1};
-    }
-
-    if (view_narrows.contains(entry.ckpt_name())) {
-      const auto& narrow = view_narrows.at(entry.ckpt_name());
-      if (!src_range.has_range || src_range.dim != narrow.dim) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} source range required for view narrow", idx));
-      }
-      if (src_range.start < narrow.start || src_range.end > narrow.end) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} source range outside view bounds", idx));
-      }
-      src_range.start -= narrow.start;
-      src_range.end -= narrow.start;
-    }
-
-    if (!src_shape.empty()) {
-      auto st = normalize_range(src_shape, src_range, "source");
-      if (!st.ok()) {
-        return st;
-      }
-    }
-    if (!dst_shape.empty()) {
-      auto st = normalize_range(dst_shape, dst_range, "target");
-      if (!st.ok()) {
-        return st;
-      }
-    }
-
-    if (!src_shape.empty() && !dst_shape.empty()) {
-      for (size_t i = 0; i < src_shape.size(); ++i) {
-        if (static_cast<int32_t>(i) == dim) {
-          continue;
-        }
-        if (i >= dst_shape.size() || src_shape[i] != dst_shape[i]) {
-          return absl::InvalidArgumentError(
-              std::format("copy_plan entry {} shape mismatch for {}", idx, entry.dst_name()));
-        }
-      }
-    }
-
-    auto src_count_or = product_dims(src_shape);
-    if (!src_count_or.ok()) {
-      return src_count_or.status();
-    }
-    auto dst_count_or = product_dims(dst_shape);
-    if (!dst_count_or.ok()) {
-      return dst_count_or.status();
-    }
-    uint64_t src_elements = src_shape.empty() ? 1 : *src_count_or;
-    uint64_t dst_elements = dst_shape.empty() ? 1 : *dst_count_or;
-
-    uint64_t src_slice_elements = src_elements;
-    if (!src_shape.empty()) {
-      uint64_t slice_dim = static_cast<uint64_t>(src_range.end - src_range.start);
-      auto tail_or = product_dims(absl::Span<const int64_t>(src_shape).subspan(dim + 1));
-      if (!tail_or.ok()) {
-        return tail_or.status();
-      }
-      uint64_t tail = *tail_or;
-      if (dim == 0) {
-        src_slice_elements = slice_dim * tail;
-      } else {
-        src_slice_elements = slice_dim * tail * static_cast<uint64_t>(src_shape.front());
-      }
-    }
-
-    uint64_t dst_slice_elements = dst_elements;
-    if (!dst_shape.empty()) {
-      uint64_t slice_dim = static_cast<uint64_t>(dst_range.end - dst_range.start);
-      auto tail_or = product_dims(absl::Span<const int64_t>(dst_shape).subspan(dim + 1));
-      if (!tail_or.ok()) {
-        return tail_or.status();
-      }
-      uint64_t tail = *tail_or;
-      if (dim == 0) {
-        dst_slice_elements = slice_dim * tail;
-      } else {
-        dst_slice_elements = slice_dim * tail * static_cast<uint64_t>(dst_shape.front());
-      }
-    }
-
-    if (src_slice_elements != dst_slice_elements) {
-      return absl::InvalidArgumentError(std::format("copy_plan entry {} element count mismatch", idx));
-    }
-
-    auto record_interval = [&](const std::string& name, const RangeSpec& range) -> absl::Status {
-      auto it = dst_dim_by_name.find(name);
-      if (it == dst_dim_by_name.end()) {
-        dst_dim_by_name.emplace(name, range.dim);
-      } else if (it->second != range.dim) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} mixes slice dims for {}", idx, name));
-      }
-      auto& intervals = dst_intervals[name];
-      intervals.emplace_back(range.start, range.end, idx);
-      return absl::OkStatus();
-    };
-    RangeSpec record_range = dst_range;
-    if (!record_range.has_range) {
-      record_range.has_range = true;
-      record_range.dim = dim;
-      record_range.start = 0;
-      record_range.end = dst_shape[static_cast<size_t>(dim)];
-    }
-    auto st = record_interval(entry.dst_name(), record_range);
-    if (!st.ok()) {
-      return st;
-    }
-
-    const uint64_t src_base_offset = src_entry.logical_offset + src_entry.storage_offset * src_elem_size;
-    const uint64_t dst_base_offset_bytes = dst_base_offset;
-
-    const auto tail_or = product_dims(absl::Span<const int64_t>(src_shape).subspan(dim + 1));
-    if (!tail_or.ok()) {
-      return tail_or.status();
-    }
-    uint64_t row_elems = *tail_or;
-    if (src_shape.empty()) {
-      row_elems = 1;
-    }
-
-    if (dim == 0 || src_shape.empty()) {
-      uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
-      uint64_t src_offset_elems = static_cast<uint64_t>(src_range.start) * src_stride[0];
-      uint64_t dst_offset_elems = static_cast<uint64_t>(dst_range.start) * dst_stride[0];
-      store::loader::ByteRangeSegment seg;
-      seg.kind = store::loader::ByteRangeSegment::Kind::kData;
-      seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
-      seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
-      seg.length = length_elems * src_elem_size;
-      seg.source_index = 0;
-      mapped_segments.push_back(SegmentWithIndex{.seg = seg, .entry_index = idx});
-      total_bytes_copied += seg.length;
-      return absl::OkStatus();
-    }
-
-    if (dim == 1) {
-      if (src_shape.size() < 2 || dst_shape.size() < 2) {
-        return absl::InvalidArgumentError(std::format("copy_plan entry {} dim1 requires at least 2D tensors", idx));
-      }
-      uint64_t length_elems = static_cast<uint64_t>(src_range.end - src_range.start) * row_elems;
-      int64_t outer = src_shape.front();
-      for (int64_t row = 0; row < outer; ++row) {
-        uint64_t src_offset_elems =
-            static_cast<uint64_t>(row) * src_stride[0] + static_cast<uint64_t>(src_range.start) * src_stride[1];
-        uint64_t dst_offset_elems =
-            static_cast<uint64_t>(row) * dst_stride[0] + static_cast<uint64_t>(dst_range.start) * dst_stride[1];
-        store::loader::ByteRangeSegment seg;
-        seg.kind = store::loader::ByteRangeSegment::Kind::kData;
-        seg.src_offset = src_base_offset + src_offset_elems * src_elem_size;
-        seg.dst_offset = dst_base_offset_bytes + dst_offset_elems * dst_spec.element_size;
-        seg.length = length_elems * src_elem_size;
-        seg.source_index = 0;
-        mapped_segments.push_back(SegmentWithIndex{.seg = seg, .entry_index = idx});
-        total_bytes_copied += seg.length;
-      }
-      return absl::OkStatus();
-    }
-
-    return absl::InvalidArgumentError("copy_plan dim must be 0 or 1");
-  };
-
-  int entry_index = 0;
-  for (const auto& entry : req.copy_plan().entries()) {
-    if (entry.ckpt_name().empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing ckpt_name"};
-    }
-    if (entry.dst_name().empty()) {
-      record_materialize_into_target(
-          "error", "tensor_name_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan entry missing dst_name"};
-    }
-    auto src_it = source_table.entries.find(entry.ckpt_name());
-    if (src_it == source_table.entries.end()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan references unknown source tensor"};
-    }
-    auto dst_it = dst_specs.find(entry.dst_name());
-    if (dst_it == dst_specs.end()) {
-      record_materialize_into_target(
-          "error", "tensor_name_mismatch", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan references unknown destination tensor"};
-    }
-
-    RangeSpec src_range;
-    if (entry.has_ckpt_range()) {
-      src_range = build_range(entry.ckpt_range());
-    }
-    RangeSpec dst_range;
-    if (entry.has_dst_range()) {
-      dst_range = build_range(entry.dst_range());
-    }
-
-    auto st = validate_and_build_segments(
-        entry_index,
-        entry,
-        src_it->second,
-        dst_it->second,
-        dst_base_offsets.at(entry.dst_name()),
-        src_range,
-        dst_range);
-    if (!st.ok()) {
-      record_materialize_into_target(
-          "error", "mapping_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-      return to_grpc_status(st);
-    }
-    ++entry_index;
+  auto copy_plan_or = build_copy_plan(req.copy_plan(), source_table, dst_specs, dst_base_offsets, view_narrows);
+  if (!copy_plan_or.ok()) {
+    record_materialize_into_target(
+        "error", "mapping_invalid", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return to_grpc_status(copy_plan_or.status());
   }
-
-  for (const auto& [name, intervals] : dst_intervals) {
-    const auto& spec = dst_specs.at(name);
-    int32_t dim = 0;
-    auto dim_it = dst_dim_by_name.find(name);
-    if (dim_it != dst_dim_by_name.end()) {
-      dim = dim_it->second;
-    }
-    if (spec.shape.empty()) {
-      if (intervals.size() != 1) {
-        return {StatusCode::INVALID_ARGUMENT, "copy_plan must include one entry for scalar dst"};
-      }
-      const auto& interval = intervals.front();
-      if (std::get<0>(interval) != 0 || std::get<1>(interval) != 1) {
-        return {StatusCode::INVALID_ARGUMENT, "copy_plan scalar dst must cover full range"};
-      }
-      continue;
-    }
-    if (dim < 0 || dim >= static_cast<int32_t>(spec.shape.size())) {
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan dim out of range for dst tensor"};
-    }
-    std::vector<std::tuple<int64_t, int64_t, int>> sorted = intervals;
-    std::sort(
-        sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return std::get<0>(a) < std::get<0>(b); });
-    int64_t cursor = 0;
-    for (const auto& interval : sorted) {
-      const int64_t start = std::get<0>(interval);
-      const int64_t end = std::get<1>(interval);
-      if (start < cursor) {
-        return {StatusCode::INVALID_ARGUMENT, "copy_plan has overlapping dst ranges"};
-      }
-      if (start != cursor) {
-        return {StatusCode::INVALID_ARGUMENT, "copy_plan has gaps in dst ranges"};
-      }
-      cursor = end;
-    }
-    if (cursor != spec.shape[static_cast<size_t>(dim)]) {
-      return {StatusCode::INVALID_ARGUMENT, "copy_plan does not cover full dst range"};
-    }
-  }
-
-  store::loader::ByteRangeMap map;
-  map.total_bytes = logical_total_size;
-  map.num_sources = 1;
-  map.segments.reserve(mapped_segments.size());
-  for (const auto& entry : mapped_segments) {
-    map.segments.push_back(entry.seg);
-  }
+  BuildCopyPlanResult copy_plan = std::move(*copy_plan_or);
+  copy_plan.map.total_bytes = logical_total_size;
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
   auto storage_lease_or = TargetStorageLease::acquire(d_.regions, layout.storages(), req.pid(), &acquire_error);
@@ -3547,7 +3138,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
 
   const uint64_t generation = compute_generation_from_index(*canonical_json_or);
   auto result_or = d_.engine.materialize_mapped_into_target(
-      device, target_layout, map, *canonical_json_or, generation, hints, disk_source);
+      device, target_layout, copy_plan.map, *canonical_json_or, generation, hints, disk_source);
   if (!result_or.ok()) {
     if (absl::IsDataLoss(result_or.status())) {
       for (const auto& region_id : storage_lease.acquired_region_ids()) {
@@ -3572,7 +3163,7 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   resp.set_generation(generation);
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
-    span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(total_bytes_copied));
+    span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(copy_plan.total_bytes_copied));
   }
   record_materialize_into_target("ok", "ok", resp.source());
   rctx.mark_success();

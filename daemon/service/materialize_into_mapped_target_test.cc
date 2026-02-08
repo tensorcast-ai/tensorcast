@@ -412,3 +412,194 @@ TEST_CASE("MaterializeIntoMappedTarget rejects dst coverage gaps", "[daemon][mat
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects overlapping dst ranges",
+    "[daemon][materialize][mapped_target][validation]") {
+  MappedFixture fix;
+
+  const std::string canonical_index_json = R"({"src":[0,4,[4],[1],"torch.uint8",0]})";
+  fix.global_store_client->canonical_index_json = canonical_index_json;
+
+  MaterializeIntoMappedTargetRequest req;
+  req.set_artifact_id("artifact_mapped_overlap");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage0 = layout->add_storages();
+  storage0->set_storage_id("storage-0");
+  storage0->set_device_id(0);
+  storage0->set_storage_length(4);
+  storage0->set_vram_region_id("region-0");
+  storage0->set_mapping_base_offset(0);
+
+  auto* offset0 = layout->add_offsets();
+  offset0->set_name("a");
+  offset0->set_storage_id("storage-0");
+  offset0->set_storage_offset(0);
+  offset0->set_logical_length(4);
+
+  auto* spec0 = req.add_dst_tensors();
+  spec0->set_name("a");
+  spec0->add_shape(4);
+  spec0->add_stride(1);
+  spec0->set_dtype("torch.uint8");
+  spec0->set_storage_offset(0);
+  spec0->set_logical_length(4);
+
+  CopyPlan plan;
+  plan.set_version(1);
+
+  auto* entry0 = plan.add_entries();
+  entry0->set_ckpt_name("src");
+  entry0->set_dst_name("a");
+  entry0->mutable_ckpt_range()->set_dim(0);
+  entry0->mutable_ckpt_range()->set_start(0);
+  entry0->mutable_ckpt_range()->set_end(3);
+  entry0->mutable_dst_range()->set_dim(0);
+  entry0->mutable_dst_range()->set_start(0);
+  entry0->mutable_dst_range()->set_end(3);
+
+  auto* entry1 = plan.add_entries();
+  entry1->set_ckpt_name("src");
+  entry1->set_dst_name("a");
+  entry1->mutable_ckpt_range()->set_dim(0);
+  entry1->mutable_ckpt_range()->set_start(2);
+  entry1->mutable_ckpt_range()->set_end(4);
+  entry1->mutable_dst_range()->set_dim(0);
+  entry1->mutable_dst_range()->set_start(2);
+  entry1->mutable_dst_range()->set_end(4);
+
+  req.mutable_copy_plan()->CopyFrom(plan);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("overlapping dst ranges") != std::string::npos);
+}
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects mixed slice dimensions for the same dst tensor",
+    "[daemon][materialize][mapped_target][validation]") {
+  MappedFixture fix;
+
+  const std::string canonical_index_json = R"({"src":[0,4,[2,2],[2,1],"torch.uint8",0]})";
+  fix.global_store_client->canonical_index_json = canonical_index_json;
+
+  MaterializeIntoMappedTargetRequest req;
+  req.set_artifact_id("artifact_mapped_mixed_dim");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage0 = layout->add_storages();
+  storage0->set_storage_id("storage-0");
+  storage0->set_device_id(0);
+  storage0->set_storage_length(4);
+  storage0->set_vram_region_id("region-0");
+  storage0->set_mapping_base_offset(0);
+
+  auto* offset0 = layout->add_offsets();
+  offset0->set_name("a");
+  offset0->set_storage_id("storage-0");
+  offset0->set_storage_offset(0);
+  offset0->set_logical_length(4);
+
+  auto* spec0 = req.add_dst_tensors();
+  spec0->set_name("a");
+  spec0->add_shape(2);
+  spec0->add_shape(2);
+  spec0->add_stride(2);
+  spec0->add_stride(1);
+  spec0->set_dtype("torch.uint8");
+  spec0->set_storage_offset(0);
+  spec0->set_logical_length(4);
+
+  CopyPlan plan;
+  plan.set_version(1);
+
+  auto* entry0 = plan.add_entries();
+  entry0->set_ckpt_name("src");
+  entry0->set_dst_name("a");
+  entry0->mutable_ckpt_range()->set_dim(0);
+  entry0->mutable_ckpt_range()->set_start(0);
+  entry0->mutable_ckpt_range()->set_end(1);
+  entry0->mutable_dst_range()->set_dim(0);
+  entry0->mutable_dst_range()->set_start(0);
+  entry0->mutable_dst_range()->set_end(1);
+
+  auto* entry1 = plan.add_entries();
+  entry1->set_ckpt_name("src");
+  entry1->set_dst_name("a");
+  entry1->mutable_ckpt_range()->set_dim(1);
+  entry1->mutable_ckpt_range()->set_start(0);
+  entry1->mutable_ckpt_range()->set_end(1);
+  entry1->mutable_dst_range()->set_dim(1);
+  entry1->mutable_dst_range()->set_start(0);
+  entry1->mutable_dst_range()->set_end(1);
+
+  req.mutable_copy_plan()->CopyFrom(plan);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("mixes slice dims") != std::string::npos);
+}
+
+TEST_CASE(
+    "MaterializeIntoMappedTarget rejects unsupported copy-plan version",
+    "[daemon][materialize][mapped_target][validation]") {
+  MappedFixture fix;
+
+  MaterializeIntoMappedTargetRequest req;
+  req.set_artifact_id("artifact_mapped_bad_version");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(1);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(1);
+
+  auto* spec = req.add_dst_tensors();
+  spec->set_name("a");
+  spec->add_shape(1);
+  spec->add_stride(1);
+  spec->set_dtype("torch.uint8");
+  spec->set_storage_offset(0);
+  spec->set_logical_length(1);
+
+  req.mutable_copy_plan()->set_version(2);
+  auto* entry = req.mutable_copy_plan()->add_entries();
+  entry->set_ckpt_name("src");
+  entry->set_dst_name("a");
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message().find("unsupported copy_plan version") != std::string::npos);
+}
