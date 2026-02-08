@@ -66,6 +66,14 @@ void ReleaseRegionRefs(IpcRegionRegistry& registry, const absl::flat_hash_map<st
   }
 }
 
+void EraseRegistrationRegionRefs(
+    RegistrationManager& registration_manager,
+    IpcRegionRegistry& registry,
+    std::string_view registration_id) {
+  auto refs = registration_manager.erase_all_for(std::string(registration_id));
+  ReleaseRegionRefs(registry, refs);
+}
+
 class RegionPinGuard {
  public:
   explicit RegionPinGuard(IpcRegionRegistry& registry) : registry_(registry) {}
@@ -2422,8 +2430,7 @@ grpc::Status RegistrationController::abort(
   auto st = d_.engine.abort_registered_artifact(req.registration_id());
   if (!st.ok())
     return to_grpc_status(st);
-  auto refs = d_.reg.erase_all_for(req.registration_id());
-  ReleaseRegionRefs(d_.regions, refs);
+  EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
   try {
     static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
     static auto counter = meter->CreateDoubleCounter("tc_register_abort_total");
@@ -2441,23 +2448,16 @@ grpc::Status RegistrationController::revoke(
     v2::RevokeRegisteredArtifactResponse& /*resp*/) {
   // Capture meta for potential joined-reference cleanup
   auto meta_opt = d_.reg.get_meta(req.registration_id());
-  {
-    auto st = d_.lip.revoke_by_registration_id(req.registration_id());
-    if (st.ok()) {
-      auto refs = d_.reg.erase_all_for(req.registration_id());
-      ReleaseRegionRefs(d_.regions, refs);
-      goto REVOKE_DONE;
+  auto revoke_status = d_.lip.revoke_by_registration_id(req.registration_id());
+  if (!revoke_status.ok()) {
+    absl::Status abort_status = d_.engine.abort_registered_artifact(req.registration_id());
+    if (!abort_status.ok()) {
+      LOG(WARNING) << "revoke: abort_registered_artifact failed for id=" << req.registration_id() << ": "
+                   << abort_status;
     }
   }
-  {
-    absl::Status _st = d_.engine.abort_registered_artifact(req.registration_id());
-    if (!_st.ok()) {
-      LOG(WARNING) << "revoke: abort_registered_artifact failed for id=" << req.registration_id() << ": " << _st;
-    }
-    auto refs = d_.reg.erase_all_for(req.registration_id());
-    ReleaseRegionRefs(d_.regions, refs);
-  }
-REVOKE_DONE:
+  EraseRegistrationRegionRefs(d_.reg, d_.regions, req.registration_id());
+
   if (meta_opt.has_value() && meta_opt->joined_existing) {
     const auto& m = *meta_opt;
     store::DeviceKey dev_key = store::DeviceRegistry::instance().gpu_key(m.device_id);
