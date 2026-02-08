@@ -611,6 +611,40 @@ absl::StatusOr<std::optional<std::string>> resolve_artifact_binding(
   return binding_or.status();
 }
 
+absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(
+    store::StoreEngine& engine,
+    std::string_view resolved_artifact_id,
+    const std::optional<std::filesystem::path>& normalized_disk_path,
+    int device_ordinal,
+    bool gs_connected) {
+  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
+    if (!normalized_disk_path.has_value()) {
+      return absl::FailedPreconditionError("disk source path required when Global Store is unavailable");
+    }
+    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+    if (!idx_status.ok()) {
+      return idx_status;
+    }
+    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device_ordinal);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  };
+
+  const bool prefer_disk_index = normalized_disk_path.has_value() && !gs_connected;
+  absl::StatusOr<std::string> canonical_json_or =
+      prefer_disk_index ? read_canonical_from_disk() : engine.get_canonical_index_by_id(resolved_artifact_id);
+  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
+    // Allow local disk materialization even when Global Store is disabled/unreachable.
+    auto disk_or = read_canonical_from_disk();
+    if (disk_or.ok()) {
+      canonical_json_or = std::move(disk_or);
+    }
+  }
+  return canonical_json_or;
+}
+
 struct TargetLayoutSpan {
   gsl::not_null<void*> base_ptr;
   uint64_t offset{0};
@@ -2059,31 +2093,8 @@ grpc::Status MaterializationController::materialize_into_target(
     }
   }
 
-  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
-    if (!normalized_disk_path.has_value()) {
-      return absl::FailedPreconditionError("disk source path required when Global Store is unavailable");
-    }
-    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-    if (!idx_status.ok()) {
-      return idx_status;
-    }
-    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device.ordinal);
-    if (!local_or.ok()) {
-      return local_or.status();
-    }
-    return local_or->canonical_index_json;
-  };
-
-  const bool prefer_disk_index = normalized_disk_path.has_value() && !gs_connected;
-  absl::StatusOr<std::string> canonical_json_or =
-      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(resolved_artifact_id);
-  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
-    // Allow local disk materialization even when Global Store is disabled/unreachable.
-    auto disk_or = read_canonical_from_disk();
-    if (disk_or.ok()) {
-      canonical_json_or = std::move(disk_or);
-    }
-  }
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
@@ -2794,30 +2805,8 @@ grpc::Status MaterializationController::materialize_into_mapped_target(
   auto dst_base_offsets = std::move(mapped_layout.dst_base_offsets);
   const uint64_t logical_total_size = mapped_layout.logical_total_size;
 
-  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
-    if (!normalized_disk_path.has_value()) {
-      return absl::FailedPreconditionError("disk source path required when Global Store is unavailable");
-    }
-    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-    if (!idx_status.ok()) {
-      return idx_status;
-    }
-    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, device.ordinal);
-    if (!local_or.ok()) {
-      return local_or.status();
-    }
-    return local_or->canonical_index_json;
-  };
-
-  const bool prefer_disk_index = normalized_disk_path.has_value() && !gs_connected;
-  absl::StatusOr<std::string> canonical_json_or =
-      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(resolved_artifact_id);
-  if (!canonical_json_or.ok() && normalized_disk_path.has_value() && !prefer_disk_index) {
-    auto disk_or = read_canonical_from_disk();
-    if (disk_or.ok()) {
-      canonical_json_or = std::move(disk_or);
-    }
-  }
+  auto canonical_json_or = load_canonical_index_with_disk_fallback(
+      d_.engine, resolved_artifact_id, normalized_disk_path, device.ordinal, gs_connected);
   if (!canonical_json_or.ok()) {
     record_materialize_into_target(
         "error", "index_missing", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
