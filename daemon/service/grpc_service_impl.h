@@ -10,13 +10,13 @@
 #include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/persistence_manager.h"
 #include "daemon/state/session_lifecycle.h"
-#include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -41,8 +41,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     LipManager& lip_manager;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     PersistenceManager* persistence_manager{nullptr};
-    SessionsService& sessions_service;
     SessionLifecycleManager& lifecycle_manager;
+    ReplicaSessionController& replica_session_controller;
     LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
   };
@@ -283,8 +283,8 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   LipManager* lip_manager_;
   std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   PersistenceManager* persistence_manager_;
-  SessionsService* sessions_service_;
   SessionLifecycleManager* lifecycle_manager_;
+  ReplicaSessionController* replica_session_controller_;
   LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
   Options opts_;

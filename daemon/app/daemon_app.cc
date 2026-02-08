@@ -119,6 +119,12 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
+  ReplicaSessionController::Dep rsdep{
+      .sessions = app->kernel_->sessions_service(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+  };
+  app->replica_session_controller_ = std::make_unique<ReplicaSessionController>(rsdep);
+
   LeaseController::Dep ldep{
       .engine = app->kernel_->engine(),
       .lifecycle = app->kernel_->lifecycle_manager(),
@@ -140,8 +146,8 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .lip_manager = app->kernel_->lip_manager(),
       .global_store_client = app->options_.global_store_client,
       .persistence_manager = app->kernel_->persistence_manager(),
-      .sessions_service = app->kernel_->sessions_service(),
       .lifecycle_manager = app->kernel_->lifecycle_manager(),
+      .replica_session_controller = *app->replica_session_controller_,
       .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
   };

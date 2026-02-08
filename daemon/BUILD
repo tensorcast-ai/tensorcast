@@ -65,10 +65,10 @@ sc_cc_library(
         ":registration_controller_lib",
         ":registration_manager_lib",
         ":replica_listing_hdr",
+        ":replica_session_controller_lib",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":session_manager_hdr",
-        ":sessions_service_hdr",
         ":shutdown_signal_hdr",
         ":status_controller_hdr",
         ":status_utils",
@@ -101,6 +101,7 @@ sc_cc_library(
         ":grpc_service_impl",
         ":lease_controller_lib",
         ":local_handle_server_lib",
+        ":replica_session_controller_lib",
         ":worker_lifecycle",
         ":worker_lifecycle_ports_hdr",
         "//core/common:async_runtime_lib",
@@ -124,6 +125,7 @@ sc_cc_library(
         ":local_handle_server_lib",
         ":materialization_controller_lib",
         ":registration_controller_lib",
+        ":replica_session_controller_lib",
         ":status_controller_hdr",
         ":transport_controller_lib",
         "//core/common:async_runtime_lib",
@@ -745,6 +747,20 @@ sc_cc_library(
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/time",
+    ],
+)
+
+sc_cc_library(
+    name = "replica_session_controller_lib",
+    srcs = ["service/controllers/replica_session_controller.cc"],
+    hdrs = ["service/controllers/replica_session_controller.h"],
+    deps = [
+        ":rpc_context_hdr",
+        ":session_lifecycle_lib",
+        ":sessions_service_hdr",
+        ":status_utils",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@folly//folly/futures:core",
     ],
 )
 

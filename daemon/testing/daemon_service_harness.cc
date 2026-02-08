@@ -32,6 +32,7 @@ DaemonServiceHarness::DaemonServiceHarness(
     std::unique_ptr<RegistrationController> registration_controller,
     std::unique_ptr<TransportController> transport_controller,
     std::unique_ptr<StatusController> status_controller,
+    std::unique_ptr<ReplicaSessionController> replica_session_controller,
     std::unique_ptr<LeaseController> lease_controller,
     std::unique_ptr<StoreDaemonServiceImpl> service,
     std::unique_ptr<LocalHandleServer> local_handle_server)
@@ -41,6 +42,7 @@ DaemonServiceHarness::DaemonServiceHarness(
       registration_controller_(std::move(registration_controller)),
       transport_controller_(std::move(transport_controller)),
       status_controller_(std::move(status_controller)),
+      replica_session_controller_(std::move(replica_session_controller)),
       lease_controller_(std::move(lease_controller)),
       service_(std::move(service)),
       local_handle_server_(std::move(local_handle_server)) {}
@@ -136,6 +138,12 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
   };
   auto status_controller = std::make_unique<StatusController>(sdep);
 
+  ReplicaSessionController::Dep rsdep{
+      .sessions = kernel->sessions_service(),
+      .lifecycle = kernel->lifecycle_manager(),
+  };
+  auto replica_session_controller = std::make_unique<ReplicaSessionController>(rsdep);
+
   LeaseController::Dep ldep{
       .engine = kernel->engine(),
       .lifecycle = kernel->lifecycle_manager(),
@@ -157,8 +165,8 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .lip_manager = kernel->lip_manager(),
       .global_store_client = global_store_client,
       .persistence_manager = kernel->persistence_manager(),
-      .sessions_service = kernel->sessions_service(),
       .lifecycle_manager = kernel->lifecycle_manager(),
+      .replica_session_controller = *replica_session_controller,
       .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
   };
@@ -189,6 +197,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       std::move(registration_controller),
       std::move(transport_controller),
       std::move(status_controller),
+      std::move(replica_session_controller),
       std::move(lease_controller),
       std::move(service),
       std::move(local_handle_server)));
