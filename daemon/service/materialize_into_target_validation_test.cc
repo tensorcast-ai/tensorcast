@@ -652,6 +652,96 @@ TEST_CASE(
   REQUIRE(status.error_message() == "target_layout.view_id must be empty for subset-only layouts");
 }
 
+TEST_CASE("MaterializeIntoTarget rejects alias dtype mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* alias_a = layout->add_aliases();
+  alias_a->set_name("a");
+  alias_a->set_storage_id("storage-0");
+  alias_a->set_storage_offset(0);
+  alias_a->set_logical_length(4);
+  alias_a->set_dtype("torch.float16");
+  alias_a->add_shape(4);
+  alias_a->add_stride(1);
+
+  auto* alias_b = layout->add_aliases();
+  alias_b->set_name("b");
+  alias_b->set_storage_id("storage-0");
+  alias_b->set_storage_offset(4);
+  alias_b->set_logical_length(4);
+  alias_b->set_dtype("torch.uint8");
+  alias_b->add_shape(4);
+  alias_b->add_stride(1);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout alias dtype mismatch");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects alias stride mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* alias_a = layout->add_aliases();
+  alias_a->set_name("a");
+  alias_a->set_storage_id("storage-0");
+  alias_a->set_storage_offset(0);
+  alias_a->set_logical_length(4);
+  alias_a->set_dtype("torch.uint8");
+  alias_a->add_shape(4);
+  alias_a->add_stride(2);
+
+  auto* alias_b = layout->add_aliases();
+  alias_b->set_name("b");
+  alias_b->set_storage_id("storage-0");
+  alias_b->set_storage_offset(4);
+  alias_b->set_logical_length(4);
+  alias_b->set_dtype("torch.uint8");
+  alias_b->add_shape(4);
+  alias_b->add_stride(1);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout alias stride mismatch");
+}
+
 TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
 
