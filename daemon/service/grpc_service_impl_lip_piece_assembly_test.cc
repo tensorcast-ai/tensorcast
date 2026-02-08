@@ -194,6 +194,9 @@ TEST_CASE("LIP pieces can be registered and assembled via remote keys", "[daemon
     INFO("CommitRegisteredArtifact status: " << st.error_message());
     REQUIRE(st.ok());
     REQUIRE_FALSE(cresp.view_id().empty());
+    REQUIRE(cresp.has_local_stable_tier());
+    REQUIRE(cresp.local_stable_tier().status() == tensorcast::daemon::v2::LOCAL_STABLE_TIER_STATUS_SKIPPED);
+    REQUIRE(cresp.local_stable_tier().message().find("view registrations") != std::string::npos);
   };
 
   register_piece(/*start=*/0, /*length=*/4, child.handle_bytes().front());
