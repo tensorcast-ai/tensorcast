@@ -15,6 +15,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
@@ -27,30 +28,10 @@ namespace tensorcast::daemon::materialization_request_common {
 
 namespace {
 
+using materialization_disk_resolve::record_disk_path_denied;
+using materialization_disk_resolve::record_disk_resolution_outcome;
 using materialization_replica_handle::attach_cuda_lease_for_replica_key;
 using materialization_replica_handle::register_session_and_refs;
-
-void record_disk_path_denied() {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_denied_total");
-    if (counter) {
-      counter->Add(1);
-    }
-  } catch (...) {
-  }
-}
-
-void record_disk_resolution_outcome(std::string_view outcome) {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_resolve_total");
-    if (counter) {
-      counter->Add(1, {{"outcome", std::string(outcome)}});
-    }
-  } catch (...) {
-  }
-}
 
 void record_wait_for_shared_disk(std::string_view outcome, absl::Duration waited) {
   try {

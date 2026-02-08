@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <filesystem>
 #include <format>
-#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -26,7 +25,6 @@
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/time.h"
 #include "absl/types/span.h"
@@ -36,9 +34,7 @@
 
 #include "core/common/artifact_hash.h"
 #include "core/common/selection_identity.h"
-#include "core/cuda/cuda_ipc.h"
 #include "core/store/device_registry.h"
-#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 #include "core/store/materialization/dataplane/metadata/disk_dir_hash.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
@@ -46,6 +42,7 @@
 #include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
@@ -56,7 +53,6 @@
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
 #include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
-#include "daemon/util/path_utils.h"
 #include "daemon/util/status_utils.h"
 #include "folly/futures/Future.h"
 #include "nlohmann/json.hpp"
@@ -69,6 +65,7 @@ using status_utils::to_grpc_status;
 
 namespace {
 
+using materialization_disk_resolve::record_disk_resolution_outcome;
 using materialization_index_source::compute_target_layout_multihash;
 using materialization_index_source::DescriptorMetadata;
 using materialization_index_source::ensure_tensor_index_present;
@@ -182,53 +179,6 @@ std::string compute_target_layout_hash(const v2::TargetLayout& layout) {
   const std::vector<uint8_t> digest = common::sha256_digest_bytes(
       absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(buffer.data()), buffer.size()));
   return std::string(reinterpret_cast<const char*>(digest.data()), digest.size());
-}
-
-void record_disk_path_denied() {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_denied_total");
-    if (counter) {
-      counter->Add(1);
-    }
-  } catch (...) {
-  }
-}
-
-void record_disk_resolution_outcome(std::string_view outcome) {
-  try {
-    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-    static auto counter = meter->CreateUInt64Counter("tc_store_disk_path_resolve_total");
-    if (counter) {
-      counter->Add(1, {{"outcome", std::string(outcome)}});
-    }
-  } catch (...) {
-  }
-}
-
-absl::Status write_artifact_descriptor(
-    const std::filesystem::path& artifact_dir,
-    std::string_view artifact_id,
-    std::string_view index_multihash,
-    std::string_view data_multihash,
-    std::optional<uint64_t> total_size,
-    std::optional<std::string_view> schema_version) {
-  nlohmann::json desc;
-  desc["artifact_id"] = std::string(artifact_id);
-  desc["index_multihash"] = std::string(index_multihash);
-  desc["data_multihash"] = std::string(data_multihash);
-  desc["schema_version"] = schema_version.has_value() ? std::string(*schema_version) : "v3";
-  desc["encoding"] = "json";
-  if (total_size.has_value() && *total_size > 0) {
-    desc["total_size"] = *total_size;
-  }
-  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
-  std::ofstream out(descriptor_path, std::ios::trunc);
-  if (!out.is_open()) {
-    return absl::InternalError("failed to open artifact_descriptor.json for writing");
-  }
-  out << desc.dump(2);
-  return absl::OkStatus();
 }
 
 void record_materialize_into_target(std::string_view result, std::string_view reason, v2::MaterializationSource source);
@@ -2028,137 +1978,32 @@ grpc::Status MaterializationController::resolve_artifact_from_disk(
     return {StatusCode::PERMISSION_DENIED, "ResolveArtifactFromDisk is local-only (loopback/UDS)"};
   }
 
-  auto normalized_or = normalize_disk_import_path(req.disk_path(), storage_path_);
-  if (!normalized_or.ok()) {
-    record_disk_path_denied();
-    record_disk_resolution_outcome("invalid_argument");
-    return to_grpc_status(normalized_or.status());
-  }
-  const auto& normalized = *normalized_or;
-  resp.set_disk_path(normalized.string());
-  if (rctx.allow_high_card_attrs()) {
-    span->SetAttribute("tc.disk.path", normalized.string());
-  }
   span->SetAttribute("tc.store.verify_checksums", verify_checksums);
-
-  auto descriptor_or = load_descriptor_metadata(normalized);
-  if (!descriptor_or.ok()) {
-    record_disk_resolution_outcome("invalid_descriptor");
-    return to_grpc_status(descriptor_or.status());
+  auto resolved_or =
+      materialization_disk_resolve::resolve_artifact_from_disk(req.disk_path(), storage_path_, verify_checksums);
+  if (!resolved_or.ok()) {
+    return to_grpc_status(resolved_or.status());
   }
-  DescriptorMetadata descriptor = *descriptor_or;
-
-  auto index_presence_status = ensure_tensor_index_present(normalized);
-  if (!index_presence_status.ok()) {
-    record_disk_resolution_outcome("not_found");
-    return to_grpc_status(index_presence_status);
-  }
-
-  auto index_or = store::loader::read_from_artifact_dir(normalized, /*target_device_id=*/0);
-  if (!index_or.ok()) {
-    record_disk_resolution_outcome("not_found");
-    return to_grpc_status(index_or.status());
-  }
-
-  const bool has_descriptor = descriptor.found;
-  const bool is_safetensors = index_or->is_safetensors;
-  if (verify_checksums && has_descriptor) {
-    auto validation_status = validate_descriptor_against_index(descriptor, *index_or, /*verify_checksums=*/true);
-    if (!validation_status.ok()) {
-      record_disk_resolution_outcome("checksum_failed");
-      return to_grpc_status(validation_status);
-    }
-  } else if (verify_checksums && !has_descriptor) {
-    LOG(WARNING) << "verify_checksums requested but artifact_descriptor.json missing at " << normalized.string()
-                 << "; skipping descriptor validation";
-  }
-
-  std::string index_multihash = index_or->index_multihash;
-  if (index_multihash.empty()) {
-    auto index_mh_or = common::compute_index_multihash(
-        std::optional<std::string>(index_or->canonical_index_json), /*index_key_hex=*/"");
-    if (!index_mh_or.ok()) {
-      record_disk_resolution_outcome("invalid_descriptor");
-      return to_grpc_status(index_mh_or.status());
-    }
-    index_multihash = *index_mh_or;
-  }
-
-  auto data_mh_or = store::loader::compute_data_multihash_from_disk_dir(normalized.string());
-  if (!data_mh_or.ok()) {
-    record_disk_resolution_outcome("invalid_descriptor");
-    return to_grpc_status(data_mh_or.status());
-  }
-  const std::string data_multihash = *data_mh_or;
-  const std::string artifact_id = absl::StrCat("mi2:", index_multihash, ":", data_multihash);
-  resp.set_artifact_id(artifact_id);
+  const auto& resolved = *resolved_or;
+  resp.set_disk_path(resolved.normalized_disk_path.string());
+  resp.set_artifact_id(resolved.artifact_id);
+  resp.set_canonical_index_bytes(resolved.canonical_index_json);
+  resp.set_generation(resolved.generation);
   if (rctx.allow_high_card_attrs()) {
-    span->SetAttribute("tc.artifact.id", artifact_id);
+    span->SetAttribute("tc.disk.path", resolved.normalized_disk_path.string());
+    span->SetAttribute("tc.artifact.id", resolved.artifact_id);
   }
-
-  const bool artifact_id_mismatch = descriptor.artifact_id.has_value() && *descriptor.artifact_id != artifact_id;
-  if (artifact_id_mismatch && verify_checksums) {
-    record_disk_resolution_outcome("checksum_failed");
-    return to_grpc_status(
-        absl::FailedPreconditionError("artifact_id mismatch between resolved descriptor and computed identity"));
-  }
-  if (artifact_id_mismatch && !verify_checksums) {
-    LOG(WARNING) << "artifact_id mismatch between descriptor and computed identity at " << normalized.string()
-                 << "; verify_checksums=false, proceeding with computed identity";
-  }
-
-  const bool data_multihash_mismatch =
-      descriptor.data_multihash.has_value() && *descriptor.data_multihash != data_multihash;
-  if (data_multihash_mismatch && verify_checksums) {
-    record_disk_resolution_outcome("checksum_failed");
-    return to_grpc_status(absl::FailedPreconditionError("data_multihash mismatch for disk artifact"));
-  }
-  if (data_multihash_mismatch && !verify_checksums) {
-    LOG(WARNING) << "data_multihash mismatch between descriptor and disk bytes at " << normalized.string()
-                 << "; verify_checksums=false, proceeding with computed multihash";
-  }
-
-  const bool missing_descriptor_fields = !descriptor.found || !descriptor.artifact_id.has_value() ||
-      !descriptor.index_multihash.has_value() || !descriptor.data_multihash.has_value();
-  const bool stale_descriptor_fields = artifact_id_mismatch ||
-      (descriptor.index_multihash.has_value() && *descriptor.index_multihash != index_multihash) ||
-      data_multihash_mismatch;
-  const bool should_backfill_descriptor = missing_descriptor_fields || stale_descriptor_fields;
-  bool descriptor_present = descriptor.found;
-  if (should_backfill_descriptor) {
-    const auto total_size =
-        index_or->total_size_bytes > 0 ? std::optional<uint64_t>(index_or->total_size_bytes) : std::nullopt;
-    const std::optional<std::string_view> schema_version = descriptor.schema_version.has_value()
-        ? std::optional<std::string_view>(*descriptor.schema_version)
-        : std::nullopt;
-    auto write_status =
-        write_artifact_descriptor(normalized, artifact_id, index_multihash, data_multihash, total_size, schema_version);
-    if (!write_status.ok()) {
-      LOG(WARNING) << "Failed to backfill artifact_descriptor.json at " << normalized.string() << ": " << write_status;
-    } else {
-      descriptor_present = true;
-    }
-  }
-
-  if (is_safetensors) {
-    maybe_backfill_tensor_index(normalized, index_or->canonical_index_json);
-  }
-
-  resp.set_canonical_index_bytes(index_or->canonical_index_json);
-  const uint64_t generation = compute_generation_from_index(index_or->canonical_index_json);
-  resp.set_generation(generation);
-  span->SetAttribute("tc.artifact.generation", static_cast<int64_t>(generation));
+  span->SetAttribute("tc.artifact.generation", static_cast<int64_t>(resolved.generation));
   d_.disk_imports.upsert_import(
-      artifact_id,
+      resolved.artifact_id,
       LocalDiskImportCatalog::Entry{
-          .normalized_disk_path = normalized.string(),
-          .descriptor_present = descriptor_present,
-          .index_multihash = index_multihash,
-          .data_multihash = data_multihash,
-          .generation = generation,
+          .normalized_disk_path = resolved.normalized_disk_path.string(),
+          .descriptor_present = resolved.descriptor_present,
+          .index_multihash = resolved.index_multihash,
+          .data_multihash = resolved.data_multihash,
+          .generation = resolved.generation,
           .created_at = absl::Now(),
       });
-  record_disk_resolution_outcome("ok");
   rctx.mark_success();
   return Status::OK;
 }

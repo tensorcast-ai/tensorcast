@@ -826,6 +826,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
+        ":materialization_disk_resolve_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_layout_utils_lib",
         ":materialization_payload_utils_lib",
@@ -860,6 +861,22 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "materialization_disk_resolve_utils_lib",
+    srcs = ["service/controllers/materialization_disk_resolve_utils.cc"],
+    hdrs = ["service/controllers/materialization_disk_resolve_utils.h"],
+    deps = [
+        ":materialization_index_source_utils_lib",
+        ":materialization_payload_utils_lib",
+        ":path_utils_lib",
+        "//core/common:artifact_hash_lib",
+        "//core/store/materialization/dataplane:disk_dir_hash",
+        "@abseil-cpp//absl/strings",
+        "@nlohmann_json//:json",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
     name = "materialization_request_common_utils_lib",
     srcs = ["service/controllers/materialization_request_common_utils.cc"],
     hdrs = ["service/controllers/materialization_request_common_utils.h"],
@@ -869,6 +886,7 @@ sc_cc_library(
         ":handle_lease_registry_lib",
         ":lip_bridge_lib",
         ":local_disk_import_catalog_lib",
+        ":materialization_disk_resolve_utils_lib",
         ":materialization_replica_handle_utils_lib",
         ":path_utils_lib",
         ":ref_tracker_hdr",
