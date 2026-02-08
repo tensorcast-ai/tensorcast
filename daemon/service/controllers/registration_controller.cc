@@ -34,11 +34,9 @@
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 #include "core/store/view_utils.h"
+#include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/state/store_policy_resolver.h"
 #include "daemon/util/status_utils.h"
-#include "google/protobuf/io/coded_stream.h"
-#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
-#include "google/protobuf/message.h"
 #include "nlohmann/json.hpp"
 #include "opentelemetry/common/attribute_value.h"
 #include "opentelemetry/common/key_value_iterable_view.h"
@@ -158,6 +156,9 @@ const char* stable_overflow_label(store::components::StableOverflowPolicy policy
       return "reject";
   }
 }
+
+using materialization_policy::compute_view_id_from_spec;
+using materialization_policy::convert_view_spec;
 
 void record_local_stable_tier_metrics(
     const char* op,
@@ -294,68 +295,6 @@ void record_local_stable_tier_metrics(
   } catch (...) {
     // Metrics must not affect control flow.
   }
-}
-
-absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf::Message& message) {
-  const size_t size = message.ByteSizeLong();
-  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    return absl::OutOfRangeError("proto message too large for deterministic serialization");
-  }
-  std::string buffer;
-  buffer.resize(size);
-  google::protobuf::io::ArrayOutputStream stream(buffer.data(), static_cast<int>(size));
-  google::protobuf::io::CodedOutputStream coded(&stream);
-  coded.SetSerializationDeterministic(true);
-  if (!message.SerializeToCodedStream(&coded) || coded.HadError()) {
-    return absl::InternalError("deterministic proto serialization failed");
-  }
-  return buffer;
-}
-
-absl::StatusOr<std::string> compute_view_id_from_spec(
-    const tensorcast::common::v1::ViewSpec& view_spec,
-    std::string_view canonical_index_json) {
-  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
-  if (!index_mh_or.ok()) {
-    return index_mh_or.status();
-  }
-  auto proto_bytes_or = serialize_deterministic_proto(view_spec);
-  if (!proto_bytes_or.ok()) {
-    return proto_bytes_or.status();
-  }
-  std::vector<uint8_t> buffer;
-  buffer.reserve(proto_bytes_or->size() + index_mh_or->size());
-  buffer.insert(buffer.end(), proto_bytes_or->begin(), proto_bytes_or->end());
-  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
-  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer));
-  return common::multibase_multihash_sha256(digest);
-}
-
-absl::StatusOr<store::loader::ViewSpec> BuildViewSpecFromProto(const tensorcast::common::v1::ViewSpec& spec_proto) {
-  store::loader::ViewSpec spec;
-  for (const auto& [tensor_name, ops_proto] : spec_proto.tensors()) {
-    store::loader::TensorViewOps tensor_ops;
-    for (const auto& op_proto : ops_proto.ops()) {
-      if (op_proto.has_narrow()) {
-        const auto& narrow = op_proto.narrow();
-        store::loader::NarrowOp narrow_op;
-        narrow_op.dim = static_cast<int32_t>(narrow.dim());
-        narrow_op.start = narrow.start();
-        narrow_op.length = narrow.length();
-        tensor_ops.ops.push_back(store::loader::ViewOp::Narrow(narrow_op));
-      } else if (op_proto.has_transpose()) {
-        const auto& transpose = op_proto.transpose();
-        store::loader::TransposeOp transpose_op;
-        transpose_op.dim0 = static_cast<int32_t>(transpose.dim0());
-        transpose_op.dim1 = static_cast<int32_t>(transpose.dim1());
-        tensor_ops.ops.push_back(store::loader::ViewOp::Transpose(transpose_op));
-      } else {
-        return absl::InvalidArgumentError("unsupported view operation in ViewSpec");
-      }
-    }
-    spec.tensors.emplace(tensor_name, std::move(tensor_ops));
-  }
-  return spec;
 }
 
 store::StoreEngine::ViewPlacement ToPlacement(v2::TransformPlacement placement) {
@@ -1187,7 +1126,7 @@ grpc::Status RegistrationController::begin(
     if (registration_kind == store::StoreEngine::ViewRegistrationKind::kPiece && req.view().ranges_size() > 0) {
       return {StatusCode::INVALID_ARGUMENT, "view.ranges not supported for piece registration"};
     }
-    auto spec_or = BuildViewSpecFromProto(req.view().spec());
+    auto spec_or = convert_view_spec(req.view().spec());
     if (!spec_or.ok()) {
       return to_grpc_status(spec_or.status());
     }
