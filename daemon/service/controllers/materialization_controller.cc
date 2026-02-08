@@ -21,6 +21,7 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
+#include "absl/random/random.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/escaping.h"
@@ -116,7 +117,8 @@ absl::StatusOr<bool> check_post_seal_view_reuse_safe(
     std::string_view mi2_id);
 using store::loading::MaterializationSource;
 
-std::string mint_write_id(absl::BitGen& bitgen) {
+std::string mint_write_id() {
+  thread_local absl::BitGen bitgen;
   std::string raw;
   raw.resize(16);
   for (size_t i = 0; i < raw.size(); ++i) {
@@ -480,6 +482,39 @@ void record_lease_create_failed() {
   }
 }
 
+class OperationLeaseGuard {
+ public:
+  OperationLeaseGuard(
+      std::shared_ptr<store::components::IGlobalStoreClient> client,
+      std::string lease_token,
+      std::string operation_id)
+      : client_(std::move(client)), lease_token_(std::move(lease_token)), operation_id_(std::move(operation_id)) {}
+
+  ~OperationLeaseGuard() {
+    release();
+  }
+
+  void release() {
+    if (released_ || client_ == nullptr || lease_token_.empty()) {
+      released_ = true;
+      return;
+    }
+    tensorcast::operation::v1::ReleaseOperationLeaseRequest release_req;
+    release_req.set_lease_token(lease_token_);
+    auto release_or = client_->release_operation_lease(release_req);
+    if (!release_or.ok()) {
+      LOG(WARNING) << "release_operation_lease failed for op=" << operation_id_ << ": " << release_or.status();
+    }
+    released_ = true;
+  }
+
+ private:
+  std::shared_ptr<store::components::IGlobalStoreClient> client_;
+  std::string lease_token_;
+  std::string operation_id_;
+  bool released_{false};
+};
+
 struct LeaseContext {
   bool loopback_peer{false};
   bool no_lease{false};
@@ -706,6 +741,7 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
 
 MaterializationController::MaterializationController(Dep d)
     : d_(std::move(d)),
+      seal_operation_tracker_(std::make_shared<SealOperationTracker>()),
       capability_tokens_(d_.capability_tokens),
       target_write_registry_(TargetWriteRegistry::Options{.ttl = kTargetWriteTokenTtl}) {
   if (!d_.storage_path.empty()) {
@@ -1851,7 +1887,7 @@ grpc::Status MaterializationController::materialize_into_target(
     }
 
     const std::string layout_hash = compute_target_layout_hash(layout);
-    const std::string write_id = mint_write_id(bitgen_);
+    const std::string write_id = mint_write_id();
     const absl::Time expires_at = absl::Now() + kTargetWriteTokenTtl;
 
     auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
@@ -2762,46 +2798,67 @@ grpc::Status MaterializationController::start_seal_assembly(
   const std::string assembly_id = req.assembly_id();
   const std::string layout_id = req.layout_id();
 
+  auto seal_tracker = seal_operation_tracker_;
   bool should_start = false;
   {
-    absl::MutexLock lock(&seal_mu_);
-    should_start = active_seal_operations_.insert(operation_id).second;
+    absl::MutexLock lock(&seal_tracker->mu);
+    should_start = seal_tracker->active_operations.insert(operation_id).second;
   }
 
   if (should_start) {
-    auto* client = d_.global_store_client.get();
+    auto client_sp = d_.global_store_client;
     auto executor = d_.async_runtime.blocking_executor();
+    auto* async_runtime = &d_.async_runtime;
+    auto* engine = &d_.engine;
+    auto* devices = &d_.devices;
+    auto* identity = &d_.identity;
+    const DaemonOptions::PostSealPolicy post_seal_policy = d_.post_seal_policy;
     executor->add(
-        [this, client, operation_id, assembly_id, layout_id, lease_generation, lease_token]() mutable -> void {
+        [seal_tracker,
+         client_sp = std::move(client_sp),
+         async_runtime,
+         engine,
+         devices,
+         identity,
+         post_seal_policy,
+         operation_id,
+         assembly_id,
+         layout_id,
+         lease_generation,
+         lease_token]() mutable -> void {
+          if (client_sp == nullptr) {
+            return;
+          }
           absl::Status final_status = absl::OkStatus();
-          auto cleanup = absl::MakeCleanup([this, operation_id]() {
-            absl::MutexLock lock(&seal_mu_);
-            active_seal_operations_.erase(operation_id);
+          OperationLeaseGuard lease_guard(client_sp, lease_token, operation_id);
+          auto cleanup = absl::MakeCleanup([seal_tracker, operation_id]() {
+            absl::MutexLock lock(&seal_tracker->mu);
+            seal_tracker->active_operations.erase(operation_id);
           });
 
           auto keepalive_stop = std::make_shared<std::atomic<bool>>(false);
-          auto keepalive_exec = d_.async_runtime.blocking_executor();
+          auto keepalive_exec = async_runtime->blocking_executor();
           auto keepalive = std::make_shared<std::function<void()>>();
           std::weak_ptr<std::function<void()>> keepalive_weak = keepalive;
-          *keepalive = [client,
+          *keepalive = [client_sp,
                         keepalive_stop,
                         keepalive_exec,
                         keepalive_weak,
-                        &timekeeper = d_.async_runtime.timekeeper(),
+                        &timekeeper = async_runtime->timekeeper(),
                         lease_token]() mutable {
             if (keepalive_stop->load(std::memory_order_relaxed)) {
               return;
             }
             timekeeper.after(std::chrono::milliseconds(5000))
                 .via(keepalive_exec)
-                .thenValue([client, keepalive_stop, lease_token, keepalive_weak](folly::Unit) mutable {
+                .thenValue([client_sp, keepalive_stop, lease_token, keepalive_weak](folly::Unit) mutable {
                   if (keepalive_stop->load(std::memory_order_relaxed)) {
                     return;
                   }
                   tensorcast::operation::v1::KeepaliveOperationLeaseRequest req;
                   req.set_lease_token(lease_token);
                   req.set_ttl_ms(0);
-                  auto resp_or = client->keepalive_operation_lease(req);
+                  auto resp_or = client_sp->keepalive_operation_lease(req);
                   if (!resp_or.ok()) {
                     LOG(WARNING) << "keepalive_operation_lease failed for op=" << lease_token << ": "
                                  << resp_or.status();
@@ -2820,7 +2877,7 @@ grpc::Status MaterializationController::start_seal_assembly(
           {
             tensorcast::operation::v1::GetOperationRequest get_req;
             get_req.set_operation_id(operation_id);
-            auto existing_or = client->get_operation(get_req);
+            auto existing_or = client_sp->get_operation(get_req);
             if (existing_or.ok()) {
               const auto& existing_snapshot = existing_or->snapshot();
               const bool has_snapshot = !existing_snapshot.type_url().empty() || !existing_snapshot.value().empty();
@@ -2843,14 +2900,14 @@ grpc::Status MaterializationController::start_seal_assembly(
               snapshot_msg.set_layout_id(layout_id);
               snapshot_msg.set_assembly_layout_binding_version(0);
             } else {
-              auto binding_or = client->get_assembly_layout_binding(assembly_id);
+              auto binding_or = client_sp->get_assembly_layout_binding(assembly_id);
               if (binding_or.ok()) {
                 snapshot_msg.set_layout_id(binding_or->layout_id());
                 snapshot_msg.set_assembly_layout_binding_version(binding_or->binding_version());
               }
             }
 
-            auto views_or = client->list_views(assembly_id);
+            auto views_or = client_sp->list_views(assembly_id);
             if (!views_or.ok()) {
               final_status = views_or.status();
             } else {
@@ -2884,7 +2941,7 @@ grpc::Status MaterializationController::start_seal_assembly(
           if (snapshot_loaded) {
             running.mutable_snapshot()->CopyFrom(snapshot_any);
           }
-          final_status = client->update_operation(running);
+          final_status = client_sp->update_operation(running);
           if (!final_status.ok()) {
             LOG(WARNING) << "update_operation(RUNNING) failed for op=" << operation_id << ": " << final_status;
             keepalive_stop->store(true, std::memory_order_relaxed);
@@ -2900,7 +2957,7 @@ grpc::Status MaterializationController::start_seal_assembly(
           }
 
           if (snapshot_msg.views_size() > 0) {
-            auto current_views_or = client->list_views(assembly_id);
+            auto current_views_or = client_sp->list_views(assembly_id);
             if (!current_views_or.ok()) {
               final_status = current_views_or.status();
             } else {
@@ -2938,7 +2995,7 @@ grpc::Status MaterializationController::start_seal_assembly(
           auto max_hashed = std::make_shared<std::atomic<uint64_t>>(0);
           auto enable_updates = std::make_shared<std::atomic<bool>>(true);
           store::runtime::ingestion::MaterializationFacade::SealProgressCallback progress_cb =
-              [client, operation_id, lease_generation, last_progress_ms, max_hashed, enable_updates](
+              [client_sp, operation_id, lease_generation, last_progress_ms, max_hashed, enable_updates](
                   uint64_t hashed_leaf_count, uint64_t total_hash_leaves) mutable {
                 if (!enable_updates->load(std::memory_order_relaxed) || total_hash_leaves == 0) {
                   return;
@@ -2964,7 +3021,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                 status->set_message(absl::StrCat("hashing ", hashed_leaf_count, "/", total_hash_leaves));
                 status->set_progress(static_cast<double>(hashed_leaf_count) / static_cast<double>(total_hash_leaves));
                 *status->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
-                absl::Status st = client->update_operation(update);
+                absl::Status st = client_sp->update_operation(update);
                 if (!st.ok()) {
                   enable_updates->store(false, std::memory_order_relaxed);
                   LOG(WARNING) << "update_operation(progress) failed for op=" << operation_id << ": " << st;
@@ -2973,19 +3030,19 @@ grpc::Status MaterializationController::start_seal_assembly(
 
           const std::vector<std::string>* allowed_ptr = snapshot_loaded ? &allowed_view_ids : nullptr;
           auto seal_or = final_status.ok()
-              ? d_.engine.seal_assembly(assembly_id, /*publish_canonical=*/true, std::move(progress_cb), allowed_ptr)
+              ? engine->seal_assembly(assembly_id, /*publish_canonical=*/true, std::move(progress_cb), allowed_ptr)
               : absl::StatusOr<store::SealAssemblyResult>(final_status);
           if (!seal_or.ok()) {
             final_status = seal_or.status();
           } else {
             const std::string sealed_artifact_id = seal_or->sealed_artifact_id;
             if (final_status.ok() && !snapshot_msg.layout_id().empty()) {
-              final_status = client->attach_layout_to_artifact(sealed_artifact_id, snapshot_msg.layout_id());
+              final_status = client_sp->attach_layout_to_artifact(sealed_artifact_id, snapshot_msg.layout_id());
             }
 
             std::optional<tensorcast::layout::v1::LayoutSpec> layout_spec_for_post_seal;
             if (final_status.ok() && !snapshot_msg.layout_id().empty()) {
-              auto layout_or = client->get_layout_spec(snapshot_msg.layout_id());
+              auto layout_or = client_sp->get_layout_spec(snapshot_msg.layout_id());
               if (!layout_or.ok()) {
                 final_status = layout_or.status();
               } else {
@@ -3007,7 +3064,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                   } else if (proof_schema_version != "v1") {
                     final_status = absl::UnimplementedError("unsupported proof_schema_version");
                   } else {
-                    auto index_or = client->get_artifact_index_by_id(sealed_artifact_id);
+                    auto index_or = client_sp->get_artifact_index_by_id(sealed_artifact_id);
                     if (!index_or.ok()) {
                       final_status = index_or.status();
                     } else {
@@ -3015,11 +3072,12 @@ grpc::Status MaterializationController::start_seal_assembly(
                       if (!intervals_or.ok()) {
                         final_status = intervals_or.status();
                       } else {
-                        auto devices = d_.engine.get_resident_devices(sealed_artifact_id);
-                        auto gpu_it = std::find_if(devices.begin(), devices.end(), [](const store::DeviceKey& d) {
-                          return d.type == DeviceType::GPU;
-                        });
-                        if (gpu_it == devices.end()) {
+                        auto resident_devices = engine->get_resident_devices(sealed_artifact_id);
+                        auto gpu_it = std::find_if(
+                            resident_devices.begin(), resident_devices.end(), [](const store::DeviceKey& d) {
+                              return d.type == DeviceType::GPU;
+                            });
+                        if (gpu_it == resident_devices.end()) {
                           final_status =
                               absl::FailedPreconditionError("sealed artifact GPU replica unavailable for proofs");
                         } else {
@@ -3029,8 +3087,8 @@ grpc::Status MaterializationController::start_seal_assembly(
                           replica_key.device = *gpu_it;
                           replica_key.replica = 0;
 
-                          auto size_or = d_.engine.get_replica_size(replica_key);
-                          auto ptr_or = d_.engine.get_replica_gpu_ptr(replica_key);
+                          auto size_or = engine->get_replica_size(replica_key);
+                          auto ptr_or = engine->get_replica_gpu_ptr(replica_key);
                           if (!size_or.ok()) {
                             final_status = size_or.status();
                           } else if (!ptr_or.ok()) {
@@ -3101,7 +3159,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                                 for (size_t j = i; j < end; ++j) {
                                   *write_req.add_commitments() = writes[j];
                                 }
-                                auto write_resp_or = client->write_tensor_proof_commitments(write_req);
+                                auto write_resp_or = client_sp->write_tensor_proof_commitments(write_req);
                                 if (!write_resp_or.ok()) {
                                   final_status = write_resp_or.status();
                                   break;
@@ -3118,7 +3176,7 @@ grpc::Status MaterializationController::start_seal_assembly(
             }
 
             if (final_status.ok()) {
-              const auto& policy = d_.post_seal_policy;
+              const auto& policy = post_seal_policy;
               const bool allow_migration = policy.migrate_views;
               const bool allow_retire = policy.retire_pieces;
               if (allow_retire && !policy.migrate_views && !policy.reuse_views_if_safe) {
@@ -3127,7 +3185,7 @@ grpc::Status MaterializationController::start_seal_assembly(
               }
 
               if (allow_migration) {
-                auto views_or = client->list_views(assembly_id);
+                auto views_or = client_sp->list_views(assembly_id);
                 if (!views_or.ok()) {
                   LOG(WARNING) << "post-seal migrate_views list_views failed for assembly=" << assembly_id << ": "
                                << views_or.status();
@@ -3153,7 +3211,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                   }
 
                   const std::vector<std::string>* allowed_ptr = allowed_view_ids.empty() ? nullptr : &allowed_view_ids;
-                  if (d_.engine.get_num_gpus() == 0) {
+                  if (engine->get_num_gpus() == 0) {
                     LOG(WARNING) << "post-seal migrate_views skipped: no GPU devices available";
                   } else {
                     for (const auto& view : *views_or) {
@@ -3188,8 +3246,8 @@ grpc::Status MaterializationController::start_seal_assembly(
                         }
                       }
 
-                      const store::DeviceKey target_device = d_.devices.DefaultGpu();
-                      auto handle_or = d_.engine.materialize_view_from_assembly(
+                      const store::DeviceKey target_device = devices->DefaultGpu();
+                      auto handle_or = engine->materialize_view_from_assembly(
                           assembly_id,
                           sealed_artifact_id,
                           view.view_id,
@@ -3203,7 +3261,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                         continue;
                       }
 
-                      auto publish_status = d_.engine.register_replica_with_global_store(handle_or->replica_key, {});
+                      auto publish_status = engine->register_replica_with_global_store(handle_or->replica_key, {});
                       if (!publish_status.ok() && !absl::IsAlreadyExists(publish_status)) {
                         LOG(WARNING) << "post-seal migrate_views register_replica failed for view_id=" << view.view_id
                                      << ": " << publish_status;
@@ -3221,7 +3279,7 @@ grpc::Status MaterializationController::start_seal_assembly(
                       update.canonical_size_bytes = view.canonical_size_bytes;
                       update.canonical_bytes_covered = view.canonical_bytes_covered;
                       update.canonical_ranges = view.canonical_ranges;
-                      auto view_status = client->update_artifact_view_state(update);
+                      auto view_status = client_sp->update_artifact_view_state(update);
                       if (!view_status.ok()) {
                         LOG(WARNING) << "post-seal migrate_views update_view_state failed for view_id=" << view.view_id
                                      << ": " << view_status;
@@ -3232,9 +3290,9 @@ grpc::Status MaterializationController::start_seal_assembly(
               }
 
               if (allow_retire) {
-                const std::string worker_id = d_.identity.worker_id();
+                const std::string worker_id = identity->worker_id();
                 if (!worker_id.empty()) {
-                  auto unreg_status = client->unregister_replica_by_worker(assembly_id, worker_id);
+                  auto unreg_status = client_sp->unregister_replica_by_worker(assembly_id, worker_id);
                   if (!unreg_status.ok()) {
                     LOG(WARNING) << "post-seal retire_pieces unregister_replica_by_worker failed for assembly="
                                  << assembly_id << ": " << unreg_status;
@@ -3244,13 +3302,13 @@ grpc::Status MaterializationController::start_seal_assembly(
                 }
 
                 std::vector<store::loading::ReplicaKey> to_unload;
-                for (const auto& info : d_.engine.get_all_replicas_info()) {
+                for (const auto& info : engine->get_all_replicas_info()) {
                   if (info.key.artifact_id == assembly_id) {
                     to_unload.push_back(info.key);
                   }
                 }
                 for (const auto& key : to_unload) {
-                  auto unload_status = d_.engine.unload_replica_status(key);
+                  auto unload_status = engine->unload_replica_status(key);
                   if (!unload_status.ok()) {
                     LOG(WARNING) << "post-seal retire_pieces unload_replica failed for key=" << key << ": "
                                  << unload_status;
@@ -3288,7 +3346,7 @@ grpc::Status MaterializationController::start_seal_assembly(
             *out->mutable_as_of() = google::protobuf::util::TimeUtil::GetCurrentTime();
             out->mutable_result()->PackFrom(result_msg);
             if (final_status.ok()) {
-              final_status = client->update_operation(success);
+              final_status = client_sp->update_operation(success);
             }
           }
 
@@ -3305,19 +3363,14 @@ grpc::Status MaterializationController::start_seal_assembly(
             err->set_status_code(absl::StatusCodeToString(final_status.code()));
             err->set_message(std::string(final_status.message()));
             err->set_retryable(retryable_status(final_status));
-            absl::Status update_st = client->update_operation(failed);
+            absl::Status update_st = client_sp->update_operation(failed);
             if (!update_st.ok()) {
               LOG(WARNING) << "update_operation(FAILED) failed for op=" << operation_id << ": " << update_st;
             }
           }
 
           keepalive_stop->store(true, std::memory_order_relaxed);
-          tensorcast::operation::v1::ReleaseOperationLeaseRequest release;
-          release.set_lease_token(lease_token);
-          auto release_or = client->release_operation_lease(release);
-          if (!release_or.ok()) {
-            LOG(WARNING) << "release_operation_lease failed for op=" << operation_id << ": " << release_or.status();
-          }
+          lease_guard.release();
         });
   }
 
