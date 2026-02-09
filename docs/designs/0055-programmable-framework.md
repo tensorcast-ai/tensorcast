@@ -9,7 +9,7 @@ areas:
   - global_store
   - proto
 created: 2026-01-23
-last_updated: 2026-02-04
+last_updated: 2026-02-08
 related_code:
   - tensorcast/api/store/artifact.py
   - tensorcast/api/store/batch_context.py
@@ -45,7 +45,6 @@ related_docs:
   - docs/designs/0011-unified-session-lifecycle-leases.md
   - docs/architecture/artifact-views-and-retrieval.md
   - docs/designs/0039-artifact-first-sdk.md
-  - docs/architecture/api/region-backed.md
 links:
   plan: ../plans/0055-programmable-framework.md
   predecessors:
@@ -72,8 +71,8 @@ Instead, programmability is expressed by **composing existing Artifact primitive
 
 This document prioritizes **What/Why** (semantics and rationale) and defines contracts/invariants that must hold from Phase-0.
 
-Planned advanced extensions (Controller execution, app/instance agents, signals, and engine-agnostic KV-cache integration)
-are specified in `docs/designs/0056-programmable-framework-adv.md`.
+Planned advanced extensions (daemon-run plan execution from a single entry daemon, process runtime unification,
+signals, and engine-agnostic KV-cache integration) are specified in `docs/designs/0056-programmable-framework-adv.md`.
 
 ---
 
@@ -90,6 +89,15 @@ Scope choices (long-term, repo-wide):
   wait/cancel/status), but does not fork transport/loading semantics.
 - **Node-local safety boundary**: any action that touches PID/IPC/regions must run at the node-local boundary
   (Engine Adapter / node agent), not from a central controller.
+
+### Phase labels (note)
+
+This document uses “Phase-*” labels as repo-internal implementation milestones across multiple designs; they are not a
+strictly linear sequence inside this doc. For `status: implemented` 0055:
+
+- **Phase-0**: baseline implemented behavior (sync/blocking public APIs; local-run plans; user-driven retries).
+- **Phase-1**: recommended follow-ups (e.g., additional wait/status RPCs to reduce polling).
+- **Phase-4**: implemented PlanSpec + node-local execution boundary (node_agent / engine adapter dispatch).
 
 ## Prior State (Grounding)
 
@@ -143,7 +151,7 @@ vs what was true **before 0055** (historical motivation). This avoids ambiguity 
 - [Feature Mapping (Legacy → Programmable)](#feature-mapping-legacy--programmable)
 - [Contracts and Invariants](#contracts-and-invariants)
 - [Error, Retry, Deadline, Cancel Semantics](#error-retry-deadline-cancel-semantics)
-- [Proto Requirements](#proto-requirements)
+- [Proto & RPC Surfaces](#proto--rpc-surfaces-as-of-0055)
 - [Schema Changes](#schema-changes)
 - [Trade-offs & Risks](#trade-offs--risks)
 - [Examples](#examples)
@@ -262,6 +270,14 @@ Canonical encoding (required):
   string, it MUST be canonicalized as `idempotency_key_hex = sha256(utf8(idempotency_key)).hexdigest()` (lowercase
   hex) to ensure delimiter-safety and bounded size.
 
+Single-source-of-truth (implemented):
+
+- Python reference implementation: `tensorcast/common/selection_identity.py`.
+- Minimal pseudocode (normative; matches the reference implementation):
+  - `logical_layout_hash = sha256(index_bytes + ("|view" if needs_view_index else "|canonical")).digest()`
+  - `view_subset_hash = sha256(json.dumps(sorted(unique(tensor_names)), separators=(",", ":"), ensure_ascii=True).encode("utf-8")).digest()`
+  - `selection_hash = sha256(utf8(view_id) + (view_subset_hash or b"|all") + b"|v1").digest()`
+
 ### Replica (existing)
 
 A concrete materialization of an artifact (or view) on a tier/device.
@@ -272,7 +288,11 @@ In the C++ StoreEngine, the identity of a daemon-owned replica is the `ReplicaKe
 
 - `artifact_id`
 - `view_id` (optional; absent means canonical view)
+  - SDK convention (required): canonical view is represented as `view_id == ""` at the Python API boundary.
+    Wire/proto MAY omit the field or send an empty string; both map to the canonical view.
 - `device` (`DeviceType`, `ordinal`, `uuid`)
+  - Note (implemented): the “placement tier” concept (HOST_DRAM vs GPU_VRAM) is represented by `device.type` (CPU vs
+    GPU). There is no separate `tier` field in the StoreEngine `ReplicaKey` as of 0055.
 - `replica` (uint32; Phase-0 uses `replica=0`)
 
 This is the key that determines which underlying daemon-owned VRAM/DRAM replica is being loaded/kept around.
@@ -282,8 +302,8 @@ This is the key that determines which underlying daemon-owned VRAM/DRAM replica 
 TensorCast has two different identities that must not be conflated:
 
 1) **ReplicaKey (replica identity; existing)**  
-   The identity of a daemon-owned materialization in the StoreEngine, derived from `(artifact_id, view_id, device_id,
-   tier, ...)`.  
+   The identity of a daemon-owned materialization in the StoreEngine, derived from `(artifact_id, view_id,
+   device(type, ordinal, uuid), replica)`.  
    **Engine invariant**: repeated materialization on the same daemon MUST join on `ReplicaKey` to avoid duplicate VRAM
    allocations; programmability must preserve and rely on this behavior.
 
@@ -458,7 +478,15 @@ class CallContext:
 - If the caller already has a stable idempotency key (stable across retries and across agents), it should be set as
   `idempotency_key`. Otherwise, `request_id` provides traceability, not cross-retry idempotency.
 - `deadline_ms` is an end-to-end budget (relative), enforced as a hard cutoff (see Deadline semantics).
- - Rule of thumb: **handles come from `tensorcast` / `Store` factories; `ctx` appears only on action execution (or on `tensorcast.plan(ctx)`).**
+- `tags` are small, safe-to-log metadata (debugging/observability only).
+  - As of 0055, the SDK does not enforce size/shape limits; callers SHOULD keep tags small to avoid trace/log blowups.
+  - Recommended limits (caller guidance):
+    - max entries: 32
+    - key length: ≤ 64 UTF‑8 bytes
+    - string value length: ≤ 256 UTF‑8 bytes
+    - total encoded size: ≤ 8 KiB
+  - Future SDKs MAY enforce these limits (e.g., reject with `INVALID_ARGUMENT`) rather than truncating silently.
+- Rule of thumb: **handles come from `tensorcast` / `Store` factories; `ctx` appears only on action execution (or on `tensorcast.plan(ctx)`).**
 
 **Module-level helper**
 
@@ -549,6 +577,14 @@ class Operation(Generic[T]):
     def cancel(self) -> bool: ...
 ```
 
+Notes (required):
+
+- `Operation.result(...)` and `Operation.wait(...)` are synonyms (the SDK MAY implement one in terms of the other).
+  Docs use `result(...)` as the preferred name.
+- `OperationStatus.progress` is best-effort:
+  - `None` means “unknown / not reported”.
+  - When present, it SHOULD be in `[0.0, 1.0]` (inclusive) and monotonically non-decreasing for a given `operation_id`.
+
 **Timestamp conventions**
 
 - `as_of_ms` and `*_at_ms` fields use Unix epoch milliseconds (wall-clock) so they can be correlated across machines.
@@ -574,14 +610,29 @@ For correctness, daemon-owned actions MUST have daemon-side, operation-scoped st
 - `prefetch`: the daemon-owned replica is **ready for serving** (loaded on the requested device/tier). This does not
   imply IPC handle export, and does not imply verification unless explicitly enabled.
 - `pin_device_residency`: the placement pin is active and a valid `PlacementPin` capability is returned.
-- `persistence`: the persistence task reaches a terminal state (`success|failed|degraded`).
+- `persistence`: the persistence task reaches `success`. The daemon persistence task itself may reach a terminal
+  non-success outcome (`failed` or `degraded`); this is surfaced via `Operation.status()` / `query_persistence_status(...)`
+  and `wait()/result()` raises when bounded by a deadline/timeout.
 - `into` / transforms: the in-process Engine Adapter has completed the buffer writes / produced the output artifact.
 
 **`degraded` is used when**
 
-- The caller’s deadline is exhausted.
-- Best-effort cancellation has been initiated.
-- The underlying action may still complete in the background.
+- The operation cannot be treated as successfully completed and requires caller handling.
+- It may be reported by the target service (daemon/global store) and/or synthesized by the SDK when a local budget is
+  exhausted while observing status.
+- For daemon-owned replica operations, the underlying action may still complete in the background.
+- For long-tail workflows like persistence, `degraded` may also represent a terminal “partial success” outcome (e.g.,
+  one or more shards degraded), even though it is not `success`.
+
+**`degraded` does not satisfy `Operation.done()` (as of 0055; required)**
+
+- `Operation.done()` MUST treat `degraded` as **not done** (i.e., not a completion condition).
+- `Operation.wait()/result()` MUST raise on deadline/budget exhaustion (e.g., `OperationTimeoutError`), but the
+  underlying daemon-side operation may still complete later.
+- To observe the eventual terminal outcome after a timeout, callers SHOULD re-attach by:
+  - re-submitting the same deterministic action with the same `ctx.idempotency_key` (joins the same operation id), or
+  - using a fresh context/budget to query status (a dedicated “attach by operation_id” API may be added in future
+    designs).
 
 **Failure reporting (required)**
 
@@ -600,7 +651,7 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class PrefetchedReplica:
     artifact_id: str
-    view_id: str
+    view_id: str  # "" means canonical view
     operation_id: str
     device_id: int
     daemon_id: str
@@ -630,6 +681,12 @@ class Artifact:
         - `device` may refer to:
           - GPU VRAM (e.g., `"cuda:0"` or `0`), or
           - daemon-owned host DRAM (e.g., `"dram"`, `"cpu"`, or `-1`).
+        - Placement model (required):
+          - Semantically, `device` selects a **Placement** tier, not a GPU ordinal.
+            - `Placement(kind="GPU_VRAM", device_id=N)` for `"cuda:N"` / `N`.
+            - `Placement(kind="HOST_DRAM")` for `"dram"` / `"cpu"` / `-1`.
+          - Wire compatibility: `Placement(kind="HOST_DRAM")` is encoded as `device_id = -1` on the wire today.
+            Future designs may introduce an explicit `Placement` type while preserving this encoding.
         - Uses a deterministic **operation id** (sent as `replica_uuid`) when `ctx.idempotency_key` is provided.
         - Cache identity follows StoreEngine `ReplicaKey` (engine dedup is `ReplicaKey`-based; operation ids are not).
         - Prefetch does not imply pinning. To keep a replica resident, callers must use `pin_device_residency(...)`.
@@ -657,6 +714,9 @@ Properties:
 - **VRAM dedup remains ReplicaKey-based**: the daemon/engine MUST join repeated loads on `ReplicaKey`, independent of
   operation ids.
 - **Canonical UUID form**: the on-wire `replica_uuid` MUST use RFC 4122 canonical string form (lowercase hex with `-`).
+- Proto evolution note (recommended): future proto versions MAY introduce a new `operation_id` field name (as an alias)
+  while keeping `replica_uuid` for backward compatibility. Servers should accept either field and canonicalize
+  internally to “operation id” semantics.
 
 Canonicalization rules (required):
 
@@ -667,8 +727,13 @@ Canonicalization rules (required):
   SDK MUST resolve key→artifact_id and fetch canonical/view index bytes before deriving deterministic operation ids; if
   index bytes cannot be resolved, deterministic operation ids MUST NOT be produced silently (the call MUST fail rather
   than “fall back” to a non-deterministic operation id when `ctx.idempotency_key` is provided).
-- `device` MUST canonicalize to an integer `device_id` before fingerprinting (e.g., `"cpu"`/`"dram"`/`-1` → `-1`,
-  `"cuda:N"`/`N` → `N`).
+- `device` MUST canonicalize to a semantic Placement and then to its wire `device_id` before fingerprinting:
+  - `"cpu"` / `"dram"` / `-1` → `Placement(kind="HOST_DRAM")` → `device_id = -1`
+  - `"cuda:N"` / `N` → `Placement(kind="GPU_VRAM", device_id=N)` → `device_id = N`
+  - Implementation note: today `device_id` fully disambiguates Placement kind because only HOST_DRAM and GPU_VRAM are
+    supported. If additional Placement kinds are introduced (e.g., NVMe cache), deterministic fingerprints MUST be
+    extended to include `placement.kind` explicitly (or replaced by a first-class `Placement` message) to avoid
+    semantic drift.
 - `daemon_id` MUST be a stable daemon identity (derived from unified config). If only a network address is available,
   deterministic operation ids remain deterministic but are HA-unsafe; SDKs SHOULD fail fast when
   `ctx.idempotency_key` is provided but `daemon_id` cannot be resolved.
@@ -697,7 +762,7 @@ class Artifact:
         - If region-backed cannot be used and the SDK falls back to the standard materialization path, normal daemon-side
           materialization/caching semantics apply (the replica may be created transiently and released after copy).
         - For remote execution, `target` MUST be a `TargetSpec` capability minted by the engine adapter on the target
-          instance. Controllers must not mint targets directly.
+          instance. Remote plan executors (e.g., daemon-run plans in future designs) must not mint targets directly.
         - Cross-process/remote `into(...)` orchestration is supported via `Plan` instance steps when the target is a
           `TargetSpec` minted by the engine adapter on the target instance.
         """
@@ -735,10 +800,10 @@ from dataclasses import dataclass
 @dataclass(frozen=True, slots=True)
 class PlacementPin:
     pin_id: int
-    capability_token: str     # opaque, unforgeable capability minted by the daemon
+    capability_token: str     # base64url-nopad encoding of opaque bytes (wire: bytes)
     daemon_id: str            # stable target identity (derived from daemon config)
     artifact_id: str
-    view_id: str
+    view_id: str  # "" means canonical view
     device_id: int
     expires_at_ms: int | None
 
@@ -763,6 +828,13 @@ class Artifact:
         - Idempotency (implemented constraint): pin creation is capability-based and **not idempotent**. Callers MUST
           NOT automatically retry on unknown outcomes (it may create multiple pins). Callers SHOULD always provide a
           finite `ttl_ms`. To extend TTL, use `PlacementPin.renew(...)` instead of re-issuing a new pin.
+        - Retry policy (required): because creation is non-idempotent, SDKs and plan executors MUST disable any
+          transparent/automatic retries for the underlying `CreatePlacementLease` RPC (including gRPC retry policies).
+          If an error does not prove the request was not executed server-side, the call MUST surface the unknown
+          outcome to the caller rather than retrying implicitly.
+        - Cancel semantics: because pin creation is non-idempotent and the capability token is only available on
+          success, `Operation.cancel()` is best-effort and MUST NOT be relied upon to “undo” an unknown-outcome pin
+          creation. Prefer finite `ttl_ms` for bounded leakage.
         """
 ```
 
@@ -788,7 +860,14 @@ For long-term correctness, `Plan` MUST be serializable and versioned (proto pref
 
 **Implementation note (as of 2026-02-04)**:
 
-- `PlanSpec` proto (`proto/tensorcast/plan/v1/plan.proto`) and `Plan.to_spec()` provide a versioned, deterministic IR.
+- `PlanSpec` proto (`proto/tensorcast/plan/v1/plan.proto`) and `Plan.to_spec()` provide a versioned IR with
+  deterministic serialization given a deterministic plan construction order.
+  - As of 0055, `step_id` values are allocated sequentially (e.g., `step-0001`) in builder call order, so cross-process
+    determinism depends on constructing the same logical plan with the same step insertion order.
+  - Set-like inputs that participate in identity (e.g., subset `tensor_names`) MUST be canonicalized (sorted/unique) by
+    builders before hashing/fingerprinting.
+  - Planned refinement: derive `step_id` deterministically from a step fingerprint (UUIDv5 over stable inputs) and
+    enforce canonical ordering of dependency lists and batch inputs in the IR (see `docs/designs/0056-programmable-framework-adv.md`).
 - A Node Agent implementation exists for node-local execution and Engine Adapter dispatch.
 - `Plan.run()` executes in the caller process and dispatches actions to Store Daemons and Node Agents.
 
@@ -946,13 +1025,23 @@ class InstanceStepBuilder:
     ) -> PlanStepRef[None]: ...
 ```
 
+Implementation note (as of 0055):
+
+- There is no dedicated `materialize_into(...)` / `into(...)` instance step in the public `Plan` surface.
+  - Remote “into” orchestration is typically expressed as an engine-defined identity transform via `transform_into(...)`.
+  - A dedicated `materialize_into(...)` instance action is a planned refinement for improved auditability and clearer
+    observability (see `docs/designs/0056-programmable-framework-adv.md`).
+
 #### Execution
 
 `Plan.run()` enforces:
 
 - bounded concurrency
 - deadline propagation
-- action-level idempotency derived from `(ctx.idempotency_key, action_name, selection identity (artifact_id, logical_layout_hash, selection_hash), placement (tier/device), stable target identity, and action-specific stable inputs such as ttl_ms)`
+- action-level idempotency derived from `(ctx.idempotency_key, action_name, selection identity (artifact_id, logical_layout_hash, selection_hash), placement (tier/device), stable target identity, and action-specific stable inputs)`
+  - For **monotonic-extend** actions (e.g., `PlacementPin.renew(...)` and backend TTL touch), `ttl_ms` MUST NOT
+    participate in deterministic operation/step identity; it is treated as a requested minimum expiry and the daemon
+    applies monotonic extension (`expires_at = max(expires_at, now + ttl_ms)`).
 - atomic success reporting: `PlanResult.ok` is `True` only if all steps succeed
 
 #### Failure, retry, and partial success (Phase-0)
@@ -985,7 +1074,7 @@ class TargetSpec:
     tensors: Mapping[str, str]  # tensor_name -> buffer_handle_id (opaque to controller)
     layout_hash: str | None = None
     expires_at_ms: int  # hard expiry for replay safety
-    capability_token: str  # opaque, unforgeable, instance-scoped capability
+    capability_token: str  # base64url-nopad encoding of opaque bytes (wire: bytes)
 ```
 
 Note: `TargetSpec.layout_hash` is an **engine buffer layout/shape contract hash** (to prevent mis-writes). It is not the
@@ -1105,13 +1194,17 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
    - Non-identity views MUST resolve to a stable `view_id` and participate in `selection_hash`.
 
 3. **ReplicaKey is the replica identity (engine join)**
-   - Daemon-owned VRAM replicas are identified by `ReplicaKey` (artifact_id, view_id, device, tier, ...).
+   - Daemon-owned replicas are identified by StoreEngine `ReplicaKey` (artifact_id, view_id, device(type, ordinal, uuid), replica).
    - The daemon/StoreEngine MUST join repeated loads on the same `ReplicaKey` and must not allocate duplicate VRAM
      replicas.
 
-4. **Deterministic operation id (`replica_uuid`) for joinable actions**
+4. **Deterministic operation id (`replica_uuid`) for joinable daemon-owned actions**
    - When `ctx.idempotency_key` is provided, the SDK MUST derive a deterministic operation id and send it as
-     `replica_uuid` for joinable actions (prefetch/pin/waits).
+     `replica_uuid` for joinable daemon-owned materialization actions (e.g., `prefetch`, persistence) and their
+     wait/cancel/status.
+   - Placement pin creation in 0055 does **not** use deterministic operation ids. It is capability-based and **not
+     idempotent**; callers MUST avoid automatic retries on unknown outcomes and SHOULD always use a finite `ttl_ms`.
+     (Idempotent pin creation is a planned extension; see `docs/designs/0056-programmable-framework-adv.md`.)
    - Cancel/status are scoped to `replica_uuid` (operation id), not `ReplicaKey` identity.
    - Multiple operation ids may map to the same `ReplicaKey`; cancel MUST NOT affect other operation ids.
    - When `ctx` is absent, the SDK MUST still generate a per-call operation id once and reuse it across internal retries,
@@ -1124,11 +1217,13 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 6. **Capabilities are required for unsafe references**
    - `TargetSpec` MUST carry an unforgeable, instance-scoped capability token before an engine adapter will resolve
      buffers.
-   - `PlacementPin` MUST carry an unforgeable, daemon-scoped capability token for renew/release.
+   - `PlacementPin` MUST carry an unforgeable, daemon-scoped capability token for renew/release. In 0055, the
+     capability token is the join key for placement pin lifecycle operations (renew/release); `replica_uuid` is not
+     used as a stable pin identity.
 
 7. **Stable target identity is config-derived**
    - `daemon_id` and `instance_id` MUST be derived from the unified runtime config (no ad-hoc env vars).
-   - Controllers MUST NOT assume `worker_id` or `daemon_address` are stable across HA re-registration.
+   - Plan executors MUST NOT assume `worker_id` or `daemon_address` are stable across HA re-registration.
 
 8. **Durability vs residency orthogonal**
    - `StorePolicy` does not express “GPU never evict”.
@@ -1163,6 +1258,11 @@ This section maps today’s SDK surfaces (and common workflows) onto the program
 ### Cancel semantics
 
 - Cancel is best-effort.
+- `Operation.cancel() -> bool` return value (as of 0055):
+  - `True` means the target acknowledged the cancel/release request for this operation id (it does not guarantee
+    underlying IO was aborted).
+  - `False` means cancel is not confirmed (already terminal, not supported, or could not be issued; 0055
+    implementations may return `False` on transport errors rather than raising).
 - Cancel is scoped to the **operation id** (`Operation.operation_id`, typically `replica_uuid` for daemon-owned actions).
   Cancelling an operation id MUST NOT cancel other operations, even if they map to the same underlying `ReplicaKey`.
 - Cancellation MUST be implemented against operation-scoped daemon state (not `ReplicaKey` state) to avoid cross-talk.
@@ -1196,45 +1296,41 @@ If no idempotency key is provided:
 
 ---
 
-## Proto Requirements
+## Proto & RPC Surfaces (as of 0055)
 
-This design assumes proto can evolve. The following are required to make the user-facing contracts real (`NO_LEASE`,
-operation-scoped wait/cancel, placement pins, and stable daemon identity).
+This section documents which proto/RPC surfaces are relied upon by the **implemented** 0055 SDK contracts, and
+separately lists follow-ups that are recommended but not required for 0055 correctness. 0056-only extensions are
+specified in `docs/designs/0056-programmable-framework-adv.md`.
 
-### StoreDaemonService (additive)
+### StoreDaemonService (as of 0055)
 
-1) **MaterializeReplica / MaterializeByKey**
+**Implemented in 0055**
 
-- add `lease_mode` with `NO_LEASE` option (`prefetch` MUST default to `NO_LEASE`)
-  - in `NO_LEASE`, the daemon must ignore PID use-lease creation even for loopback peers
-  - in `NO_LEASE`, the daemon MUST NOT mint IPC handle leases and SHOULD omit `mem_handle` entirely
-- clarify semantics of `replica_uuid` as an operation/session id:
-  - multiple `replica_uuid`s may map to the same `ReplicaKey`
-  - cancel/status are scoped to `replica_uuid` (operation id), not global replica identity
-- (optional but recommended) include `replica_key_hash` fields for validation/debug so the daemon can detect accidental
-  mismatches (same `replica_uuid` used for different `ReplicaKey`s)
+- **MaterializeReplica / MaterializeByKey**
+  - `lease_mode` supports `NO_LEASE` (`prefetch` defaults to `NO_LEASE`).
+  - In `NO_LEASE`, the daemon ignores PID use-lease creation and MUST NOT mint IPC handle leases (it SHOULD omit
+    `mem_handle` entirely).
+  - `replica_uuid` is treated as an **operation/session id**:
+    - multiple `replica_uuid`s may map to the same `ReplicaKey`,
+    - cancel/status are scoped to `replica_uuid` (operation id), not replica identity.
+- **Operation RPCs for daemon-owned actions**
+  - `QueryReplicaStatus`, `WaitReplicaStatus`, `ReleaseReplica` implement `Operation.status/wait/cancel` by operation id
+    (`replica_uuid`).
+  - As of 0055, `WaitReplicaStatus` is a unary long-poll; server-streaming is a recommended follow-up.
+- **Persistence status**
+  - `QueryPersistenceStatus` exists and is wrapped as a polling `Operation[...]` (`Store.persistence_operation(...)`).
+- **Placement pins** (wire uses legacy “lease” naming)
+  - `CreatePlacementLease`, `RenewPlacementLease`, `ReleasePlacementLease`.
+  - Must return and require a `lease_token` capability for renew/release (wire: `bytes`; Python API:
+    base64url-nopad `str` surfaced as `capability_token`).
 
-2) **ReleaseReplica**
+**Recommended follow-ups (not required for 0055 correctness)**
 
-- define release semantics as operation-scoped (by `replica_uuid`)
-- implement `QueryReplicaStatus` + `ReleaseReplica` (or return `UNIMPLEMENTED`) so SDK `Operation.wait/cancel` can be
-  correct and observable
-
-3) **WaitReplicaStatus (recommended)**
-
-- avoid polling storms; required for low-latency operation waits
-- MUST reflect the daemon-side operation record state machine (not just `ReplicaKey` state)
-- SHOULD be server-streaming (or long-poll) to support low-latency waits without polling loops
-
-4) **WaitPersistenceStatus (recommended)**
-
-- avoid polling storms for persistence task waits (mirrors `WaitReplicaStatus`)
-
-5) **Placement pin RPCs** (wire uses legacy “lease” naming)
-
-- `CreatePlacementLease`, `RenewPlacementLease`, `ReleasePlacementLease`
-- map to daemon’s existing `placement_pins` semantics (`SessionLifecycleManager::create_placement_lease`)
-- MUST return and require a `lease_token` capability for renew/release (daemon-scoped, time-bounded, unforgeable). The Python SDK should surface this as a generic `capability_token` to avoid overloading “lease” terminology.
+- Add optional `replica_key_hash` debug fields so the daemon can detect accidental mismatches (same `replica_uuid` used
+  for different `ReplicaKey`s).
+- Add `WaitPersistenceStatus` (mirrors `WaitReplicaStatus`) to avoid polling storms on persistence workflows.
+- Proto evolution: introduce an `operation_id` alias field while keeping `replica_uuid` as a deprecated wire name (see
+  “replica_uuid vs operation_id” notes earlier in this doc).
 
 6) **Unified capability token envelope (implemented)**
 
@@ -1248,7 +1344,9 @@ Verification model (normative, v1):
 
 - Tokens MUST be validated by the issuing daemon (issuer-only validation).
 - Tokens MUST embed `issuer_daemon_id`, and the issuer MUST reject tokens whose issuer does not match `self.daemon_id`.
-- SDKs SHOULD treat tokens as opaque `bytes` and never parse them.
+- SDKs MUST treat tokens as opaque and never parse envelope fields.
+  - Wire/proto representation is raw `bytes`.
+  - Python public APIs represent tokens as base64url without padding (`str`) and SDKs only encode/decode for transport.
 
 Token requirements (normative):
 
@@ -1326,22 +1424,27 @@ Node-local execution is provided by:
 - `TransformSpec` and `TargetSpec` for instance-scoped transforms
 
 - Engine adapters MUST expose a target-minting surface that returns a `TargetSpec` with a capability token
-  (instance-scoped, time-bounded). Controllers must not mint targets directly.
+  (instance-scoped, time-bounded). Remote plan executors must not mint targets directly.
 
-### GlobalStoreService (recommended)
+### GlobalStoreService (as of 0055)
 
-- Worker registration/heartbeat requires stable `daemon_id` (derived from daemon config, not from address);
-  address/port are routing attributes and endpoint conflicts are rejected regardless of `node_id`.
-- `ListActiveWorkers` should return `daemon_id` alongside `worker_id` so controllers/node agents can reconcile state
-  across HA re-registrations.
+**Implemented in 0055**
+
+- Worker registry/heartbeat includes a stable `daemon_id` (derived from daemon config, not from address); address/port
+  are routing attributes and endpoint conflicts are rejected regardless of `node_id`.
+- `ListActiveWorkers` returns `daemon_id` alongside `worker_id` so plan executors/node agents can reconcile state across
+  HA re-registrations.
 - Instance registry exposes `RegisterInstance`, `InstanceHeartbeat`, and `ListActiveInstances` for stable
-  `instance_id` discovery.
-- Capability directory (low-frequency): worker/instance discovery includes a bounded capability bitset (routing hints
-  only, not correctness) in `proto/tensorcast/global_store/v1/global_store.proto`, for example:
+  `instance_id` discovery (and includes an HA-safe `daemon_id` for routing).
+
+**Recommended follow-ups**
+
+- Capability directory semantics (low-frequency): worker/instance discovery includes a bounded capability bitset
+  (routing hints only, not correctness) in `proto/tensorcast/global_store/v1/global_store.proto`, for example:
   - workers: `WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED`, `WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED`,
     `WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED`
   - instances: `INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED`, `INSTANCE_CAPABILITY_FLAG_NODE_AGENT_ENABLED`
-  - listing supports filters (`required_capability_flags`) so clients/controllers can find broker-enabled endpoints
+  - listing supports filters (`required_capability_flags`) so clients/plan executors can find broker-enabled endpoints
   - daemons publish worker capability flags when `DaemonConfig.capability_directory.enabled=true`
   - writes SHOULD be update-on-change (do not rewrite identical flags every heartbeat)
   - clients MUST cache results and MUST NOT query Global Store per control-plane action; refresh is bounded by explicit
@@ -1355,7 +1458,7 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
 
 - Add `daemon_id` to the Global Store worker registry (`schema.sql`: `workers` table), **NOT NULL** with a uniqueness
   constraint (stable identity; address/port remain unique but are not identity).
-- Plumb `daemon_id` through `RegisterWorker`, heartbeat, and `ListActiveWorkers`, so controllers/node agents can
+- Plumb `daemon_id` through `RegisterWorker`, heartbeat, and `ListActiveWorkers`, so plan executors/node agents can
   reconcile worker restarts and address changes without guessing.
 
 ---
@@ -1368,7 +1471,7 @@ Stable target identity requires Global Store persistence beyond ephemeral `worke
 - **`NO_LEASE` default changes expectations**: warm pools stop being per-process by default; mitigate by allowing
   explicit PID-bound lease mode for IPC-handle export flows only.
 - **Placement pins are best-effort**: daemon restart loses pins; mitigate by treating pinning as rebuildable intent
-  and making controllers tolerant (reconcile + re-pin).
+  and making plan executors tolerant (reconcile + re-pin).
 - **Alias and KV catalog scale/availability**: linearizable alias reads and large KV catalogs can hurt availability;
   mitigate with explicit fallback policy (fixed-version keys) + admission control + bounded candidate LPM.
 - **Transform plugins risk semantic drift**: mitigate with versioned `TransformSpec.name` + `layout_hash` gating and
@@ -1414,6 +1517,10 @@ hot.tensor_dict_into(target=param_tensors, device="cuda:0", ctx=ctx)
 ```
 
 ### Example 3: Orchestrate a warm pool with Plan
+
+Note: this example uses `CapabilityDirectoryClient` for worker discovery. In the planned “external app + single
+entrypoint” model (`docs/designs/0056-programmable-framework-adv.md`), apps SHOULD instead use daemon-served directory
+queries via `Runtime.signals().list_workers(...)`.
 
 ```python
 import tensorcast
