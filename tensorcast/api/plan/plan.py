@@ -177,6 +177,8 @@ def _derive_action_idempotency_key(
     digest.update(action.encode("utf-8"))
     digest.update(b"|target=")
     digest.update(target_id.encode("utf-8"))
+    digest.update(b"|artifact=")
+    digest.update(selection.artifact_id.encode("utf-8"))
     if device_id is not None:
         digest.update(f"|device={int(device_id)}".encode("utf-8"))
     if ttl_ms is not None:
@@ -190,9 +192,25 @@ def _derive_action_idempotency_key(
 
 def _resolve_device_id(*, device: str | int, allow_cpu: bool) -> int:
     if isinstance(device, int):
+        if device < 0:
+            if not allow_cpu:
+                raise ArtifactError(
+                    "CPU device is not supported for this operation",
+                    status_code="INVALID_ARGUMENT",
+                    retryable=False,
+                )
+            return CPU_DEVICE_ID
         return int(device)
     import torch
 
+    if device.strip().lower() == "dram":
+        if not allow_cpu:
+            raise ArtifactError(
+                "CPU device is not supported for this operation",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        return CPU_DEVICE_ID
     device_obj = torch.device(device)
     if device_obj.type == "cpu":
         if not allow_cpu:
@@ -397,7 +415,7 @@ class WorkerStepBuilder:
         device: str | int,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[PrefetchedReplica]:
-        device_id = _resolve_device_id(device=device, allow_cpu=False)
+        device_id = _resolve_device_id(device=device, allow_cpu=True)
         device_input: str | int = device
         return self._plan._add_step(
             target=self._worker,
@@ -457,7 +475,8 @@ class InstanceStepBuilder:
         art: Artifact,
         *,
         spec: TransformSpec,
-        targets: TargetSpec,
+        target: TargetSpec | None = None,
+        targets: TargetSpec | None = None,
         depends_on: Sequence[PlanStepRef[Any]] | None = None,
     ) -> PlanStepRef[None]:
         if not spec.name:
@@ -466,7 +485,20 @@ class InstanceStepBuilder:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if targets.instance_id != self._inst.instance_id:
+        if target is not None and targets is not None:
+            raise ArtifactError(
+                "Specify only one of target or targets",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        resolved_target = target if target is not None else targets
+        if resolved_target is None:
+            raise ArtifactError(
+                "target is required",
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        if resolved_target.instance_id != self._inst.instance_id:
             raise ArtifactError(
                 "TargetSpec instance_id does not match instance target",
                 status_code="FAILED_PRECONDITION",
@@ -477,7 +509,7 @@ class InstanceStepBuilder:
             action=_TransformIntoAction(
                 artifact=art,
                 spec=spec,
-                targets=targets,
+                targets=resolved_target,
             ),
             depends_on=depends_on,
         )
