@@ -19,6 +19,12 @@ Understand how TensorCast works:
 - **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
 - **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
 
+## 📘 User Guides
+
+Integration-oriented guides for SDK consumers:
+
+- **[SDK Startup User Guide](guides/sdk-startup-user-guide.md)** - Best practices for `tensorcast.init`, daemon lifecycle ownership, API/SDK startup modes, and TP/multi-process integration.
+
 ## 🔧 Component Development
 
 Guides for developing specific components:

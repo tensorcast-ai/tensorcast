@@ -11,6 +11,7 @@ weights and KV cache once, then share them across processes and services.
 - [Developer Guides](docs/README.md) - architecture map and developer docs
 - [Architecture Overview](docs/architecture/architecture-overview.md) - system overview
 - [API Architecture](docs/architecture/api/README.md) - SDK surface and flows
+- [SDK Startup User Guide](docs/guides/sdk-startup-user-guide.md) - user integration patterns for `tensorcast.init`, API/SDK startup, and TP multi-process usage
 - [Store Daemon Deployment](docs/deployment/store-daemon.md) - daemon deployment and config
 - [Global Store Deployment](docs/deployment/global-store-deployment.md) - Global Store deployment
 - [Testing Guide](docs/development/testing.md) - Python, C++, P2P, and RDMA tests
