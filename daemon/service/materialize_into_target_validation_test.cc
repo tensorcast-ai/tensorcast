@@ -272,6 +272,55 @@ TEST_CASE(
   REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
 }
 
+TEST_CASE(
+    "MaterializeIntoTarget falls back to local import disk when Global Store connected",
+    "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  fix.global_store_client->connected = true;
+
+  const auto artifact_dir = test_tmpdir() / "artifact_target_local_import_fallback";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor_index.json", make_canonical_index_json()));
+
+  fix.disk_imports.upsert_import(
+      "mi2:dummy:dummy",
+      tensorcast::daemon::LocalDiskImportCatalog::Entry{
+          .normalized_disk_path = artifact_dir.string(),
+      });
+
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+}
+
 TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;

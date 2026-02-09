@@ -5,16 +5,21 @@
 #include <algorithm>
 
 #include <catch2/catch_test_macros.hpp>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "absl/time/time.h"
 #include "absl/types/span.h"
 #include "core/common/artifact_hash.h"
 #include "core/store/store_engine.h"
+#include "core/store/testing/global_store_client_stub.h"
 #include "core/testing/common.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/background_scheduler.h"
@@ -98,6 +103,7 @@ uint64_t generation_from_bytes(const std::string& canonical_index_json) {
 
 struct ResolveFixture {
   std::shared_ptr<tensorcast::store::StoreEngine> engine;
+  std::shared_ptr<tensorcast::store::components::IGlobalStoreClient> global_store_client;
   tensorcast::daemon::RefTracker refs;
   tensorcast::daemon::IpcRegionRegistry regions;
   tensorcast::daemon::LipManager lip_mgr;
@@ -113,8 +119,11 @@ struct ResolveFixture {
   tensorcast::daemon::WorkerIdentityStore identity;
   MaterializationController controller;
 
-  explicit ResolveFixture(std::filesystem::path storage_root = test_tmpdir())
+  explicit ResolveFixture(
+      std::filesystem::path storage_root = test_tmpdir(),
+      std::shared_ptr<tensorcast::store::components::IGlobalStoreClient> gs_client = nullptr)
       : engine(std::make_shared<tensorcast::store::StoreEngine>(make_opts())),
+        global_store_client(std::move(gs_client)),
         regions(tensorcast::daemon::IpcRegionRegistry::Options{}),
         lip_mgr(engine, &regions),
         lip_bridge(lip_mgr),
@@ -136,7 +145,7 @@ struct ResolveFixture {
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,
-                .global_store_client = nullptr,
+                .global_store_client = global_store_client,
                 .lifecycle = nullptr,
                 .storage_path = ensure_dir(std::move(storage_root)),
             })) {}
@@ -358,4 +367,114 @@ TEST_CASE("Standalone disk import materializes without Global Store", "[daemon][
   REQUIRE(materialize_status.ok());
   REQUIRE(materialize_resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(materialize_resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
+}
+
+TEST_CASE("ResolveArtifactFromDisk concurrent backfill remains parseable", "[daemon][disk][resolve][concurrency]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_concurrent_backfill";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  create_safetensors_file(artifact_dir / "part0.safetensors", "weights", /*size_bytes=*/32);
+
+  ResolveFixture fix;
+  constexpr int kWorkers = 8;
+  std::mutex mu;
+  std::vector<grpc::Status> statuses;
+  std::vector<std::string> artifact_ids;
+  statuses.reserve(kWorkers);
+  artifact_ids.reserve(kWorkers);
+  std::vector<std::thread> workers;
+  workers.reserve(kWorkers);
+
+  for (int i = 0; i < kWorkers; ++i) {
+    workers.emplace_back([&]() {
+      grpc::ServerContext ctx;
+      tensorcast::daemon::RpcContext rctx{"ResolveArtifactFromDiskConcurrentTest", ctx, /*allow_high_card_attrs=*/true};
+      ResolveArtifactFromDiskRequest req;
+      req.set_disk_path(artifact_dir.string());
+      req.set_verify_checksums(false);
+      ResolveArtifactFromDiskResponse resp;
+      auto status = fix.controller.resolve_artifact_from_disk(rctx, req, resp);
+      std::lock_guard<std::mutex> lock(mu);
+      statuses.push_back(status);
+      if (status.ok()) {
+        artifact_ids.push_back(resp.artifact_id());
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+
+  REQUIRE(statuses.size() == static_cast<size_t>(kWorkers));
+  for (const auto& status : statuses) {
+    REQUIRE(status.ok());
+  }
+  REQUIRE(artifact_ids.size() == static_cast<size_t>(kWorkers));
+  for (const auto& artifact_id : artifact_ids) {
+    REQUIRE(artifact_id == artifact_ids.front());
+  }
+
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+  std::ifstream descriptor_in(descriptor_path);
+  REQUIRE(descriptor_in.is_open());
+  nlohmann::json descriptor_json = nlohmann::json::parse(descriptor_in);
+  REQUIRE(descriptor_json["artifact_id"].get<std::string>() == artifact_ids.front());
+  REQUIRE(descriptor_json["index_multihash"].is_string());
+  REQUIRE(descriptor_json["data_multihash"].is_string());
+
+  const auto index_json_path = artifact_dir / "tensor_index.json";
+  std::ifstream index_json_in(index_json_path);
+  REQUIRE(index_json_in.is_open());
+  nlohmann::json index_json = nlohmann::json::parse(index_json_in);
+  REQUIRE(index_json.contains("weights"));
+
+  const auto index_cbor_path = artifact_dir / "tensor_index.cbor";
+  std::ifstream index_cbor_in(index_cbor_path, std::ios::binary);
+  REQUIRE(index_cbor_in.is_open());
+  std::vector<std::uint8_t> index_cbor_bytes;
+  index_cbor_bytes.assign(std::istreambuf_iterator<char>(index_cbor_in), std::istreambuf_iterator<char>());
+  REQUIRE_FALSE(index_cbor_bytes.empty());
+  nlohmann::json index_from_cbor = nlohmann::json::from_cbor(index_cbor_bytes);
+  REQUIRE(index_from_cbor.contains("weights"));
+}
+
+TEST_CASE(
+    "MaterializeReplica falls back to local import disk when Global Store is connected",
+    "[daemon][disk][resolve][gs]") {
+  const auto artifact_dir = test_tmpdir() / "artifact_gs_connected_local_fallback";
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  const auto data_path = artifact_dir / "tensor.data";
+  REQUIRE(tensorcast::testing::create_dummy_file(data_path, 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  auto gs_client = std::make_shared<tensorcast::store::testing::GlobalStoreClientStub>();
+  gs_client->connected = true;
+  ResolveFixture fix(test_tmpdir(), gs_client);
+
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::RpcContext resolve_rctx{
+      "ResolveArtifactFromDiskGsConnectedTest", resolve_ctx, /*allow_high_card_attrs=*/true};
+  ResolveArtifactFromDiskRequest resolve_req;
+  resolve_req.set_disk_path(artifact_dir.string());
+  resolve_req.set_verify_checksums(true);
+  ResolveArtifactFromDiskResponse resolve_resp;
+  auto resolve_status = fix.controller.resolve_artifact_from_disk(resolve_rctx, resolve_req, resolve_resp);
+  REQUIRE(resolve_status.ok());
+  REQUIRE(resolve_resp.artifact_id().starts_with("mi2:"));
+
+  grpc::ServerContext materialize_ctx;
+  tensorcast::daemon::RpcContext materialize_rctx{
+      "MaterializeReplicaGsConnectedFallbackTest", materialize_ctx, /*allow_high_card_attrs=*/true};
+  MaterializeReplicaRequest materialize_req;
+  materialize_req.set_artifact_id(resolve_resp.artifact_id());
+  materialize_req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  materialize_req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_AUTO);
+
+  MaterializeReplicaResponse materialize_resp;
+  auto materialize_status = fix.controller.materialize_replica(materialize_rctx, materialize_req, materialize_resp);
+  REQUIRE(materialize_status.ok());
+  REQUIRE(materialize_resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+  REQUIRE(materialize_resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE_FALSE(materialize_resp.disk_path().empty());
 }

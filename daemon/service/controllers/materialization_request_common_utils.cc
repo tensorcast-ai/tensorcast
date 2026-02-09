@@ -278,8 +278,10 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
   resolution.gs_connected = global_store_client && global_store_client->is_connected();
   resolution.normalized_disk_path =
       resolve_managed_disk_path(global_store_client.get(), storage_path, resolution.resolved_artifact_id, allow_disk);
-  if (!resolution.normalized_disk_path.has_value() && !resolution.gs_connected && allow_disk &&
-      allow_local_import_fallback && disk_imports != nullptr) {
+  // Managed shared-disk remains preferred. If unavailable, local imports can still provide
+  // a deterministic disk source even when Global Store is connected.
+  if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_fallback &&
+      disk_imports != nullptr) {
     auto entry = disk_imports->lookup_import(resolution.resolved_artifact_id);
     if (entry.has_value()) {
       if (!loopback_peer) {

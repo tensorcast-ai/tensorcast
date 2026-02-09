@@ -27,6 +27,21 @@ def _append_hint(message: str, hint: str) -> str:
     return _append_debug_hint(f"{message}\nHint: {hint}")
 
 
+def _global_store_not_connected_hint() -> str:
+    return (
+        "Materialization requires the daemon to be connected to Global Store. "
+        "Set this when creating/starting daemon, for example "
+        "`tc.init(mode='create', global_store_mode='connect', "
+        "global_store_address='127.0.0.1:50051')`, or start the daemon with "
+        "`uv run tensorcast-cli daemon start --global-store-mode connect "
+        "--global-store-address 127.0.0.1:50051`. "
+        "In `tc.init(mode='connect', ...)`, `global_store_*` parameters do not "
+        "reconfigure an existing daemon. "
+        "If you want TensorCast to launch a local Global Store, use "
+        "`tc.init(mode='create', global_store_mode='start')`."
+    )
+
+
 def _grpc_details(exc: grpc.RpcError) -> str:
     try:
         details = exc.details()
@@ -147,14 +162,8 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         mapped = details or "retrieval failed"
         lowered = mapped.lower()
         if "globalstoreclient not connected" in lowered:
-            hint = (
-                "Materialization requires a Global Store connection. "
-                "Start TensorCast with Global Store enabled, e.g. "
-                "`tensorcast.startup.init(mode='create', global_store_mode='start')`, "
-                "or start the Global Store service and connect the daemon to it."
-            )
             return ArtifactError(
-                _append_hint(mapped, hint),
+                _append_hint(mapped, _global_store_not_connected_hint()),
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -188,6 +197,12 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             mapped = _append_debug_hint(mapped)
         return ArtifactError(mapped, status_code=status_name, retryable=retryable)
     lowered = message.lower()
+    if "globalstoreclient not connected" in lowered:
+        return ArtifactError(
+            _append_hint(message, _global_store_not_connected_hint()),
+            status_code="FAILED_PRECONDITION",
+            retryable=False,
+        )
     if "tensor index not found" in lowered:
         hint = (
             "Ensure the directory contains tensor_index.json, tensor_index.cbor, or *.safetensors files. "

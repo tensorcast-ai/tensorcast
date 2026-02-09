@@ -33,6 +33,15 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "atomic_file_utils_lib",
+    srcs = ["util/atomic_file_utils.cc"],
+    hdrs = ["util/atomic_file_utils.h"],
+    deps = [
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
     name = "identity_utils_lib",
     srcs = ["util/identity_utils.cc"],
     hdrs = ["util/identity_utils.h"],
@@ -1005,6 +1014,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_disk_resolve_utils.cc"],
     hdrs = ["service/controllers/materialization_disk_resolve_utils.h"],
     deps = [
+        ":atomic_file_utils_lib",
         ":materialization_index_source_utils_lib",
         ":materialization_payload_utils_lib",
         ":path_utils_lib",
@@ -1076,6 +1086,7 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_index_source_utils.cc"],
     hdrs = ["service/controllers/materialization_index_source_utils.h"],
     deps = [
+        ":atomic_file_utils_lib",
         "//core/common:artifact_hash_lib",
         "//core/cuda:cuda_api_lib",
         "//core/store:store_engine",
@@ -1910,6 +1921,7 @@ cc_test(
         ":verification_tracker_hdr",
         "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
+        "//core/store:testing_global_store_client_stub",
         "//core/testing:common",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/time:time",

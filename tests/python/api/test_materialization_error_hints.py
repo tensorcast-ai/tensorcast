@@ -26,3 +26,18 @@ def test_materialization_error_global_store_not_connected_adds_hint() -> None:
     assert mapped.status_code == "FAILED_PRECONDITION"
     assert "Hint:" in str(mapped)
     assert "Global Store" in str(mapped)
+    assert "tc.init" in str(mapped)
+    assert "global_store_address" in str(mapped)
+    assert "tensorcast-cli daemon start" in str(mapped)
+    assert "--global-store-address" in str(mapped)
+    assert "mode='connect'" in str(mapped)
+    assert "do not reconfigure" in str(mapped)
+
+
+def test_materialization_runtime_error_global_store_not_connected_adds_hint() -> None:
+    mapped = map_materialization_error(RuntimeError("GlobalStoreClient not connected"))
+    assert mapped.status_code == "FAILED_PRECONDITION"
+    assert "Hint:" in str(mapped)
+    assert "tc.init" in str(mapped)
+    assert "global_store_address" in str(mapped)
+    assert "do not reconfigure" in str(mapped)
