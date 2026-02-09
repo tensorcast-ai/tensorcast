@@ -2,7 +2,6 @@
 
 #include "daemon/service/controllers/replica_materialization_service.h"
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -12,18 +11,14 @@
 #include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/str_cat.h"
 #include "absl/strings/string_view.h"
-#include "absl/types/span.h"
 #include "opentelemetry/metrics/provider.h"
 
-#include "core/common/artifact_hash.h"
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
@@ -103,30 +98,6 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
   }
 }
 
-std::vector<uint8_t> compute_view_meta_digest(const store::components::ViewInfo& view) {
-  std::vector<store::components::CanonicalRange> ranges = view.canonical_ranges;
-  std::sort(ranges.begin(), ranges.end(), [](const auto& a, const auto& b) {
-    if (a.offset != b.offset) {
-      return a.offset < b.offset;
-    }
-    return a.length < b.length;
-  });
-
-  std::string payload;
-  payload.reserve(256 + ranges.size() * 32);
-  absl::StrAppend(&payload, "view_id=", view.view_id, ";");
-  absl::StrAppend(&payload, "view_data_hash=", view.view_data_hash.value_or(""), ";");
-  absl::StrAppend(&payload, "view_size_bytes=", view.view_size_bytes, ";");
-  absl::StrAppend(&payload, "canonical_size_bytes=", view.canonical_size_bytes, ";");
-  absl::StrAppend(&payload, "canonical_bytes_covered=", view.canonical_bytes_covered, ";");
-  for (const auto& range : ranges) {
-    absl::StrAppend(&payload, range.offset, ":", range.length, ";");
-  }
-
-  const auto bytes = absl::Span<const uint8_t>(reinterpret_cast<const uint8_t*>(payload.data()), payload.size());
-  return tensorcast::common::sha256_digest_bytes(bytes);
-}
-
 absl::StatusOr<bool> check_post_seal_view_reuse_safe(
     store::components::IGlobalStoreClient& client,
     std::string_view assembly_id,
@@ -190,6 +161,64 @@ absl::StatusOr<bool> check_post_seal_view_reuse_safe(
     }
   }
   return true;
+}
+
+absl::Status bind_materialized_handle(
+    store::StoreEngine& engine,
+    SessionsService& sessions,
+    RefTracker& refs,
+    SessionLifecycleManager* lifecycle,
+    HandleLeaseRegistry* handle_leases,
+    const store::loading::ReplicaHandle& handle,
+    std::string_view replica_uuid,
+    int32_t effective_pid,
+    bool allow_pid_ref,
+    bool cpu_target,
+    std::string_view lease_log_context,
+    v2::MemCopyHandle& out_mem_handle) {
+  return bind_replica_handle_for_response(
+      engine,
+      sessions,
+      refs,
+      lifecycle,
+      handle_leases,
+      handle,
+      replica_uuid,
+      effective_pid,
+      allow_pid_ref,
+      cpu_target,
+      lease_log_context,
+      [&]() { record_lease_create_failed(); },
+      out_mem_handle);
+}
+
+absl::StatusOr<store::loading::ReplicaHandle> retry_materialize_from_shared_disk(
+    const absl::Status& initial_status,
+    store::StoreEngine& engine,
+    const store::DeviceKey& dev,
+    store::StoreEngine::MaterializeMode mode,
+    store::loading::MaterializeHints& hints,
+    store::components::IGlobalStoreClient* global_store_client,
+    const std::filesystem::path& storage_path,
+    std::string_view resolved_artifact_id,
+    int wait_for_shared_disk_ms,
+    bool allow_disk,
+    const grpc::ServerContext& server_context,
+    std::optional<std::filesystem::path>& normalized_disk_path,
+    const materialization_request_common::PrepareRetryDiskSourceFn& prepare_retry_disk_source) {
+  return materialize_with_shared_disk_retry(
+      initial_status,
+      global_store_client,
+      storage_path,
+      resolved_artifact_id,
+      wait_for_shared_disk_ms,
+      allow_disk,
+      server_context,
+      normalized_disk_path,
+      [&](const std::optional<store::loading::DiskSource>& retry_disk_source) {
+        return engine.materialize_replica(dev, mode, hints, retry_disk_source);
+      },
+      prepare_retry_disk_source);
 }
 
 } // namespace
@@ -630,8 +659,12 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     }
   }
   if (!result.ok()) {
-    auto retry_or = materialize_with_shared_disk_retry(
+    auto retry_or = retry_materialize_from_shared_disk(
         result.status(),
+        d_.engine,
+        dev,
+        store::StoreEngine::MaterializeMode::AUTO,
+        hints,
         d_.global_store_client.get(),
         storage_path_,
         resolved_artifact_id,
@@ -639,10 +672,6 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
         effective_policy.allow_disk,
         rctx.server_context(),
         normalized_disk_path,
-        [&](const std::optional<store::loading::DiskSource>& retry_disk_source) {
-          return d_.engine.materialize_replica(
-              dev, store::StoreEngine::MaterializeMode::AUTO, hints, retry_disk_source);
-        },
         [&](const std::filesystem::path& ready_disk_path) -> absl::StatusOr<std::optional<store::loading::DiskSource>> {
           auto descriptor_or = load_descriptor_metadata(ready_disk_path);
           if (!descriptor_or.ok()) {
@@ -727,7 +756,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
                  << handle.replica_key << " cpu_state=" << static_cast<int>(handle.cpu_state)
                  << " gpu_state=" << static_cast<int>(handle.gpu_state);
   }
-  auto bind_status = bind_replica_handle_for_response(
+  auto bind_status = bind_materialized_handle(
       d_.engine,
       d_.sessions,
       d_.refs,
@@ -739,7 +768,6 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       loopback_peer,
       cpu_target,
       "engine path",
-      [&]() { record_lease_create_failed(); },
       *resp.mutable_mem_handle());
   if (!bind_status.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
@@ -936,8 +964,12 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
 
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
   if (!result.ok()) {
-    auto retry_or = materialize_with_shared_disk_retry(
+    auto retry_or = retry_materialize_from_shared_disk(
         result.status(),
+        d_.engine,
+        dev,
+        store::StoreEngine::MaterializeMode::AUTO,
+        hints,
         d_.global_store_client.get(),
         storage_path_,
         resolved_artifact_id,
@@ -945,10 +977,6 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
         effective_policy.allow_disk,
         rctx.server_context(),
         normalized_disk_path,
-        [&](const std::optional<store::loading::DiskSource>& retry_disk_source) {
-          return d_.engine.materialize_replica(
-              dev, store::StoreEngine::MaterializeMode::AUTO, hints, retry_disk_source);
-        },
         [&](const std::filesystem::path& ready_disk_path) -> absl::StatusOr<std::optional<store::loading::DiskSource>> {
           hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
           hints.allow_p2p = false;
@@ -969,7 +997,7 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
     return to_grpc_status(result.status());
   }
   const auto& handle = *result;
-  auto bind_status = bind_replica_handle_for_response(
+  auto bind_status = bind_materialized_handle(
       d_.engine,
       d_.sessions,
       d_.refs,
@@ -981,7 +1009,6 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
       loopback_peer,
       cpu_target,
       "engine by-key",
-      [&]() { record_lease_create_failed(); },
       *resp.mutable_mem_handle());
   if (!bind_status.ok()) {
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
