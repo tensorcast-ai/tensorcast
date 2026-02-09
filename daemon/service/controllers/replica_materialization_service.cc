@@ -12,11 +12,8 @@
 #include <string_view>
 #include <utility>
 
-#include "absl/container/flat_hash_map.h"
-#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
-#include "absl/strings/string_view.h"
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/store/device_registry.h"
@@ -25,6 +22,7 @@
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/materialization_post_seal_utils.h"
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/util/status_utils.h"
@@ -49,10 +47,10 @@ using materialization_policy::convert_view_spec;
 using materialization_policy::resolve_source_policy;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::ResolvedSourcePolicy;
-using materialization_policy::spec_includes_transpose;
 using materialization_policy::to_hint_export_policy;
 using materialization_policy::to_hint_preference;
 using materialization_policy::validate_source_policy;
+using materialization_post_seal::check_post_seal_view_reuse_safe;
 using materialization_replica_handle::bind_replica_handle_for_response;
 using materialization_request_common::LeaseContext;
 using materialization_request_common::LipFastPathRequest;
@@ -96,71 +94,6 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
     default:
       return v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
   }
-}
-
-absl::StatusOr<bool> check_post_seal_view_reuse_safe(
-    store::components::IGlobalStoreClient& client,
-    std::string_view assembly_id,
-    std::string_view mi2_id) {
-  if (assembly_id.empty() || mi2_id.empty()) {
-    return absl::InvalidArgumentError("check_post_seal_view_reuse_safe requires assembly_id and mi2_id");
-  }
-
-  auto layouts_or = client.list_artifact_layouts(mi2_id);
-  if (!layouts_or.ok()) {
-    return layouts_or.status();
-  }
-  if (layouts_or->empty()) {
-    return true;
-  }
-
-  absl::flat_hash_map<std::string, absl::flat_hash_set<std::string>> tensors_by_schema;
-  for (const auto& layout_id : *layouts_or) {
-    if (layout_id.empty()) {
-      continue;
-    }
-    auto spec_or = client.get_layout_spec(layout_id);
-    if (!spec_or.ok()) {
-      return spec_or.status();
-    }
-    const auto& layout_spec = spec_or->layout();
-    const std::string schema_version = layout_spec.proof_schema_version();
-    for (const auto& entry : layout_spec.tensors()) {
-      if (entry.second.overlap_mode() == tensorcast::layout::v1::OVERLAP_MODE_REPLICATE_EQUAL) {
-        if (schema_version.empty()) {
-          return absl::FailedPreconditionError("proof_schema_version required for replicated tensors");
-        }
-        tensors_by_schema[schema_version].insert(entry.first);
-      }
-    }
-  }
-
-  if (tensors_by_schema.empty()) {
-    return true;
-  }
-
-  for (const auto& [schema_version, tensors] : tensors_by_schema) {
-    if (tensors.empty()) {
-      continue;
-    }
-    tensorcast::global_store::v1::CheckProofCommitmentsMatchRequest req;
-    req.set_assembly_id(std::string(assembly_id));
-    req.set_mi2_id(std::string(mi2_id));
-    req.set_proof_schema_version(schema_version);
-    for (const auto& name : tensors) {
-      if (!name.empty()) {
-        req.add_tensor_names(name);
-      }
-    }
-    auto resp_or = client.check_proof_commitments_match(req);
-    if (!resp_or.ok()) {
-      return resp_or.status();
-    }
-    if (!resp_or->match()) {
-      return false;
-    }
-  }
-  return true;
 }
 
 absl::Status bind_materialized_handle(
