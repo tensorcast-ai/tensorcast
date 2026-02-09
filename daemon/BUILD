@@ -1219,14 +1219,52 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "registration_storage_mapping_utils_lib",
+    srcs = ["service/controllers/registration_storage_mapping_utils.cc"],
+    hdrs = ["service/controllers/registration_storage_mapping_utils.h"],
+    deps = [
+        ":ipc_region_registry_lib",
+        ":types_hdr",
+        "//core/cuda:cuda_ipc_lib",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+    ],
+)
+
+sc_cc_library(
+    name = "local_stable_tier_service_lib",
+    srcs = ["service/controllers/local_stable_tier_service.cc"],
+    hdrs = ["service/controllers/local_stable_tier_service.h"],
+    deps = [
+        ":lip_manager_lib",
+        ":registration_manager_lib",
+        ":registration_storage_mapping_utils_lib",
+        ":store_policy_resolver_lib",
+        "//core/cuda:cuda_ipc_lib",
+        "//core/cuda:device_guard_lib",
+        "//core/store:device_registry",
+        "//core/store:store_engine",
+        "//core/store/materialization/dataplane:byte_range_map_builder",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/time",
+        "@abseil-cpp//absl/types:span",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
     name = "registration_controller_lib",
     srcs = ["service/controllers/registration_controller.cc"],
     hdrs = ["service/controllers/registration_controller.h"],
     deps = [
         ":lip_manager_lib",
+        ":local_stable_tier_service_lib",
         ":materialization_policy_utils_lib",
         ":ref_tracker_hdr",
         ":registration_manager_lib",
+        ":registration_storage_mapping_utils_lib",
         ":rpc_context_hdr",
         ":session_lifecycle_lib",
         ":status_utils",
@@ -1236,7 +1274,6 @@ sc_cc_library(
         "//core/cuda:device_guard_lib",
         "//core/store:device_registry",
         "//core/store:store_engine",
-        "//core/store/materialization/dataplane:byte_range_map_builder",
         "//proto/tensorcast/common/v1:common_cc",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@abseil-cpp//absl/strings",
