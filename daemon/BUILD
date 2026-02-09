@@ -854,6 +854,7 @@ sc_cc_library(
         ":daemon_options_hdr",
         ":device_resolver_hdr",
         ":materialization_policy_utils_lib",
+        ":materialization_post_seal_utils_lib",
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
@@ -905,6 +906,7 @@ sc_cc_library(
         ":materialization_index_source_utils_lib",
         ":materialization_payload_utils_lib",
         ":materialization_policy_utils_lib",
+        ":materialization_post_seal_utils_lib",
         ":materialization_replica_handle_utils_lib",
         ":materialization_request_common_utils_lib",
         ":ref_tracker_hdr",
@@ -913,17 +915,13 @@ sc_cc_library(
         ":sessions_service_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
-        "//core/common:artifact_hash_lib",
         "//core/store:device_registry",
         "//core/store:global_store_client",
         "//core/store:store_engine",
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
-        "@abseil-cpp//absl/container:flat_hash_map",
-        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
-        "@abseil-cpp//absl/time",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -1019,6 +1017,21 @@ sc_cc_library(
         "//core/store/materialization/contracts:loading_spec",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "materialization_post_seal_utils_lib",
+    srcs = ["service/controllers/materialization_post_seal_utils.cc"],
+    hdrs = ["service/controllers/materialization_post_seal_utils.h"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store:global_store_client",
+        "//proto/tensorcast/global_store/v1:global_store_cc",
+        "@abseil-cpp//absl/container:flat_hash_map",
+        "@abseil-cpp//absl/container:flat_hash_set",
+        "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
     ],
 )
 
@@ -1586,6 +1599,16 @@ cc_test(
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "materialization_post_seal_utils_test",
+    srcs = ["service/materialization_post_seal_utils_test.cc"],
+    deps = [
+        ":materialization_post_seal_utils_lib",
+        "//core/store:testing_global_store_client_stub",
+        "@catch2//:catch2_main",
     ],
 )
 
