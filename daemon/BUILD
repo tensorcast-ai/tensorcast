@@ -946,6 +946,7 @@ sc_cc_library(
         ":rpc_context_hdr",
         ":shutdown_signal_hdr",
         ":status_utils",
+        ":target_publish_service_lib",
         ":target_write_registry_lib",
         ":worker_identity_store_lib",
         "//core/common:artifact_hash_lib",
@@ -960,6 +961,24 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/time",
         "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "target_publish_service_lib",
+    srcs = ["service/controllers/target_publish_service.cc"],
+    hdrs = ["service/controllers/target_publish_service.h"],
+    deps = [
+        ":device_resolver_hdr",
+        ":lip_manager_lib",
+        ":rpc_context_hdr",
+        ":status_utils",
+        ":target_write_registry_lib",
+        ":worker_identity_store_lib",
+        "//core/common:capability_token_lib",
+        "//core/store:global_store_client",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/time",
     ],
 )
 
