@@ -12,12 +12,17 @@ related_code:
   - core/store/replica/transfer_service.*
   - tensorcast/api/_indices.py
 created: 2025-09-09
-last_updated: 2025-09-09
+last_updated: 2026-02-03
 ---
 
 # Summary
 
-Provide first-class, high-performance loading from `.safetensors` artifacts while preserving the unified loader pipeline: `SeekableSource → pump_ranges → PositionedSink`. The design introduces `SafetensorsSource` (single-file) and `MultiSafetensorsSource` (multi-file concatenation of payloads) that present only the binary payload as a contiguous logical byte space, hiding the format header. Python builds a canonical v2-style index from safetensors headers to keep metadata handling uniform. Direct I/O is disabled for safetensors sources to avoid alignment pitfalls; performance relies on the page cache. Verification hashes only the data payload(s), excluding headers.
+Provide first-class, high-performance loading from `.safetensors` artifacts while preserving the unified loader pipeline: `SeekableSource → pump_ranges → PositionedSink`. The design introduces `SafetensorsSource` (single-file) and `MultiSafetensorsSource` (multi-file concatenation of payloads) that present only the binary payload as a contiguous logical byte space, hiding the format header. Safetensors header offsets define a *source layout* for disk planning, while a coalesced canonical index (sorted tensor names + alignment) defines identity and in-memory layout (see design-0062). Direct I/O is disabled for safetensors sources to avoid alignment pitfalls; performance relies on the page cache. Verification hashes only the data payload(s), excluding headers.
+
+Note (2026-02-02): `docs/designs/0062-safetensors-canonical-bytespace.md` updates the indexing model so that safetensors
+header offsets are treated as a **source layout** (disk planning), while a **coalesced canonical index** is derived
+for identity and region-backed / `packing="byte_space"` compatibility. This document remains the source-layer contract
+(payload-only Source ByteSpace; headers excluded).
 
 ```mermaid
 flowchart LR
@@ -61,7 +66,7 @@ Non‑Goals / Constraints
 
 - SafetensorsSource: `SeekableSource` that exposes the payload of a single `.safetensors` file as a contiguous byte space starting at logical offset 0. Internally parses the 8‑byte little‑endian header length, validates the JSON header, computes `data_start = 8 + header_length`, and sets `data_size = file_size - data_start`. Implements `read_at` via `pread(fd, data_start + off, ...)`. Provides a concrete `total_size()` accessor. Sequential `read()` maintains an internal offset guarded by a mutex. Direct write is disabled.
 - MultiSafetensorsSource: `SeekableSource` that concatenates the payloads from multiple `.safetensors` files, sorted lexicographically by filename. Pre‑parses all headers to build segments `(fd, data_start, data_size, base_offset)` and maintains prefix sums for O(log N) segment location. Implements `read_at` spanning segments. Provides `total_size()`. Sequential `read()` is guarded by a small mutex. Direct write is disabled.
-- Shared utility: `ParseSafetensorsHeader(fd)` validates header length and returns `{header_length, data_start, data_size}`. `BuildCanonicalIndexFromSafetensors(files)` constructs canonical v2 index JSON from one or more safetensors headers.
+- Shared utility: `ParseSafetensorsHeader(fd)` validates header length and returns `{header_length, data_start, data_size}`. `BuildSourceIndexFromSafetensors(files)` extracts the source layout (payload offsets by tensor). `BuildCanonicalIndexFromSafetensors(files)` returns a coalesced canonical index derived from the source layout.
 
 ## DiskLoader detection (C++)
 
@@ -77,8 +82,8 @@ Non‑Goals / Constraints
 
 ## Canonical index for safetensors (C++/Python)
 
-- C++ builds canonical v2 index bytes from one or more safetensors headers: entries are sorted by tensor name with fixed field order `[offset, size, shape, stride, dtype, storage_offset]`. Offsets are relative to the concatenated payload space (`base_offset_i + begin`). Storage offset is always 0 for safetensors.
-- Python (`tensorcast/api/_indices.py`) calls into the C++ binding (`build_canonical_index_from_safetensors(...)`) and decodes the JSON to produce:
+- C++ builds a *source* layout from safetensors headers (offsets relative to the concatenated payload space), then derives the canonical v2 index by coalescing sorted tensor names with fixed field order `[offset, size, shape, stride, dtype, storage_offset]`. Canonical offsets are identity/layout only and do **not** depend on payload order. Storage offset is always 0 for safetensors.
+- Python (`tensorcast/api/_indices.py`) calls into the C++ binding (`build_canonical_index_from_safetensors(...)`) and decodes the canonical JSON to produce:
   - TensorMetaIndex: `(shape, stride, torch_dtype, storage_offset)`
   - TensorDataIndex: `(offset, size)`
 - Dtype mapping covers `F16/F32/F64/BF16`, `I8/I16/I32/I64`, `U8`, and `BOOL` (mapped to `torch.uint8`). Sub‑byte dtypes are rejected.

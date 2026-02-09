@@ -1,7 +1,8 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <map>
@@ -149,6 +150,74 @@ absl::StatusOr<std::string> build_canonical_index_json(
     out[name] = std::move(arr);
   }
   return out.dump();
+}
+
+absl::StatusOr<std::string> build_coalesced_canonical_index_from_source_index_json(
+    std::string_view source_index_json,
+    uint64_t align_bytes) {
+  if (source_index_json.empty()) {
+    return absl::InvalidArgumentError("source_index_json must not be empty");
+  }
+  if (align_bytes == 0) {
+    return absl::InvalidArgumentError("align_bytes must be > 0");
+  }
+
+  nlohmann::json j;
+  try {
+    j = nlohmann::json::parse(source_index_json, nullptr, true);
+  } catch (const std::exception& e) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to parse source index JSON: ", e.what()));
+  }
+  if (!j.is_object()) {
+    return absl::InvalidArgumentError("source index JSON must be an object");
+  }
+
+  std::vector<std::string> ordered_names;
+  ordered_names.reserve(j.size());
+  std::unordered_map<std::string, uint64_t> sizes;
+  sizes.reserve(j.size());
+  std::unordered_map<std::string, CanonicalTensorMeta> metas;
+  metas.reserve(j.size());
+
+  for (auto it = j.begin(); it != j.end(); ++it) {
+    const std::string& name = it.key();
+    const auto& meta = it.value();
+    if (!meta.is_array() || meta.size() < 6) {
+      return absl::InvalidArgumentError(
+          "source index entry must be array [offset,size,shape,stride,dtype,storage_offset]");
+    }
+    uint64_t size = meta[1].get<uint64_t>();
+    CanonicalTensorMeta out_meta;
+    out_meta.shape.clear();
+    for (const auto& dim : meta[2]) {
+      out_meta.shape.push_back(dim.get<int64_t>());
+    }
+    out_meta.stride.clear();
+    for (const auto& stride : meta[3]) {
+      out_meta.stride.push_back(stride.get<int64_t>());
+    }
+    out_meta.dtype = meta[4].get<std::string>();
+    out_meta.storage_offset = meta[5].get<uint64_t>();
+    ordered_names.push_back(name);
+    sizes.emplace(name, size);
+    metas.emplace(name, std::move(out_meta));
+  }
+
+  std::sort(ordered_names.begin(), ordered_names.end());
+
+  std::unordered_map<std::string, uint64_t> offsets;
+  offsets.reserve(ordered_names.size());
+  uint64_t cursor = 0;
+  for (const auto& name : ordered_names) {
+    if (cursor % align_bytes != 0) {
+      cursor = ((cursor + align_bytes - 1) / align_bytes) * align_bytes;
+    }
+    offsets.emplace(name, cursor);
+    const uint64_t size = sizes.at(name);
+    cursor += size;
+  }
+
+  return build_canonical_index_json(ordered_names, offsets, sizes, metas);
 }
 
 } // namespace tensorcast::store::loader

@@ -161,7 +161,8 @@ class RegisteredArtifact:
         if client is None:
             raise RuntimeError(
                 "RegisteredArtifact requires an active TensorCast session. "
-                "Call tensorcast.startup.init(mode='connect'|'create') before using registration APIs."
+                "Call tensorcast.startup.init(mode='connect'|'create'|'auto') "
+                "before using registration APIs."
             )
         # Cache client for this handle's lifetime
         self._ctl = client
@@ -326,7 +327,6 @@ def _upsert_key_mapping_if_needed(
     *,
     key: str | None,
     artifact_id: str,
-    disk_path: str | None,
     descriptor: ArtifactDescriptor | None = None,
     client: DaemonCtl | None,
 ) -> None:
@@ -338,9 +338,7 @@ def _upsert_key_mapping_if_needed(
         logger.warning("Skipping key publish for %s: missing artifact descriptor", key)
         return
     try:
-        ok = client.publish_replica_key(
-            key=key, descriptor=descriptor, disk_path=disk_path or ""
-        )
+        ok = client.publish_replica_key(key=key, descriptor=descriptor)
     except Exception:  # noqa: BLE001
         logger.exception("Failed to publish key %s via daemon", key)
         return
@@ -360,22 +358,12 @@ def _persist_publish_if_needed(
     state_dict_to_save: dict[str, torch.Tensor] | None,
     client: DaemonCtl,
 ) -> None:
-    if options.disk_path is not None and options.disk_path.strip() == "":
-        if state_dict_to_save is not None:
-            raise TensorCastError(
-                "disk_path=='' local persistence is test-only and disabled in production. "
-                "Provide an explicit disk_path, or persist via your own pipeline; "
-                "tests may use tensorcast.testing.io_disk.save_dict."
-            )
-        return
-    else:
-        _upsert_key_mapping_if_needed(
-            key=options.key,
-            artifact_id=desc.artifact_id,
-            disk_path=options.disk_path,
-            descriptor=desc,
-            client=client,
-        )
+    _upsert_key_mapping_if_needed(
+        key=options.key,
+        artifact_id=desc.artifact_id,
+        descriptor=desc,
+        client=client,
+    )
 
 
 class BuildContext:

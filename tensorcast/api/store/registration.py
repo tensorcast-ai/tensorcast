@@ -46,7 +46,7 @@ from tensorcast.api.store.common import (
 from tensorcast.api.store.handles import RegisteredArtifact
 from tensorcast.api.store.retry import (
     compute_retry_delay,
-    map_registration_error,
+    raise_mapped_registration_error,
     remaining_budget,
     should_retry,
 )
@@ -454,11 +454,46 @@ class RegistrationPipeline:
         return view_ctx, upload_tensors
 
     @staticmethod
-    def _require_cuda_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
-        if any(not tensor.is_cuda for tensor in tensors.values()):
+    def _require_put_tensors(tensors: Mapping[str, torch.Tensor]) -> None:
+        """Validate tc.put / tc.put_async inputs.
+
+        Historically we required CUDA tensors for `put`, but the registration
+        pipeline can stage CPU tensors onto the selected CUDA device during
+        upload. We still require:
+        - all tensors are either CPU, or CUDA on the same device
+        - no mixing CPU and CUDA tensors
+        """
+        saw_cpu = False
+        saw_cuda = False
+        device_id: int | None = None
+        for tensor in tensors.values():
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if tensor.is_cuda:
+                saw_cuda = True
+                idx = tensor.device.index or 0
+                if device_id is None:
+                    device_id = int(idx)
+                elif int(idx) != int(device_id):
+                    raise ArtifactError(
+                        "All CUDA tensors must reside on the same device",
+                        status_code="INVALID_ARGUMENT",
+                        retryable=False,
+                    )
+            else:
+                saw_cpu = True
+        if saw_cpu and saw_cuda:
             raise ArtifactError(
-                "put requires CUDA tensors; CPU tensors are not supported yet",
+                "Artifact tensors must be all CPU or all CUDA tensors on the same device",
                 status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
+        # `put` always requires a CUDA device for staging and IPC; fail early to
+        # produce a clearer error than a deeper runtime path.
+        if saw_cpu and not torch.cuda.is_available():
+            raise ArtifactError(
+                "put requires CUDA to be available for staging CPU tensors",
+                status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
 
@@ -472,7 +507,7 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> RegisteredArtifact:
-        self._require_cuda_tensors(tensors)
+        self._require_put_tensors(tensors)
         return self._perform_registration(
             tensors,
             artifact_id=artifact_id,
@@ -495,7 +530,7 @@ class RegistrationPipeline:
         options: RegisterArtifactOptions | None = None,
         device: int | torch.device | None = None,
     ) -> ArtifactFuture[RegisteredArtifact]:
-        self._require_cuda_tensors(tensors)
+        self._require_put_tensors(tensors)
         cancel_event = threading.Event()
         handle_lock = threading.Lock()
         handle_ref: dict[str, _RegisterHandle | None] = {"handle": None}
@@ -631,7 +666,7 @@ class RegistrationPipeline:
                 ttl_ms=ttl_ms,
                 client_artifact_id=normalized_artifact_id,
                 force_lease_in_place=plan is PlanType.VRAM_LEASED,
-                prevalidate_disk=self._should_prevalidate_disk(options),
+                prevalidate_disk=False,
                 client=self._runtime.ensure_client(),
                 daemon_address=self._runtime.daemon_endpoint,
                 cancel_event=cancel_event,
@@ -639,7 +674,7 @@ class RegistrationPipeline:
                 view=view_registration,
             )
         except Exception as exc:  # noqa: BLE001
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
         task_id = self._maybe_start_persistence(options, registration_result)
         return self._registration_to_artifact(
             registration_result, persistence_task_id=task_id
@@ -652,13 +687,14 @@ class RegistrationPipeline:
         artifact_id: str | None,
     ) -> None:
         try:
-            mapped_id, _ = self._runtime.ensure_client().resolve_key_mapping(key)
+            mapping = self._runtime.ensure_client().resolve_key_mapping(key)
         except grpc.RpcError as exc:
             if exc.code() == grpc.StatusCode.NOT_FOUND:
                 return
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
         except Exception as exc:  # noqa: BLE001
-            raise map_registration_error(exc) from exc
+            raise_mapped_registration_error(exc)
+        mapped_id = mapping.artifact_id
         if not mapped_id:
             return
         if artifact_id and mapped_id == artifact_id:
@@ -668,14 +704,6 @@ class RegistrationPipeline:
             status_code="FAILED_PRECONDITION",
             retryable=False,
         )
-
-    def _should_prevalidate_disk(self, options: RegisterArtifactOptions) -> bool:
-        disk_path = options.disk_path
-        if disk_path is None:
-            return False
-        if not isinstance(disk_path, str):
-            return False
-        return disk_path.strip() != ""
 
     def _maybe_start_persistence(
         self, options: RegisterArtifactOptions, result: RegistrationResult
@@ -750,13 +778,8 @@ class RegistrationPipeline:
         if not artifact_id:
             return
         resolved_key = key or (options.key if options is not None else None)
-        disk_path = None
-        if options is not None and options.disk_path:
-            disk_path = options.disk_path
         if resolved_key:
-            self._runtime.cache_key_mapping(
-                resolved_key, artifact_id=artifact_id, disk_path=disk_path
-            )
+            self._runtime.cache_key_mapping(resolved_key, artifact_id=artifact_id)
         registration = result.registration_result
         if registration is None or not registration.index_bytes:
             return
@@ -765,7 +788,6 @@ class RegistrationPipeline:
             canonical_index_bytes=registration.index_bytes,
             parsed_index=result.canonical_index,
             generation=self._compute_generation(registration.index_bytes),
-            disk_path=disk_path,
             expires_at=time.monotonic(),
         )
         self._runtime.cache_artifact_index(entry)

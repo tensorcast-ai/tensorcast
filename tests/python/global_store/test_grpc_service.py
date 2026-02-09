@@ -111,6 +111,97 @@ class TestGRPCService:
 
         assert response.status == global_store_pb2.Status.STATUS_NOT_FOUND
 
+    def test_mark_replica_unavailable_idempotent(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        register_response = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_unavailable",
+                mem_info=memory_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        replica_id = register_response.replica_id
+        first = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="test_artifact_unavailable", replica_id=replica_id
+            ),
+            test_context,
+        )
+        assert first.status == global_store_pb2.Status.STATUS_OK
+        assert first.updated is True
+
+        second = servicer.MarkReplicaUnavailable(
+            global_store_pb2.MarkReplicaUnavailableRequest(
+                artifact_id="test_artifact_unavailable", replica_id=replica_id
+            ),
+            test_context,
+        )
+        assert second.status == global_store_pb2.Status.STATUS_OK
+        assert second.updated is True
+
+    def test_wait_replica_drain_timeout_snapshot(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        register_response = servicer.RegisterReplica(
+            global_store_pb2.RegisterReplicaRequest(
+                artifact_id="test_artifact_drain",
+                mem_info=memory_info,
+                max_concurrency=1,
+                worker_id=registered_worker,
+            ),
+            test_context,
+        )
+        replica_id = register_response.replica_id
+
+        servicer.WorkerHeartbeat(
+            global_store_pb2.WorkerHeartbeatRequest(
+                worker_id=registered_worker,
+                mem_pool_available_size=7000000000,
+                accepting_new_requests=True,
+                state_version=1,
+            ),
+            test_context,
+        )
+
+        transport_response = servicer.RequestReplicaTransport(
+            global_store_pb2.RequestReplicaTransportRequest(
+                artifact_id="test_artifact_drain",
+                local_memory_info=memory_info,
+                wait_timeout_dur=duration_pb2.Duration(seconds=1),
+                source_node_id="source_node",
+                source_address="192.168.1.2",
+                source_port=9000,
+            ),
+            test_context,
+        )
+        assert transport_response.status == global_store_pb2.Status.STATUS_OK
+
+        drain_response = servicer.WaitReplicaDrain(
+            global_store_pb2.WaitReplicaDrainRequest(
+                replica_id=replica_id, timeout_ms=1
+            ),
+            test_context,
+        )
+        assert drain_response.status == global_store_pb2.Status.STATUS_TIMED_OUT
+        assert drain_response.drained is False
+        assert drain_response.current_requests == 1
+        assert drain_response.HasField("oldest_transport_age_ms")
+
+        current = servicer.replica_repository.get_current_requests(
+            uuid.UUID(replica_id)
+        )
+        assert current == 1
+
+        servicer.CompleteReplicaTransport(
+            global_store_pb2.CompleteReplicaTransportRequest(
+                transport_id=transport_response.transport_id
+            ),
+            test_context,
+        )
+
     def test_worker_capability_flags_filtering(self, servicer, test_context):
         flags = (
             1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
@@ -367,6 +458,13 @@ class TestGRPCService:
                 kind=common_pb2.BYTE_SPACE_KIND_CANONICAL, id=""
             ),
         )
+        canonical_transport = canonical_info.transport
+        canonical_transport.export_state = (
+            common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        )
+        canonical_transport.export_generation = 1
+        canonical_transport.remote_memory_keys.append("rk0")
+        canonical_transport.buffer_sizes.append(canonical_info.memory_size)
         view_id = "view-1"
         view_info = common_pb2.MemoryInfo(
             node_id=str(uuid.uuid4()),
@@ -379,6 +477,13 @@ class TestGRPCService:
                 kind=common_pb2.BYTE_SPACE_KIND_VIEW, id=view_id
             ),
         )
+        view_transport = view_info.transport
+        view_transport.export_state = (
+            common_pb2.ReplicaTransportMetadata.EXPORT_STATE_EXPORTABLE
+        )
+        view_transport.export_generation = 1
+        view_transport.remote_memory_keys.append("rk1")
+        view_transport.buffer_sizes.append(view_info.memory_size)
 
         servicer.RegisterReplica(
             global_store_pb2.RegisterReplicaRequest(
@@ -674,9 +779,10 @@ class TestGRPCService:
         assert sum(1 for _ in list_response.replicas) == 1
         assert list_response.replicas[0].artifact_id == artifact_id
         assert list_response.replicas[0].memory_info.node_id == memory_info.node_id
+        assert list_response.replicas[0].memory_info.HasField("transport")
         assert (
-            list_response.replicas[0].memory_info.remote_memory_keys[0]
-            == memory_info.remote_memory_keys[0]
+            list_response.replicas[0].memory_info.transport.remote_memory_keys[0]
+            == memory_info.transport.remote_memory_keys[0]
         )
 
         # 4. Unregister the replica

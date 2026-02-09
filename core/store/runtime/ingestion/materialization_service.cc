@@ -39,13 +39,11 @@ absl::Status validate_mi2_descriptor_matches_request(const loading::Materializat
   if (!absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
     return absl::OkStatus();
   }
-  if (!request.has_disk_path()) {
+  if (!request.has_disk_source()) {
     return absl::InvalidArgumentError(
-        "Content-addressed load requires MaterializeHints.disk_path so the descriptor can be validated");
+        "Content-addressed load requires a disk source so the descriptor can be validated");
   }
-
-  const std::filesystem::path descriptor_path =
-      std::filesystem::path(request.hints().disk_path) / "artifact_descriptor.json";
+  const std::filesystem::path descriptor_path = request.disk_source()->path / "artifact_descriptor.json";
   std::error_code ec;
   if (!std::filesystem::exists(descriptor_path, ec)) {
     return absl::FailedPreconditionError(
@@ -316,9 +314,8 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
   if (!request.hints().allow_disk) {
     return absl::InvalidArgumentError("source_policy disallows disk ingestion");
   }
-  if (!request.has_disk_path()) {
-    return absl::InvalidArgumentError(
-        "LOAD_ONLY materialize paths require MaterializeHints.disk_path for disk ingestion");
+  if (!request.has_disk_source()) {
+    return absl::InvalidArgumentError("LOAD_ONLY materialize paths require a disk source for disk ingestion");
   }
   if (absl::StartsWith(request.canonical_artifact_id(), "mi2:")) {
     auto validate_st = validate_mi2_descriptor_matches_request(request);
@@ -327,8 +324,7 @@ absl::StatusOr<ReplicaHandle> MaterializationService::load_from_disk(const Mater
     }
   }
 
-  DiskSource disk_src;
-  disk_src.path = std::filesystem::path(request.hints().disk_path);
+  DiskSource disk_src = *request.disk_source();
   // Content-addressed (mi2) loads require descriptor + index for verification; CGID/local ids can stream without it.
   disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(request.canonical_artifact_id());
 
@@ -362,21 +358,21 @@ absl::StatusOr<ReplicaHandle> MaterializationService::run_auto(const Materializa
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
-    if (!allow_disk || !request.has_disk_path()) {
+    if (!allow_disk || !request.has_disk_source()) {
       return orchestrated_or.status();
     }
     LOG(WARNING) << "Materialize AUTO callback failed: " << orchestrated_or.status() << "; falling back to disk load";
   }
 
-  if (allow_disk && request.has_disk_path()) {
+  if (allow_disk && request.has_disk_source()) {
     return load_from_disk(request);
   }
-  if (!allow_disk && request.has_disk_path()) {
+  if (!allow_disk && request.has_disk_source()) {
     return absl::FailedPreconditionError("source_policy disallows disk fallback");
   }
 
   return absl::FailedPreconditionError(
-      "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit hints.disk_path");
+      "AUTO materialize_replica requires a canonical artifact identifier (mi2: or cgid:) with Global Store routing or an explicit disk source");
 }
 
 replica::ReplicaConfig MaterializationService::build_copy_replica_config(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import threading
 import time
@@ -11,7 +12,10 @@ from collections.abc import Callable, Mapping, Sequence
 
 import torch
 
-from tensorcast._c_ext import get_cuda_memory_handle
+from tensorcast._c_ext import (
+    get_cuda_memory_handle,
+    get_cuda_memory_handle_with_offset,
+)
 from tensorcast.api._config import RegisterArtifactOptions, StorePolicy
 from tensorcast.api._materialize import (
     MaterializationPayload,
@@ -46,8 +50,18 @@ from tensorcast.api.store.batch_context import (
     BatchContext,
     MaterializationBatcher,
 )
+from tensorcast.api.store.binding import Binding
+from tensorcast.api.store.cache import ArtifactCacheEntry
+from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredLoader
 from tensorcast.api.store.handles import RegisteredArtifact
+from tensorcast.api.store.inplace_slot import InplaceSlot
+from tensorcast.api.store.mapped_binding import (
+    CopyPlan,
+    CopyPlanEntry,
+    Range,
+    TargetTensors,
+)
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.registration import RegistrationPipeline
 from tensorcast.api.store.runtime import (
@@ -86,6 +100,8 @@ from tensorcast.types import (
     VramRegionHandle,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
     if kind == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2:
@@ -94,6 +110,43 @@ def _artifact_id_kind_from_proto(kind: int, artifact_id: str) -> ArtifactIdKind:
         return ArtifactIdKind.CGID
     inferred = infer_artifact_id_kind(artifact_id)
     return inferred or ArtifactIdKind.MI2
+
+
+def _split_mi2_artifact_id(artifact_id: str) -> tuple[str | None, str | None]:
+    if not artifact_id.startswith("mi2:"):
+        return None, None
+    remainder = artifact_id[len("mi2:") :]
+    parts = remainder.split(":", 1)
+    if len(parts) != 2:
+        return None, None
+    index_multihash = parts[0].strip()
+    data_multihash = parts[1].strip()
+    if not index_multihash or not data_multihash:
+        return None, None
+    return index_multihash, data_multihash
+
+
+def _parse_artifact_ref(
+    ref: str | None,
+    *,
+    artifact_id: str | None,
+    key: str | None,
+) -> tuple[str | None, str | None]:
+    if ref is None:
+        return artifact_id, key
+    if artifact_id or key:
+        raise ValueError("ref cannot be combined with artifact_id or key")
+    ref_value = str(ref)
+    if not ref_value:
+        raise ValueError("ref must be non-empty")
+    if ref_value.startswith(("mi2:", "cgid:")):
+        return ref_value, None
+    if ref_value.startswith("disk:"):
+        raise ValueError(
+            "disk: ref is no longer supported; use Store.from_disk(...) to import "
+            "and then reference the artifact by id or key."
+        )
+    return None, ref_value
 
 
 class Store:
@@ -530,46 +583,114 @@ class Store:
     # ------------------------------------------------------------------
     def artifact(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        disk_path: str | None = None,
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
+        artifact_id, key = _parse_artifact_ref(
+            ref,
+            artifact_id=artifact_id,
+            key=key,
+        )
         effective_fallback = FallbackOptions.parse(fallback)
-        if disk_path and effective_fallback is None:
-            effective_fallback = FallbackOptions.for_disk(str(disk_path))
         return Artifact(
             store_ref=weakref.ref(self),
             artifact_id=artifact_id,
             key=key,
-            disk_path=disk_path,
             fallback=effective_fallback,
         )
 
     async def artifact_async(
         self,
+        ref: str | None = None,
         *,
         artifact_id: str | None = None,
         key: str | None = None,
-        disk_path: str | None = None,
         fallback: FallbackOptions | str | None = None,
     ) -> Artifact:
         return self.artifact(
+            ref,
             artifact_id=artifact_id,
             key=key,
-            disk_path=disk_path,
             fallback=fallback,
         )
 
     def from_disk(
-        self, path: str, *, fallback: FallbackOptions | str | None = None
+        self,
+        path: str,
+        *,
+        key: str | None = None,
+        verify_checksums: bool = True,
     ) -> Artifact:
         disk_path = os.fspath(path)
-        effective_fallback = FallbackOptions.parse(fallback)
-        if effective_fallback is None:
-            effective_fallback = FallbackOptions.for_disk(str(disk_path))
-        return self.artifact(disk_path=str(disk_path), fallback=effective_fallback)
+        if not disk_path:
+            raise ValueError("path is required")
+        client = self._runtime.ensure_client()
+        response = client.resolve_artifact_from_disk_v2(
+            disk_path=disk_path,
+            verify_checksums=bool(verify_checksums),
+        )
+        artifact_id = response.artifact_id or ""
+        if not artifact_id:
+            raise ArtifactError(
+                "ResolveArtifactFromDisk returned empty artifact_id",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        canonical_index_bytes = bytes(response.canonical_index_bytes)
+        if not canonical_index_bytes:
+            raise ArtifactError(
+                "ResolveArtifactFromDisk returned empty canonical index bytes",
+                status_code="DATA_LOSS",
+                retryable=False,
+            )
+        canonical_index = canonical_index_from_bytes(canonical_index_bytes)
+        generation_value: int | None = (
+            int(response.generation) if response.generation else None
+        )
+        entry = ArtifactCacheEntry(
+            artifact_id=artifact_id,
+            canonical_index_bytes=canonical_index_bytes,
+            parsed_index=canonical_index,
+            generation=generation_value,
+            expires_at=time.monotonic(),
+        )
+        self._runtime.cache_artifact_index(entry)
+        if key:
+            index_multihash, data_multihash = _split_mi2_artifact_id(artifact_id)
+            id_kind = infer_artifact_id_kind(artifact_id) or ArtifactIdKind.MI2
+            descriptor = TypedArtifactDescriptor(
+                artifact_id=artifact_id,
+                index_multihash=index_multihash,
+                data_multihash=data_multihash,
+                schema_version=None,
+                encoding=None,
+                total_size=canonical_index.total_size_bytes,
+                id_kind=id_kind,
+            )
+            try:
+                ok = client.publish_replica_key(key=key, descriptor=descriptor)
+            except Exception:  # noqa: BLE001
+                logger.exception("Failed to publish key %s via daemon", key)
+            else:
+                if not ok:
+                    logger.warning(
+                        "Key mapping for %s already exists; keeping existing mapping",
+                        key,
+                    )
+                else:
+                    self._runtime.cache_key_mapping(key, artifact_id=artifact_id)
+        return Artifact(
+            store_ref=weakref.ref(self),
+            artifact_id=artifact_id,
+            key=key,
+            fallback=None,
+            canonical_index_bytes=canonical_index_bytes or None,
+            canonical_index=canonical_index,
+            generation=generation_value,
+        )
 
     # ------------------------------------------------------------------
     # Region-backed registration
@@ -584,10 +705,22 @@ class Store:
         name: str | None = None,
     ) -> VramRegionHandle:
         client = self._runtime.ensure_client()
-        handle_bytes = get_cuda_memory_handle(int(device_id), int(base_ptr))
+        base_ptr_value = int(base_ptr)
+        size_value = int(size_bytes)
+        base_offset = 0
+        try:
+            handle_bytes, base_offset = get_cuda_memory_handle_with_offset(
+                int(device_id), base_ptr_value
+            )
+        except Exception:  # noqa: BLE001
+            handle_bytes = get_cuda_memory_handle(int(device_id), base_ptr_value)
+            base_offset = 0
+        if base_offset:
+            base_ptr_value -= int(base_offset)
+            size_value += int(base_offset)
         handle = client.register_vram_region(
             device_id=int(device_id),
-            size_bytes=int(size_bytes),
+            size_bytes=int(size_value),
             ttl_ms=int(ttl_ms),
             cuda_ipc_handle=handle_bytes,
             region_name=name,
@@ -596,8 +729,8 @@ class Store:
             _cache_register_region(
                 region_id=handle.region_id,
                 device_id=int(device_id),
-                base_ptr=int(base_ptr),
-                size_bytes=int(size_bytes),
+                base_ptr=int(base_ptr_value),
+                size_bytes=int(size_value),
                 ttl_ms=int(ttl_ms),
             )
         return handle
@@ -620,6 +753,9 @@ class Store:
         drain_timeout_s: float | None = None,
         extend_ttl_ms: int | None = None,
         device_id: int | None = None,
+        byte_space: common_pb2.ByteSpaceRef | None = None,
+        keep_shared_disk_copy: bool = False,
+        operation_id: str | None = None,
     ) -> DeregisterArtifactOutcome:
         client = self._runtime.ensure_client()
         drain_ms = int(drain_timeout_s * 1000) if drain_timeout_s is not None else None
@@ -629,6 +765,9 @@ class Store:
             drain_timeout_ms=drain_ms,
             extend_ttl_ms=extend_ttl_ms,
             device_id=device_id,
+            byte_space=byte_space,
+            keep_shared_disk_copy=keep_shared_disk_copy,
+            operation_id=operation_id,
         )
         self._runtime.invalidate_artifact(artifact_id, key=None, reason="deregister")
         return outcome
@@ -866,6 +1005,9 @@ def deregister_artifact(
     drain_timeout_s: float | None = None,
     extend_ttl_ms: int | None = None,
     device_id: int | None = None,
+    byte_space: common_pb2.ByteSpaceRef | None = None,
+    keep_shared_disk_copy: bool = False,
+    operation_id: str | None = None,
 ) -> DeregisterArtifactOutcome:
     return _coerce_store().deregister_artifact(
         artifact_id,
@@ -873,6 +1015,9 @@ def deregister_artifact(
         drain_timeout_s=drain_timeout_s,
         extend_ttl_ms=extend_ttl_ms,
         device_id=device_id,
+        byte_space=byte_space,
+        keep_shared_disk_copy=keep_shared_disk_copy,
+        operation_id=operation_id,
     )
 
 
@@ -942,37 +1087,53 @@ def seal_assembly(
 
 
 def artifact(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return _coerce_store().artifact(
+    store = _coerce_store()
+    if ref is None:
+        return store.artifact(
+            artifact_id=artifact_id,
+            key=key,
+            fallback=fallback,
+        )
+    return store.artifact(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
-        disk_path=disk_path,
         fallback=fallback,
     )
 
 
 async def artifact_async(
+    ref: str | None = None,
     *,
     artifact_id: str | None = None,
     key: str | None = None,
-    disk_path: str | None = None,
     fallback: FallbackOptions | str | None = None,
 ) -> Artifact:
-    return await _coerce_store().artifact_async(
+    store = _coerce_store()
+    if ref is None:
+        return await store.artifact_async(
+            artifact_id=artifact_id,
+            key=key,
+            fallback=fallback,
+        )
+    return await store.artifact_async(
+        ref=ref,
         artifact_id=artifact_id,
         key=key,
-        disk_path=disk_path,
         fallback=fallback,
     )
 
 
-def from_disk(path: str, *, fallback: FallbackOptions | str | None = None) -> Artifact:
-    return _coerce_store().from_disk(path, fallback=fallback)
+def from_disk(
+    path: str, *, key: str | None = None, verify_checksums: bool = True
+) -> Artifact:
+    return _coerce_store().from_disk(path, key=key, verify_checksums=verify_checksums)
 
 
 __all__ = [
@@ -981,10 +1142,14 @@ __all__ = [
     "ArtifactError",
     "ArtifactFuture",
     "ArtifactStatusCode",
+    "Binding",
     "CanonicalIndex",
     "CanonicalIndexEntry",
+    "CopyPlan",
+    "CopyPlanEntry",
     "DeferredCommitResult",
     "DeferredLoader",
+    "InplaceSlot",
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",
@@ -1000,6 +1165,8 @@ __all__ = [
     "TensorMeta",
     "TensorDict",
     "TransformPlacement",
+    "Range",
+    "TargetTensors",
     "PersistenceStatusResult",
     "PersistenceShardStatus",
     "artifact",

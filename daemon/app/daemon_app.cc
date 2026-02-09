@@ -72,14 +72,17 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .refs = app->kernel_->ref_tracker(),
       .sessions = app->kernel_->sessions_service(),
       .lip = app->kernel_->lip_bridge(),
+      .lip_manager = app->kernel_->lip_manager(),
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
+      .disk_imports = app->kernel_->disk_import_catalog(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),
       .global_store_client = app->options_.global_store_client,
       .lifecycle = &app->kernel_->lifecycle_manager(),
       .handle_leases = app->kernel_->handle_leases(),
+      .capability_tokens = app->kernel_->capability_tokens(),
       .cpu_shared_memory_enabled = app->options_.daemon_options.cpu_shared_memory_enabled,
       .external_target_verification_enabled = app->options_.daemon_options.external_target_verification_enabled,
       .storage_path = app->options_.daemon_options.storage_path,
@@ -116,6 +119,35 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
   };
   app->status_controller_ = std::make_unique<StatusController>(sdep);
 
+  KeyMappingController::Dep kmdep{
+      .engine = app->kernel_->engine(),
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->key_mapping_controller_ = std::make_unique<KeyMappingController>(kmdep);
+
+  PersistenceRpcController::Dep prdep{
+      .persistence_manager = app->kernel_->persistence_manager(),
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->persistence_rpc_controller_ = std::make_unique<PersistenceRpcController>(prdep);
+
+  ReplicaSessionController::Dep rsdep{
+      .sessions = app->kernel_->sessions_service(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+  };
+  app->replica_session_controller_ = std::make_unique<ReplicaSessionController>(rsdep);
+
+  LeaseController::Dep ldep{
+      .engine = app->kernel_->engine(),
+      .lifecycle = app->kernel_->lifecycle_manager(),
+      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
+      .capability_tokens = app->kernel_->capability_tokens(),
+      .retention_registry = app->kernel_->retention_registry(),
+      .daemon_id = app->options_.daemon_options.daemon_id,
+      .shutdown_signal = app->kernel_->shutdown_signal(),
+  };
+  app->lease_controller_ = std::make_unique<LeaseController>(std::move(ldep));
+
   StoreDaemonServiceImpl::Deps sdeps{
       .engine = app->kernel_->engine(),
       .materialization_controller = *app->materialization_controller_,
@@ -124,13 +156,12 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .status_controller = *app->status_controller_,
       .region_registry = app->kernel_->region_registry(),
       .lip_manager = app->kernel_->lip_manager(),
-      .persistence_manager = app->kernel_->persistence_manager(),
-      .sessions_service = app->kernel_->sessions_service(),
+      .global_store_client = app->options_.global_store_client,
       .lifecycle_manager = app->kernel_->lifecycle_manager(),
-      .placement_lease_tokens = app->kernel_->placement_lease_tokens(),
-      .capability_tokens = app->kernel_->capability_tokens(),
-      .retention_registry = app->kernel_->retention_registry(),
-      .daemon_id = app->options_.daemon_options.daemon_id,
+      .key_mapping_controller = *app->key_mapping_controller_,
+      .persistence_rpc_controller = *app->persistence_rpc_controller_,
+      .replica_session_controller = *app->replica_session_controller_,
+      .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
   };
   StoreDaemonServiceImpl::Options svc_opts{

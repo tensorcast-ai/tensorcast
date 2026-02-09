@@ -136,7 +136,8 @@ save_dict(state_dict, "/path/to/replica")
 from tensorcast import FallbackOptions, GetArtifactOptions, get
 
 state_dict = get(
-    fallback=FallbackOptions(disk_path="/path/to/replica", prefer_disk=True),
+    artifact_id="mi2:...",
+    fallback=FallbackOptions(prefer="disk", allow_p2p=False),
     options=GetArtifactOptions(enable_verification=True),
 )
 ```

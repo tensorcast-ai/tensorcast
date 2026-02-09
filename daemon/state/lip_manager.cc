@@ -308,7 +308,8 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     store::StoreEngine& engine) {
   {
     absl::MutexLock l(&mu_);
-    if (quiesced_.contains(lip.artifact_id)) {
+    ArtifactDeviceKey key{.artifact_id = lip.artifact_id, .view_id = lip.view_id, .device_id = lip.device_id};
+    if (quiesced_.contains(key)) {
       return absl::FailedPreconditionError("artifact is quiesced; staging new exports is blocked");
     }
   }
@@ -482,6 +483,7 @@ absl::StatusOr<std::string> LipManager::create_staged_export(
     absl::MutexLock lk(&exp_mu_);
     LipExportRecord rec;
     rec.artifact_id = lip.artifact_id;
+    rec.view_id = lip.view_id;
     rec.device_id = lip.device_id;
     rec.region_registry = region_registry_;
     rec.held_region_refs = std::move(region_hold_counts);
@@ -543,19 +545,35 @@ absl::Status LipManager::keepalive_lease(
     int owner_pid,
     uint64_t epoch,
     uint32_t ttl_ms) {
-  absl::MutexLock l(&mu_);
-  auto itk = reg_to_key_.find(registration_id);
-  if (itk == reg_to_key_.end())
-    return absl::NotFoundError("registration_id not found");
-  auto it = leases_.find(itk->second);
-  if (it == leases_.end())
-    return absl::NotFoundError("lease not found");
-  if (it->second.owner_pid != owner_pid)
-    return absl::PermissionDeniedError("owner_pid mismatch");
-  it->second.epoch = epoch;
-  const uint32_t extend = ttl_ms > 0 ? ttl_ms : (it->second.ttl_ms > 0 ? it->second.ttl_ms : 600000U);
-  it->second.ttl_ms = extend;
-  it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(extend);
+  std::vector<RegisterStorageMeta> storages;
+  uint32_t extend = 0;
+  {
+    absl::MutexLock l(&mu_);
+    auto itk = reg_to_key_.find(registration_id);
+    if (itk == reg_to_key_.end())
+      return absl::NotFoundError("registration_id not found");
+    auto it = leases_.find(itk->second);
+    if (it == leases_.end())
+      return absl::NotFoundError("lease not found");
+    if (it->second.owner_pid != owner_pid)
+      return absl::PermissionDeniedError("owner_pid mismatch");
+    it->second.epoch = epoch;
+    extend = ttl_ms;
+    it->second.ttl_ms = extend;
+    if (extend == 0) {
+      it->second.expiry = std::chrono::steady_clock::time_point{};
+    } else {
+      it->second.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(extend);
+    }
+    storages = it->second.storages;
+  }
+  if (region_registry_ != nullptr && extend > 0) {
+    for (const auto& storage : storages) {
+      if (storage.has_region()) {
+        (void)region_registry_->refresh_ttl(storage.region_id, extend);
+      }
+    }
+  }
   return absl::OkStatus();
 }
 
@@ -570,6 +588,7 @@ absl::Status LipManager::revoke_by_registration_id(const std::string& registrati
     key = itk->second;
     leases_.erase(*key);
     reg_to_key_.erase(itk);
+    quiesced_.erase(*key);
   }
 
   std::optional<LipExportRecord> export_record;
@@ -633,6 +652,61 @@ std::optional<LipLeaseEntry> LipManager::find_active_by_artifact_id(
   return std::nullopt;
 }
 
+std::optional<LipLeaseEntry> LipManager::find_active_by_key(const ArtifactDeviceKey& key) const {
+  absl::MutexLock l(&mu_);
+  const auto now = std::chrono::steady_clock::now();
+  auto it = leases_.find(key);
+  if (it == leases_.end()) {
+    return std::nullopt;
+  }
+  if (it->second.expiry.time_since_epoch().count() > 0 && now > it->second.expiry) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::vector<LipLeaseEntry> LipManager::list_active_by_artifact_id(
+    std::string_view artifact_id,
+    std::optional<std::string_view> view_id) const {
+  const std::string view_key = normalize_view_id(view_id);
+  absl::MutexLock l(&mu_);
+  const auto now = std::chrono::steady_clock::now();
+  std::vector<LipLeaseEntry> matches;
+  for (const auto& kv : leases_) {
+    const auto& key = kv.first;
+    const auto& e = kv.second;
+    if (key.artifact_id != artifact_id) {
+      continue;
+    }
+    if (key.view_id != view_key) {
+      continue;
+    }
+    if (e.expiry.time_since_epoch().count() > 0 && now > e.expiry) {
+      continue;
+    }
+    matches.push_back(e);
+  }
+  return matches;
+}
+
+std::optional<ArtifactDeviceKey> LipManager::find_key_by_registration_id(std::string_view registration_id) const {
+  absl::MutexLock l(&mu_);
+  auto it = reg_to_key_.find(std::string(registration_id));
+  if (it == reg_to_key_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::optional<std::string> LipManager::find_replica_id(const ArtifactDeviceKey& key) const {
+  absl::MutexLock lk(&routable_mu_);
+  auto it = routable_replica_ids_.find(key);
+  if (it == routable_replica_ids_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
 bool LipManager::has_active_on_device(
     std::string_view artifact_id,
     int device_id,
@@ -679,6 +753,7 @@ void LipManager::sweep_expired_and_dead_pids() {
         for (const auto& rid : regs)
           reg_to_key_.erase(rid);
         leases_.erase(key);
+        quiesced_.erase(key);
       }
     }
   }
@@ -747,6 +822,7 @@ bool LipManager::revoke_commit_lease_if_owner_matches(
   for (const auto& rid : regs)
     reg_to_key_.erase(rid);
   leases_.erase(it);
+  quiesced_.erase(key);
   VLOG(2) << "revoke_commit_lease_if_owner_matches: erased lease for artifact_id=" << artifact_id
           << " device_id=" << device_id;
   return true;
@@ -789,19 +865,20 @@ absl::Status LipManager::extend_ttl_for_artifact(
   return absl::OkStatus();
 }
 
-void LipManager::quiesce_artifact(const std::string& artifact_id) {
+void LipManager::quiesce_lease(const ArtifactDeviceKey& key) {
   absl::MutexLock l(&mu_);
-  quiesced_.insert(artifact_id);
+  quiesced_.insert(key);
 }
 
-bool LipManager::wait_exports_drained(const std::string& artifact_id, absl::Time deadline) {
+bool LipManager::wait_exports_drained(const ArtifactDeviceKey& key, absl::Time deadline) {
   // Simple polling with backoff; exports_ rarely large
   while (absl::Now() < deadline) {
     size_t active = 0;
     {
       absl::MutexLock lk(&exp_mu_);
       for (const auto& kv : exports_) {
-        if (kv.second.artifact_id == artifact_id)
+        if (kv.second.artifact_id == key.artifact_id && kv.second.view_id == key.view_id &&
+            kv.second.device_id == key.device_id)
           ++active;
       }
     }
@@ -1069,8 +1146,12 @@ absl::StatusOr<CommitLeaseResult> LipManager::commit_lease_in_place(
   lease.id_kind = out.id_kind;
   lease.device_id = device_id;
   lease.owner_pid = owner_pid;
-  lease.ttl_ms = ttl_ms > 0 ? ttl_ms : 600000U; // default 10 minutes
-  lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(lease.ttl_ms);
+  lease.ttl_ms = ttl_ms;
+  if (ttl_ms == 0) {
+    lease.expiry = std::chrono::steady_clock::time_point{};
+  } else {
+    lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  }
   lease.epoch = epoch;
   lease.total_size = total_size;
   lease.index_data = canonical_index_json;
@@ -1101,9 +1182,6 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
   if (artifact_id.empty()) {
     return absl::InvalidArgumentError("artifact_id is required for routable LIP lease");
   }
-  if (view_id.empty()) {
-    return absl::InvalidArgumentError("view_id is required for routable LIP lease");
-  }
   if (storages.empty()) {
     return absl::InvalidArgumentError("routable LIP lease requires storage metadata");
   }
@@ -1112,7 +1190,9 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
   }
   {
     absl::MutexLock l(&mu_);
-    if (quiesced_.contains(std::string(artifact_id))) {
+    ArtifactDeviceKey key{
+        .artifact_id = std::string(artifact_id), .view_id = std::string(view_id), .device_id = device_id};
+    if (quiesced_.contains(key)) {
       return absl::FailedPreconditionError("artifact is quiesced; new routable leases are blocked");
     }
   }
@@ -1299,8 +1379,12 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
   lease.id_kind = common::ArtifactIdKind::kCgid;
   lease.device_id = device_id;
   lease.owner_pid = owner_pid;
-  lease.ttl_ms = ttl_ms > 0 ? ttl_ms : 600000U; // default 10 minutes
-  lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(lease.ttl_ms);
+  lease.ttl_ms = ttl_ms;
+  if (ttl_ms == 0) {
+    lease.expiry = std::chrono::steady_clock::time_point{};
+  } else {
+    lease.expiry = std::chrono::steady_clock::now() + std::chrono::milliseconds(ttl_ms);
+  }
   lease.epoch = epoch;
   lease.total_size = total_size;
   lease.index_data.clear();
@@ -1315,6 +1399,7 @@ absl::StatusOr<LipManager::RoutableLeaseResult> LipManager::commit_routable_view
     absl::MutexLock lk(&routable_mu_);
     LipExportRecord rec;
     rec.artifact_id = std::string(artifact_id);
+    rec.view_id = std::string(view_id);
     rec.device_id = device_id;
     rec.region_registry = region_registry_;
     rec.held_region_refs = std::move(region_hold_counts);

@@ -6,13 +6,23 @@ import time
 import uuid
 import weakref
 from dataclasses import dataclass
-from typing import Callable, Generic, Literal, Mapping, Protocol, TypeVar, cast
+from typing import (
+    Callable,
+    Generic,
+    Literal,
+    Mapping,
+    NoReturn,
+    Protocol,
+    TypeVar,
+    cast,
+)
 
 import grpc
 from google.protobuf import timestamp_pb2
 
 from tensorcast.api.context import CallContext
 from tensorcast.api.errors import ArtifactError, ArtifactStatusCode
+from tensorcast.error_reporting import debug_errors_enabled, debug_errors_hint
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 
@@ -167,6 +177,34 @@ def _retryable_for_grpc(code: object) -> bool:
     }
 
 
+def _raise_api_error(err: Exception, *, cause: BaseException | None) -> NoReturn:
+    if debug_errors_enabled() and cause is not None:
+        raise err from cause
+    raise err from None
+
+
+def _append_debug_hint(message: str) -> str:
+    if debug_errors_enabled():
+        return message
+    return f"{message}\nDebug: {debug_errors_hint()}"
+
+
+def _grpc_details(exc: grpc.RpcError) -> str:
+    try:
+        details = exc.details()
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(details) if details else ""
+
+
+def _format_rpc_message(action: str, exc: grpc.RpcError) -> str:
+    details = _grpc_details(exc)
+    base = f"{action} failed"
+    if details:
+        return f"{base}: {details}"
+    return _append_debug_hint(base)
+
+
 def _daemon_status_to_operation_status(
     status: store_daemon_pb2.ReplicaOperationStatus,
     *,
@@ -260,11 +298,12 @@ class DaemonReplicaOperation(Operation[T]):
             resp = client.query_replica_status(ticket)
         except grpc.RpcError as exc:  # noqa: BLE001
             code = exc.code()
-            raise ArtifactError(
-                f"QueryReplicaStatus failed: {exc.details() or exc!s}",
+            error = ArtifactError(
+                _format_rpc_message("QueryReplicaStatus", exc),
                 status_code=_coerce_grpc_status_code(code),
                 retryable=_retryable_for_grpc(code),
-            ) from exc
+            )
+            _raise_api_error(error, cause=exc)
 
         context = {
             "request_id": self._request_id,
@@ -324,11 +363,12 @@ class DaemonReplicaOperation(Operation[T]):
                 )
             except grpc.RpcError as exc:  # noqa: BLE001
                 code = exc.code()
-                raise ArtifactError(
-                    f"WaitReplicaStatus failed: {exc.details() or exc!s}",
+                error = ArtifactError(
+                    _format_rpc_message("WaitReplicaStatus", exc),
                     status_code=_coerce_grpc_status_code(code),
                     retryable=_retryable_for_grpc(code),
-                ) from exc
+                )
+                _raise_api_error(error, cause=exc)
 
             status = _daemon_status_to_operation_status(resp.status, context=context)
             if status.state == "success":
@@ -444,14 +484,15 @@ class DaemonGlobalStoreOperation(Operation[T]):
             )
         except grpc.RpcError as exc:
             code = exc.code()
+            message = _format_rpc_message("GetOperation", exc)
             return OperationStatus(
                 state="degraded",
-                message=str(exc),
+                message=message,
                 progress=0.0,
                 as_of_ms=int(time.time() * 1000),
                 error=OperationError(
                     status_code=_coerce_grpc_status_code(code),
-                    message=str(exc),
+                    message=message,
                     retryable=_retryable_for_grpc(code),
                     context=self._context,
                 ),
@@ -501,14 +542,16 @@ class DaemonGlobalStoreOperation(Operation[T]):
             except grpc.RpcError as exc:
                 code = exc.code()
                 if code == grpc.StatusCode.DEADLINE_EXCEEDED:
-                    raise OperationTimeoutError(
+                    timeout_error = OperationTimeoutError(
                         "Operation wait timeout expired", retryable=True
-                    ) from exc
-                raise ArtifactError(
-                    str(exc),
+                    )
+                    _raise_api_error(timeout_error, cause=exc)
+                error = ArtifactError(
+                    _format_rpc_message("WaitOperation", exc),
                     status_code=_coerce_grpc_status_code(code),
                     retryable=_retryable_for_grpc(code),
-                ) from exc
+                )
+                _raise_api_error(error, cause=exc)
 
             status = _global_store_status_to_operation_status(
                 resp.status, context=self._context

@@ -8,7 +8,11 @@ managing clients manually.
 ## Artifact Handles
 
 - `tensorcast.artifact(...)` and `Store.artifact(...)` return a lazy `Artifact`
-  bound to the process `Store`. Handles support metadata accessors
+  bound to the process `Store`. `tc.artifact("my-key")` is shorthand for
+  `tc.artifact(key="my-key")`; reserved prefixes (`mi2:`/`cgid:`) map to
+  explicit identifier kinds. `disk:` is reserved and rejected; use
+  `from_disk(...)` for explicit imports.
+  Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
 - `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
@@ -21,20 +25,25 @@ managing clients manually.
   non-identity views the SDK resolves and sends a deterministic `view_id` in
   the `TargetLayout`. `region_backed_mode` (`auto`/`require`/`disable`) controls
   fallback behavior.
-- Handles retain whichever identifiers are available (`artifact_id`, `key`,
-  `disk_path`). At least one identifier is required when instantiating or
+- Handles retain whichever identifiers are available (`artifact_id`, `key`).
+  At least one identifier is required when instantiating or
   rehydrating a handle, but resolved handles may keep both `artifact_id` and
   `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
   continue to work.
 - `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
   artifacts via the daemon `ResolveArtifactFromDisk` RPC. The daemon validates
-  descriptor multihashes when `verify_checksums=True`, returns canonical
-  `canonical_index_bytes` + `generation`, and seeds `ArtifactCache` while
-  binding a disk-first `FallbackOptions` so materialization prefers the local
-  files without extra resolver RPCs.
-  Set `verify_checksums=False` on `FallbackOptions.for_disk(...)` to allow
-  descriptor-free local development; checksum validation (and descriptor
-  requirements) remain the default in production.
+  descriptor multihashes when `verify_checksums=True` (when a descriptor is
+  present), returns canonical `canonical_index_bytes` + `generation`, and seeds
+  the `ArtifactCache` with the resolved metadata. This API is an explicit
+  **import/registration** step: it does **not** inject disk fallback hints into
+  later materializations. For safetensors directories, the daemon prefers
+  `tensor_index.(json|cbor)` when present; otherwise it builds canonical
+  metadata directly from `.safetensors` headers. When checksums are verified
+  and the daemon can write to the directory, it will backfill
+  `tensor_index.(json|cbor)` for faster subsequent metadata reads.
+  Set `verify_checksums=False` on `from_disk(...)` to allow descriptor-free
+  local development; checksum validation (and descriptor requirements) remain
+  the default in production.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
@@ -66,17 +75,69 @@ managing clients manually.
 
 ## Deferred Slice Materialization (vLLM)
 
-- `artifact.deferred_loader(device=..., packing="append", capacity_bytes=...)` returns
-  a `DeferredLoader` that issues no I/O until `commit()`.
+- `artifact.deferred_loader(device=..., packing="byte_space"|"append"|"plan", capacity_bytes=...)`
+  returns a `DeferredLoader` that issues no I/O until `commit()`.
 - `loader.tensor(name, slice=...)` returns a CUDA placeholder backed by a
   client-owned arena; contents are undefined until `commit()` completes.
+- `packing="byte_space"` places tensors at their logical offsets in the selected
+  canonical/view ByteSpace. Full coverage uses empty `tensor_names` +
+  `view_subset_hash=b""` and is publishable; subset/packed layouts remain
+  local-only in Phase 1.
 - `packing="append"` preserves call order; `packing="plan"` requires `plan(...)`
-  first to precompute a deterministic layout before calling `tensor(...)`.
-- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena;
-  `publish=True` optionally registers the packed slice artifact via
-  `VRAM_LEASED` (LIP).
+  first to precompute a deterministic layout before calling `tensor(...)`. Both
+  modes are local-only layouts (not publishable).
+- `commit()` performs a single `MaterializeIntoTarget` RPC to fill the arena and
+  returns an `InplaceSlot`. Use `slot.publish_replica()` to publish a routable
+  replica or `slot.swap(..., publish=True)` to retire → overwrite → publish.
+  `slot.swap(ref)` reuses the slot selection (including any `artifact.view(...)`
+  slices) so callers do not need to restate view parameters on every swap.
 - `capacity_bytes` bounds the arena size (defaults to the base canonical/view
   total size); exceeding it raises `RESOURCE_EXHAUSTED`.
+- For most users, prefer the `Binding` API (`artifact.bind(...)` /
+  `artifact.bind_into(...)`) which hides the deferred-loader/slot mechanics.
+
+## Binding (Preferred Inplace Updates)
+
+- `artifact.bind(device=..., packing=\"byte_space\", publish=False)` allocates a
+  client-owned CUDA layout, fills it from the artifact, and returns a `Binding`
+  ready for swaps without extra ceremony.
+- `artifact.bind_into({name: tensor, ...}, packing=\"byte_space\", publish=False)`
+  adopts **user-owned** CUDA tensors (already allocated in the current process),
+  fills them once, and returns a `Binding`.
+- `artifact.bind_into(..., mapping=copy_plan, packing=\"byte_space\", publish=False)`
+  executes a traced copy plan (`CopyPlanEntry`/`Range`) to map source slices into
+  user-owned CUDA tensors; the mapping is stored and reused on `swap(...)`.
+- Mapped binding v1 requires contiguous CUDA tensors with `storage_offset=0`,
+  enforces full dst coverage with no overlaps, and is local-only (publish is rejected).
+- View compatibility for mapped binding is narrow-only: transpose/permutation views
+  are rejected and copy-plan ranges are expressed in canonical coordinates.
+- `binding.swap(artifact_or_ref, publish=False, activate_key=None, ...)` performs
+  safe retire → overwrite → optional publish, reusing the original selection
+  (including view slices) without restating them.
+
+Example (vLLM-style split weight):
+
+```python
+from tensorcast.api.store import CopyPlanEntry, Range
+
+copy_plan = [
+    CopyPlanEntry(
+        ckpt_name="layers.0.mlp.gate_up_proj.weight",
+        ckpt_range=Range(dim=0, start=0, end=4096),
+        dst_name="layers.0.mlp.gate_proj.weight",
+        dst_range=Range(dim=0, start=0, end=4096),
+    ),
+    CopyPlanEntry(
+        ckpt_name="layers.0.mlp.gate_up_proj.weight",
+        ckpt_range=Range(dim=0, start=4096, end=8192),
+        dst_name="layers.0.mlp.up_proj.weight",
+        dst_range=Range(dim=0, start=0, end=4096),
+    ),
+]
+
+binding = artifact.bind_into(dst_tensors, mapping=copy_plan, packing="byte_space")
+binding.swap("model:v2")
+```
 
 ## Batching, Async, and Prefetch
 
@@ -108,13 +169,14 @@ managing clients manually.
 `FallbackOptions` now supports explicit source preferences:
 
 - `prefer="auto"` (default) — daemon chooses optimal source
-- `prefer="local"` — disallow P2P and disk unless an explicit `disk_path` is provided;
-  daemon enforces this via `SourcePolicy` gating
+- `prefer="local"` — disallow P2P and disk; daemon enforces this via
+  `SourcePolicy` gating
 - `prefer="p2p"` — allow remote transfer
-- `prefer="disk"` — prioritize disk fallback; pass `disk_path` or rely on key→path
-  mapping
+- `prefer="disk"` — prioritize disk fallback when a managed disk location is
+  available; disk paths are resolved by the daemon via Global Store
 
-Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
+Use `allow_p2p` / `allow_disk` to gate sources explicitly. Compatibility flags
+`prefer_disk` and `allow_p2p` continue to work; setting
 `replica_uuid` hints the daemon to reuse a prefetched replica.
 
 ## Feature Toggles
@@ -127,8 +189,8 @@ Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
 ## Metadata Cache
 
 - The process runtime owns an `ArtifactCache` that stores canonical index bytes,
-  parsed indices, and disk hints keyed by `artifact_id`. Cache entries expire by
-  TTL and obey an LRU bound.
+  parsed indices, and generation metadata keyed by `artifact_id`. Cache entries
+  expire by TTL and obey an LRU bound.
 - Environment defaults:
   - `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS=600` (set `<=0` to disable)
   - `TENSORCAST_STORE_CACHE_MAX_ENTRIES=1000` (set `<=0` to disable)
@@ -140,12 +202,11 @@ Compatibility flags `prefer_disk` and `allow_p2p` continue to work; setting
 - Invalidation hooks run after registration, deregistration, and materialization
   errors (`NOT_FOUND`/`FAILED_PRECONDITION`) to keep key→artifact mappings and
   cached indices consistent.
-- Disk lookups honor cache entries keyed by `disk_path` (not just
-  `artifact_id`) to bypass resolver RPCs; mismatched `disk_path` or `generation`
-  values trigger cache invalidation and a fresh daemon fetch.
+- Key→artifact-id lookups are cached with TTL (see
+  `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS`) to avoid repeated resolver RPCs.
 - Disk resolution (`ResolveArtifactFromDisk`) seeds the cache with
-  `canonical_index_bytes`, `generation`, and `disk_path` so repeated
-  `from_disk` calls avoid extra daemon RPCs and preserve generation metadata.
+  `canonical_index_bytes` and `generation` so repeated `from_disk` calls avoid
+  extra daemon RPCs and preserve generation metadata.
 - Metadata hydration (`_ensure_metadata`) applies `_set_metadata` while holding
   the artifact’s reentrant lock so concurrent callers never observe partially
   populated canonical metadata.

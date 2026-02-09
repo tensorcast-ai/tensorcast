@@ -68,9 +68,9 @@ graph TD
 - **Runtime wiring**: `RuntimeEnv` boots a `RuntimeContext` that owns the device manager, pinned buffer pool, communication manager, metrics collector, Global Store client, and ingestion event hub. The gRPC surface stays thin; lifecycle/telemetry is driven by the runtime modules rather than ad‑hoc engine wiring.
 - **Ingestion pipeline**: `IngestionRuntime` delegates to `MaterializationFacade`, which runs the staged `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). MetadataStage rebuilds or fetches canonical indices (from disk or Global Store for variants), plans views, and enforces descriptor schema v3. AllocationStage handles eviction and retries for P2P GPU loads; VerificationStage enforces `verification_json` key‑point checks and optional full digests, and computes view hashes when configured.
 - **P2P orchestration**: `MaterializationService` invokes `MaterializeOrchestrator` for `AUTO` mode. The orchestrator:
-  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first requires a disk path; `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
+  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first requires a daemon‑resolved disk path (managed disk location); `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
   - Tries view-aware transports first (`request_view_transport`) and falls back to canonical transport when unsupported.
-  - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present.
+  - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present (daemon-resolved).
   - Builds `P2PSource` with remote `verification_json` and memory registration info so VerificationStage can validate the transfer.
 - **Auto-publish**: Every ingestion run mints a `publish_context_id`; completion events flow through the ingestion event hub into `MetadataGateway`, which registers replicas (and variant residency) with the Global Store. Explicit registration calls from the orchestrator reuse the same context so `MetadataGateway` dedupes double-publishes cleanly.
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
@@ -90,7 +90,7 @@ graph TD
   daemon (`ResolveArtifactFromDisk`) so disk paths stay daemon-owned. The RPC
   enforces whitelist entries, validates descriptor multihashes when requested
   (`verify_checksums=true`), returns canonical index bytes + generation, and
-  seeds the SDK cache with `{artifact_id, disk_path}` for reuse across
+  seeds the SDK cache with the resolved metadata for reuse across
   materialization, views, and unloads.
 - **Metadata Cache**: A process-wide `ArtifactCache` stores canonical indices
   (default TTL 600s, max 1000 entries) to avoid repeated daemon lookups.
@@ -152,7 +152,7 @@ Client                                 Store Daemon                        Globa
    |                                         |                                   |
    |-- MaterializeByKey(key, device, uuid) ->|                                   |
    |                                          |-- ResolveKeyMapping(key) ------->|
-   |                                          |<-- artifact_id (+ disk_path) ----|
+   |                                          |<-- artifact_id (+ disk location) |
    |                                          |   (Load from local disk)         |
    |                                          |-- Register Local Replica ------->|
   |                                          |<------ Replica ID ---------------|

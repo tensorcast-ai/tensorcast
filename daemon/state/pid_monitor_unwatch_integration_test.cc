@@ -42,3 +42,32 @@ TEST_CASE("PidMonitor unwatch called on last guard retire", "[daemon][lifecycle]
 
   REQUIRE_FALSE(mon.is_watching_for_test(pid));
 }
+
+TEST_CASE("PidMonitor unwatch is suppressed by external watches", "[daemon][lifecycle][pid]") {
+  ReplicaSessionManager sessions(std::chrono::seconds(60));
+  RefTracker refs;
+  tensorcast::daemon::IpcRegionRegistry regions(tensorcast::daemon::IpcRegionRegistry::Options{});
+  auto lip =
+      std::make_unique<tensorcast::daemon::LipManager>(std::shared_ptr<tensorcast::store::StoreEngine>(), &regions);
+  SessionLifecycleManager mgr(sessions, refs, *lip);
+
+  PidMonitor mon([&](pid_t) {});
+  mgr.attach_pid_monitor(&mon);
+
+  const int32_t pid = 991122;
+  ReplicaKey subj{.artifact_id = "mi2:test:ext", .device = DeviceRegistry::instance().gpu_key(0), .replica = 0};
+
+  // Simulate a long-lived external resource (e.g. ttl_ms=0 VRAM region).
+  mgr.watch_pid(pid);
+  REQUIRE(mon.is_watching_for_test(pid));
+
+  // Create and retire a lease: should not unwatch due to external watch ref.
+  auto id_or = mgr.create_use_lease(subj, pid);
+  REQUIRE(id_or.ok());
+  REQUIRE(mgr.release_use_lease(subj, pid).ok());
+  REQUIRE(mon.is_watching_for_test(pid));
+
+  // Drop the external watch: now it can be unwatched.
+  mgr.unwatch_pid(pid);
+  REQUIRE_FALSE(mon.is_watching_for_test(pid));
+}

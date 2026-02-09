@@ -14,6 +14,7 @@ import grpc
 
 from tensorcast import __version__ as _tc_version
 from tensorcast.engine_adapter import EngineAdapter
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.logger import init_logger
 from tensorcast.node_agent.config import NodeAgentConfig
 from tensorcast.node_agent.executor import NodeAgentExecutor
@@ -21,7 +22,7 @@ from tensorcast.node_agent.server import add_servicer_to_server
 from tensorcast.observability.otel import (
     setup_otel_from_observability as _setup_otel_from_observability,
 )
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
 
@@ -39,9 +40,7 @@ def _load_transform_plugins(adapter: EngineAdapter, paths: list[str]) -> None:
         register(adapter)
 
 
-def _resolve_worker_id(
-    stub: global_store_pb2_grpc.GlobalStoreServiceStub, daemon_id: str
-) -> str | None:
+def _resolve_worker_id(stub: GlobalStoreCompositeStub, daemon_id: str) -> str | None:
     resp = stub.ListActiveWorkers(global_store_pb2.ListActiveWorkersRequest())
     for worker in resp.workers:
         if worker.daemon_id == daemon_id:
@@ -50,7 +49,7 @@ def _resolve_worker_id(
 
 
 def _register_instance(
-    stub: global_store_pb2_grpc.GlobalStoreServiceStub,
+    stub: GlobalStoreCompositeStub,
     *,
     config: NodeAgentConfig,
     daemon_id: str,
@@ -81,7 +80,7 @@ def _register_instance(
 
 def _heartbeat_loop(
     *,
-    stub: global_store_pb2_grpc.GlobalStoreServiceStub,
+    stub: GlobalStoreCompositeStub,
     config: NodeAgentConfig,
     daemon_id: str,
     stop_event: threading.Event,
@@ -160,11 +159,11 @@ def main() -> None:
 
     stop_event = threading.Event()
     hb_thread: threading.Thread | None = None
-    stub: global_store_pb2_grpc.GlobalStoreServiceStub | None = None
+    stub: GlobalStoreCompositeStub | None = None
     if config.register_instance and config.global_store_endpoints:
         target = config.global_store_endpoints[0]
         channel = grpc.insecure_channel(target)
-        stub = global_store_pb2_grpc.GlobalStoreServiceStub(channel)
+        stub = GlobalStoreCompositeStub(channel)
         worker_id = config.worker_id or _resolve_worker_id(stub, config.daemon_id)
         _register_instance(
             stub, config=config, daemon_id=config.daemon_id, worker_id=worker_id

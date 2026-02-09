@@ -269,6 +269,24 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::OkStatus();
   }
 
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<std::string_view>) override {
+    return true;
+  }
+
+  absl::StatusOr<tensorcast::store::components::ReplicaDrainStatus> wait_replica_drain(
+      std::string_view,
+      uint32_t,
+      std::optional<std::string_view>) override {
+    tensorcast::store::components::ReplicaDrainStatus out;
+    out.drained = true;
+    out.current_requests = 0;
+    return out;
+  }
+
   absl::Status update_artifact_view_state(const tensorcast::store::components::ViewStateUpdate&) override {
     return absl::OkStatus();
   }
@@ -419,8 +437,35 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("get_view_metadata not used in tests");
   }
 
-  absl::Status upsert_key_mapping(std::string_view, std::string_view, std::string_view, absl::Duration) override {
+  absl::Status upsert_key_mapping(std::string_view, std::string_view, absl::Duration) override {
     return absl::UnimplementedError("upsert_key_mapping not used in tests");
+  }
+
+  absl::StatusOr<std::string> get_cluster_id() override {
+    return absl::UnimplementedError("get_cluster_id not used in tests");
+  }
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view,
+      std::string_view,
+      std::string_view,
+      tensorcast::global_store::v1::DiskLocationKind,
+      bool) override {
+    return absl::UnimplementedError("upsert_artifact_disk_location not used in tests");
+  }
+
+  absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view,
+      bool) override {
+    return absl::UnimplementedError("list_artifact_disk_locations not used in tests");
+  }
+
+  absl::StatusOr<tensorcast::store::components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view,
+      std::string_view,
+      std::optional<std::string_view>,
+      std::optional<uint64_t>) override {
+    return absl::UnimplementedError("swap_key_mapping not used in tests");
   }
 
   absl::Status revoke_key_mapping(std::string_view) override {
@@ -451,6 +496,7 @@ struct MetadataGatewayHarness {
     MetadataGateway::Config cfg{
         .runtime_context = &context,
         .replica_runtime = &replica_runtime,
+        .promotion_manager = nullptr,
         .artifact_chunk_bytes = options.artifact_chunk_bytes,
         .pinned_memory_timeout = options.pinned_memory_timeout,
         .replica_factory = {},

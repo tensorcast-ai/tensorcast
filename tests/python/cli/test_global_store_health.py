@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from tensorcast.cli_utils.health import GlobalStoreHealth, ping_global_store
-from tensorcast.proto.global_store.v1 import global_store_pb2, global_store_pb2_grpc
 from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+from tensorcast.cli_utils.health import GlobalStoreHealth, ping_global_store
+from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
 def test_ping_global_store_prefers_service_health(monkeypatch):
@@ -30,7 +31,9 @@ def test_ping_global_store_prefers_service_health(monkeypatch):
                 version="v1",
             )
 
-    monkeypatch.setattr(global_store_pb2_grpc, "GlobalStoreServiceStub", DummyStub)
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.health.GlobalStoreCompositeStub", DummyStub
+    )
     monkeypatch.setattr(health_pb2_grpc, "HealthStub", lambda _channel: None)
 
     health = ping_global_store("127.0.0.1:6100", timeout=0.1)
@@ -60,7 +63,9 @@ def test_ping_global_store_fallback_to_grpc_health(monkeypatch):
                 status=health_pb2.HealthCheckResponse.SERVING
             )
 
-    monkeypatch.setattr(global_store_pb2_grpc, "GlobalStoreServiceStub", FailingStub)
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.health.GlobalStoreCompositeStub", FailingStub
+    )
     monkeypatch.setattr(health_pb2_grpc, "HealthStub", DummyHealthStub)
 
     health = ping_global_store("127.0.0.1:6200", timeout=0.1)

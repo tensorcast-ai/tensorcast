@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -107,9 +107,8 @@ def test_resolved_view_inputs_variants() -> None:
         ResolvedViewInputs(
             artifact_id="artifact",
             canonical_index_bytes=None,
-            build_result=None,
-            disk_path_hint=None,
-            view_id=None,
+            build_result=build_result,
+            view_id="view-123",
         )
 
 

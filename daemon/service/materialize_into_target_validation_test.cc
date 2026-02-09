@@ -93,11 +93,23 @@ std::filesystem::path ensure_dir(std::filesystem::path path) {
   return path;
 }
 
+void register_disk_location(
+    tensorcast::store::testing::RecordingGlobalStoreClient& client,
+    std::string_view artifact_id,
+    const std::filesystem::path& relative_path) {
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = std::string(artifact_id);
+  loc.cluster_id = client.cluster_id;
+  loc.relative_path = relative_path.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  client.disk_locations.push_back(std::move(loc));
+}
+
 tensorcast::store::StoreEngineOptions make_opts() {
   tensorcast::store::StoreEngineOptions opts;
   opts.storage_path = (test_tmpdir() / "engine").string();
   std::filesystem::create_directories(opts.storage_path);
-  opts.p2p_port = 47016;
+  opts.p2p_port = 0; // Let the OS pick an available port for test isolation.
   opts.memory_pool_size = 32ULL << 20;
   opts.tx_slice_bytes = 1ULL << 20;
   opts.num_thread = 2;
@@ -117,6 +129,7 @@ struct ValidationFixture {
   tensorcast::daemon::BackgroundScheduler scheduler;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
+  tensorcast::daemon::LocalDiskImportCatalog disk_imports;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
@@ -141,8 +154,10 @@ struct ValidationFixture {
                 .refs = refs,
                 .sessions = sessions_svc,
                 .lip = lip_bridge,
+                .lip_manager = lip_mgr,
                 .devices = devices,
                 .regions = regions,
+                .disk_imports = disk_imports,
                 .shutdown_signal = shutdown_signal,
                 .async_runtime = async_runtime,
                 .identity = identity,
@@ -170,18 +185,6 @@ grpc::Status run_request(
 TEST_CASE("MaterializeIntoTarget rejects missing artifact_id", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  MaterializeIntoTargetResponse resp;
-  auto status = run_request(fix.controller, req, resp);
-
-  REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-}
-
-TEST_CASE("MaterializeIntoTarget rejects empty disk_fallback path", "[daemon][materialize][into_target]") {
-  ValidationFixture fix;
-  MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
-  req.mutable_disk_fallback();
   MaterializeIntoTargetResponse resp;
   auto status = run_request(fix.controller, req, resp);
 
@@ -222,6 +225,53 @@ TEST_CASE("MaterializeIntoTarget accepts subset selection", "[daemon][materializ
   REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
 }
 
+TEST_CASE(
+    "MaterializeIntoTarget falls back to disk index when Global Store disconnected",
+    "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  fix.global_store_client->connected = false;
+
+  const auto storage_root = fix.storage_root;
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_disk_only";
+  const auto artifact_dir = storage_root / artifact_rel;
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(write_file(artifact_dir / "tensor_index.json", make_canonical_index_json()));
+  register_disk_location(*fix.global_store_client, "mi2:dummy:dummy", artifact_rel);
+
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+}
+
 TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
@@ -233,26 +283,26 @@ TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][mate
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
-  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
   layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
 
   auto* storage = layout->add_storages();
   storage->set_storage_id("storage-0");
   storage->set_device_id(0);
-  storage->set_storage_length(8);
+  storage->set_storage_length(12);
   storage->set_vram_region_id("region-0");
   storage->set_mapping_base_offset(0);
 
   auto* offset_b = layout->add_offsets();
   offset_b->set_name("b");
   offset_b->set_storage_id("storage-0");
-  offset_b->set_storage_offset(4);
+  offset_b->set_storage_offset(0);
   offset_b->set_logical_length(4);
 
   auto* offset_a = layout->add_offsets();
   offset_a->set_name("a");
   offset_a->set_storage_id("storage-0");
-  offset_a->set_storage_offset(0);
+  offset_a->set_storage_offset(8);
   offset_a->set_logical_length(4);
 
   MaterializeIntoTargetResponse resp;
@@ -318,11 +368,462 @@ TEST_CASE("MaterializeIntoTarget requires device_uuid", "[daemon][materialize][i
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
 }
 
+TEST_CASE(
+    "MaterializeIntoTarget rejects tensor_names mismatch with target_layout",
+    "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("b");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "tensor_names do not match target_layout entries");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects unknown tensor in target_layout", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("unknown_tensor");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout includes unknown tensor name");
+}
+
+TEST_CASE("MaterializeIntoTarget canonical index rejects subset selection", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "index_kind CANONICAL cannot be used with view/subset selection");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects offset referencing unknown storage_id", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-missing");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout references unknown storage_id");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(1);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout storage_offset mismatch");
+}
+
+TEST_CASE("MaterializeIntoTarget view index requires view or ordered selection", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(4);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(4);
+  offset_b->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "index_kind VIEW requires view or selection order");
+}
+
+TEST_CASE("MaterializeIntoTarget canonical layout forbids target view_id", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+  layout->set_view_id("unexpected-view-id");
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(4);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(4);
+  offset_b->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout.view_id not allowed for canonical layout");
+}
+
+TEST_CASE(
+    "MaterializeIntoTarget subset-only view layout requires empty view_id",
+    "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.add_tensor_names("a");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+  layout->set_view_id("unexpected-view-id");
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout.view_id must be empty for subset-only layouts");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects alias dtype mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* alias_a = layout->add_aliases();
+  alias_a->set_name("a");
+  alias_a->set_storage_id("storage-0");
+  alias_a->set_storage_offset(0);
+  alias_a->set_logical_length(4);
+  alias_a->set_dtype("torch.float16");
+  alias_a->add_shape(4);
+  alias_a->add_stride(1);
+
+  auto* alias_b = layout->add_aliases();
+  alias_b->set_name("b");
+  alias_b->set_storage_id("storage-0");
+  alias_b->set_storage_offset(4);
+  alias_b->set_logical_length(4);
+  alias_b->set_dtype("torch.uint8");
+  alias_b->add_shape(4);
+  alias_b->add_stride(1);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout alias dtype mismatch");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects alias stride mismatch", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_ALIAS_UNSPECIFIED);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* alias_a = layout->add_aliases();
+  alias_a->set_name("a");
+  alias_a->set_storage_id("storage-0");
+  alias_a->set_storage_offset(0);
+  alias_a->set_logical_length(4);
+  alias_a->set_dtype("torch.uint8");
+  alias_a->add_shape(4);
+  alias_a->add_stride(2);
+
+  auto* alias_b = layout->add_aliases();
+  alias_b->set_name("b");
+  alias_b->set_storage_id("storage-0");
+  alias_b->set_storage_offset(4);
+  alias_b->set_logical_length(4);
+  alias_b->set_dtype("torch.uint8");
+  alias_b->add_shape(4);
+  alias_b->add_stride(1);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "target_layout alias stride mismatch");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects mismatched view_subset_hash", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.add_tensor_names("a");
+  req.set_view_subset_hash("invalid-subset-hash");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_VIEW);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(4);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset = layout->add_offsets();
+  offset->set_name("a");
+  offset->set_storage_id("storage-0");
+  offset->set_storage_offset(0);
+  offset->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "view_subset_hash does not match tensor_names");
+}
+
+TEST_CASE("MaterializeIntoTarget rejects subset hash for full selection", "[daemon][materialize][into_target]") {
+  ValidationFixture fix;
+  MaterializeIntoTargetRequest req;
+  req.set_artifact_id("mi2:dummy:dummy");
+  req.set_device_uuid("gpu-0");
+  req.set_pid(123);
+  req.set_view_subset_hash("unexpected-full-hash");
+
+  auto* layout = req.mutable_target_layout();
+  layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
+  layout->set_index_kind(tensorcast::daemon::v2::TargetLayout::INDEX_KIND_CANONICAL_UNSPECIFIED);
+  layout->set_tensor_spec_kind(tensorcast::daemon::v2::TargetLayout::TENSOR_SPEC_KIND_OFFSETS);
+
+  auto* storage = layout->add_storages();
+  storage->set_storage_id("storage-0");
+  storage->set_device_id(0);
+  storage->set_storage_length(8);
+  storage->set_vram_region_id("region-0");
+  storage->set_mapping_base_offset(0);
+
+  auto* offset_a = layout->add_offsets();
+  offset_a->set_name("a");
+  offset_a->set_storage_id("storage-0");
+  offset_a->set_storage_offset(0);
+  offset_a->set_logical_length(4);
+
+  auto* offset_b = layout->add_offsets();
+  offset_b->set_name("b");
+  offset_b->set_storage_id("storage-0");
+  offset_b->set_storage_offset(4);
+  offset_b->set_logical_length(4);
+
+  MaterializeIntoTargetResponse resp;
+  auto status = run_request(fix.controller, req, resp);
+
+  REQUIRE_FALSE(status.ok());
+  REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
+  REQUIRE(status.error_message() == "view_subset_hash must be empty for full selection");
+}
+
 TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
 
   const auto storage_root = fix.storage_root;
-  const auto artifact_dir = storage_root / "artifact_multi_region";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_multi_region";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
 
@@ -377,7 +878,7 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
+  register_disk_location(*fix.global_store_client, "artifact_multi_region", artifact_rel);
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -441,7 +942,9 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   ValidationFixture fix(/*external_target_verification_enabled=*/true);
 
   const auto storage_root = fix.storage_root;
-  const auto artifact_dir = storage_root / "artifact_verify_fail";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / fix.global_store_client->cluster_id / "objects" / "artifact_verify_fail";
+  const auto artifact_dir = storage_root / artifact_rel;
   std::filesystem::remove_all(artifact_dir);
   std::filesystem::create_directories(artifact_dir);
 
@@ -458,6 +961,7 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   const std::string descriptor_json = std::string("{\"artifact_id\":\"") + artifact_id + "\",\"index_multihash\":\"" +
       *index_mh_or + "\",\"data_multihash\":\"bad\",\"schema_version\":\"v3\",\"encoding\":\"json\",\"total_size\":8}";
   REQUIRE(write_file(artifact_dir / "artifact_descriptor.json", descriptor_json));
+  register_disk_location(*fix.global_store_client, artifact_id, artifact_rel);
 
   int device_count = 0;
   REQUIRE(tensorcast::cuda::get_device_count(&device_count).ok());
@@ -498,7 +1002,6 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.mutable_disk_fallback()->set_disk_path(artifact_dir.string());
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

@@ -34,6 +34,7 @@ Index v2 encodes each tensor entry as `[offset, size, shape, stride, dtype, stor
 - **Size semantics.** `size` is the total logical bytes occupied by the full storage, not the slice size of an alias. Multiple tensors that share a storage therefore emit identical `offset`/`size` pairs; the differentiator for views is only `storage_offset`.
 - **Shape/stride normalization.** Shapes and strides are serialized as unsigned 64-bit lists. Dtypes are lowercased internally to maintain deterministic ordering (`torch_dtype_code` helper).
 - **Storage offsets.** `storage_offset` captures each alias's view into the parent storage. When present, it must not push `storage_offset + size` past the storage boundary; both Python (`tensorcast/api/store.py` validation) and daemon (`daemon/state/lip_metadata_utils.cc:67-78`) enforce the bound.
+- **Source layouts (safetensors).** Safetensors payload offsets define a *source layout* used only for disk read planning. Canonical offsets are derived by coalescing sorted tensor names with alignment; identity never depends on payload order (see design-0062).
 
 Together these invariants make the canonical index a pure description of *layout* rather than physical allocation. Physical placement is captured elsewhere (byte-range maps and CUDA IPC handles) while the index remains transport-neutral.
 

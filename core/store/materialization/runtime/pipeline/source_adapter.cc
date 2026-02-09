@@ -111,6 +111,8 @@ absl::Status DiskSourceAdapter::prepare(const loading::DiskSource& source, Inges
     metadata.schema_version = disk_metadata.schema_version;
     metadata.existing_index_multihash = disk_metadata.index_multihash;
     metadata.existing_data_multihash = disk_metadata.data_multihash;
+    metadata.source_index_json = disk_metadata.source_index_json;
+    metadata.source_total_size_bytes = disk_metadata.source_total_size_bytes;
   } else {
     const auto descriptor_path = artifact_path / "artifact_descriptor.json";
     std::error_code descriptor_error;
@@ -161,11 +163,6 @@ absl::Status P2PSourceAdapter::prepare(const P2PSource& source, IngestionContext
   P2PSource normalized = source;
   normalized.comm_engine =
       gsl::not_null<std::shared_ptr<communicator::engine::Communicator>>{comm_manager->get_shared_engine()};
-  if (!ctx.hints.disk_path.empty() && ctx.hints.allow_disk &&
-      ctx.hints.source_preference != loading::SourcePreference::kPreferP2P) {
-    normalized.fallback_disk_dir = ctx.hints.disk_path;
-  }
-
   ctx.p2p.source = std::move(normalized);
   return absl::OkStatus();
 }

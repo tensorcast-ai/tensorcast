@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ class _RuntimeStub:
             daemon_endpoint="daemon", ttl_seconds=5, max_entries=4
         )
         self._client = client
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, str | None] = {}
 
     def ensure_client(self) -> _ClientStub:
         return self._client
@@ -55,15 +55,13 @@ class _RuntimeStub:
         if key and key in self._key_cache:
             del self._key_cache[key]
 
-    def resolve_key_mapping_cached(
-        self, *, key: str
-    ) -> tuple[str | None, str | None]:
-        return self._key_cache.get(key, (None, None))
+    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
+        return self._key_cache.get(key)
 
     def cache_key_mapping(
-        self, key: str, *, artifact_id: str | None, disk_path: str | None, ttl_override=None
+        self, key: str, *, artifact_id: str | None, ttl_override=None
     ) -> None:
-        self._key_cache[key] = (artifact_id, disk_path)
+        self._key_cache[key] = artifact_id
 
 
 class _StoreStub:
@@ -85,7 +83,7 @@ def test_exists_populates_cache_and_id():
     canonical_bytes = _canonical_index_bytes()
     runtime = _RuntimeStub(_ClientStub(canonical_bytes))
     store = _StoreStub(runtime)
-    runtime.cache_key_mapping("mapped", artifact_id="aid", disk_path=None)
+    runtime.cache_key_mapping("mapped", artifact_id="aid")
     artifact = Artifact(store_ref=weakref.ref(store), key="mapped")
 
     assert artifact.exists() is True

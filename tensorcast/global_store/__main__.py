@@ -13,7 +13,10 @@ from grpc_health.v1 import health, health_pb2, health_pb2_grpc
 from tensorcast import __version__ as _tc_version
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import set_config
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
+from tensorcast.global_store.grpc_service import (
+    GlobalStoreServicer,
+    register_global_store_servicers,
+)
 from tensorcast.global_store.memory_tier_grpc_service import MemoryTierGrpcServicer
 
 # Prometheus metrics
@@ -36,7 +39,6 @@ from tensorcast.logger import init_logger
 from tensorcast.observability.otel import (
     setup_otel_from_observability as _setup_otel_from_observability,
 )
-from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 from tensorcast.proto.memory_tier.v1 import memory_tier_pb2_grpc
 
 logger = init_logger(__name__)
@@ -190,7 +192,7 @@ def main():
         futures.ThreadPoolExecutor(max_workers=config.max_workers),
         interceptors=[PrometheusInterceptor()],
     )
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+    register_global_store_servicers(server, servicer)
     memory_tier_pb2_grpc.add_MemoryTierServiceServicer_to_server(
         memory_tier_servicer, server
     )
@@ -207,10 +209,14 @@ def main():
     health_servicer = health.HealthServicer()
     health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
     health_servicer.set("", health_pb2.HealthCheckResponse.SERVING)
-    health_servicer.set(
-        "tensorcast.global_store.v1.GlobalStoreService",
-        health_pb2.HealthCheckResponse.SERVING,
-    )
+    for service_name in (
+        "tensorcast.global_store.v1.ClusterRuntimeService",
+        "tensorcast.global_store.v1.ArtifactCatalogService",
+        "tensorcast.global_store.v1.AssemblyViewService",
+        "tensorcast.global_store.v1.WorkflowOrchestrationService",
+        "tensorcast.global_store.v1.ClusterAdminService",
+    ):
+        health_servicer.set(service_name, health_pb2.HealthCheckResponse.SERVING)
 
     advertise_host, advertise_port, advertise_source = _resolve_advertise_address(
         listen_host=listen_host,

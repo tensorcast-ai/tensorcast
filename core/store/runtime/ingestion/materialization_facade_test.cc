@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <chrono>
 #include <filesystem>
@@ -330,18 +330,19 @@ TEST_CASE("MaterializationFacade materialize_replica reuses disk ingestion path"
   target.location.device_id = 0;
 
   loading::MaterializeHints hints;
-  hints.disk_path = (temp_root / "artifact_auto").string();
+  hints.artifact_id = "cgid:artifact_auto";
+  loading::DiskSource disk_source{.path = temp_root / "artifact_auto", .expected_size = std::nullopt};
   loading::ReplicaHandle handle;
-  handle.replica_key.artifact_id = "artifact_auto";
+  handle.replica_key.artifact_id = hints.artifact_id;
   handle.replica_key.device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
   harness.fake_pipeline->set_next_disk_result(std::move(handle));
 
   loading::MaterializeHints request_hints = hints;
 
   auto handle_or = harness.facade->materialize_replica(
-      target.location.to_device_key(), loading::MaterializeMode::LOAD_ONLY, request_hints);
+      target.location.to_device_key(), loading::MaterializeMode::LOAD_ONLY, request_hints, disk_source);
   REQUIRE(handle_or.ok());
-  CHECK(handle_or->replica_key.artifact_id == "artifact_auto");
+  CHECK(handle_or->replica_key.artifact_id == hints.artifact_id);
 
   harness.shutdown();
   std::error_code cleanup_ec;
@@ -371,8 +372,8 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
   harness.runtime_context().set_global_store_client_for_testing(gs_client);
 
   loading::MaterializeHints hints;
-  hints.artifact_id = "artifact_auto";
-  hints.disk_path = (temp_root / "artifact_fallback").string();
+  hints.artifact_id = "cgid:artifact_auto";
+  loading::DiskSource disk_source{.path = temp_root / "artifact_fallback", .expected_size = std::nullopt};
 
   loading::ReplicaHandle disk_handle;
   disk_handle.replica_key.artifact_id = hints.artifact_id;
@@ -381,11 +382,52 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
   harness.fake_pipeline->set_next_p2p_result(absl::FailedPreconditionError("p2p should be skipped"));
 
   DeviceKey target_device{.type = DeviceType::GPU, .ordinal = 0, .uuid = ""};
-  auto handle_or = harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints);
+  auto handle_or =
+      harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints, disk_source);
   REQUIRE(handle_or.ok());
   CHECK(harness.fake_pipeline->disk_invocations().size() == 1);
   CHECK(harness.fake_pipeline->p2p_invocations().empty());
   CHECK(gs_client->replica_requests.size() == 1);
+
+  harness.shutdown();
+  std::error_code cleanup_ec;
+  std::filesystem::remove_all(temp_root, cleanup_ec);
+}
+
+TEST_CASE("MaterializationFacade AUTO uses disk when Global Store disconnected", "[materialization_facade]") {
+  SKIP_IF_NO_CUDA();
+
+  auto temp_root = std::filesystem::temp_directory_path() / "materialization_facade_auto_no_gs";
+  std::filesystem::create_directories(temp_root);
+
+  FacadeHarness harness(MakeOptions(temp_root));
+  harness.initialize();
+
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = false;
+  gs_client->allow_replica_transport = true;
+  harness.runtime_context().set_global_store_client_for_testing(gs_client);
+
+  loading::MaterializeHints hints;
+  hints.artifact_id = "mi2:mh:index:mh:data";
+  hints.source_preference = loading::SourcePreference::kPreferDisk;
+  hints.allow_disk = true;
+  hints.allow_p2p = false;
+
+  loading::DiskSource disk_source{.path = temp_root / "artifact_no_gs", .expected_size = std::nullopt};
+
+  loading::ReplicaHandle disk_handle;
+  disk_handle.replica_key.artifact_id = hints.artifact_id;
+  disk_handle.replica_key.device = {.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  harness.fake_pipeline->set_next_disk_result(std::move(disk_handle));
+
+  DeviceKey target_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  auto handle_or =
+      harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints, disk_source);
+  REQUIRE(handle_or.ok());
+  CHECK(harness.fake_pipeline->disk_invocations().size() == 1);
+  CHECK(harness.fake_pipeline->p2p_invocations().empty());
+  CHECK(gs_client->replica_requests.empty());
 
   harness.shutdown();
   std::error_code cleanup_ec;

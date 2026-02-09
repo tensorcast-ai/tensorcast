@@ -14,10 +14,12 @@ absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(
     DeviceKey target_device,
     MaterializeMode mode,
     const MaterializeHints& hints,
-    const components::DeviceManager& device_manager) {
+    const components::DeviceManager& device_manager,
+    std::optional<DiskSource> disk_source) {
   MaterializationRequest request;
   request.mode_ = mode;
   request.hints_ = hints;
+  request.disk_source_ = std::move(disk_source);
 
   DeviceKey normalized_device = target_device;
 
@@ -41,29 +43,20 @@ absl::StatusOr<MaterializationRequest> MaterializationRequest::Create(
               id_kind_or.status().message()));
     }
   } else {
-    request.canonical_artifact_id_ = !hints.artifact_id.empty() ? hints.artifact_id : hints.disk_path;
+    request.canonical_artifact_id_ = hints.artifact_id;
     request.requested_view_id_.reset();
-
-    if (!hints.artifact_id.empty()) {
-      const auto id_kind = tensorcast::common::infer_artifact_id_kind(request.canonical_artifact_id_);
-      if (id_kind == tensorcast::common::ArtifactIdKind::kMi2 || id_kind == tensorcast::common::ArtifactIdKind::kCgid) {
-        auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id_);
-        if (!id_kind_or.ok()) {
-          return absl::InvalidArgumentError(
-              absl::StrCat(
-                  "MaterializeHints.artifact_id must be a valid mi2: or cgid: identifier: ",
-                  id_kind_or.status().message()));
-        }
-      }
-    }
   }
 
   if (request.canonical_artifact_id_.empty()) {
-    if (mode == MaterializeMode::COPY_ONLY) {
-      return absl::InvalidArgumentError(
-          "COPY_ONLY requires hints.artifact_id or VariantIdentity.canonical_artifact_id");
-    }
-    return absl::InvalidArgumentError("MaterializeHints must provide artifact_id or disk_path for LOAD modes");
+    return absl::InvalidArgumentError(
+        "MaterializeHints must provide artifact_id or VariantIdentity.canonical_artifact_id");
+  }
+
+  auto id_kind_or = tensorcast::common::validate_and_get_artifact_id_kind(request.canonical_artifact_id_);
+  if (!id_kind_or.ok()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat(
+            "MaterializeHints.artifact_id must be a valid mi2: or cgid: identifier: ", id_kind_or.status().message()));
   }
 
   switch (normalized_device.type) {

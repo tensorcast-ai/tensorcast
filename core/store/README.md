@@ -25,7 +25,7 @@ Key files:
   - EvictionService: core/store/components/eviction_service.{h,cc}
   - View spec helpers: core/store/view_utils.{h,cc}
   - Runtime catalog + services (core/store/runtime/**):
-    - RuntimeContext: core/store/runtime/context/runtime_context.{h,cc} (initializes the shared PinnedBufferPool, DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, GlobalStoreClient, and ViewHashComputer, while embedding the Folly-backed event dispatcher used by the runtimes; Global Store HA sync calls carry monotonic sync tokens to reject stale updates).
+    - RuntimeContext: core/store/runtime/context/runtime_context.{h,cc} (initializes the shared PinnedBufferPool, DeviceManager, ReplicaRegistry, MetricsCollector, CommunicationManager, GlobalStoreClient, and ViewHashComputer, while embedding the Folly-backed event dispatcher used by the runtimes; Global Store HA sync calls carry monotonic sync tokens to reject stale updates; Global Store client helpers now include replica-availability + drain waits for safe swap retire flows).
     - RuntimeEnv: core/store/runtime/runtime_env.{h,cc} (bootstraps RuntimeContext, owns worker identity, and coordinates lifecycle/shutdown hooks for runtime services).
     - ReplicaRuntime: core/store/runtime/replica/replica_runtime.{h,cc} (wraps ReplicaRegistry operations, eviction retries, UMA snapshots, publishes replica lifecycle events, manages remote access toggles, and tracks per-replica publish state to build the HA inventory of publishable/resident replicas).
     - Ingestion events: core/store/runtime/ingestion_events.h (canonical definitions for runtime ingestion hooks shared by RuntimeContext’s dispatcher, ReplicaRuntime, and the ingestion/metadata runtimes).
@@ -119,13 +119,13 @@ graph TB
   - Configures the shared `storage_path` root, pinned pool size/chunk size, UMA chunk size, and optional `CommunicationManager` and `GlobalStore` address.
 
 - Materialization (multi-device):
-  - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&)`
+  - `absl::StatusOr<loading::ReplicaHandle> materialize_replica(const DeviceKey&, MaterializeMode, const MaterializeHints&, std::optional<loading::DiskSource>)`
   - `absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(assembly_id, target_artifact_id, view_id, view_spec_json, target_device, placement, allowed_view_ids)`
     assembles a view replica under a sealed `mi2` identity from CGID-scoped pieces; validates index multihash for `mi2`
     targets and requires a GPU destination.
   - Modes:
-    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. P2P is gated by `hints.allow_p2p`; disk fallback happens only when `hints.allow_disk` is true and `hints.disk_path` is populated. `PREFER_DISK` flips ordering to disk‑first, while `PREFER_P2P` keeps P2P‑first ordering and still requires a canonical `artifact_id`. When `disk_path` is empty the orchestrator returns the transport status directly (no implicit fallback). Global Store routing is eventually consistent and may briefly reference evicted local replicas; when that happens, the route is treated as stale: disk fallback is used when allowed and available, otherwise a retryable error is returned.
-    - `LOAD_ONLY`: Loads from disk only and requires `hints.disk_path`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
+    - `AUTO`: Uses `MaterializeOrchestrator` to request a P2P transport from Global Store. P2P is gated by `hints.allow_p2p`; disk fallback is attempted only when `hints.allow_disk` is true and a typed `DiskSource` is supplied by the daemon. `PREFER_DISK` flips ordering to disk‑first, while `PREFER_P2P` keeps P2P‑first ordering and still requires a canonical `artifact_id`. Without a `DiskSource`, the orchestrator returns the transport status directly (no implicit path fallback). Global Store routing is eventually consistent and may briefly reference evicted local replicas; when that happens, the route is treated as stale: disk fallback is used when allowed and available, otherwise a retryable error is returned.
+    - `LOAD_ONLY`: Loads from disk only and requires a typed `DiskSource`; when a content-addressed ID (`mi2:`) is provided it is validated against the on-disk `artifact_descriptor.json` to keep canonical identity aligned with the loaded replica.
     - `COPY_ONLY`: GPU→GPU copy from an already-loaded GPU instance; requires `hints.artifact_id` and a GPU target. If the destination replica already exists, it is reused instead of re-copying.
   - Safetensors disk fallback rebuilds canonical index JSON bytes and re-hashes them via `common::compute_index_multihash` so `mi2` identities stay stable even when the original `tensor_index.json` is absent.
   - Returns `ReplicaHandle { ReplicaKey, ready_signal, cpu_state, gpu_state, gpu_base_ptr, cuda_ipc_handle, view_index_json?, view_data_hash? }`.
@@ -134,11 +134,13 @@ graph TB
   - The staged ingestion pipeline emits structured events for each request; `TelemetryService` updates metrics/read-only snapshots, and `GlobalStorePublisher` registers successful loads with Global Store automatically so callers do not need to invoke the registration helper manually.
 
 - Region-backed materialization (external targets):
-  - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(const DeviceKey&, const loading::IntoTargetLayout&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&)`
+  - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(const DeviceKey&, const loading::IntoTargetLayout&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&, std::optional<loading::DiskSource>)`
+  - `absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(const DeviceKey&, const loading::IntoTargetLayout&, const loader::ByteRangeMap&, std::string_view canonical_index_json, uint64_t generation, const loading::MaterializeHints&, std::optional<loading::DiskSource>)`
+  - Executes a precompiled byte-range mapping (dst → src) into external target storages; v1 is used by mapped binding with narrow-only views and contiguous dst tensors.
   - Streams canonical or view-selected ByteSpaces directly into client-provided GPU storages; no daemon-owned replica is allocated.
   - `IntoTargetLayout` supports ordered-concatenation multi-storage layouts (mapped to `TargetLayoutGpuSink`), and view/subset selection uses `ViewPlanner` + `ViewPlanSource` with `MaterializeHints::variant` carrying `view_id`/`view_spec` and placement.
 
-  Note: In the key-based client flow, the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` and, when applicable, `hints.disk_path` (canonicalized under the shared root). Clients do not pass `disk_path` directly; fallback is orchestrated entirely inside the daemon/engine.
+  Note: In the key-based client flow, the Store Daemon is responsible for resolving the human key via Global Store and supplying `hints.artifact_id` plus an optional typed `DiskSource` (managed shared disk or daemon-local import). Clients do not pass disk paths directly; fallback authority remains daemon/engine-internal.
 
 - In-memory registration (RFC-0006/0007):
   - `begin_register_artifact(const ArtifactRegistration&) -> RegistrationBeginResult`
@@ -458,7 +460,7 @@ Implementation: `try_evict_gpu_memory_impl()` in store_engine.cc. CPU VS memory 
 ## Notes and Limitations
 
 - `InlineBufferSource` ingestion path is currently unimplemented for general loading; it is used internally for memory-only allocations (registration, COPY_ONLY source/dest creation).
-- Content-addressed `mi2:...` artifact IDs require Global Store routing; disk fallback must specify `hints.disk_path`.
+- Content-addressed `mi2:...` artifact IDs require an authoritative source binding (Global Store routing, managed shared-disk location, or daemon-local disk import). Core no longer accepts string path hints.
 - Per-GPU transfer concurrency is limited to 1 active session by design to reduce VRAM fragmentation and pressure.
 - Canonical tensor indices are expected in schema version `"v3"`; the engine emits v3 descriptors and rejects older schemas on write paths.
 - View replica registration still publishes canonical residency to Global Store. The engine issues a best-effort `record_view_residency` call so the daemon can start wiring the future RPC; until Global Store implements it the call returns `UNIMPLEMENTED` and is logged at `VLOG(1)`.

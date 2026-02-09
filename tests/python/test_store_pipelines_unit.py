@@ -30,6 +30,7 @@ from tensorcast.api.store.types import (
     StoreOptions,
 )
 from tensorcast.api.store.views import ViewOrchestrator
+from tensorcast.daemon_ctl import KeyMappingResolution
 
 
 class _DummySpan:
@@ -55,8 +56,13 @@ class _FakeClient:
     def __init__(self) -> None:
         self.unloaded: list[str] = []
 
-    def resolve_key_mapping(self, key: str) -> tuple[str | None, str | None]:
-        return None, None
+    def resolve_key_mapping(self, key: str) -> KeyMappingResolution:
+        del key
+        return KeyMappingResolution(
+            artifact_id="",
+            generation=0,
+            cache_ttl_seconds=0,
+        )
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         # Region-backed get_into may probe indices before determining that no
@@ -90,7 +96,7 @@ class _DummyRuntime:
         self.leases: list[object] = []
         self.futures: list[object] = []
         self.client = _FakeClient()
-        self._key_cache: dict[str, tuple[str | None, str | None]] = {}
+        self._key_cache: dict[str, str | None] = {}
 
     def track_future(self, future: concurrent.futures.Future[object]) -> None:
         self.futures.append(future)
@@ -115,18 +121,16 @@ class _DummyRuntime:
 
     def resolve_key_mapping_cached(
         self, *, key: str
-    ) -> tuple[str | None, str | None]:  # pragma: no cover - noop
-        return self.client.resolve_key_mapping(key)
-
-    def get_artifact_index_by_disk_path(self, _disk_path: str) -> object | None:
-        return None
+    ) -> str | None:  # pragma: no cover - noop
+        mapping = self.client.resolve_key_mapping(key)
+        return mapping.artifact_id or None
 
     def invalidate_artifact(
         self, artifact_id: str | None, *, key: str | None = None, reason: str | None = None
     ) -> None:  # pragma: no cover - noop
         # Mirror StoreRuntimeContext.invalidate_artifact enough for tests: clear cached key mappings.
         keys_to_remove: list[str] = []
-        for cached_key, (cached_artifact, _disk_path) in self._key_cache.items():
+        for cached_key, cached_artifact in self._key_cache.items():
             matches_artifact = bool(artifact_id and cached_artifact == artifact_id)
             matches_key = bool(key is not None and cached_key == key)
             if matches_artifact or matches_key:
@@ -216,17 +220,6 @@ def test_registration_retries_then_succeeds():
 
     assert result.artifact_id == "aid"
     assert len(attempts) == 2
-
-
-def test_materialization_rejects_empty_disk_fallback():
-    runtime = _DummyRuntime()
-    pipeline = MaterializationPipeline(runtime, ViewOrchestrator(runtime))
-
-    with pytest.raises(ArtifactError) as excinfo:
-        pipeline.get(fallback=FallbackOptions(disk_path=""))
-    runtime.close()
-
-    assert excinfo.value.status_code == "INVALID_ARGUMENT"
 
 
 def test_get_into_validates_targets(monkeypatch):

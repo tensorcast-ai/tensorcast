@@ -351,7 +351,6 @@ def _clone_artifact_for_store(artifact: Artifact, store: "Store") -> Artifact:
         store_ref=weakref.ref(store),
         artifact_id=artifact._artifact_id,
         key=artifact._key_hint,
-        disk_path=artifact._disk_path_hint,
         fallback=artifact._fallback,
         canonical_index_bytes=artifact._canonical_index_bytes,
         canonical_index=artifact._canonical_index,

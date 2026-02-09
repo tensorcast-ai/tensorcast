@@ -18,17 +18,19 @@ from pathlib import Path
 import grpc
 import pytest
 import yaml
+from google.protobuf import wrappers_pb2
 
 from tensorcast.api.store.view_composer import compute_index_multihash, compute_view_id
 from tensorcast.cli_utils.proc import build_daemon_process_env, ensure_cpp_daemon_binary
+from tensorcast.global_store.composite_stub import GlobalStoreCompositeStub
 from tensorcast.global_store.config.settings import GlobalStoreConfig, set_config
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
-from google.protobuf import wrappers_pb2
+from tensorcast.global_store.grpc_service import (
+    GlobalStoreServicer,
+    register_global_store_servicers,
+)
 from tensorcast.proto.common.v1 import common_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2
-from tensorcast.proto.daemon.v2 import store_daemon_pb2_grpc
+from tensorcast.proto.daemon.v2 import store_daemon_pb2, store_daemon_pb2_grpc
 from tensorcast.proto.global_store.v1 import global_store_pb2
-from tensorcast.proto.global_store.v1 import global_store_pb2_grpc
 from tensorcast.proto.layout.v1 import layout_pb2
 from tensorcast.proto.operation.v1 import operation_pb2
 
@@ -169,7 +171,7 @@ def gs_server():
     set_config(GlobalStoreConfig())
     servicer = GlobalStoreServicer()
     server = grpc.server(ThreadPoolExecutor(max_workers=8))
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+    register_global_store_servicers(server, servicer)
     port = server.add_insecure_port("127.0.0.1:0")
     if port <= 0:
         raise RuntimeError("failed to bind Global Store server port")
@@ -247,7 +249,7 @@ def _make_index_bytes() -> bytes:
             [1],
             "torch.float32",
             0,
-        ]
+        ],
     }
     return json.dumps(index, separators=(",", ":")).encode("utf-8")
 
@@ -320,7 +322,7 @@ def _pack_floats(values: list[float]) -> bytes:
 
 def _seal_two_piece_assembly(
     stub: store_daemon_pb2_grpc.StoreDaemonServiceStub,
-    gs_stub: global_store_pb2_grpc.GlobalStoreServiceStub,
+    gs_stub: GlobalStoreCompositeStub,
     *,
     assembly_id: str,
     canonical_index_bytes: bytes,
@@ -428,7 +430,7 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
 
     gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-    gs_stub = global_store_pb2_grpc.GlobalStoreServiceStub(gs_channel)
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
 
     assembly_id = "cgid:assembly-test"
     canonical_index_bytes = _make_index_bytes()
@@ -583,7 +585,9 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     snapshot = store_daemon_pb2.SealAssemblySnapshot()
     assert wait_resp.operation.snapshot.Unpack(snapshot) is True
     assert snapshot.layout_id == put_layout.layout_id
-    assert snapshot.assembly_layout_binding_version == bind_layout.binding.binding_version
+    assert (
+        snapshot.assembly_layout_binding_version == bind_layout.binding.binding_version
+    )
 
     seal_resp_2 = stub.SealAssembly(
         store_daemon_pb2.SealAssemblyRequest(
@@ -600,13 +604,17 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     assert binding.status == global_store_pb2.Status.STATUS_OK
     assert binding.binding.to_artifact_id == op_result.artifact.artifact_id
     attached = gs_stub.ListArtifactLayouts(
-        global_store_pb2.ListArtifactLayoutsRequest(mi2_id=op_result.artifact.artifact_id)
+        global_store_pb2.ListArtifactLayoutsRequest(
+            mi2_id=op_result.artifact.artifact_id
+        )
     )
     assert attached.status == global_store_pb2.Status.STATUS_OK
     assert put_layout.layout_id in attached.layout_ids
 
     replicas_resp = gs_stub.ListReplicasV2(
-        global_store_pb2.ListReplicasV2Request(artifact_id=op_result.artifact.artifact_id)
+        global_store_pb2.ListReplicasV2Request(
+            artifact_id=op_result.artifact.artifact_id
+        )
     )
     assert len(replicas_resp.replicas) >= 1
 
@@ -631,7 +639,7 @@ def test_post_seal_reuse_views_if_safe(daemon_process_reuse, gs_server):
     stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
 
     gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-    gs_stub = global_store_pb2_grpc.GlobalStoreServiceStub(gs_channel)
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
 
     assembly_id = "cgid:assembly-reuse"
     canonical_index_bytes = _make_index_bytes()
@@ -653,10 +661,7 @@ def test_post_seal_reuse_views_if_safe(daemon_process_reuse, gs_server):
             wait_for_completion=True,
         )
     )
-    assert (
-        mat_resp.status
-        == store_daemon_pb2.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-    )
+    assert mat_resp.status == store_daemon_pb2.MATERIALIZE_REPLICA_STATUS_ALLOCATED
     assert mat_resp.artifact_id == sealed_id
 
     channel.close()
@@ -669,7 +674,7 @@ def test_post_seal_migrate_views(daemon_process_migrate, gs_server):
     stub = store_daemon_pb2_grpc.StoreDaemonServiceStub(channel)
 
     gs_channel = grpc.insecure_channel(f"127.0.0.1:{gs_port}")
-    gs_stub = global_store_pb2_grpc.GlobalStoreServiceStub(gs_channel)
+    gs_stub = GlobalStoreCompositeStub(gs_channel)
 
     assembly_id = "cgid:assembly-migrate"
     canonical_index_bytes = _make_index_bytes()

@@ -201,6 +201,9 @@ sc_cc_library(
         "//core/store:memory_types",
         "//core/store:store_engine_options",
         "//core/store/materialization/contracts:loading_spec",
+        "//core/store/materialization/dataplane:byte_range_map_builder",
+        "//core/store/materialization/dataplane:byte_range_mapped_source",
+        "//core/store/materialization/dataplane:byte_range_program",
         "//core/store/materialization/dataplane:disk_loader",
         "//core/store/materialization/dataplane:inline_buffer_loader",
         "//core/store/materialization/dataplane:loader",
@@ -213,6 +216,7 @@ sc_cc_library(
         "@abseil-cpp//absl/strings",
         "@abseil-cpp//absl/synchronization",
         "@abseil-cpp//absl/types:span",
+        "@nlohmann_json//:json",
     ],
 )
 

@@ -183,7 +183,7 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
     }
 
     const auto publish_state = get_replica_publish_state(key);
-    if (publish_state == ReplicaPublishState::kLocalOnly || publish_state == ReplicaPublishState::kRetiring) {
+    if (publish_state != ReplicaPublishState::kPublishPending && publish_state != ReplicaPublishState::kPublished) {
       continue;
     }
 
@@ -191,20 +191,14 @@ std::vector<ReplicaInventoryEntry> ReplicaRuntime::get_ha_inventory() const {
     entry.key = key;
     entry.size_bytes = get_replica_size_or_zero(key);
     entry.memory_location = location;
-    std::optional<ExportRegistration> comm_info;
-    if (communication_manager()->is_enabled()) {
-      comm_info = replica->get_memory_manager().get_comm_registration_info(location);
-    }
-    const bool comm_ready = comm_info.has_value() && !comm_info->remote_memory_keys.empty() &&
-        comm_info->remote_memory_keys.size() == comm_info->buffer_sizes.size();
-    entry.is_available = communication_manager()->is_enabled() && state == replica::MemoryState::LOADED && comm_ready;
-    if (comm_ready) {
-      entry.remote_memory_keys = comm_info->remote_memory_keys;
-      entry.buffer_sizes.reserve(comm_info->buffer_sizes.size());
-      for (const auto size : comm_info->buffer_sizes) {
-        entry.buffer_sizes.push_back(static_cast<uint64_t>(size));
-      }
-    }
+    const auto transport_state = get_transport_state(key);
+    entry.export_state = transport_state.export_state;
+    entry.export_generation = transport_state.export_generation;
+    entry.remote_memory_keys = transport_state.remote_memory_keys;
+    entry.buffer_sizes = transport_state.buffer_sizes;
+    entry.verification_json = transport_state.verification_json;
+    const bool comm_enabled = communication_manager()->is_enabled();
+    entry.is_available = comm_enabled && state == replica::MemoryState::LOADED;
     entry.publish_state = publish_state;
     result.push_back(std::move(entry));
   }
@@ -483,6 +477,47 @@ ReplicaPublishState ReplicaRuntime::get_replica_publish_state(const loading::Rep
     return ReplicaPublishState::kLocalOnly;
   }
   return it->second;
+}
+
+ReplicaTransportState ReplicaRuntime::get_transport_state(const loading::ReplicaKey& key) const {
+  absl::MutexLock lock(&transport_state_mu_);
+  auto it = transport_states_.find(normalize_replica_key(key));
+  if (it == transport_states_.end()) {
+    return ReplicaTransportState{};
+  }
+  return it->second;
+}
+
+void ReplicaRuntime::update_transport_state(const loading::ReplicaKey& key, const ReplicaTransportState& state) {
+  absl::MutexLock lock(&transport_state_mu_);
+  transport_states_[normalize_replica_key(key)] = state;
+}
+
+void ReplicaRuntime::clear_transport_state(const loading::ReplicaKey& key) {
+  absl::MutexLock lock(&transport_state_mu_);
+  transport_states_.erase(normalize_replica_key(key));
+}
+
+void ReplicaRuntime::set_replica_global_id(const loading::ReplicaKey& key, std::string replica_id) {
+  if (replica_id.empty()) {
+    return;
+  }
+  absl::MutexLock lock(&replica_id_mu_);
+  replica_ids_[normalize_replica_key(key)] = std::move(replica_id);
+}
+
+std::optional<std::string> ReplicaRuntime::get_replica_global_id(const loading::ReplicaKey& key) const {
+  absl::MutexLock lock(&replica_id_mu_);
+  auto it = replica_ids_.find(normalize_replica_key(key));
+  if (it == replica_ids_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+void ReplicaRuntime::clear_replica_global_id(const loading::ReplicaKey& key) {
+  absl::MutexLock lock(&replica_id_mu_);
+  replica_ids_.erase(normalize_replica_key(key));
 }
 
 absl::StatusOr<ExportRegistration> ReplicaRuntime::enable_remote_replica_access(

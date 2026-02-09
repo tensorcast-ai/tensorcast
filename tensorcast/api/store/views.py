@@ -109,12 +109,11 @@ class ViewOrchestrator:
         view_id: str | None,
     ) -> ResolvedViewInputs:
         resolved_artifact_id, resolved_key = self._resolve_identifiers(artifact_id, key)
-        disk_path_hint: str | None = None
         cached_entry: ArtifactCacheEntry | None = None
         if resolved_artifact_id is None:
             assert resolved_key is not None
-            resolved_artifact_id, disk_path_hint = (
-                self._runtime.resolve_key_mapping_cached(key=resolved_key)
+            resolved_artifact_id = self._runtime.resolve_key_mapping_cached(
+                key=resolved_key
             )
             if not resolved_artifact_id:
                 raise ArtifactError(
@@ -124,8 +123,6 @@ class ViewOrchestrator:
                 )
         if resolved_artifact_id:
             cached_entry = self._runtime.get_artifact_index_cached(resolved_artifact_id)
-            if cached_entry and cached_entry.disk_path and not disk_path_hint:
-                disk_path_hint = cached_entry.disk_path
 
         if view_id is not None:
             if slices or transpose:
@@ -143,7 +140,6 @@ class ViewOrchestrator:
             return ResolvedViewInputs.from_view_id(
                 artifact_id=resolved_artifact_id,
                 view_id=view_id,
-                disk_path_hint=disk_path_hint,
             )
 
         if not slices and not transpose:
@@ -172,7 +168,6 @@ class ViewOrchestrator:
                 canonical_index_bytes=canonical_index_bytes,
                 parsed_index=canonical_index,
                 generation=None,
-                disk_path=disk_path_hint,
                 expires_at=time.monotonic(),
             )
             self._runtime.cache_artifact_index(cache_entry)
@@ -185,7 +180,6 @@ class ViewOrchestrator:
             artifact_id=resolved_artifact_id,
             canonical_index_bytes=canonical_index_bytes,
             build_result=build_result,
-            disk_path_hint=disk_path_hint,
         )
 
     @staticmethod

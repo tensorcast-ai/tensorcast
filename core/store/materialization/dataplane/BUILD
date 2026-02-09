@@ -76,6 +76,7 @@ sc_cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":file_partition_source",
+        ":multi_safetensors_source",
         ":source_hash",
         "@nlohmann_json//:json",
     ],
@@ -98,6 +99,7 @@ sc_cc_library(
     hdrs = ["metadata/safetensors_util.h"],
     visibility = ["//visibility:public"],
     deps = [
+        ":canonical_index",
         "@abseil-cpp//absl/strings",
         "@nlohmann_json//:json",
     ],
@@ -192,6 +194,21 @@ sc_cc_library(
         ":source",
         "//core/store/materialization/contracts:byte_range_map",
         "@abseil-cpp//absl/synchronization",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+sc_cc_library(
+    name = "source_window_scheduler",
+    srcs = ["sources/source_window_scheduler.cc"],
+    hdrs = ["sources/source_window_scheduler.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":sink",
+        ":source",
+        "//core/common:streaming_pinned_buffer_lib",
+        "//core/store/materialization/contracts:byte_range_map",
+        "@abseil-cpp//absl/types:span",
         "@opentelemetry-cpp//api:api",
     ],
 )
@@ -502,6 +519,17 @@ cc_test(
 )
 
 cc_test(
+    name = "disk_loader_partition_order_test",
+    srcs = ["loaders/tests/disk_loader_partition_order_test.cc"],
+    deps = [
+        ":disk_loader",
+        "//core/testing:catch_main",
+        "//core/testing:common",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "disk_error_test",
     srcs = ["loaders/tests/disk_error_test.cc"],
     tags = ["requires_cuda"],
@@ -548,11 +576,45 @@ cc_test(
 )
 
 cc_test(
+    name = "byte_range_map_builder_test",
+    srcs = ["sources/tests/byte_range_map_builder_test.cc"],
+    deps = [
+        ":byte_range_map_builder",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "source_window_scheduler_test",
+    srcs = ["sources/tests/source_window_scheduler_test.cc"],
+    deps = [
+        ":source_window_scheduler",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "index_reader_test",
     srcs = ["metadata/tests/index_reader_test.cc"],
     deps = [
         ":index_reader",
         "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+        "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "disk_dir_hash_test",
+    srcs = ["metadata/tests/disk_dir_hash_test.cc"],
+    deps = [
+        ":disk_dir_hash",
+        ":source_hash",
+        "//core/testing:catch_main",
+        "//core/testing:common",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
     ],

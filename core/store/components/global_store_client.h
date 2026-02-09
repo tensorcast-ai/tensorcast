@@ -94,6 +94,12 @@ struct TransportSession {
   absl::Time start_time;
 };
 
+struct ReplicaDrainStatus {
+  bool drained{false};
+  uint32_t current_requests{0};
+  std::optional<uint64_t> oldest_transport_age_ms;
+};
+
 struct ChunkLocationInfo {
   uint32_t chunk_idx;
   std::string node_id;
@@ -117,7 +123,25 @@ struct KeyMapping {
   std::string artifact_id;
   std::string replica_uuid;
   std::string daemon_address;
-  std::string disk_path;
+  uint64_t generation{0};
+  uint32_t cache_ttl_seconds{0};
+};
+
+struct ArtifactDiskLocation {
+  std::string artifact_id;
+  std::string cluster_id;
+  std::string relative_path;
+  global_store::DiskLocationKind kind{global_store::DISK_LOCATION_KIND_UNSPECIFIED};
+  bool is_deleted{false};
+  std::optional<absl::Time> created_at;
+  std::optional<absl::Time> updated_at;
+  std::optional<absl::Time> deleted_at;
+};
+
+struct KeyMappingSwapResult {
+  bool ok{false};
+  std::string artifact_id;
+  uint64_t generation{0};
 };
 
 struct CanonicalRange {
@@ -343,6 +367,17 @@ class IGlobalStoreClient {
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) = 0;
 
+  virtual absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) = 0;
+
   virtual absl::StatusOr<TransportSession> request_replica_transport(
       std::string_view artifact_id,
       std::string_view source_node_id,
@@ -394,13 +429,28 @@ class IGlobalStoreClient {
   virtual absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) = 0;
   virtual absl::StatusOr<ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id) = 0;
 
-  virtual absl::Status upsert_key_mapping(
+  virtual absl::Status upsert_key_mapping(std::string_view key, std::string_view artifact_id, absl::Duration ttl) = 0;
+
+  virtual absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
       std::string_view key,
-      std::string_view artifact_id,
-      std::string_view disk_path,
-      absl::Duration ttl) = 0;
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id,
+      std::optional<uint64_t> expected_generation) = 0;
 
   virtual absl::Status revoke_key_mapping(std::string_view key) = 0;
+
+  virtual absl::StatusOr<std::string> get_cluster_id() = 0;
+
+  virtual absl::Status upsert_artifact_disk_location(
+      std::string_view artifact_id,
+      std::string_view cluster_id,
+      std::string_view relative_path,
+      global_store::DiskLocationKind kind,
+      bool is_deleted = false) = 0;
+
+  virtual absl::StatusOr<std::vector<ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) = 0;
 
   // Memory tier RPCs (optional; default implementations return Unimplemented)
   virtual absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) {
@@ -583,6 +633,17 @@ class GlobalStoreClient : public IGlobalStoreClient {
       std::optional<common::memory::MemoryLocation> memory_type = std::nullopt,
       std::optional<uint32_t> device_id = std::nullopt) override;
 
+  absl::StatusOr<bool> mark_replica_unavailable(
+      std::string_view artifact_id,
+      std::string_view replica_id,
+      std::optional<std::string_view> reason = std::nullopt,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
+
+  absl::StatusOr<ReplicaDrainStatus> wait_replica_drain(
+      std::string_view replica_id,
+      uint32_t timeout_ms,
+      std::optional<std::string_view> operation_id = std::nullopt) override;
+
   // P2P transport coordination
   absl::StatusOr<TransportSession> request_replica_transport(
       std::string_view artifact_id,
@@ -635,10 +696,28 @@ class GlobalStoreClient : public IGlobalStoreClient {
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
-      std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration()) override;
 
+  absl::StatusOr<KeyMappingSwapResult> swap_key_mapping(
+      std::string_view key,
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id,
+      std::optional<uint64_t> expected_generation) override;
+
   absl::Status revoke_key_mapping(std::string_view key) override;
+
+  absl::StatusOr<std::string> get_cluster_id() override;
+
+  absl::Status upsert_artifact_disk_location(
+      std::string_view artifact_id,
+      std::string_view cluster_id,
+      std::string_view relative_path,
+      global_store::DiskLocationKind kind,
+      bool is_deleted = false) override;
+
+  absl::StatusOr<std::vector<ArtifactDiskLocation>> list_artifact_disk_locations(
+      std::string_view artifact_id,
+      bool include_deleted = false) override;
 
   absl::Status publish_memory_tier_status(const MemoryTierStatusPayload& status) override;
   absl::StatusOr<MemoryTierLeaseDescriptor> request_memory_tier_lease(
@@ -714,7 +793,11 @@ class GlobalStoreClient : public IGlobalStoreClient {
 
   const GlobalStoreClientConfig config_;
   const gsl::not_null<std::shared_ptr<grpc::Channel>> channel_;
-  const gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>> stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ClusterRuntimeService::Stub>> cluster_runtime_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ArtifactCatalogService::Stub>> artifact_catalog_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::AssemblyViewService::Stub>> assembly_view_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::WorkflowOrchestrationService::Stub>> workflow_orchestration_stub_;
+  const gsl::not_null<std::unique_ptr<global_store::ClusterAdminService::Stub>> cluster_admin_stub_;
   const gsl::not_null<std::unique_ptr<tensorcast::memory_tier::v1::MemoryTierService::Stub>> memory_tier_stub_;
   std::string worker_id_;
   std::string node_id_;

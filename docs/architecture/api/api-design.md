@@ -72,7 +72,12 @@ These terms show up across docs and APIs:
 TensorCast exposes a process-wide store session and module-level helpers.
 
 - `tensorcast.init(...)`: establishes a runtime (connect to an existing daemon
-  or launch services). Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
+  or launch services). In `mode="auto"`, concurrent callers under the same
+  runtime root coordinate so one process launches and the rest connect to the
+  same daemon. In `mode="create"`, you can also start (or reuse) a local
+  Global Store by setting `global_store_mode="start"`; use
+  `global_store_config_path=...` (or `$TENSORCAST_GLOBAL_STORE_CONFIG`) to pick
+  the Global Store YAML. Implementation: [tensorcast/startup.py](../../../tensorcast/startup.py).
 - `tensorcast.store(...)`: returns the process-wide `Store` (lazy initialization).
 - `tensorcast.plan(ctx)`: builds a programmable plan that binds a single
   `CallContext` to all step executions.
@@ -171,7 +176,7 @@ Key fields (selected; see source for full list):
 | `min_tensor_bytes` | `64 KiB` | LIP segmentation threshold. | Reduce per-tensor overhead for tiny tensors. |
 | `max_tensor_count` | `8192` | Safety cap for pathological tensor dicts. | Guard against high fan-out metadata. |
 | `stage_on_gpu` | `True` | For stable DRAM plans, stage uploads via GPU buffers. | Improve throughput when GPU→DRAM path is faster. |
-| `disk_path` | `None` | Optional disk hint to attach to the artifact. | Enable disk-first fallback for later reads. |
+| `disk_path` | `None` | Optional local disk path to validate the canonical index during registration. | Sanity-check on-disk artifacts; not used for fallback. |
 
 Example (LIP opt-in):
 
@@ -307,12 +312,13 @@ Retrieval is centered on Artifact handles, not on `Store.get` or `Store.get_into
   that exposes metadata and materialization helpers.
 - `Artifact.tensor_dict(...)` and `Artifact.tensor_dict_into(...)` provide the
   primary read surface.
-- `tensorcast.from_disk(path)` creates a handle backed by a disk path and
-  configures disk-first fallback.
+- `tensorcast.from_disk(path)` resolves an artifact id and canonical index from
+  a disk directory (explicit import) and seeds the metadata cache. It does not
+  inject disk fallback hints into later materializations.
 
 ### Why handles?
 
-Handles separate **identity** (artifact id/key/disk hint) from **execution**
+Handles separate **identity** (artifact id/key) from **execution**
 (materialize local/P2P/disk, batch, prefetch, verify). This makes it possible to:
 
 - add new materialization sources without changing call sites
@@ -325,9 +331,12 @@ Materialization behavior is controlled by `FallbackOptions` and
 `GetArtifactOptions` (advanced):
 
 - `FallbackOptions.prefer` selects `auto`, `local`, `p2p`, or `disk`.
-- `disk_path` pins a specific disk location for fallbacks.
+- `allow_p2p` / `allow_disk` gate source selection.
 - `replica_uuid` hints the daemon to reuse a prefetched replica.
 - `verify_checksums` controls descriptor validation on disk reads.
+
+Disk paths are not supplied by the SDK; when disk fallback is enabled the daemon
+resolves managed disk locations via Global Store.
 
 `GetArtifactOptions` is used by the materialization pipeline; most applications
 won’t pass it directly today, but it is important for understanding behavior
@@ -341,9 +350,9 @@ Examples:
 ```python
 import tensorcast
 
-# Disk-first handle with checksum verification.
+# Import metadata from disk (explicit import).
 handle = tensorcast.from_disk("/mnt/models/model_a")
-weights = handle.tensor_dict(device="cuda:0")
+weights = handle.tensor_dict(device="cuda:0")  # requires managed disk locations or existing replicas
 
 # Local-only reads (no P2P, no disk fallback).
 handle = tensorcast.artifact(artifact_id="mi2:...", fallback="local")
@@ -356,17 +365,15 @@ weights = handle.tensor_dict(device="cuda:0")
 
 ### Store.artifact / from_disk (build handles)
 
-Signature: `tensorcast.artifact(*, artifact_id=None, key=None, disk_path=None, fallback=None)`
+Signature: `tensorcast.artifact(*, artifact_id=None, key=None, fallback=None)`
 
 Use `artifact(...)` to build a reusable handle that carries identity and fallback
 hints. You typically provide exactly one of:
 
 - `artifact_id`: content-addressed id (preferred)
 - `key`: mapped to an artifact id via key mapping
-- `disk_path`: for disk-backed/disk-hinted materialization
-
-`tensorcast.from_disk(path)` is a convenience wrapper that sets a disk-first
-fallback automatically (equivalent to `artifact(disk_path=..., fallback="disk:/path")`).
+- Disk paths are not accepted in `artifact(...)`; use `from_disk(...)` for
+  explicit imports and rely on managed disk locations for disk fallback.
 
 ## StorePolicy And Persistence Hooks
 
@@ -393,7 +400,9 @@ For region-backed registration and quiesced cleanup:
 - `Store.register_vram_region(...)` and `Store.unregister_vram_region(...)` manage
   reusable CUDA IPC regions.
 - `Store.deregister_artifact(...)` quiesces and drains active exports, then
-  revokes the lease and performs best-effort Global Store cleanup.
+  revokes the lease, performs best-effort Global Store cleanup, and (by default)
+  also deletes any managed shared-disk persistence for that artifact
+  (`keep_shared_disk_copy=True` to retain disk bytes).
 
 Region-backed APIs are primarily about **making LIP safe** and **reducing CUDA IPC
 churn** by reusing stable region handles. See [Region-Backed](./region-backed.md)

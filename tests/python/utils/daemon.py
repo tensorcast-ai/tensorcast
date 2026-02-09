@@ -68,11 +68,13 @@ def start_daemon_binary(
     stable_bytes: int | None = None,
     handle_lease_ttl: str = "10m",
     daemon_id: str | None = None,
+    global_store_addr: str | None = None,
 ) -> subprocess.Popen:
     """Start the C++ daemon with a unified minimal config for tests.
 
     - Ensures libtorch libs are on LD_LIBRARY_PATH
     - Sets debug.cuda.enable_same_process_ipc_fallback according to flag
+    - Optionally wires Global Store endpoints when global_store_addr is set
     - Waits for readiness by issuing GetServerConfig
     """
     repo_root = Path(__file__).resolve().parents[3]
@@ -158,6 +160,20 @@ def start_daemon_binary(
                 "ttl": str(handle_lease_ttl),
             }
         }
+
+    if global_store_addr:
+        gs_host, gs_port_s = global_store_addr.split(":", 1)
+        cfg["high_availability"] = {
+            "enabled": True,
+            "global_store_endpoints": [
+                {"host": gs_host, "port": int(gs_port_s)},
+            ],
+            "heartbeat_interval": "30s",
+            "periodic_sync_interval": "30s",
+            "max_retries": 3,
+            "registration_retry_delay": "500ms",
+        }
+        cfg["capability_directory"] = {"enabled": True}
 
     cfg_suffix = ".yaml" if config_mode == "yaml" else ".json"
     with tempfile.NamedTemporaryFile(

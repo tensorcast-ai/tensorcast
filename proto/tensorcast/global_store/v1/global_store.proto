@@ -9,69 +9,8 @@ import "tensorcast/common/v1/common.proto";
 import "tensorcast/layout/v1/layout.proto";
 import "tensorcast/operation/v1/operation.proto";
 
-service GlobalStoreService {
-  rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
-
-  rpc UpdateReplica(UpdateReplicaRequest) returns (UpdateReplicaResponse) {}
-
-  rpc UnregisterReplica(UnregisterReplicaRequest) returns (UnregisterReplicaResponse) {}
-
-  // Deregister a replica using worker identity rather than replica_id.
-  // Useful when the caller does not track replica_id but knows (artifact_id, worker_id)
-  // and optionally device or memory type to disambiguate.
-  rpc UnregisterReplicaByWorker(UnregisterReplicaByWorkerRequest) returns (UnregisterReplicaByWorkerResponse) {}
-
-  rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
-
-  rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
-
-  // V2 with pagination and filtering
-  rpc ListReplicasV2(ListReplicasV2Request) returns (ListReplicasV2Response) {}
-
-  // Content-addressed query by artifact_id (mi2:...)
-  rpc GetArtifactInfoById(GetArtifactInfoByIdRequest) returns (GetArtifactInfoByIdResponse) {}
-
-  // Upsert variant metadata and batched leaf digests
-  rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
-
-  // Batch write MI2-scoped overlap proof commitments (v2).
-  rpc WriteTensorProofCommitments(WriteTensorProofCommitmentsRequest) returns (WriteTensorProofCommitmentsResponse) {}
-  // Compare assembly-scoped proof commitments against MI2-scoped commitments.
-  rpc CheckProofCommitmentsMatch(CheckProofCommitmentsMatchRequest) returns (CheckProofCommitmentsMatchResponse) {}
-
-  // List variant (view) metadata for an artifact
-  rpc ListViews(ListViewsRequest) returns (ListViewsResponse) {}
-
-  // ========== Layout v2 ==========
-  rpc PutLayoutSpec(PutLayoutSpecRequest) returns (PutLayoutSpecResponse) {}
-  rpc GetLayoutSpec(GetLayoutSpecRequest) returns (GetLayoutSpecResponse) {}
-
-  rpc GetAssemblyLayoutBinding(GetAssemblyLayoutBindingRequest) returns (GetAssemblyLayoutBindingResponse) {}
-  rpc UpdateAssemblyLayoutBinding(UpdateAssemblyLayoutBindingRequest) returns (UpdateAssemblyLayoutBindingResponse) {}
-
-  rpc AttachLayoutToArtifact(AttachLayoutToArtifactRequest) returns (AttachLayoutToArtifactResponse) {}
-  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
-
-  rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
-  rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
-
-  // ========== Unified Operations ==========
-  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest) returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
-  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest) returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
-  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest) returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
-  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
-  rpc UpdateOperation(tensorcast.operation.v1.UpdateOperationRequest) returns (tensorcast.operation.v1.UpdateOperationResponse) {}
-
-  // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
-  rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
-  rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
-
-  // Get artifact tensor index data by key
-  rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
-
-  // Get canonical tensor index by content-addressed artifact_id
-  rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
-
+// Runtime state domain: workers/instances/replicas/transports/chunks and HA sync.
+service ClusterRuntimeService {
   // Worker management
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse) {}
   rpc WorkerHeartbeat(WorkerHeartbeatRequest) returns (WorkerHeartbeatResponse) {}
@@ -88,29 +27,94 @@ service GlobalStoreService {
   rpc SynchronizeWorkerState(SynchronizeWorkerStateRequest) returns (SynchronizeWorkerStateResponse) {}
   rpc RequestFullStateSync(RequestFullStateSyncRequest) returns (RequestFullStateSyncResponse) {}
 
+  // Replica lifecycle
+  rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
+  rpc UpdateReplica(UpdateReplicaRequest) returns (UpdateReplicaResponse) {}
+  rpc UnregisterReplica(UnregisterReplicaRequest) returns (UnregisterReplicaResponse) {}
+  // Deregister a replica using worker identity rather than replica_id.
+  rpc UnregisterReplicaByWorker(UnregisterReplicaByWorkerRequest) returns (UnregisterReplicaByWorkerResponse) {}
+  // Mark a single replica unavailable (idempotent).
+  rpc MarkReplicaUnavailable(MarkReplicaUnavailableRequest) returns (MarkReplicaUnavailableResponse) {}
+  // Wait for in-flight transports to drain for a replica.
+  rpc WaitReplicaDrain(WaitReplicaDrainRequest) returns (WaitReplicaDrainResponse) {}
+  // V2 with pagination and filtering
+  rpc ListReplicasV2(ListReplicasV2Request) returns (ListReplicasV2Response) {}
+
+  // Replica transport
+  rpc RequestReplicaTransport(RequestReplicaTransportRequest) returns (RequestReplicaTransportResponse) {}
+  rpc CompleteReplicaTransport(CompleteReplicaTransportRequest) returns (CompleteReplicaTransportResponse) {}
+
+  // Chunk directory operations
+  rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
+  rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
+}
+
+// Artifact metadata domain: durable identity and addressing metadata.
+service ArtifactCatalogService {
+  // Resolve or upsert artifact bindings (e.g., assembly_id -> mi2_id)
+  rpc GetArtifactBinding(GetArtifactBindingRequest) returns (GetArtifactBindingResponse) {}
+  rpc UpsertArtifactBinding(UpsertArtifactBindingRequest) returns (UpsertArtifactBindingResponse) {}
+
+  // Get artifact tensor index data by key
+  rpc GetArtifactIndex(GetArtifactIndexRequest) returns (GetArtifactIndexResponse) {}
+  // Get canonical tensor index by content-addressed artifact_id
+  rpc GetArtifactIndexById(GetArtifactIndexByIdRequest) returns (GetArtifactIndexByIdResponse) {}
+
+  // Disk locations
+  rpc UpsertArtifactDiskLocation(UpsertArtifactDiskLocationRequest) returns (UpsertArtifactDiskLocationResponse) {}
+  rpc ListArtifactDiskLocations(ListArtifactDiskLocationsRequest) returns (ListArtifactDiskLocationsResponse) {}
+
+  // Key mapping
+  rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
+  rpc SwapKeyMapping(SwapKeyMappingRequest) returns (SwapKeyMappingResponse) {}
+  rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
+  rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
+}
+
+// Assembly/view domain: view coverage/proofs/layouts and assembly-oriented query model.
+service AssemblyViewService {
+  // Content-addressed query by artifact_id (mi2:...)
+  rpc GetArtifactInfoById(GetArtifactInfoByIdRequest) returns (GetArtifactInfoByIdResponse) {}
+
+  // Upsert variant metadata and batched leaf digests
+  rpc UpdateArtifactViewState(UpdateArtifactViewStateRequest) returns (UpdateArtifactViewStateResponse) {}
+  // Batch write MI2-scoped overlap proof commitments (v2).
+  rpc WriteTensorProofCommitments(WriteTensorProofCommitmentsRequest) returns (WriteTensorProofCommitmentsResponse) {}
+  // Compare assembly-scoped proof commitments against MI2-scoped commitments.
+  rpc CheckProofCommitmentsMatch(CheckProofCommitmentsMatchRequest) returns (CheckProofCommitmentsMatchResponse) {}
+  // List variant (view) metadata for an artifact
+  rpc ListViews(ListViewsRequest) returns (ListViewsResponse) {}
+
+  // Layout v2
+  rpc PutLayoutSpec(PutLayoutSpecRequest) returns (PutLayoutSpecResponse) {}
+  rpc GetLayoutSpec(GetLayoutSpecRequest) returns (GetLayoutSpecResponse) {}
+  rpc GetAssemblyLayoutBinding(GetAssemblyLayoutBindingRequest) returns (GetAssemblyLayoutBindingResponse) {}
+  rpc UpdateAssemblyLayoutBinding(UpdateAssemblyLayoutBindingRequest) returns (UpdateAssemblyLayoutBindingResponse) {}
+  rpc AttachLayoutToArtifact(AttachLayoutToArtifactRequest) returns (AttachLayoutToArtifactResponse) {}
+  rpc ListArtifactLayouts(ListArtifactLayoutsRequest) returns (ListArtifactLayoutsResponse) {}
+  rpc GetAssemblyRuntimePolicy(GetAssemblyRuntimePolicyRequest) returns (GetAssemblyRuntimePolicyResponse) {}
+  rpc UpdateAssemblyRuntimePolicy(UpdateAssemblyRuntimePolicyRequest) returns (UpdateAssemblyRuntimePolicyResponse) {}
+}
+
+// Workflow domain: lease-based long-running operations and placement/persistence plans.
+service WorkflowOrchestrationService {
+  // Unified Operations
+  rpc AcquireOperationLease(tensorcast.operation.v1.AcquireOperationLeaseRequest) returns (tensorcast.operation.v1.AcquireOperationLeaseResponse) {}
+  rpc KeepaliveOperationLease(tensorcast.operation.v1.KeepaliveOperationLeaseRequest) returns (tensorcast.operation.v1.KeepaliveOperationLeaseResponse) {}
+  rpc ReleaseOperationLease(tensorcast.operation.v1.ReleaseOperationLeaseRequest) returns (tensorcast.operation.v1.ReleaseOperationLeaseResponse) {}
+  rpc GetOperation(tensorcast.operation.v1.GetOperationRequest) returns (tensorcast.operation.v1.GetOperationResponse) {}
+  rpc UpdateOperation(tensorcast.operation.v1.UpdateOperationRequest) returns (tensorcast.operation.v1.UpdateOperationResponse) {}
+
+  // Placement & persistence
+  rpc PlanPlacement(PlanPlacementRequest) returns (PlanPlacementResponse) {}
+  rpc ReportPersistenceStatus(ReportPersistenceStatusRequest) returns (ReportPersistenceStatusResponse) {}
+}
+
+service ClusterAdminService {
   // Health check endpoint
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse) {}
   // Server info endpoint (advertise + bind metadata)
   rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse) {}
-
-  // ========== Chunk Directory Operations ==========
-  // Query chunk locations for distributed memory pool
-  rpc QueryChunkLocations(QueryChunkLocationsRequest) returns (QueryChunkLocationsResponse) {}
-
-  // Update chunk states (called by StoreDaemon periodically)
-  rpc BatchUpdateChunkStates(BatchUpdateChunkStatesRequest) returns (BatchUpdateChunkStatesResponse) {}
-
-  // ========== Placement & Persistence ==========
-  rpc PlanPlacement(PlanPlacementRequest) returns (PlanPlacementResponse) {}
-  rpc ReportPersistenceStatus(ReportPersistenceStatusRequest) returns (ReportPersistenceStatusResponse) {}
-
-  // ========== Key Mapping ==========
-  // Map a human-readable key to a single artifact_id, with optional replica hints
-  rpc UpsertKeyMapping(UpsertKeyMappingRequest) returns (UpsertKeyMappingResponse) {}
-  // Resolve a key to its artifact_id and optional hints
-  rpc ResolveKeyMapping(ResolveKeyMappingRequest) returns (ResolveKeyMappingResponse) {}
-  // Revoke an existing key mapping
-  rpc RevokeKeyMapping(RevokeKeyMappingRequest) returns (RevokeKeyMappingResponse) {}
 }
 
 enum Status {
@@ -743,6 +747,31 @@ message UnregisterReplicaByWorkerResponse {
   Status status = 1;
 }
 
+message MarkReplicaUnavailableRequest {
+  string artifact_id = 1;
+  string replica_id = 2;
+  optional string reason = 3;
+  optional string operation_id = 4;
+}
+
+message MarkReplicaUnavailableResponse {
+  Status status = 1;
+  bool updated = 2;
+}
+
+message WaitReplicaDrainRequest {
+  string replica_id = 1;
+  uint32 timeout_ms = 2;
+  optional string operation_id = 3;
+}
+
+message WaitReplicaDrainResponse {
+  Status status = 1;
+  bool drained = 2;
+  uint32 current_requests = 3;
+  optional uint64 oldest_transport_age_ms = 4;
+}
+
 // MemoryInfo moved to common
 
 // MemoryInfoList removed with legacy ListReplicas
@@ -795,6 +824,7 @@ message GetServerInfoResponse {
   uint32 metrics_port = 8;
   string version = 9;
   string db_file = 10;
+  string cluster_id = 11;
 }
 
 // ========== Chunk Directory Messages ==========
@@ -969,11 +999,55 @@ message ReportPersistenceStatusResponse {
   Status status = 1;
 }
 
+// ========== Disk Location Messages ==========
+
+enum DiskLocationKind {
+  DISK_LOCATION_KIND_UNSPECIFIED = 0;
+  DISK_LOCATION_KIND_MANAGED = 1;
+  DISK_LOCATION_KIND_IMPORTED = 2;
+}
+
+message ArtifactDiskLocation {
+  string artifact_id = 1;
+  string cluster_id = 2;
+  string relative_path = 3;
+  DiskLocationKind kind = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+  bool is_deleted = 7;
+  google.protobuf.Timestamp deleted_at = 8;
+}
+
+message UpsertArtifactDiskLocationRequest {
+  string artifact_id = 1;
+  string cluster_id = 2;
+  string relative_path = 3;
+  DiskLocationKind kind = 4;
+  // Soft delete marker. When true, the entry is treated as deleted for disk fallback.
+  // Deletion is sticky: a deleted location cannot be revived by an upsert.
+  bool is_deleted = 5;
+}
+
+message UpsertArtifactDiskLocationResponse {
+  Status status = 1;
+}
+
+message ListArtifactDiskLocationsRequest {
+  string artifact_id = 1;
+  // When true, include deleted locations (tombstones). Default false.
+  bool include_deleted = 2;
+}
+
+message ListArtifactDiskLocationsResponse {
+  Status status = 1;
+  repeated ArtifactDiskLocation locations = 2;
+}
+
 // ========== Key Mapping Messages ==========
 // See docs/architecture/api/materialization-flow.md for key mapping usage.
 // Upsert/resolve a mapping from a human-friendly key to a content-addressed artifact_id.
 // The mapping is unique: one key must point to exactly one artifact_id.
-// Optional fields provide hints (e.g., a known disk_path) for client fallbacks.
+// Optional fields provide hints for client fallbacks.
 
 message UpsertKeyMappingRequest {
   string key = 1;
@@ -981,12 +1055,27 @@ message UpsertKeyMappingRequest {
   // Optional hints (opaque to server logic except for persistence)
   string replica_uuid = 3;
   string daemon_address = 4;
-  string disk_path = 5;
+  reserved 5;
+  reserved "disk_path";
   google.protobuf.Duration ttl = 6; // Optional TTL for the mapping
 }
 message UpsertKeyMappingResponse {
   Status status = 1;
   string conflict_reason = 2;
+}
+
+message SwapKeyMappingRequest {
+  string key = 1;
+  string new_artifact_id = 2;
+  // Optional CAS guards
+  string expected_artifact_id = 3;
+  optional uint64 expected_generation = 4;
+  string operation_id = 5;
+}
+message SwapKeyMappingResponse {
+  Status status = 1;
+  string artifact_id = 2;
+  uint64 generation = 3;
 }
 
 message ResolveKeyMappingRequest {
@@ -997,7 +1086,10 @@ message ResolveKeyMappingResponse {
   string artifact_id = 2;
   string replica_uuid = 3;
   string daemon_address = 4;
-  string disk_path = 5;
+  reserved 5;
+  reserved "disk_path";
+  uint64 generation = 6;
+  uint32 cache_ttl_seconds = 7;
 }
 
 message RevokeKeyMappingRequest {

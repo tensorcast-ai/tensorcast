@@ -158,7 +158,7 @@ Workers (Store Daemons) register with the Global Store and send periodic heartbe
   [replicas marked unavailable]
 ```
 
-Workers must provide a stable `daemon_id` (from daemon config). Registration treats `daemon_id` as the
+Workers must provide a stable `daemon_id` (auto-generated and persisted when omitted, or explicitly configured). Registration treats `daemon_id` as the
 primary identity for upserts so a daemon can restart or change advertised address/port without losing its logical
 identity. `worker_id` remains an assigned row identifier; `ListActiveWorkers` returns both `worker_id` and `daemon_id`.
 
@@ -233,6 +233,9 @@ counts by scope and capability.
 - Atomically claims the replica (increment counter) and creates transport record
 - Supports blocking wait with timeout for high-contention scenarios
 - Emits a timeout diagnostics snapshot (availability, capacity, worker heartbeat/accepting state, sample replicas)
+- Provides swap-safety helpers: `MarkReplicaUnavailable` flips `is_available=false` for a replica, and `WaitReplicaDrain`
+  waits until `current_requests==0` without mutating transport state; the drain wait honors the requested timeout and
+  RPC deadline by capping sleep intervals to the remaining time budget
 - Cleans up stale transports as safety net for crashed clients
 
 **Load balancing strategy:**
@@ -477,5 +480,5 @@ uv run -m tensorcast.global_store --config config/global_store.yaml
 # Programmatically (for tests)
 servicer = GlobalStoreServicer(db_file=None)  # in-memory
 server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(servicer, server)
+register_global_store_servicers(server, servicer)
 ```

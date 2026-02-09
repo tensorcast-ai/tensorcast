@@ -14,6 +14,13 @@ TensorCast is a high-performance distributed artifact storage and loading system
 - You must use `bazel test //core/component:xxx_test` to run cxx tests
 - These policies keep virtualenv isolation consistent; violating them can break the build and introduce environment skew.
 
+## Python SDK Daemon Startup (Quick Map)
+
+- Store API calls (e.g., `tc.from_disk`) go through `tensorcast.api.store.runtime.get_context()`; if no runtime exists it tries `startup.init(mode="connect")` and falls back to `startup.init(mode="create")`.
+- `startup.init(mode="connect")` resolves the daemon address from an explicit parameter or the current local session (`runtime.status()` / service manager); it errors if no session is found or the daemon is unreachable.
+- `startup.init(mode="create")` launches a local daemon via `runtime.start(...)` using a daemon config path selected in order: explicit `daemon_config_path` → `$TENSORCAST_DAEMON_CONFIG` → `examples/config/store_daemon_config.yaml` (repo or packaged wheel).
+- If the chosen config enables HA or disk operations, the daemon must have `daemon_id` set (for Global Store registration) and `server.storage_path` set (for disk materialization). Missing values cause startup to exit early with clear errors.
+
 ## Architecture Overview
 
 ### Runtime Topology
@@ -87,11 +94,11 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 
 ### Doc sync rule (required for agents)
 
-- When you change any module code, you must also update its docs:
-  - Update the module’s README.md and any linked docs under docs/ that describe behavior you changed.
-  - Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
-  - If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
-  - In PRs, include doc updates in the same change set so readers can rely on documentation being current.
+- Update module docs **only when** a change affects external behavior, configuration, or user/operator workflow.
+- Skip doc updates for internal-only refactors, guardrails, or error-path tweaks that do not change the public contract.
+- If you modify Protocol Buffers, also regenerate code as described in this file under “Protocol Buffer Code Generation”.
+- Keep links consistent across docs/architecture, docs/internals, and module sub-docs.
+- In PRs, include doc updates in the same change set so readers can rely on documentation being current.
 
 - When authoring any design or plan document, follow the repository’s documentation system specification in ./docs/designs/0001-docs-system-design.md for required structure, metadata/frontmatter, and cross-linking. Use the templates defined there and maintain the 1:1 design↔plan linkage.
 - `docs/designs/` and `docs/plans/` filenames begin with a zero-padded sequence number: `0001-<slug>.md`, `0002-<slug>.md`, etc.

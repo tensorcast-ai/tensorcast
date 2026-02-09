@@ -1,9 +1,10 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
 #include <nlohmann/json.hpp>
@@ -19,6 +20,7 @@ using tensorcast::DeviceType;
 using tensorcast::store::DeviceKey;
 using tensorcast::store::StoreEngine;
 using tensorcast::store::StoreEngineOptions;
+using tensorcast::store::loading::DiskSource;
 
 static StoreEngine make_store(const fs::path& root) {
   StoreEngineOptions opts;
@@ -34,18 +36,30 @@ static DeviceKey cpu_key() {
   return DeviceKey{DeviceType::CPU, -1, /*uuid=*/""};
 }
 
+static std::string read_descriptor_artifact_id(const fs::path& artifact_dir) {
+  const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
+  std::ifstream in(descriptor_path);
+  if (!in.is_open()) {
+    throw std::runtime_error("failed to open artifact_descriptor.json");
+  }
+  nlohmann::json j;
+  in >> j;
+  return j.at("artifact_id").get<std::string>();
+}
+
 TEST_CASE("Post-load verification generation and enforcement", "[store_engine][verification]") {
-  const std::string artifact_id = "verify_artifact";
+  const std::string artifact_name = "verify_artifact";
   const size_t artifact_size = 128 * 1024; // 128 KiB
 
   fs::path temp_root = fs::temp_directory_path() / "store_engine_verify_default_test";
   fs::create_directories(temp_root);
-  fs::path artifact_dir = temp_root / artifact_id;
+  fs::path artifact_dir = temp_root / artifact_name;
   fs::create_directories(artifact_dir);
 
   // Create data and descriptor (standard partitions format)
   REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data", artifact_size));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+  const std::string artifact_id = read_descriptor_artifact_id(artifact_dir);
 
   // Ensure verification.json does not exist initially
   fs::path verification_path = artifact_dir / "verification.json";
@@ -56,9 +70,10 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   // Load to CPU and wait ready
   StoreEngine store = make_store(temp_root);
   tensorcast::store::loading::MaterializeHints hints;
-  hints.disk_path = artifact_id;
-  auto handle_or =
-      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  hints.artifact_id = artifact_id;
+  DiskSource disk_source{.path = artifact_dir, .expected_size = std::nullopt};
+  auto handle_or = store.materialize_replica(
+      cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   REQUIRE(handle_or.ok());
   if (!handle_or.ok()) {
     LOG(ERROR) << "Materialize failed: " << handle_or.status().message();
@@ -70,15 +85,18 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   REQUIRE(fs::exists(verification_path));
 
   // Prepare a directory with a deliberately mismatching verification.json
-  const std::string artifact_id2 = "verify_artifact_bad";
-  fs::path artifact_dir2 = temp_root / artifact_id2;
+  const std::string artifact_name2 = "verify_artifact_bad";
+  const size_t artifact_size2 = artifact_size + 1;
+  fs::path artifact_dir2 = temp_root / artifact_name2;
   fs::create_directories(artifact_dir2);
-  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size));
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir2 / "tensor.data", artifact_size2));
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir2).ok());
+  const std::string artifact_id2 = read_descriptor_artifact_id(artifact_dir2);
+  REQUIRE(artifact_id2 != artifact_id);
 
   // Write a bad verification.json (wrong key_values ensures failure)
   tensorcast::common::ArtifactVerificationInfo bad_info;
-  bad_info.artifact_size = artifact_size;
+  bad_info.artifact_size = artifact_size2;
   bad_info.full_hash = 0ULL;
   bad_info.segment_hashes.fill(0ULL);
   bad_info.sample_values.fill(0ULL);
@@ -90,9 +108,10 @@ TEST_CASE("Post-load verification generation and enforcement", "[store_engine][v
   out.close();
 
   tensorcast::store::loading::MaterializeHints hints2;
-  hints2.disk_path = artifact_id2;
-  auto handle_or2 =
-      store.materialize_replica(cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2);
+  hints2.artifact_id = artifact_id2;
+  DiskSource disk_source2{.path = artifact_dir2, .expected_size = std::nullopt};
+  auto handle_or2 = store.materialize_replica(
+      cpu_key(), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints2, disk_source2);
   REQUIRE_FALSE(handle_or2.ok());
 
   std::error_code ec;

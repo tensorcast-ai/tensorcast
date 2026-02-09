@@ -39,6 +39,7 @@
 #include "core/store/materialization/dataplane/sources/byte_range_program.h"
 #include "core/store/materialization/dataplane/sources/memory_source.h"
 #include "core/store/materialization/dataplane/sources/remote_key_source.h"
+#include "core/store/materialization/dataplane/sources/source_window_scheduler.h"
 #include "core/store/materialization/dataplane/view/view_ingest_executor.h"
 #include "core/store/materialization/dataplane/view/view_plan_source.h"
 #include "core/store/materialization/dataplane/view/view_transform_executor.h"
@@ -75,7 +76,7 @@ bool is_local_replica(const components::RemoteReplicaInfo& remote, const compone
 
 absl::Status stale_local_route_status(std::string_view artifact_id) {
   return absl::UnavailableError(
-      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk_path"));
+      absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
 }
 
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
@@ -685,14 +686,28 @@ MaterializationFacade::MaterializationFacade(Config config)
   };
   deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
     auto client = config_.runtime_context->global_store_client();
-    if (!client || !client->is_connected()) {
-      return absl::FailedPreconditionError("GlobalStoreClient not connected");
+    const bool gs_connected = client && client->is_connected();
+    if (!gs_connected) {
+      if (!request.hints().allow_disk || !request.has_disk_source()) {
+        return absl::FailedPreconditionError("GlobalStoreClient not connected");
+      }
+      loading::ReplicaTarget target;
+      target.location.type =
+          request.target_is_gpu() ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
+      target.location.device_id = request.target_device().ordinal;
+      return run_disk_ingestion_internal(
+          request.canonical_artifact_id(),
+          *request.disk_source(),
+          target,
+          request.hints(),
+          /*publish_to_global_store=*/false);
     }
     MaterializeOrchestrator orchestrator(
         gsl::not_null<materialization::control::MaterializationBackend*>{this},
         gsl::not_null<components::IGlobalStoreClient*>{client.get()},
         config_.runtime_context->worker_identity());
-    auto orchestrated_or = orchestrator.run(request.canonical_artifact_id(), request.target_device(), request.hints());
+    auto orchestrated_or = orchestrator.run(
+        request.canonical_artifact_id(), request.target_device(), request.hints(), request.disk_source());
     if (orchestrated_or.ok()) {
       return *orchestrated_or;
     }
@@ -722,9 +737,10 @@ MaterializationFacade::~MaterializationFacade() = default;
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_replica(
     const DeviceKey& target_device,
     loading::MaterializeMode mode,
-    const loading::MaterializeHints& hints) {
-  auto request_or =
-      loading::MaterializationRequest::Create(target_device, mode, hints, config_.replica_runtime->device_manager());
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
+  auto request_or = loading::MaterializationRequest::Create(
+      target_device, mode, hints, config_.replica_runtime->device_manager(), std::move(disk_source));
   if (!request_or.ok()) {
     return request_or.status();
   }
@@ -736,7 +752,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     const loading::IntoTargetLayout& target_layout,
     std::string_view canonical_index_json,
     uint64_t generation,
-    const loading::MaterializeHints& hints) {
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
   if (target_device.type != DeviceType::GPU) {
     return absl::InvalidArgumentError("materialize_into_target requires GPU target device");
   }
@@ -791,32 +808,53 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("materialize_into_target view size does not match target layout size");
   }
 
-  auto plan_key = [&]() -> std::string {
-    auto mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
+  auto index_hash = [](std::string_view index_json) -> std::string {
+    auto mh_or = common::compute_index_multihash(std::optional<std::string>(index_json), "");
     if (mh_or.ok()) {
-      return absl::StrCat(generation, ":", *mh_or);
+      return *mh_or;
     }
-    const size_t fallback_hash = std::hash<std::string_view>{}(canonical_index_json);
-    return absl::StrCat(generation, ":raw:", fallback_hash);
-  }();
+    const size_t fallback_hash = std::hash<std::string_view>{}(index_json);
+    return absl::StrCat("raw:", fallback_hash);
+  };
 
-  std::shared_ptr<loader::ByteRangeMap> map_ptr;
-  {
-    absl::MutexLock lock(&byte_range_map_mu_);
-    auto it = byte_range_map_cache_.find(plan_key);
-    if (it != byte_range_map_cache_.end()) {
-      map_ptr = it->second;
+  const std::optional<std::string_view> source_index_json =
+      (hints.disk_metadata && hints.disk_metadata->source_index_json.has_value())
+      ? std::optional<std::string_view>(*hints.disk_metadata->source_index_json)
+      : std::nullopt;
+
+  auto get_map_ptr = [&](bool use_source_layout) -> absl::StatusOr<std::shared_ptr<loader::ByteRangeMap>> {
+    const std::string canonical_hash = index_hash(canonical_index_json);
+    std::string plan_key = absl::StrCat(generation, ":canon:", canonical_hash);
+    if (use_source_layout && source_index_json.has_value()) {
+      plan_key = absl::StrCat(plan_key, ":src:", index_hash(*source_index_json));
     }
-  }
-  if (!map_ptr) {
-    auto map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+
+    std::shared_ptr<loader::ByteRangeMap> map_ptr;
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      auto it = byte_range_map_cache_.find(plan_key);
+      if (it != byte_range_map_cache_.end()) {
+        return it->second;
+      }
+    }
+
+    absl::StatusOr<loader::ByteRangeMap> map_or;
+    if (use_source_layout && source_index_json.has_value()) {
+      map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
+          canonical_index_json, *source_index_json, canonical_total_size);
+    } else {
+      map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+    }
     if (!map_or.ok()) {
       return map_or.status();
     }
     map_ptr = std::make_shared<loader::ByteRangeMap>(std::move(*map_or));
-    absl::MutexLock lock(&byte_range_map_mu_);
-    byte_range_map_cache_.emplace(plan_key, map_ptr);
-  }
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      byte_range_map_cache_.emplace(plan_key, map_ptr);
+    }
+    return map_ptr;
+  };
 
   auto run_source =
       [&](std::unique_ptr<IArtifactLoader> loader,
@@ -830,45 +868,62 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
       return source_or.status();
     }
 
-    loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_into_target");
-    auto program_or = compiler.Compile(*map_ptr);
-    if (!program_or.ok()) {
-      return program_or.status();
+    const bool use_source_layout =
+        (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
+    auto map_ptr_or = get_map_ptr(use_source_layout);
+    if (!map_ptr_or.ok()) {
+      return map_ptr_or.status();
     }
+    auto map_ptr = *map_ptr_or;
+
+    loader::ByteRangeMap effective_map = *map_ptr;
+    bool composed_view = false;
+    if (view_plan.has_value() && !view_plan->is_identity && use_source_layout) {
+      auto composed_or = loader::compose_byte_range_maps(view_plan->selection.map, *map_ptr);
+      if (!composed_or.ok()) {
+        return composed_or.status();
+      }
+      effective_map = std::move(*composed_or);
+      composed_view = true;
+    }
+
+    std::shared_ptr<loader::SeekableSource> base_source = std::move(*source_or);
     std::vector<std::shared_ptr<loader::SeekableSource>> sources;
-    sources.emplace_back(std::move(*source_or));
-    loader::ByteRangeMappedSource::Options map_opts{
-        .path = "materialize_into_target",
-        .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-    };
-    auto mapped_or =
-        loader::ByteRangeMappedSource::Create(*map_ptr, *program_or, std::move(sources), std::move(map_opts));
-    if (!mapped_or.ok()) {
-      return mapped_or.status();
-    }
-    std::unique_ptr<loader::SeekableSource> plan_source = std::move(*mapped_or);
-    if (view_plan.has_value() && !view_plan->is_identity) {
-      plan_source =
-          loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
-    }
-    if (!plan_source) {
-      return absl::InternalError("materialize_into_target failed to build view plan source");
+    sources.emplace_back(base_source);
+
+    const bool source_ordered = use_source_layout && config_.options->byte_mapping.disk_source_ordered_read;
+    std::unique_ptr<loader::SeekableSource> plan_source;
+    if (!source_ordered) {
+      loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_into_target");
+      auto program_or = compiler.Compile(effective_map);
+      if (!program_or.ok()) {
+        return program_or.status();
+      }
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "materialize_into_target",
+          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+      };
+      auto mapped_or =
+          loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
+      if (!mapped_or.ok()) {
+        return mapped_or.status();
+      }
+      plan_source = std::move(*mapped_or);
+      if (view_plan.has_value() && !view_plan->is_identity && !composed_view) {
+        plan_source =
+            loader::make_view_plan_source(std::move(plan_source), view_plan->selection, config_.options->byte_mapping);
+      }
+      if (!plan_source) {
+        return absl::InternalError("materialize_into_target failed to build view plan source");
+      }
     }
 
     const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
     if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
       return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
     }
-    const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
-    auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
-        /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
     const std::chrono::milliseconds timeout =
         hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
-    auto init_spb_status = session_spb->initialize(timeout);
-    if (!init_spb_status.ok()) {
-      return init_spb_status;
-    }
-    loader::StreamingBufferAdapter adapter(session_spb);
 
     std::vector<loader::TargetStorage> storages;
     storages.reserve(target_layout.storages.size());
@@ -899,15 +954,47 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
 
     const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
                                                            : std::max(1, config_.num_threads);
-    auto pump_status = loader::pump_ranges(
-        *plan_source,
-        sink,
-        adapter,
-        absl::MakeSpan(ranges),
-        concurrency,
-        config_.runtime_context->async_runtime()->blocking_executor());
-    if (!pump_status.ok()) {
-      return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
+    if (source_ordered) {
+      const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
+      const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
+      loader::SourceWindowScheduler::Options sched_opts{
+          .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+          .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+          .prefetch_depth = config_.options->byte_mapping.disk_source_prefetch_depth,
+          .window_cap_bytes = window_cap_bytes,
+          .path = "materialize_into_target",
+      };
+      loader::SourceWindowScheduler scheduler(std::move(sched_opts));
+      auto exec_status = scheduler.Execute(
+          effective_map,
+          sources,
+          sink,
+          config_.runtime_context->pinned_buffer_pool(),
+          timeout,
+          /*use_pinned_buffers=*/true);
+      if (!exec_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_into_target source-ordered execution failed: ", exec_status.message()));
+      }
+    } else {
+      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+          /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+      auto init_spb_status = session_spb->initialize(timeout);
+      if (!init_spb_status.ok()) {
+        return init_spb_status;
+      }
+      loader::StreamingBufferAdapter adapter(session_spb);
+      auto pump_status = loader::pump_ranges(
+          *plan_source,
+          sink,
+          adapter,
+          absl::MakeSpan(ranges),
+          concurrency,
+          config_.runtime_context->async_runtime()->blocking_executor());
+      if (!pump_status.ok()) {
+        return absl::DataLossError(absl::StrCat("materialize_into_target pump failed: ", pump_status.message()));
+      }
     }
     auto close_status = sink.close();
     if (!close_status.ok()) {
@@ -934,7 +1021,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
   const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
   const bool allow_p2p = hints.allow_p2p;
   const bool allow_disk = hints.allow_disk;
-  const bool has_disk_path = !hints.disk_path.empty();
+  const bool has_disk_source = disk_source.has_value();
   components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
   if (!is_local_identity(local_identity)) {
     const auto& options = config_.runtime_context->options();
@@ -951,9 +1038,8 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
   }
 
-  if (prefer_disk && has_disk_path && allow_disk) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (prefer_disk && has_disk_source && allow_disk) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
     if (disk_or.ok()) {
@@ -964,7 +1050,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     }
   }
 
-  if (!gs_connected && (!has_disk_path || !allow_disk)) {
+  if (!gs_connected && (!has_disk_source || !allow_disk)) {
     return absl::FailedPreconditionError("GlobalStoreClient not connected");
   }
 
@@ -986,7 +1072,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (!complete_status.ok()) {
           LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
         }
-        if (!has_disk_path) {
+        if (!has_disk_source) {
           return stale_local_route_status(hints.artifact_id);
         }
       } else {
@@ -1000,6 +1086,9 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         p2p_src.enable_checksum = false;
         p2p_src.location.type = remote.memory_type;
         p2p_src.location.device_id = remote.device_id;
+        if (has_disk_source && allow_disk && !prefer_p2p) {
+          p2p_src.fallback_disk_dir = disk_source->path.string();
+        }
         auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
         auto complete_status = gs_client->complete_replica_transport(session.transport_id);
         if (!complete_status.ok()) {
@@ -1008,18 +1097,17 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         if (p2p_or.ok()) {
           return p2p_or;
         }
-        if (!allow_disk || !has_disk_path || prefer_p2p) {
+        if (!allow_disk || !has_disk_source || prefer_p2p) {
           return p2p_or.status();
         }
       }
-    } else if (!allow_disk || !has_disk_path) {
+    } else if (!allow_disk || !has_disk_source) {
       return transport_or.status();
     }
   }
 
-  if (allow_disk && has_disk_path) {
-    loading::DiskSource disk_src;
-    disk_src.path = std::filesystem::path(hints.disk_path);
+  if (allow_disk && has_disk_source) {
+    loading::DiskSource disk_src = *disk_source;
     disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
     return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
   }
@@ -1028,7 +1116,368 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
     return absl::FailedPreconditionError("source_policy disallows P2P and disk for materialize_into_target");
   }
 
-  return absl::FailedPreconditionError("materialize_into_target requires disk_path or Global Store connectivity");
+  return absl::FailedPreconditionError("materialize_into_target requires disk source or Global Store connectivity");
+}
+
+absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::materialize_mapped_into_target(
+    const DeviceKey& target_device,
+    const loading::IntoTargetLayout& target_layout,
+    const loader::ByteRangeMap& mapping,
+    std::string_view canonical_index_json,
+    uint64_t generation,
+    const loading::MaterializeHints& hints,
+    std::optional<loading::DiskSource> disk_source) {
+  if (target_device.type != DeviceType::GPU) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires GPU target device");
+  }
+  if (canonical_index_json.empty()) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires canonical index bytes");
+  }
+  if (hints.artifact_id.empty()) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires hints.artifact_id");
+  }
+  if (target_layout.storages.empty()) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires at least one target storage");
+  }
+  if (mapping.num_sources != 1) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires mapping.num_sources == 1");
+  }
+
+  uint64_t total_size = target_layout.total_size;
+  uint64_t computed_total = 0;
+  for (const auto& storage : target_layout.storages) {
+    if (storage.length == 0) {
+      return absl::InvalidArgumentError("materialize_mapped_into_target requires non-empty storage length");
+    }
+    if (storage.length > std::numeric_limits<uint64_t>::max() - computed_total) {
+      return absl::OutOfRangeError("materialize_mapped_into_target storage length overflow");
+    }
+    computed_total += storage.length;
+  }
+  if (total_size == 0) {
+    total_size = computed_total;
+  } else if (total_size != computed_total) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target total_size does not match storage lengths");
+  }
+  if (total_size == 0) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target requires total_size > 0");
+  }
+  if (mapping.total_bytes != total_size) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target mapping total_bytes mismatch");
+  }
+
+  auto canonical_total_or = compute_logical_total_size(canonical_index_json);
+  if (!canonical_total_or.ok()) {
+    return canonical_total_or.status();
+  }
+  const uint64_t canonical_total_size = *canonical_total_or;
+
+  std::optional<loader::ViewPlan> view_plan;
+  if (hints.variant && hints.variant->cached_plan.has_value()) {
+    view_plan = *hints.variant->cached_plan;
+  }
+  if (view_plan.has_value() && view_plan->transform.requires_materialization) {
+    return absl::InvalidArgumentError("materialize_mapped_into_target does not support view transforms");
+  }
+
+  auto index_hash = [](std::string_view index_json) -> std::string {
+    auto mh_or = common::compute_index_multihash(std::optional<std::string>(index_json), "");
+    if (mh_or.ok()) {
+      return *mh_or;
+    }
+    const size_t fallback_hash = std::hash<std::string_view>{}(index_json);
+    return absl::StrCat("raw:", fallback_hash);
+  };
+
+  const std::optional<std::string_view> source_index_json =
+      (hints.disk_metadata && hints.disk_metadata->source_index_json.has_value())
+      ? std::optional<std::string_view>(*hints.disk_metadata->source_index_json)
+      : std::nullopt;
+
+  auto get_map_ptr = [&](bool use_source_layout) -> absl::StatusOr<std::shared_ptr<loader::ByteRangeMap>> {
+    const std::string canonical_hash = index_hash(canonical_index_json);
+    std::string plan_key = absl::StrCat(generation, ":canon:", canonical_hash);
+    if (use_source_layout && source_index_json.has_value()) {
+      plan_key = absl::StrCat(plan_key, ":src:", index_hash(*source_index_json));
+    }
+
+    std::shared_ptr<loader::ByteRangeMap> map_ptr;
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      auto it = byte_range_map_cache_.find(plan_key);
+      if (it != byte_range_map_cache_.end()) {
+        return it->second;
+      }
+    }
+
+    absl::StatusOr<loader::ByteRangeMap> map_or;
+    if (use_source_layout && source_index_json.has_value()) {
+      map_or = loader::build_byte_range_map_from_canonical_and_source_index_json(
+          canonical_index_json, *source_index_json, canonical_total_size);
+    } else {
+      map_or = loader::build_byte_range_map_from_canonical_index_json(canonical_index_json, canonical_total_size);
+    }
+    if (!map_or.ok()) {
+      return map_or.status();
+    }
+    map_ptr = std::make_shared<loader::ByteRangeMap>(std::move(*map_or));
+    {
+      absl::MutexLock lock(&byte_range_map_mu_);
+      byte_range_map_cache_.emplace(plan_key, map_ptr);
+    }
+    return map_ptr;
+  };
+
+  auto run_source =
+      [&](std::unique_ptr<IArtifactLoader> loader,
+          loading::MaterializationSource source_kind) -> absl::StatusOr<loading::MaterializeIntoTargetResult> {
+    auto init_status = loader->initialize();
+    if (!init_status.ok()) {
+      return init_status;
+    }
+    auto source_or = loader->open_source();
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
+
+    const bool use_source_layout =
+        (source_kind == loading::MaterializationSource::kDisk) && source_index_json.has_value();
+    loader::ByteRangeMap effective_map = mapping;
+    if (view_plan.has_value() && !view_plan->is_identity) {
+      auto composed_or = loader::compose_byte_range_maps(effective_map, view_plan->selection.map);
+      if (!composed_or.ok()) {
+        return composed_or.status();
+      }
+      effective_map = std::move(*composed_or);
+    }
+    if (use_source_layout) {
+      auto map_ptr_or = get_map_ptr(true);
+      if (!map_ptr_or.ok()) {
+        return map_ptr_or.status();
+      }
+      auto composed_or = loader::compose_byte_range_maps(effective_map, **map_ptr_or);
+      if (!composed_or.ok()) {
+        return composed_or.status();
+      }
+      effective_map = std::move(*composed_or);
+    }
+
+    std::shared_ptr<loader::SeekableSource> base_source = std::move(*source_or);
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+    sources.emplace_back(base_source);
+
+    const bool source_ordered = use_source_layout && config_.options->byte_mapping.disk_source_ordered_read;
+    std::unique_ptr<loader::SeekableSource> plan_source;
+    if (!source_ordered) {
+      loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "materialize_mapped_into_target");
+      auto program_or = compiler.Compile(effective_map);
+      if (!program_or.ok()) {
+        return program_or.status();
+      }
+      loader::ByteRangeMappedSource::Options map_opts{
+          .path = "materialize_mapped_into_target",
+          .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
+      };
+      auto mapped_or =
+          loader::ByteRangeMappedSource::Create(effective_map, *program_or, std::move(sources), std::move(map_opts));
+      if (!mapped_or.ok()) {
+        return mapped_or.status();
+      }
+      plan_source = std::move(*mapped_or);
+      if (!plan_source) {
+        return absl::InternalError("materialize_mapped_into_target failed to build mapped source");
+      }
+    }
+
+    const size_t slice_bytes = config_.runtime_context->tx_slice_bytes();
+    if (slice_bytes == 0 || config_.artifact_chunk_bytes == 0) {
+      return absl::FailedPreconditionError("tx_slice_bytes or artifact_chunk_bytes is zero");
+    }
+    const std::chrono::milliseconds timeout =
+        hints.pinned_timeout.count() > 0 ? hints.pinned_timeout : config_.pinned_memory_timeout;
+
+    std::vector<loader::TargetStorage> storages;
+    storages.reserve(target_layout.storages.size());
+    std::vector<loader::Range> ranges;
+    ranges.reserve(target_layout.storages.size());
+    uint64_t range_cursor = 0;
+    for (const auto& storage : target_layout.storages) {
+      if (storage.length == 0) {
+        return absl::InvalidArgumentError("materialize_mapped_into_target requires non-empty storage length");
+      }
+      if (storage.length > std::numeric_limits<size_t>::max()) {
+        return absl::OutOfRangeError("materialize_mapped_into_target storage length exceeds host limits");
+      }
+      storages.push_back(loader::TargetStorage{storage.base_ptr, storage.length});
+      ranges.emplace_back(range_cursor, static_cast<size_t>(storage.length));
+      range_cursor += storage.length;
+    }
+    if (range_cursor != total_size) {
+      return absl::InvalidArgumentError("materialize_mapped_into_target storage ranges do not span total_size");
+    }
+
+    loader::TargetLayoutGpuSink::Options sink_opts{
+        .storages = std::move(storages),
+        .chunk_size = config_.artifact_chunk_bytes,
+        .device_id = target_device.ordinal,
+    };
+    loader::TargetLayoutGpuSink sink(std::move(sink_opts));
+
+    const int concurrency = hints.pipeline_concurrency > 0 ? static_cast<int>(hints.pipeline_concurrency)
+                                                           : std::max(1, config_.num_threads);
+    if (source_ordered) {
+      const uint64_t max_window_bytes = std::min<uint64_t>(hints.max_buffer_bytes, 64ULL * 1024 * 1024);
+      const uint64_t window_cap_bytes = std::min<uint64_t>(max_window_bytes, slice_bytes);
+      loader::SourceWindowScheduler::Options sched_opts{
+          .merge_max_gap_bytes = config_.options->byte_mapping.disk_source_merge_max_gap_bytes,
+          .merge_max_amplification = config_.options->byte_mapping.disk_source_merge_max_amplification,
+          .prefetch_depth = config_.options->byte_mapping.disk_source_prefetch_depth,
+          .window_cap_bytes = window_cap_bytes,
+          .path = "materialize_mapped_into_target",
+      };
+      loader::SourceWindowScheduler scheduler(std::move(sched_opts));
+      auto exec_status = scheduler.Execute(
+          effective_map,
+          sources,
+          sink,
+          config_.runtime_context->pinned_buffer_pool(),
+          timeout,
+          /*use_pinned_buffers=*/true);
+      if (!exec_status.ok()) {
+        return absl::DataLossError(
+            absl::StrCat("materialize_mapped_into_target source-ordered execution failed: ", exec_status.message()));
+      }
+    } else {
+      const size_t num_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+      auto session_spb = std::make_shared<common::memory::StreamingPinnedBuffer>(
+          /*num_chunks=*/num_chunks, slice_bytes, config_.runtime_context->pinned_buffer_pool());
+      auto init_spb_status = session_spb->initialize(timeout);
+      if (!init_spb_status.ok()) {
+        return init_spb_status;
+      }
+      loader::StreamingBufferAdapter adapter(session_spb);
+      auto pump_status = loader::pump_ranges(
+          *plan_source,
+          sink,
+          adapter,
+          absl::MakeSpan(ranges),
+          concurrency,
+          config_.runtime_context->async_runtime()->blocking_executor());
+      if (!pump_status.ok()) {
+        return absl::DataLossError(absl::StrCat("materialize_mapped_into_target pump failed: ", pump_status.message()));
+      }
+    }
+    auto close_status = sink.close();
+    if (!close_status.ok()) {
+      return absl::DataLossError(
+          absl::StrCat("materialize_mapped_into_target sink close failed: ", close_status.message()));
+    }
+    return loading::MaterializeIntoTargetResult{.source = source_kind};
+  };
+
+  auto gs_client = config_.runtime_context->global_store_client();
+  const bool gs_connected = gs_client && gs_client->is_connected();
+  const bool prefer_disk = hints.source_preference == loading::SourcePreference::kPreferDisk;
+  const bool prefer_p2p = hints.source_preference == loading::SourcePreference::kPreferP2P;
+  const bool allow_p2p = hints.allow_p2p;
+  const bool allow_disk = hints.allow_disk;
+  const bool has_disk_source = disk_source.has_value();
+  components::WorkerIdentity local_identity = config_.runtime_context->worker_identity();
+  if (!is_local_identity(local_identity)) {
+    const auto& options = config_.runtime_context->options();
+    if (!options.p2p_listen_host.empty()) {
+      local_identity.node_address = options.p2p_listen_host;
+    }
+    local_identity.p2p_port = options.p2p_port;
+  }
+
+  if (prefer_disk && !allow_disk) {
+    return absl::InvalidArgumentError("source_policy disallows disk but preference=PREFER_DISK was requested");
+  }
+  if (prefer_p2p && !allow_p2p) {
+    return absl::InvalidArgumentError("source_policy disallows P2P but preference=PREFER_P2P was requested");
+  }
+
+  if (prefer_disk && has_disk_source && allow_disk) {
+    loading::DiskSource disk_src = *disk_source;
+    disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
+    auto disk_or = run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+    if (disk_or.ok()) {
+      return disk_or;
+    }
+    if (!gs_connected || !allow_p2p) {
+      return disk_or.status();
+    }
+  }
+
+  if (!gs_connected && (!has_disk_source || !allow_disk)) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+
+  if (allow_p2p && gs_connected && !hints.artifact_id.empty()) {
+    auto transport_or = gs_client->request_replica_transport(
+        hints.artifact_id,
+        local_identity.node_id,
+        local_identity.node_address,
+        local_identity.p2p_port,
+        target_device,
+        /*wait_timeout_ms=*/30000);
+    if (transport_or.ok()) {
+      const auto& session = *transport_or;
+      const auto& remote = session.remote_replica;
+      if (is_local_replica(remote, local_identity)) {
+        LOG(WARNING) << "Global Store returned local replica for artifact_id=" << hints.artifact_id
+                     << "; treating route as stale";
+        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        if (!complete_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << complete_status;
+        }
+        if (!has_disk_source) {
+          return stale_local_route_status(hints.artifact_id);
+        }
+      } else {
+        P2PSource p2p_src;
+        p2p_src.size_bytes = remote.memory_size;
+        p2p_src.ip = remote.node_address;
+        p2p_src.port = static_cast<uint16_t>(remote.node_port);
+        p2p_src.memory_keys = remote.remote_memory_keys;
+        p2p_src.buf_sizes = remote.buffer_sizes;
+        p2p_src.verification_json = remote.verification_json;
+        p2p_src.enable_checksum = false;
+        p2p_src.location.type = remote.memory_type;
+        p2p_src.location.device_id = remote.device_id;
+        if (has_disk_source && allow_disk && !prefer_p2p) {
+          p2p_src.fallback_disk_dir = disk_source->path.string();
+        }
+        auto p2p_or = run_source(std::make_unique<P2PLoader>(p2p_src), loading::MaterializationSource::kP2P);
+        auto complete_status = gs_client->complete_replica_transport(session.transport_id);
+        if (!complete_status.ok()) {
+          LOG(WARNING) << "complete_replica_transport returned error: " << complete_status;
+        }
+        if (p2p_or.ok()) {
+          return p2p_or;
+        }
+        if (!allow_disk || !has_disk_source || prefer_p2p) {
+          return p2p_or.status();
+        }
+      }
+    } else if (!allow_disk || !has_disk_source) {
+      return transport_or.status();
+    }
+  }
+
+  if (allow_disk && has_disk_source) {
+    loading::DiskSource disk_src = *disk_source;
+    disk_src.require_descriptor = tensorcast::common::is_mi2_artifact_id(hints.artifact_id);
+    return run_source(std::make_unique<DiskLoader>(disk_src), loading::MaterializationSource::kDisk);
+  }
+
+  if (!allow_p2p && !allow_disk) {
+    return absl::FailedPreconditionError("source_policy disallows P2P and disk for materialize_mapped_into_target");
+  }
+
+  return absl::FailedPreconditionError(
+      "materialize_mapped_into_target requires disk source or Global Store connectivity");
 }
 
 absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_from_assembly(
@@ -2326,6 +2775,7 @@ IngestionResultEvent MaterializationFacade::make_ingestion_event_seed(
   event.request_id = request_id;
   event.source = source;
   event.materialize_mode = mode;
+  event.export_policy = hints.export_policy;
   event.artifact_id = std::string(artifact_identifier);
   event.target_device = target.location.to_device_key();
   event.target_location = target.location.type;
@@ -2355,6 +2805,7 @@ IngestionStartedEvent MaterializationFacade::make_started_event(
   started.publish_context_id = publish_context_id;
   started.publish_to_global_store = publish_to_global_store;
   started.materialize_mode = mode;
+  started.export_policy = hints.export_policy;
   if (hints.variant && hints.variant->view_id.has_value()) {
     started.view_id = hints.variant->view_id;
   }

@@ -58,6 +58,7 @@ sc_cc_library(
         "//core/store/materialization/dataplane:memory_source",
         "//core/store/materialization/dataplane:p2p_loader",
         "//core/store/materialization/dataplane:pump",
+        "//core/store/materialization/dataplane:source_window_scheduler",
         "//core/store/materialization/dataplane:streaming_buffer_adapter",
         "//core/store/materialization/dataplane:target_layout_gpu_sink",
         "//core/store/materialization/dataplane:view_plan_source",
@@ -86,6 +87,7 @@ sc_cc_library(
     deps = [
         ":materialization_facade",
         "//core/store:store_engine_options",
+        "//core/store/materialization/contracts:byte_range_map",
         "//core/store/runtime/context:runtime_context",
         "//core/store/runtime/context:runtime_context_events",
         "//core/store/runtime/metadata:metadata_gateway",

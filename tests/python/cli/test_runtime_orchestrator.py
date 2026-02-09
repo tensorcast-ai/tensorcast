@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -134,6 +135,7 @@ def test_runtime_start_injects_global_store(monkeypatch):
 
     def _fake_start_global_store(**kwargs):
         captured["cluster_token"] = kwargs.get("cluster_token")
+        captured["config_path"] = kwargs.get("config_path")
         return SimpleNamespace(
             id="gs-123",
             pid=1111,
@@ -160,11 +162,13 @@ def test_runtime_start_injects_global_store(monkeypatch):
     }
     started = _stub_daemon_start(monkeypatch, gs_state)
 
-    session = runtime.start(global_store_mode="start")
+    gs_cfg = Path("cfg/gs.yaml")
+    session = runtime.start(global_store_mode="start", global_store_config=gs_cfg)
 
     assert session.global_store_address == "127.0.0.1:50051"
     assert started["ha_endpoints"] == ["127.0.0.1:50051"]
     assert captured["cluster_token"] is None
+    assert captured["config_path"] == gs_cfg
     assert session.global_store_session == "gs-123"
     assert session.global_store_mode == "start"
 
@@ -260,6 +264,7 @@ def test_runtime_rejects_mismatched_cluster_token(monkeypatch):
         runtime._resolve_global_store(
             mode="connect",
             address=None,
+            config_path=None,
             allow_gs_fallback=False,
             cluster_id=None,
         )

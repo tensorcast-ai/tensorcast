@@ -17,7 +17,7 @@ related_code:
 
 # Summary
 
-TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). When HA is enabled, every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned without dropping cluster identity. SDK `tensorcast.init(mode="connect"|"create")` forwards into the orchestrator (create) or binds to an existing daemon (connect), preserving CLI semantics including `global_store_mode` and ownership behavior for created sessions.
+TensorCast now ships a unified runtime orchestrator shared by the CLI and SDK. The CLI surface is split into `tensorcast daemon` and `tensorcast global` subcommands with a minimal command set (`start`, `stop`, `status`, `logs`, `restart`). When HA is enabled, every daemon launch is two-phase: resolve or start a single Global Store first, validate the cluster token to avoid split-brain, then inject the resolved endpoint into the daemon HA config before startup. Runtime state is authoritative, versioned, and reconciled under a strict lock order so stale PIDs and pointers are cleaned without dropping cluster identity. SDK `tensorcast.init(mode="connect"|"create"|"auto")` forwards into the orchestrator (create/auto) or binds to an existing daemon (connect), preserving CLI semantics including `global_store_mode` and ownership behavior for created sessions.
 
 # Goals / Non-Goals
 
@@ -87,7 +87,7 @@ RuntimeSession start(
 - Startup readiness is always awaited; there is no `no-wait` mode and no global startup timeout. In foreground (`blocking`) mode the call remains attached until the service exits.
 - Owner stop: `runtime.stop()` checks `session_state.global_store.owner`; if true, it stops the Global Store before stopping the daemon.
 - When `session_id` is omitted, `runtime.stop()` resolves the active daemon from `runtime/state.json` first, then falls back to `current_session`.
-- SDK `tensorcast.init(mode="create")` forwards `global_store_mode/address/cluster_id/session_id` into `runtime.start`, preserving CLI semantics. Ephemeral/private sessions are supported by passing an explicit `session_id` and skipping `current_session` writes.
+- SDK `tensorcast.init(mode="create"|"auto")` forwards `global_store_mode/address/global_store_config_path/cluster_id/session_id` into `runtime.start`, preserving CLI semantics. In `auto` mode, concurrent callers under the same runtime root singleflight into one owner launch and all followers connect to the same daemon. Ephemeral/private sessions are supported by passing an explicit `session_id` and skipping `current_session` writes.
 
 ## Runtime layout & state contracts
 
@@ -189,7 +189,7 @@ Key schemas (schema_version=1):
 
 ## SDK integration
 
-- `tensorcast.init(mode="create")` and `tensorcast.shutdown()` delegate to `runtime.start/stop`, exposing `global_store_mode`, `global_store_address`, `cluster_id`, `session_id`, and `allow_gs_fallback`. Initialization is blocking and returns only when the daemon is ready (or on error).
+- `tensorcast.init(mode="create"|"auto")` and `tensorcast.shutdown()` delegate to `runtime.start/stop`, exposing `global_store_mode`, `global_store_address`, `global_store_config_path`, `cluster_id`, `session_id`, and `allow_gs_fallback`. Initialization is blocking and returns only when the daemon is ready (or on error).
 - Clients reading daemon addresses first consult runtime state, then `current_session`, preserving behavior consistency with the CLI.
 - Private sessions are supported for tests by passing a custom `session_id` and skipping `register_current`.
 

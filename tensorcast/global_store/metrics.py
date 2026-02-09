@@ -135,6 +135,18 @@ ACTIVE_TRANSPORTS_GAUGE = Gauge(
     "Current number of in-flight (not yet completed) artifact transports.",
 )
 
+TRANSPORT_FILTER_COUNTER = Counter(
+    "tc_transport_filter_total",
+    "Total number of replicas filtered during transport selection.",
+    labelnames=("artifact_id", "reason"),
+)
+
+TRANSPORT_NO_EXPORTABLE_COUNTER = Counter(
+    "tc_transport_no_exportable_total",
+    "Total number of transport requests rejected due to no exportable sources.",
+    labelnames=("artifact_id",),
+)
+
 # Capability directory -------------------------------------------------------
 
 CAPABILITY_DIRECTORY_GAUGE = Gauge(
@@ -435,6 +447,18 @@ def dec_active_transports() -> None:
     # Ensure we do not go below zero.
     if ACTIVE_TRANSPORTS_GAUGE._value.get() > 0:
         ACTIVE_TRANSPORTS_GAUGE.dec()
+
+
+def inc_transport_filter(artifact_id: str, reason: str) -> None:
+    """Increment transport filter counter with *reason*."""
+
+    TRANSPORT_FILTER_COUNTER.labels(artifact_id=artifact_id, reason=reason).inc()
+
+
+def inc_transport_no_exportable(artifact_id: str) -> None:
+    """Increment no-exportable transport counter."""
+
+    TRANSPORT_NO_EXPORTABLE_COUNTER.labels(artifact_id=artifact_id).inc()
 
 
 # ---------------------------------------------------------------------------

@@ -50,7 +50,8 @@ The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/stor
   `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to
   `$TENSORCAST_HOME/hosts/<host_id>/sessions/<session_id>/session` or
   `~/.tensorcast/hosts/<host_id>/sessions/<session_id>/session`, auto-discovery relies on
-  `TENSORCAST_INSTANCE`); set it explicitly for cross-pod deployments.
+  `TENSORCAST_INSTANCE`); if `TENSORCAST_INSTANCE` is not set, it falls back to
+  `$TENSORCAST_HOME/hosts/<host_id>/runtime/daemons/<daemon_id>/local_handle.sock`. If the selected path exceeds AF_UNIX limits, the daemon falls back to `$TENSORCAST_HOME/uds/lh-<hash>.sock`. Set it explicitly for cross-pod deployments.
 
 The SDK builds these requests in `tensorcast/api/_materialize.py` and
 `tensorcast/api/store/materialization.py`.
@@ -98,9 +99,9 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
 
 1. **Validate inputs**: require `artifact_id` or disk path; `prefer_p2p` requires
    `artifact_id`; device UUID/ID must be valid.
-2. **Normalize disk path**: disk paths are normalized under `storage_path` and
-   rejected if they escape the configured root; when `server.storage_path` is
-   empty, disk paths are rejected and disk materialization is disabled.
+2. **Normalize disk path**: relative disk paths are normalized under `storage_path` and
+   rejected if they escape the configured root. Absolute disk paths are accepted as-is.
+   When `server.storage_path` is empty, only absolute disk paths are accepted.
 3. **Disk descriptor checks**:
    - If `verify_checksums=true`, `artifact_descriptor.json` is required and
      validated against the computed index multihash.
@@ -116,7 +117,8 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
-     disk_path, source policy allow flags, variant/view info).
+     disk_path resolved by the daemon from managed disk locations, source policy
+     allow flags, variant/view info).
    - Determine materialize mode:
      - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
      - Otherwise -> `AUTO`.

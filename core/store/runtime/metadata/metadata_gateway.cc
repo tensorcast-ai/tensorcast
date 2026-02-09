@@ -119,6 +119,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
 MetadataGateway::MetadataGateway(Config config)
     : runtime_context_(gsl::not_null<RuntimeContext*>{config.runtime_context}),
       replica_runtime_(gsl::not_null<ReplicaRuntime*>{config.replica_runtime}),
+      promotion_manager_(config.promotion_manager),
       event_publisher_(runtime_context_->event_publisher()),
       artifact_chunk_bytes_(config.artifact_chunk_bytes),
       pinned_memory_timeout_(config.pinned_memory_timeout),
@@ -210,7 +211,7 @@ absl::Status MetadataGateway::register_replica(
   const common::memory::MemoryLocation loc =
       (key.device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU : common::memory::MemoryLocation::CPU;
 
-  absl::Status register_status = materialization::control::ReplicaRegistrationHelper::register_local_replica(
+  auto register_or = materialization::control::ReplicaRegistrationHelper::register_local_replica(
       gsl::not_null<components::IGlobalStoreClient*>{client.get()},
       worker_id(),
       artifact_id,
@@ -218,9 +219,10 @@ absl::Status MetadataGateway::register_replica(
       loc,
       *size_or,
       key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt);
-  if (!register_status.ok()) {
-    return register_status;
+  if (!register_or.ok()) {
+    return register_or.status();
   }
+  replica_runtime_->set_replica_global_id(key, *register_or);
 
   if (key.view_id.has_value()) {
     auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
@@ -232,11 +234,11 @@ absl::Status MetadataGateway::register_replica(
       }
     }
   }
-  record_publish_context_result(publish_context_id, key, register_status);
-  if (register_status.ok()) {
+  record_publish_context_result(publish_context_id, key, register_or.status());
+  if (register_or.ok()) {
     replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
   }
-  return register_status;
+  return register_or.status();
 }
 
 absl::Status MetadataGateway::unregister_replica(std::string_view artifact_id, int device_id) {
@@ -278,13 +280,24 @@ absl::StatusOr<components::ViewMetadata> MetadataGateway::get_view_metadata(
 absl::Status MetadataGateway::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
-    std::string_view disk_path,
     absl::Duration ttl) {
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
     return client_or.status();
   }
-  return (*client_or)->upsert_key_mapping(key, artifact_id, disk_path, ttl);
+  return (*client_or)->upsert_key_mapping(key, artifact_id, ttl);
+}
+
+absl::StatusOr<components::KeyMappingSwapResult> MetadataGateway::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  auto client_or = get_connected_client();
+  if (!client_or.ok()) {
+    return client_or.status();
+  }
+  return (*client_or)->swap_key_mapping(key, new_artifact_id, expected_artifact_id, expected_generation);
 }
 
 absl::Status MetadataGateway::revoke_key_mapping(std::string_view key) {
@@ -417,6 +430,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .memory_tier_budget = runtime_context_->memory_tier_budget(),
       .memory_tier_config = runtime_context_->options().memory_tier_config,
       .byte_mapping_config = runtime_context_->options().byte_mapping,
+      .promotion_manager = promotion_manager_,
   };
   return resources;
 }

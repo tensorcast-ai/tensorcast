@@ -38,6 +38,9 @@ DaemonKernel::DaemonKernel(
         if (this->lifecycle_mgr_) {
           this->lifecycle_mgr_->handle_pid_exit(pid);
         }
+        if (this->region_registry_) {
+          (void)this->region_registry_->handle_pid_exit(static_cast<int>(pid));
+        }
       },
       std::chrono::duration_cast<std::chrono::milliseconds>(options_.proc_check_interval));
   lifecycle_mgr_->attach_pid_monitor(pid_monitor_.get());
@@ -84,9 +87,13 @@ DaemonKernel::DaemonKernel(
       scheduler_.get(),
       lip_mgr_.get(),
       engine_.get(),
+      async_runtime_,
       engine_->get_artifact_chunk_bytes(),
       std::chrono::milliseconds(500),
       options_.persistence_log_path);
+  if (persistence_mgr_) {
+    persistence_mgr_->set_storage_path(options_.storage_path);
+  }
   engine_->set_stable_cache_spill_evictable([this](const auto& key, const auto& policy) {
     if (!persistence_mgr_) {
       return false;

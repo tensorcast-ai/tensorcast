@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from tensorcast.global_store.exceptions import NotFoundError
-from tensorcast.global_store.models import ByteSpaceRef, MemoryType, Replica
+from tensorcast.global_store.metrics import inc_transport_filter
+from tensorcast.global_store.models import (
+    ByteSpaceRef,
+    ExportState,
+    MemoryType,
+    Replica,
+)
 from tensorcast.global_store.repositories.base import BaseRepository
 from tensorcast.logger import init_logger
 
@@ -40,6 +46,8 @@ class TransportReplicaSnapshot:
     worker_accepting: bool
     heartbeat_age_sec: float
     heartbeat_fresh: bool
+    export_state: str
+    transport_valid: bool
 
     def format_for_log(self) -> str:
         worker_label = self.worker_id if self.worker_id else "missing"
@@ -53,6 +61,8 @@ class TransportReplicaSnapshot:
             f"mem={self.memory_type}/{self.device_id} "
             f"available={self.is_available} "
             f"load={self.current_requests}/{self.max_concurrency} "
+            f"export_state={self.export_state} "
+            f"transport_valid={self.transport_valid} "
             f"worker={worker_label} "
             f"accepting={self.worker_accepting} "
             f"hb_age={heartbeat_age} "
@@ -64,6 +74,7 @@ class TransportReplicaSnapshot:
 class TransportEligibilitySnapshot:
     artifact_id: str
     total_replicas: int
+    exportable_replicas: int
     eligible_replicas: int
     available_replicas: int
     capacity_replicas: int
@@ -81,6 +92,7 @@ class TransportEligibilitySnapshot:
             samples = "none"
         return (
             f"replicas_total={self.total_replicas} "
+            f"exportable={self.exportable_replicas} "
             f"eligible={self.eligible_replicas} "
             f"available={self.available_replicas} "
             f"capacity={self.capacity_replicas} "
@@ -94,6 +106,33 @@ class TransportEligibilitySnapshot:
         )
 
 
+@dataclass(frozen=True)
+class TransportCandidate:
+    replica: Replica
+    worker_present: bool
+    worker_accepting: bool
+    heartbeat_age_sec: float
+    heartbeat_fresh: bool
+
+
+@dataclass(frozen=True)
+class TransportSelectionResult:
+    replica: Replica | None
+    exportable_replicas: int
+
+
+_TRANSPORT_FILTER_WORKER_MISSING = "worker_missing"
+_TRANSPORT_FILTER_WORKER_NOT_ACCEPTING = "worker_not_accepting"
+_TRANSPORT_FILTER_HEARTBEAT_STALE = "heartbeat_stale"
+_TRANSPORT_FILTER_REPLICA_UNAVAILABLE = "replica_unavailable"
+_TRANSPORT_FILTER_OVER_CAPACITY = "over_capacity"
+_TRANSPORT_FILTER_EXPORT_STATE = "export_state"
+_TRANSPORT_FILTER_TRANSPORT_MISSING = "transport_missing"
+_TRANSPORT_FILTER_TRANSPORT_SIZE_MISMATCH = "transport_size_mismatch"
+_TRANSPORT_FILTER_TRANSPORT_SIZE_ZERO = "transport_size_zero"
+_TRANSPORT_FILTER_TRANSPORT_SIZE_SUM = "transport_size_sum"
+
+
 class ReplicaRepository(BaseRepository):
     """Repository for managing artifact replicas in the database."""
 
@@ -104,8 +143,8 @@ class ReplicaRepository(BaseRepository):
         "mr.replica_id, mr.artifact_id, mr.view_id, mr.disk_path, mr.node_id, mr.node_address, mr.node_port, "
         "mr.memory_size, mr.memory_type, mr.device_id, mr.max_concurrency, "
         "COALESCE(rc.current_requests, 0) AS current_requests, "
-        "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.verification_json, mr.worker_id, "
-        "mr.created_at, mr.updated_at, mr.expires_at"
+        "mr.is_available, mr.remote_memory_keys, mr.buffer_sizes, mr.export_state, mr.export_generation, "
+        "mr.verification_json, mr.worker_id, mr.created_at, mr.updated_at, mr.expires_at"
     )
 
     @staticmethod
@@ -124,6 +163,89 @@ class ReplicaRepository(BaseRepository):
             + ReplicaRepository._REPLICA_PROJECTION
             + " FROM artifact_replicas mr "
             + f"{join_type} replica_counters rc ON rc.replica_id = mr.replica_id"
+        )
+
+    @staticmethod
+    def _evaluate_transport_metadata(
+        replica: Replica,
+    ) -> tuple[bool, str]:
+        keys = list(replica.remote_memory_keys)
+        sizes = list(replica.buffer_sizes)
+        if replica.export_state is not ExportState.EXPORTABLE:
+            return False, _TRANSPORT_FILTER_EXPORT_STATE
+        if not keys:
+            return False, _TRANSPORT_FILTER_TRANSPORT_MISSING
+        if len(keys) != len(sizes):
+            return False, _TRANSPORT_FILTER_TRANSPORT_SIZE_MISMATCH
+        total = 0
+        for size in sizes:
+            if int(size) <= 0:
+                return False, _TRANSPORT_FILTER_TRANSPORT_SIZE_ZERO
+            total += int(size)
+        if replica.memory_size > 0 and total != replica.memory_size:
+            return False, _TRANSPORT_FILTER_TRANSPORT_SIZE_SUM
+        return True, ""
+
+    @staticmethod
+    def _evaluate_transport_candidate(
+        candidate: TransportCandidate,
+    ) -> tuple[bool, str]:
+        if not candidate.worker_present:
+            return False, _TRANSPORT_FILTER_WORKER_MISSING
+        if not candidate.worker_accepting:
+            return False, _TRANSPORT_FILTER_WORKER_NOT_ACCEPTING
+        if not candidate.heartbeat_fresh:
+            return False, _TRANSPORT_FILTER_HEARTBEAT_STALE
+        if not candidate.replica.is_available:
+            return False, _TRANSPORT_FILTER_REPLICA_UNAVAILABLE
+        if not candidate.replica.has_capacity:
+            return False, _TRANSPORT_FILTER_OVER_CAPACITY
+        ok, reason = ReplicaRepository._evaluate_transport_metadata(candidate.replica)
+        if not ok:
+            return False, reason
+        return True, ""
+
+    def _build_transport_candidate(
+        self,
+        row: tuple,
+        columns: Sequence[str],
+        *,
+        now_ts: float,
+        heartbeat_timeout_seconds: float,
+    ) -> TransportCandidate:
+        replica = self._row_to_model(row, columns)
+        column_index = {column: idx for idx, column in enumerate(columns)}
+
+        def get(column: str, *, default=None):
+            idx = column_index.get(column)
+            if idx is None:
+                return default
+            value = row[idx]
+            if value is None:
+                return default
+            return value
+
+        worker_id = get("gs_worker_id", default="")
+        inactive_at = get("worker_inactive_at")
+        worker_present = bool(worker_id) and inactive_at is None
+        worker_accepting = (
+            bool(get("worker_accepting", default=False)) if worker_present else False
+        )
+        last_heartbeat = get("worker_last_heartbeat")
+
+        heartbeat_age_sec = -1.0
+        heartbeat_fresh = False
+        if worker_present and last_heartbeat is not None:
+            last_heartbeat_ts = last_heartbeat.timestamp()
+            heartbeat_age_sec = max(0.0, now_ts - last_heartbeat_ts)
+            heartbeat_fresh = heartbeat_age_sec <= heartbeat_timeout_seconds
+
+        return TransportCandidate(
+            replica=replica,
+            worker_present=worker_present,
+            worker_accepting=worker_accepting,
+            heartbeat_age_sec=heartbeat_age_sec,
+            heartbeat_fresh=heartbeat_fresh,
         )
 
     def has_any_replica(self, artifact_id: str, view_id: str | None = None) -> bool:
@@ -151,6 +273,34 @@ class ReplicaRepository(BaseRepository):
             columns = [desc[0] for desc in query.description]
             return self._row_to_model(row, columns)
         return None
+
+    def find_by_replica_id(self, replica_id: UUID) -> Replica | None:
+        """Find a replica by ID (artifact_id not required)."""
+        cursor = self.get_cursor()
+        sql = self._replica_select_sql("LEFT JOIN") + " WHERE mr.replica_id = ?"
+        query = cursor.execute(sql, [str(replica_id)])
+        row = query.fetchone()
+        if row:
+            assert query.description is not None
+            columns = [desc[0] for desc in query.description]
+            return self._row_to_model(row, columns)
+        return None
+
+    def get_current_requests(self, replica_id: UUID) -> int | None:
+        """Return current_requests for a replica, or None if not found."""
+        cursor = self.get_cursor()
+        row = cursor.execute(
+            """
+            SELECT COALESCE(rc.current_requests, 0) AS current_requests
+            FROM artifact_replicas mr
+            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
+            WHERE mr.replica_id = ?
+            """,
+            [str(replica_id)],
+        ).fetchone()
+        if row is None:
+            return None
+        return int(row[0] or 0)
 
     def find_existing(
         self,
@@ -199,74 +349,95 @@ class ReplicaRepository(BaseRepository):
         artifact_id: str,
         heartbeat_timeout_seconds: float,
         view_id: str | None = None,
-    ) -> Replica | None:
+    ) -> TransportSelectionResult:
         """
         Find best available replica for transport with load balancing.
 
         Atomically increments current_requests counter.
         """
         cursor = self.get_cursor()
-        cutoff = time.time() - heartbeat_timeout_seconds
-
-        # Atomic update on replica_counters to claim a replica
-        result = cursor.execute(
-            """
-            WITH candidate AS (
-                SELECT r.replica_id
-                FROM artifact_replicas r
-                LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
-                LEFT JOIN workers w ON r.worker_id = w.worker_id
-                WHERE r.artifact_id = ?
-                  AND COALESCE(r.view_id, '') = COALESCE(?, '')
-                  AND COALESCE(rc.current_requests, 0) < r.max_concurrency
-                  AND r.is_available = TRUE
-                  AND w.accepting_new_requests = TRUE
-                  AND w.inactive_at IS NULL
-                  AND EXTRACT(epoch FROM w.last_heartbeat) > ?
-                ORDER BY
-                    -- 1) Prefer GPU over RAM over DISK (same as before)
-                    CASE
-                        WHEN r.memory_type = 'GPU' THEN 0
-                        WHEN r.memory_type = 'RAM' THEN 1
-                        WHEN r.memory_type = 'DISK' THEN 2
-                        ELSE 3
-                    END,
-                    -- 2) Prefer *smaller capacity* replicas first so that
-                    --    low-capacity GPUs are filled before larger ones.
-                    r.max_concurrency ASC,
-                    -- 3) Finally fall back to load-ratio to break ties among
-                    --    replicas with identical capacity.
-                    (COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(r.max_concurrency, 1)),
-                    -- 4) Most recently updated last (older replicas first) to keep
-                    --    ordering deterministic when previous keys tie.
-                    r.updated_at ASC
-                LIMIT 1
-            )
-            UPDATE replica_counters
-            SET current_requests = current_requests + 1,
-                last_assigned_at = now()
-            WHERE replica_id = (SELECT replica_id FROM candidate)
-            RETURNING replica_id
-            """,
-            [artifact_id, view_id or "", cutoff],
+        query = (
+            "SELECT "
+            + self._REPLICA_PROJECTION
+            + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+            + "w.accepting_new_requests AS worker_accepting, "
+            + "w.last_heartbeat AS worker_last_heartbeat, "
+            + "w.inactive_at AS worker_inactive_at "
+            + "FROM artifact_replicas mr "
+            + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+            + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+            + "WHERE mr.artifact_id = ? "
+            + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+            + "ORDER BY "
+            + "CASE "
+            + "WHEN mr.memory_type = 'GPU' THEN 0 "
+            + "WHEN mr.memory_type = 'RAM' THEN 1 "
+            + "WHEN mr.memory_type = 'DISK' THEN 2 "
+            + "ELSE 3 "
+            + "END, "
+            + "mr.max_concurrency ASC, "
+            + "(COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(mr.max_concurrency, 1)), "
+            + "mr.updated_at ASC"
         )
+        result = cursor.execute(query, [artifact_id, view_id or ""])
+        rows = result.fetchall()
+        if not rows:
+            return TransportSelectionResult(replica=None, exportable_replicas=0)
 
-        row = result.fetchone()
-        if not row:
-            return None
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        now_ts = time.time()
+        exportable_replicas = 0
 
-        replica_id = row[0]
+        for row in rows:
+            candidate = self._build_transport_candidate(
+                row,
+                columns,
+                now_ts=now_ts,
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            )
+            transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
+            if transport_ok:
+                exportable_replicas += 1
 
-        # Fetch full replica data including current_requests
-        sql = self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?"
-        result = cursor.execute(sql, [str(replica_id)])
+            eligible, reason = self._evaluate_transport_candidate(candidate)
+            if not eligible:
+                inc_transport_filter(artifact_id, reason)
+                continue
 
-        full_row = result.fetchone()
-        if full_row:
-            assert result.description is not None
-            columns = [desc[0] for desc in result.description]
-            return self._row_to_model(full_row, columns)
-        return None
+            replica_id = str(candidate.replica.replica_id)
+            claim = cursor.execute(
+                """
+                UPDATE replica_counters
+                SET current_requests = current_requests + 1,
+                    last_assigned_at = now()
+                WHERE replica_id = ?
+                  AND current_requests < (
+                    SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
+                  )
+                RETURNING current_requests
+                """,
+                [replica_id, replica_id],
+            ).fetchone()
+            if not claim:
+                continue
+
+            sql = self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?"
+            full_result = cursor.execute(sql, [replica_id])
+            full_row = full_result.fetchone()
+            if full_row:
+                assert full_result.description is not None
+                full_columns = [desc[0] for desc in full_result.description]
+                replica = self._row_to_model(full_row, full_columns)
+                return TransportSelectionResult(
+                    replica=replica,
+                    exportable_replicas=exportable_replicas,
+                )
+            break
+
+        return TransportSelectionResult(
+            replica=None, exportable_replicas=exportable_replicas
+        )
 
     def get_transport_eligibility_snapshot(
         self,
@@ -277,125 +448,118 @@ class ReplicaRepository(BaseRepository):
     ) -> TransportEligibilitySnapshot:
         """Return a snapshot of replica eligibility for transport debugging."""
         cursor = self.get_cursor()
-        cutoff = time.time() - heartbeat_timeout_seconds
-
-        summary_row = cursor.execute(
-            """
-            SELECT
-                COUNT(*) AS total_replicas,
-                SUM(CASE WHEN r.is_available THEN 1 ELSE 0 END) AS available_replicas,
-                SUM(CASE WHEN COALESCE(rc.current_requests, 0) < r.max_concurrency THEN 1 ELSE 0 END)
-                    AS capacity_replicas,
-                SUM(CASE WHEN COALESCE(rc.current_requests, 0) >= r.max_concurrency THEN 1 ELSE 0 END)
-                    AS over_capacity_replicas,
-                SUM(CASE WHEN w.worker_id IS NOT NULL THEN 1 ELSE 0 END) AS worker_present_replicas,
-                SUM(CASE WHEN w.worker_id IS NULL THEN 1 ELSE 0 END) AS worker_missing_replicas,
-                SUM(CASE WHEN w.worker_id IS NOT NULL AND w.accepting_new_requests = TRUE THEN 1 ELSE 0 END)
-                    AS accepting_workers,
-                SUM(CASE
-                        WHEN w.worker_id IS NOT NULL AND w.last_heartbeat IS NOT NULL
-                             AND EXTRACT(epoch FROM w.last_heartbeat) > ?
-                             AND w.inactive_at IS NULL
-                        THEN 1 ELSE 0 END) AS fresh_heartbeat_replicas,
-                SUM(CASE
-                        WHEN w.worker_id IS NOT NULL
-                             AND (w.last_heartbeat IS NULL OR EXTRACT(epoch FROM w.last_heartbeat) <= ?)
-                             AND w.inactive_at IS NULL
-                        THEN 1 ELSE 0 END) AS stale_heartbeat_replicas,
-                SUM(CASE
-                        WHEN r.is_available = TRUE
-                             AND COALESCE(rc.current_requests, 0) < r.max_concurrency
-                             AND w.accepting_new_requests = TRUE
-                             AND w.inactive_at IS NULL
-                             AND w.last_heartbeat IS NOT NULL
-                             AND EXTRACT(epoch FROM w.last_heartbeat) > ?
-                        THEN 1 ELSE 0 END) AS eligible_replicas
-            FROM artifact_replicas r
-            LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
-            LEFT JOIN workers w ON r.worker_id = w.worker_id
-            WHERE r.artifact_id = ?
-              AND COALESCE(r.view_id, '') = COALESCE(?, '')
-            """,
-            [cutoff, cutoff, cutoff, artifact_id, view_id or ""],
-        ).fetchone()
-
-        if summary_row is None:
-            summary_row = (0,) * 10
-
-        total_replicas = int(summary_row[0] or 0)
-        available_replicas = int(summary_row[1] or 0)
-        capacity_replicas = int(summary_row[2] or 0)
-        over_capacity_replicas = int(summary_row[3] or 0)
-        worker_present_replicas = int(summary_row[4] or 0)
-        worker_missing_replicas = int(summary_row[5] or 0)
-        accepting_workers = int(summary_row[6] or 0)
-        fresh_heartbeat_replicas = int(summary_row[7] or 0)
-        stale_heartbeat_replicas = int(summary_row[8] or 0)
-        eligible_replicas = int(summary_row[9] or 0)
-
-        sample_rows = []
-        if sample_limit > 0:
-            sample_rows = cursor.execute(
-                """
-                SELECT
-                    r.replica_id,
-                    r.node_id,
-                    r.node_address,
-                    r.node_port,
-                    r.memory_type,
-                    r.device_id,
-                    r.is_available,
-                    COALESCE(rc.current_requests, 0) AS current_requests,
-                    r.max_concurrency,
-                    COALESCE(w.worker_id, '') AS worker_id,
-                    COALESCE(w.accepting_new_requests, FALSE) AS worker_accepting,
-                    w.last_heartbeat
-                FROM artifact_replicas r
-                LEFT JOIN replica_counters rc ON rc.replica_id = r.replica_id
-                LEFT JOIN workers w ON r.worker_id = w.worker_id
-                WHERE r.artifact_id = ?
-                  AND COALESCE(r.view_id, '') = COALESCE(?, '')
-                ORDER BY r.updated_at ASC
-                LIMIT ?
-                """,
-                [artifact_id, view_id or "", sample_limit],
-            ).fetchall()
-
-        now_ts = time.time()
-        sample_replicas: list[TransportReplicaSnapshot] = []
-        for row in sample_rows:
-            last_heartbeat = row[11]
-            heartbeat_age_sec = -1.0
-            heartbeat_fresh = False
-            if last_heartbeat is not None:
-                last_heartbeat_ts = last_heartbeat.timestamp()
-                heartbeat_age_sec = max(0.0, now_ts - last_heartbeat_ts)
-                heartbeat_fresh = last_heartbeat_ts > cutoff
-            worker_id = row[9] or ""
-            worker_present = bool(worker_id)
-            worker_accepting = bool(row[10]) if worker_present else False
-            sample_replicas.append(
-                TransportReplicaSnapshot(
-                    replica_id=str(row[0]),
-                    node_id=row[1] or "",
-                    node_address=row[2] or "",
-                    node_port=int(row[3] or 0),
-                    memory_type=str(row[4] or ""),
-                    device_id=int(row[5] or 0),
-                    is_available=bool(row[6]),
-                    current_requests=int(row[7] or 0),
-                    max_concurrency=int(row[8] or 0),
-                    worker_id=worker_id,
-                    worker_present=worker_present,
-                    worker_accepting=worker_accepting,
-                    heartbeat_age_sec=heartbeat_age_sec,
-                    heartbeat_fresh=heartbeat_fresh,
-                )
+        query = (
+            "SELECT "
+            + self._REPLICA_PROJECTION
+            + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+            + "w.accepting_new_requests AS worker_accepting, "
+            + "w.last_heartbeat AS worker_last_heartbeat, "
+            + "w.inactive_at AS worker_inactive_at "
+            + "FROM artifact_replicas mr "
+            + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+            + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+            + "WHERE mr.artifact_id = ? "
+            + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+            + "ORDER BY mr.updated_at ASC"
+        )
+        result = cursor.execute(query, [artifact_id, view_id or ""])
+        rows = result.fetchall()
+        if not rows:
+            return TransportEligibilitySnapshot(
+                artifact_id=artifact_id,
+                total_replicas=0,
+                exportable_replicas=0,
+                eligible_replicas=0,
+                available_replicas=0,
+                capacity_replicas=0,
+                over_capacity_replicas=0,
+                worker_present_replicas=0,
+                worker_missing_replicas=0,
+                accepting_workers=0,
+                fresh_heartbeat_replicas=0,
+                stale_heartbeat_replicas=0,
+                sample_replicas=[],
             )
+
+        assert result.description is not None
+        columns = [desc[0] for desc in result.description]
+        now_ts = time.time()
+
+        total_replicas = 0
+        exportable_replicas = 0
+        eligible_replicas = 0
+        available_replicas = 0
+        capacity_replicas = 0
+        over_capacity_replicas = 0
+        worker_present_replicas = 0
+        worker_missing_replicas = 0
+        accepting_workers = 0
+        fresh_heartbeat_replicas = 0
+        stale_heartbeat_replicas = 0
+        sample_replicas: list[TransportReplicaSnapshot] = []
+
+        for row in rows:
+            total_replicas += 1
+            candidate = self._build_transport_candidate(
+                row,
+                columns,
+                now_ts=now_ts,
+                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+            )
+            if candidate.worker_present:
+                worker_present_replicas += 1
+                if candidate.worker_accepting:
+                    accepting_workers += 1
+            else:
+                worker_missing_replicas += 1
+
+            if candidate.heartbeat_fresh:
+                fresh_heartbeat_replicas += 1
+            elif candidate.worker_present:
+                stale_heartbeat_replicas += 1
+
+            if candidate.replica.is_available:
+                available_replicas += 1
+
+            if candidate.replica.has_capacity:
+                capacity_replicas += 1
+            else:
+                over_capacity_replicas += 1
+
+            transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
+            if transport_ok:
+                exportable_replicas += 1
+
+            eligible, _ = self._evaluate_transport_candidate(candidate)
+            if eligible:
+                eligible_replicas += 1
+
+            if sample_limit > 0 and len(sample_replicas) < sample_limit:
+                sample_replicas.append(
+                    TransportReplicaSnapshot(
+                        replica_id=str(candidate.replica.replica_id),
+                        node_id=candidate.replica.node_id,
+                        node_address=candidate.replica.node_address,
+                        node_port=int(candidate.replica.node_port),
+                        memory_type=candidate.replica.memory_type.value,
+                        device_id=int(candidate.replica.device_id),
+                        is_available=candidate.replica.is_available,
+                        current_requests=int(candidate.replica.current_requests),
+                        max_concurrency=int(candidate.replica.max_concurrency),
+                        worker_id=candidate.replica.worker_id or "",
+                        worker_present=candidate.worker_present,
+                        worker_accepting=candidate.worker_accepting,
+                        heartbeat_age_sec=candidate.heartbeat_age_sec,
+                        heartbeat_fresh=candidate.heartbeat_fresh,
+                        export_state=candidate.replica.export_state.value,
+                        transport_valid=transport_ok,
+                    )
+                )
 
         return TransportEligibilitySnapshot(
             artifact_id=artifact_id,
             total_replicas=total_replicas,
+            exportable_replicas=exportable_replicas,
             eligible_replicas=eligible_replicas,
             available_replicas=available_replicas,
             capacity_replicas=capacity_replicas,
@@ -418,8 +582,9 @@ class ReplicaRepository(BaseRepository):
             INSERT INTO artifact_replicas (
                 replica_id, artifact_id, view_id, node_id, node_address, node_port,
                 memory_size, memory_type, device_id, max_concurrency,
-                is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_available, remote_memory_keys, buffer_sizes, export_state, export_generation,
+                verification_json, worker_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 str(replica.replica_id),
@@ -437,6 +602,8 @@ class ReplicaRepository(BaseRepository):
                 replica.is_available,
                 list(replica.remote_memory_keys),
                 list(replica.buffer_sizes),
+                replica.export_state.value,
+                replica.export_generation,
                 replica.verification_json,
                 replica.worker_id,
             ],
@@ -475,7 +642,9 @@ class ReplicaRepository(BaseRepository):
         else:
             return self.create(replica)
 
-    def create_or_update_atomic(self, replica: Replica, cursor) -> Replica:
+    def create_or_update_atomic(
+        self, replica: Replica, cursor, *, preserve_transport: bool = False
+    ) -> Replica:
         """
         Atomically create or update a replica within a transaction.
 
@@ -492,7 +661,7 @@ class ReplicaRepository(BaseRepository):
         # First, try to find existing replica within the transaction
         existing_result = cursor.execute(
             """
-            SELECT replica_id FROM artifact_replicas
+            SELECT replica_id, memory_size FROM artifact_replicas
             WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '')
               AND node_id = ? AND node_address = ?
               AND node_port = ? AND memory_type = ?
@@ -512,33 +681,71 @@ class ReplicaRepository(BaseRepository):
         if existing_result:
             # Update existing replica
             existing_replica_id = existing_result[0]
-            cursor.execute(
-                """
-                UPDATE artifact_replicas
-                SET
-                    updated_at = CURRENT_TIMESTAMP,
-                    is_available = ?,
-                    max_concurrency = ?,
-                    remote_memory_keys = ?,
-                    buffer_sizes = ?,
-                    verification_json = ?,
-                    memory_size = ?,
-                    worker_id = ?,
-                    expires_at = ?
-                WHERE replica_id = ?
-                """,
-                [
-                    replica.is_available,
-                    replica.max_concurrency,
-                    list(replica.remote_memory_keys),
-                    list(replica.buffer_sizes),
-                    replica.verification_json,
-                    replica.memory_size,
-                    replica.worker_id,
-                    replica.expires_at,
-                    str(existing_replica_id),
-                ],
-            )
+            existing_memory_size = int(existing_result[1] or 0)
+            if preserve_transport:
+                cursor.execute(
+                    """
+                    UPDATE artifact_replicas
+                    SET
+                        updated_at = CURRENT_TIMESTAMP,
+                        is_available = ?,
+                        max_concurrency = ?,
+                        worker_id = ?,
+                        expires_at = ?
+                    WHERE replica_id = ?
+                    """,
+                    [
+                        replica.is_available,
+                        replica.max_concurrency,
+                        replica.worker_id,
+                        replica.expires_at,
+                        str(existing_replica_id),
+                    ],
+                )
+                if (
+                    existing_memory_size > 0
+                    and replica.memory_size != existing_memory_size
+                ):
+                    logger.warning(
+                        "RegisterReplica preserving transport metadata for replica_id=%s but memory_size differs (existing=%s new=%s); keeping existing",
+                        existing_replica_id,
+                        existing_memory_size,
+                        replica.memory_size,
+                    )
+                if existing_memory_size > 0:
+                    replica.memory_size = existing_memory_size
+            else:
+                cursor.execute(
+                    """
+                    UPDATE artifact_replicas
+                    SET
+                        updated_at = CURRENT_TIMESTAMP,
+                        is_available = ?,
+                        max_concurrency = ?,
+                        remote_memory_keys = ?,
+                        buffer_sizes = ?,
+                        export_state = ?,
+                        export_generation = ?,
+                        verification_json = ?,
+                        memory_size = ?,
+                        worker_id = ?,
+                        expires_at = ?
+                    WHERE replica_id = ?
+                    """,
+                    [
+                        replica.is_available,
+                        replica.max_concurrency,
+                        list(replica.remote_memory_keys),
+                        list(replica.buffer_sizes),
+                        replica.export_state.value,
+                        replica.export_generation,
+                        replica.verification_json,
+                        replica.memory_size,
+                        replica.worker_id,
+                        replica.expires_at,
+                        str(existing_replica_id),
+                    ],
+                )
             replica.replica_id = UUID(str(existing_replica_id))
         else:
             # Create new replica
@@ -547,8 +754,9 @@ class ReplicaRepository(BaseRepository):
                 INSERT INTO artifact_replicas (
                     replica_id, artifact_id, view_id, node_id, node_address, node_port,
                     memory_size, memory_type, device_id, max_concurrency,
-                    is_available, remote_memory_keys, buffer_sizes, verification_json, worker_id, expires_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_available, remote_memory_keys, buffer_sizes, export_state, export_generation,
+                    verification_json, worker_id, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     str(replica.replica_id),
@@ -566,6 +774,8 @@ class ReplicaRepository(BaseRepository):
                     replica.is_available,
                     list(replica.remote_memory_keys),
                     list(replica.buffer_sizes),
+                    replica.export_state.value,
+                    replica.export_generation,
                     replica.verification_json,
                     replica.worker_id,
                     replica.expires_at,
@@ -600,6 +810,8 @@ class ReplicaRepository(BaseRepository):
                 max_concurrency = ?,
                 remote_memory_keys = ?,
                 buffer_sizes = ?,
+                export_state = ?,
+                export_generation = ?,
                 verification_json = ?,
                 memory_size = ?,
                 worker_id = ?
@@ -614,6 +826,8 @@ class ReplicaRepository(BaseRepository):
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),
                 list(replica.buffer_sizes),
+                replica.export_state.value,
+                replica.export_generation,
                 replica.verification_json,
                 replica.memory_size,
                 replica.worker_id,
@@ -659,6 +873,8 @@ class ReplicaRepository(BaseRepository):
                 max_concurrency = ?,
                 remote_memory_keys = ?,
                 buffer_sizes = ?,
+                export_state = ?,
+                export_generation = ?,
                 verification_json = ?,
                 memory_size = ?,
                 worker_id = ?
@@ -673,6 +889,8 @@ class ReplicaRepository(BaseRepository):
                 replica.max_concurrency,
                 list(replica.remote_memory_keys),
                 list(replica.buffer_sizes),
+                replica.export_state.value,
+                replica.export_generation,
                 replica.verification_json,
                 replica.memory_size,
                 replica.worker_id,
@@ -1065,6 +1283,16 @@ class ReplicaRepository(BaseRepository):
         buffer_sizes_value = get("buffer_sizes", default=())
         buffer_sizes = list(buffer_sizes_value) if buffer_sizes_value else []
 
+        export_state_value = get(
+            "export_state", default=ExportState.PRESENCE_ONLY.value
+        )
+        try:
+            export_state = ExportState(export_state_value)
+        except Exception:
+            export_state = ExportState.PRESENCE_ONLY
+        export_generation_value = get("export_generation", default=0)
+        export_generation = int(export_generation_value or 0)
+
         verification_json = get("verification_json")
         worker_id = get("worker_id")
         created_at = get("created_at")
@@ -1093,6 +1321,8 @@ class ReplicaRepository(BaseRepository):
             is_available=is_available,
             remote_memory_keys=remote_memory_keys,
             buffer_sizes=buffer_sizes,
+            export_state=export_state,
+            export_generation=export_generation,
             worker_id=worker_id,
             verification_json=verification_json,
             created_at=created_at,

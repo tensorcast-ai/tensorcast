@@ -1,8 +1,9 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/runtime/ingestion/materialization_service.h"
 
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <utility>
@@ -104,10 +105,9 @@ std::shared_ptr<tensorcast::store::replica::Replica> MakeCpuReplica(
   return std::shared_ptr<tensorcast::store::replica::Replica>(std::move(replica_or.value()));
 }
 
-MaterializeHints MakeHints(std::string artifact_id, std::string disk_path = "") {
+MaterializeHints MakeHints(std::string artifact_id) {
   MaterializeHints hints;
   hints.artifact_id = std::move(artifact_id);
-  hints.disk_path = std::move(disk_path);
   hints.max_buffer_bytes = 16ULL << 20;
   return hints;
 }
@@ -122,7 +122,7 @@ TEST_CASE("MaterializationService reuses resident replicas", "[materialization_s
   };
 
   DeviceManager device_manager;
-  MaterializeHints hints = MakeHints("artifact-resident");
+  MaterializeHints hints = MakeHints("cgid:artifact-resident");
   auto request_or = MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::AUTO, hints, device_manager);
   REQUIRE(request_or.ok());
   const auto request = request_or.value();
@@ -148,7 +148,7 @@ TEST_CASE("MaterializationService COPY_ONLY fails without GPU sources", "[materi
 
   DeviceManager device_manager;
   device_manager.set_num_gpus_for_testing(2);
-  MaterializeHints hints = MakeHints("artifact-copy");
+  MaterializeHints hints = MakeHints("cgid:artifact-copy");
   auto request_or = MaterializationRequest::Create(MakeGpuKey(0), MaterializeMode::COPY_ONLY, hints, device_manager);
   REQUIRE(request_or.ok());
 
@@ -161,8 +161,10 @@ TEST_CASE("MaterializationService COPY_ONLY fails without GPU sources", "[materi
 TEST_CASE("MaterializationService proxies disk ingestion", "[materialization_service]") {
   TestHarness harness;
   DeviceManager device_manager;
-  MaterializeHints hints = MakeHints("artifact-disk", "/tmp/model");
-  auto request_or = MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::LOAD_ONLY, hints, device_manager);
+  MaterializeHints hints = MakeHints("cgid:artifact-disk");
+  DiskSource disk_source{.path = std::filesystem::path("/tmp/model"), .expected_size = std::nullopt};
+  auto request_or =
+      MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::LOAD_ONLY, hints, device_manager, disk_source);
   REQUIRE(request_or.ok());
   const auto request = request_or.value();
 
@@ -187,14 +189,14 @@ TEST_CASE("MaterializationService proxies disk ingestion", "[materialization_ser
 TEST_CASE("MaterializationService AUTO uses injected orchestrator", "[materialization_service]") {
   TestHarness harness;
   auto ready_key =
-      ReplicaKey{.artifact_id = "artifact-auto", .view_id = std::nullopt, .device = MakeCpuKey(), .replica = 0};
+      ReplicaKey{.artifact_id = "cgid:artifact-auto", .view_id = std::nullopt, .device = MakeCpuKey(), .replica = 0};
   harness.run_auto = [ready_key](const MaterializationRequest&) { return MakeStubHandle(ready_key); };
   harness.ingest_from_disk = [](const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&) {
     return absl::UnimplementedError("ingest not used");
   };
 
   DeviceManager device_manager;
-  MaterializeHints hints = MakeHints("artifact-auto");
+  MaterializeHints hints = MakeHints("cgid:artifact-auto");
   auto request_or = MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::AUTO, hints, device_manager);
   REQUIRE(request_or.ok());
 

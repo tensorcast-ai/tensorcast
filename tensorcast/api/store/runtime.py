@@ -52,11 +52,9 @@ class _KeyCacheEntry:
         self,
         *,
         artifact_id: str | None,
-        disk_path: str | None,
         expires_at: float,
     ) -> None:
         self.artifact_id = artifact_id
-        self.disk_path = disk_path
         self.expires_at = expires_at
 
 
@@ -271,7 +269,6 @@ class StoreRuntimeContext:
         key: str,
         *,
         artifact_id: str | None,
-        disk_path: str | None,
         ttl_override: float | None = None,
     ) -> None:
         if not key:
@@ -283,31 +280,29 @@ class StoreRuntimeContext:
         with self._key_cache_lock:
             self._key_cache[key] = _KeyCacheEntry(
                 artifact_id=artifact_id,
-                disk_path=disk_path,
                 expires_at=expires_at,
             )
 
-    def resolve_key_mapping_cached(self, *, key: str) -> tuple[str | None, str | None]:
+    def resolve_key_mapping_cached(self, *, key: str) -> str | None:
         now = time.monotonic()
         with self._key_cache_lock:
             cached = self._key_cache.get(key)
             if cached and cached.expires_at > now:
-                return cached.artifact_id, cached.disk_path
+                return cached.artifact_id
             if cached is not None:
                 del self._key_cache[key]
-        artifact_id, disk_path = self.ensure_client().resolve_key_mapping(key)
-        resolved_id = artifact_id or None
-        resolved_path = disk_path or None
-        self.cache_key_mapping(key, artifact_id=resolved_id, disk_path=resolved_path)
-        return resolved_id, resolved_path
+        mapping = self.ensure_client().resolve_key_mapping(key)
+        resolved_id = mapping.artifact_id or None
+        ttl_override = float(mapping.cache_ttl_seconds)
+        self.cache_key_mapping(
+            key,
+            artifact_id=resolved_id,
+            ttl_override=ttl_override,
+        )
+        return resolved_id
 
     def get_artifact_index_cached(self, artifact_id: str) -> ArtifactCacheEntry | None:
         return self._artifact_cache.get_artifact_index_cached(artifact_id)
-
-    def get_artifact_index_by_disk_path(
-        self, disk_path: str
-    ) -> ArtifactCacheEntry | None:
-        return self._artifact_cache.get_artifact_index_by_disk_path(disk_path)
 
     def cache_artifact_index(self, entry: ArtifactCacheEntry) -> None:
         self._artifact_cache.cache_artifact_index(entry)
@@ -609,7 +604,7 @@ def get_context(
                 try:
                     startup.init(mode="connect")
                 except RuntimeError:
-                    startup.init(mode="create")
+                    startup.init(mode="auto")
             runtime = runtime_provider()
         else:
             raise

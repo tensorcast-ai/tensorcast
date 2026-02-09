@@ -36,7 +36,11 @@ def _ts_future(seconds: int) -> Timestamp:
     return ts
 
 
-class MockGlobalStoreService(global_store_pb2_grpc.GlobalStoreServiceServicer):
+class MockGlobalStoreService(
+    global_store_pb2_grpc.ClusterAdminServiceServicer,
+    global_store_pb2_grpc.ClusterRuntimeServiceServicer,
+    global_store_pb2_grpc.AssemblyViewServiceServicer,
+):
     async def HealthCheck(
         self,
         request: global_store_pb2.HealthCheckRequest,
@@ -332,9 +336,10 @@ class MockMemoryTierService(memory_tier_pb2_grpc.MemoryTierServiceServicer):
 
 async def _serve_async(port: int) -> None:
     server = grpc.aio.server()
-    global_store_pb2_grpc.add_GlobalStoreServiceServicer_to_server(
-        MockGlobalStoreService(), server
-    )
+    servicer = MockGlobalStoreService()
+    global_store_pb2_grpc.add_ClusterAdminServiceServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_ClusterRuntimeServiceServicer_to_server(servicer, server)
+    global_store_pb2_grpc.add_AssemblyViewServiceServicer_to_server(servicer, server)
     memory_tier_pb2_grpc.add_MemoryTierServiceServicer_to_server(
         MockMemoryTierService(), server
     )

@@ -114,6 +114,8 @@ class WorkerLifecycleManager {
   void apply_full_state(const std::vector<commonpb::ReplicaInfo>& expected);
   void enqueue_retire_keys(std::vector<store::loading::ReplicaKey> keys, std::string_view context);
   void process_retire_queue();
+  void schedule_demotion_task(const store::loading::ReplicaKey& key, std::string_view context);
+  bool wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout);
   absl::Status reregister_worker(bool preserve_identity);
   void reconcile_memory_tier_leases_once();
   bool wait_for_stop(std::chrono::milliseconds interval);
@@ -189,11 +191,15 @@ class WorkerLifecycleManager {
   struct RetireEntry {
     size_t attempts{0};
     int64_t last_log_ts_s{0};
+    bool demotion_started{false};
+    bool demotion_complete{false};
   };
 
   std::mutex retire_mu_;
   absl::flat_hash_map<store::loading::ReplicaKey, RetireEntry, store::loading::ReplicaKeyHash> retire_queue_;
   std::atomic<bool> retire_pending_{false};
+  std::mutex sync_success_mu_;
+  std::condition_variable sync_success_cv_;
   std::unique_ptr<store::runtime::RuntimeContextEvents::Subscription> runtime_event_subscription_;
   bool memory_tier_enabled_{false};
 

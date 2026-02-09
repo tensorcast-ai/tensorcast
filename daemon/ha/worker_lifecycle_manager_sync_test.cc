@@ -135,7 +135,8 @@ static commonpb::ReplicaInfo make_expected_replica(
 }
 
 // Minimal in-process fake Global Store service
-class FakeGlobalStoreService final : public global_store::GlobalStoreService::Service,
+class FakeGlobalStoreService final : public global_store::ClusterRuntimeService::Service,
+                                     public global_store::ClusterAdminService::Service,
                                      public memory_tier::MemoryTierService::Service {
  public:
   explicit FakeGlobalStoreService(std::vector<std::string> expected_ids, std::string obsolete_id)
@@ -428,7 +429,8 @@ static TestServer start_fake_server(const std::vector<std::string>& expected_ids
   grpc::ServerBuilder builder;
   int port = 0;
   builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
-  builder.RegisterService(static_cast<global_store::GlobalStoreService::Service*>(ts.service.get()));
+  builder.RegisterService(static_cast<global_store::ClusterRuntimeService::Service*>(ts.service.get()));
+  builder.RegisterService(static_cast<global_store::ClusterAdminService::Service*>(ts.service.get()));
   builder.RegisterService(static_cast<memory_tier::MemoryTierService::Service*>(ts.service.get()));
   ts.server = builder.BuildAndStart();
   ts.selected_port = port;
@@ -448,9 +450,9 @@ static void require_replica_registered(const StoreEngine& store, const ArtifactF
 static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
-  hints.disk_path = artifact.dir.string();
-  auto handle_or =
-      store.materialize_replica(make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  tensorcast::store::loading::DiskSource disk_source{.path = artifact.dir, .expected_size = std::nullopt};
+  auto handle_or = store.materialize_replica(
+      make_gpu_key(0), tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   INFO("load_artifact_gpu status=" << handle_or.status().ToString());
   REQUIRE(handle_or.ok());
   auto handle = std::move(handle_or.value());
@@ -470,9 +472,10 @@ static void load_artifact_gpu(StoreEngine& store, const ArtifactFixture& artifac
 static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifact, bool publish = true) {
   tensorcast::store::loading::MaterializeHints hints;
   hints.artifact_id = artifact.artifact_id;
-  hints.disk_path = artifact.dir.string();
+  tensorcast::store::loading::DiskSource disk_source{.path = artifact.dir, .expected_size = std::nullopt};
   DeviceKey cpu{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
-  auto handle_or = store.materialize_replica(cpu, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+  auto handle_or =
+      store.materialize_replica(cpu, tensorcast::store::StoreEngine::MaterializeMode::LOAD_ONLY, hints, disk_source);
   INFO("load_artifact_cpu status=" << handle_or.status().ToString());
   REQUIRE(handle_or.ok());
   auto handle = std::move(handle_or.value());

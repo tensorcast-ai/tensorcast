@@ -3,21 +3,21 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <vector>
 
-#include "core/common/capability_token.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/key_mapping_controller.h"
+#include "daemon/service/controllers/lease_controller.h"
 #include "daemon/service/controllers/materialization_controller.h"
+#include "daemon/service/controllers/persistence_rpc_controller.h"
 #include "daemon/service/controllers/registration_controller.h"
+#include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/persistence_manager.h"
-#include "daemon/state/placement_lease_tokens.h"
-#include "daemon/state/retention_registry.h"
 #include "daemon/state/session_lifecycle.h"
-#include "daemon/state/sessions_service.h"
 #include "daemon/state/shutdown_signal.h"
 #include "grpcpp/grpcpp.h"
 #include "tensorcast/daemon/v2/store_daemon.grpc.pb.h"
@@ -40,13 +40,12 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     StatusController& status_controller;
     IpcRegionRegistry& region_registry;
     LipManager& lip_manager;
-    PersistenceManager* persistence_manager{nullptr};
-    SessionsService& sessions_service;
+    std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager& lifecycle_manager;
-    PlacementLeaseTokens& placement_lease_tokens;
-    common::CapabilityTokenManager* capability_tokens{nullptr};
-    RetentionRegistry* retention_registry{nullptr};
-    std::string daemon_id;
+    KeyMappingController& key_mapping_controller;
+    PersistenceRpcController& persistence_rpc_controller;
+    ReplicaSessionController& replica_session_controller;
+    LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
   };
 
@@ -60,6 +59,11 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   grpc::Status MaterializeIntoTarget(
       grpc::ServerContext* ctx,
       const v2::MaterializeIntoTargetRequest* req,
+      v2::MaterializeIntoTargetResponse* resp) override;
+
+  grpc::Status MaterializeIntoMappedTarget(
+      grpc::ServerContext* ctx,
+      const v2::MaterializeIntoMappedTargetRequest* req,
       v2::MaterializeIntoTargetResponse* resp) override;
 
   grpc::Status ConfirmReplica(
@@ -103,6 +107,16 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::DeregisterArtifactRequest* req,
       v2::DeregisterArtifactResponse* resp) override;
+
+  grpc::Status PublishTargetReplica(
+      grpc::ServerContext* ctx,
+      const v2::PublishTargetReplicaRequest* req,
+      v2::PublishTargetReplicaResponse* resp) override;
+
+  grpc::Status RetirePublishedReplica(
+      grpc::ServerContext* ctx,
+      const v2::RetirePublishedReplicaRequest* req,
+      v2::RetirePublishedReplicaResponse* resp) override;
 
   grpc::Status UnlockTransportChunks(
       grpc::ServerContext* ctx,
@@ -206,6 +220,10 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       grpc::ServerContext* ctx,
       const v2::ResolveKeyMappingRequest* req,
       v2::ResolveKeyMappingResponse* resp) override;
+  grpc::Status SwapKeyMapping(
+      grpc::ServerContext* ctx,
+      const v2::SwapKeyMappingRequest* req,
+      v2::SwapKeyMappingResponse* resp) override;
 
   grpc::Status GetArtifactIndexById(
       grpc::ServerContext* ctx,
@@ -265,13 +283,12 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   StatusController* status_controller_;
   IpcRegionRegistry* region_registry_;
   LipManager* lip_manager_;
-  PersistenceManager* persistence_manager_;
-  SessionsService* sessions_service_;
+  std::shared_ptr<store::components::IGlobalStoreClient> global_store_client_;
   SessionLifecycleManager* lifecycle_manager_;
-  PlacementLeaseTokens* placement_lease_tokens_;
-  common::CapabilityTokenManager* capability_tokens_;
-  RetentionRegistry* retention_registry_;
-  std::string daemon_id_;
+  KeyMappingController* key_mapping_controller_;
+  PersistenceRpcController* persistence_rpc_controller_;
+  ReplicaSessionController* replica_session_controller_;
+  LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
   Options opts_;
 };

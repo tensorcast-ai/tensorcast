@@ -286,7 +286,14 @@ WorkerLifecycleManager::WorkerLifecycleManager(
       opts_(std::move(opts)),
       daemon_id_(ports.identity_store.daemon_id()),
       global_store_(make_global_store_client(opts_)),
-      node_id_(derive_node_id()) {}
+      node_id_(derive_node_id()) {
+  if (engine_->promotion_manager() != nullptr) {
+    engine_->set_promotion_sync_hooks(
+        store::runtime::PromotionSyncHooks{
+            .request_state_sync = [this]() { request_state_sync(); },
+        });
+  }
+}
 
 gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> WorkerLifecycleManager::make_global_store_client(
     const Options& opts) {
@@ -418,6 +425,22 @@ absl::Status WorkerLifecycleManager::start() {
     if (state == store::StoreEngine::ReplicaPublishState::kLocalOnly) {
       return;
     }
+    if (event.type == store::runtime::RuntimeEventType::kReplicaEvicted) {
+      auto* promotion = engine_->promotion_manager();
+      if (promotion != nullptr) {
+        auto& async_runtime = ports_.async_runtime;
+        if (!async_runtime.is_shutting_down()) {
+          auto executor = async_runtime.blocking_executor();
+          const store::loading::ReplicaKey key = payload->key;
+          executor->add([promotion, key]() {
+            auto st = promotion->finalize_replica_demotion(key);
+            if (!st.ok()) {
+              LOG(WARNING) << "finalize_replica_demotion failed for evicted " << key << ": " << st;
+            }
+          });
+        }
+      }
+    }
     request_state_sync();
   });
 
@@ -475,6 +498,7 @@ void WorkerLifecycleManager::stop() {
   stop_.store(true);
   stop_cv_.notify_all();
   state_sync_cv_.notify_all();
+  sync_success_cv_.notify_all();
   runtime_event_subscription_.reset();
   if (hb_thread_.joinable())
     hb_thread_.join();
@@ -576,6 +600,16 @@ std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stal
 void WorkerLifecycleManager::request_state_sync() {
   state_sync_requests_.fetch_add(1);
   state_sync_cv_.notify_all();
+}
+
+bool WorkerLifecycleManager::wait_for_state_sync_success(uint64_t baseline, std::chrono::milliseconds timeout) {
+  if (timeout.count() <= 0) {
+    return sync_success_.load() > baseline;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  std::unique_lock<std::mutex> lock(sync_success_mu_);
+  return sync_success_cv_.wait_until(
+      lock, deadline, [this, baseline]() { return stop_.load() || sync_success_.load() > baseline; });
 }
 
 void WorkerLifecycleManager::queue_obsolete_replicas(std::vector<std::string> obsolete) {
@@ -855,19 +889,68 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       mi->set_memory_type(commonpb::MEMORY_TYPE_RAM);
       mi->set_device_id(0);
     }
-    if (!entry.remote_memory_keys.empty()) {
+    auto* byte_space = mi->mutable_byte_space();
+    if (entry.key.view_id.has_value() && !entry.key.view_id->empty()) {
+      byte_space->set_kind(commonpb::BYTE_SPACE_KIND_VIEW);
+      byte_space->set_id(*entry.key.view_id);
+    } else {
+      byte_space->set_kind(commonpb::BYTE_SPACE_KIND_CANONICAL);
+    }
+    auto* transport = mi->mutable_transport();
+    auto export_state = entry.export_state;
+    bool keys_valid = true;
+    if (!entry.remote_memory_keys.empty() || !entry.buffer_sizes.empty()) {
       if (entry.remote_memory_keys.size() != entry.buffer_sizes.size()) {
-        LOG(WARNING) << "State sync skipping remote keys for " << entry.key.artifact_id
+        keys_valid = false;
+        LOG(WARNING) << "State sync clearing transport metadata for " << entry.key.artifact_id
                      << " due to mismatched sizes (keys=" << entry.remote_memory_keys.size()
                      << " buffers=" << entry.buffer_sizes.size() << ")";
       } else {
-        for (const auto& key : entry.remote_memory_keys) {
-          mi->add_remote_memory_keys(key);
-        }
+        uint64_t total = 0;
         for (const auto size : entry.buffer_sizes) {
-          mi->add_buffer_sizes(size);
+          if (size == 0) {
+            keys_valid = false;
+            break;
+          }
+          total += size;
+        }
+        if (!keys_valid || (entry.size_bytes > 0 && total != entry.size_bytes)) {
+          keys_valid = false;
+          LOG(WARNING) << "State sync clearing transport metadata for " << entry.key.artifact_id
+                       << " due to invalid size sum (sum=" << total << " expected=" << entry.size_bytes << ")";
         }
       }
+    }
+
+    if (!keys_valid) {
+      export_state = store::runtime::ReplicaExportState::kPresenceOnly;
+    }
+
+    switch (export_state) {
+      case store::runtime::ReplicaExportState::kExportable:
+        transport->set_export_state(commonpb::ReplicaTransportMetadata::EXPORT_STATE_EXPORTABLE);
+        break;
+      case store::runtime::ReplicaExportState::kDraining:
+        transport->set_export_state(commonpb::ReplicaTransportMetadata::EXPORT_STATE_DRAINING);
+        break;
+      case store::runtime::ReplicaExportState::kPresenceOnly:
+      default:
+        transport->set_export_state(commonpb::ReplicaTransportMetadata::EXPORT_STATE_PRESENCE_ONLY);
+        break;
+    }
+    transport->set_export_generation(entry.export_generation);
+    const bool include_keys = keys_valid && !entry.remote_memory_keys.empty() &&
+        export_state != store::runtime::ReplicaExportState::kPresenceOnly;
+    if (include_keys) {
+      for (const auto& key : entry.remote_memory_keys) {
+        transport->add_remote_memory_keys(key);
+      }
+      for (const auto size : entry.buffer_sizes) {
+        transport->add_buffer_sizes(size);
+      }
+    }
+    if (!entry.verification_json.empty()) {
+      transport->set_verification_json(entry.verification_json);
     }
     rep->mutable_stats()->set_max_concurrency(1);
     // Reconcile current_requests with active PID refs tracked by the service
@@ -904,6 +987,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       }
     }
     sync_success_.fetch_add(1);
+    sync_success_cv_.notify_all();
     if (auto* counter = sync_success_counter()) {
       counter->Add(1);
     }
@@ -925,7 +1009,14 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           const auto& ri = ch.replica_info();
           auto selector_opt = replica_selector_from_memory_info(ri.ref().artifact_id(), ri.memory_info());
           if (selector_opt.has_value()) {
-            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &retire_keys);
+            std::vector<store::loading::ReplicaKey> matched_keys;
+            append_replica_keys_for_selector(*engine_for_unload, *selector_opt, &matched_keys);
+            if (!ri.ref().replica_id().empty()) {
+              for (const auto& key : matched_keys) {
+                engine_->set_replica_global_store_id(key, ri.ref().replica_id());
+              }
+            }
+            retire_keys.insert(retire_keys.end(), matched_keys.begin(), matched_keys.end());
           } else {
             VLOG(1) << "Skipping REMOVE for non-resident memory type: artifact_id=" << ri.ref().artifact_id()
                     << " memory_type=" << ri.memory_info().memory_type();
@@ -954,7 +1045,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           executor->add([engine = std::move(engine), dev, artifact_id = std::move(artifact_id)]() mutable {
             store::loading::MaterializeHints hints;
             hints.artifact_id = artifact_id;
-            auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::LOAD_ONLY, hints);
+            auto res = engine->materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints);
             if (!res.ok()) {
               VLOG(1) << "Prefetch materialize_replica failed: artifact_id=" << artifact_id
                       << " dev=" << dev.to_string() << ": " << res.status();
@@ -1398,18 +1489,112 @@ void WorkerLifecycleManager::enqueue_retire_keys(
 
   for (const auto& key : newly_added) {
     engine_->set_replica_publish_state(key, store::StoreEngine::ReplicaPublishState::kRetiring);
-    if (key.device.type == DeviceType::GPU || key.device.type == DeviceType::CPU) {
-      const auto location = (key.device.type == DeviceType::GPU) ? common::memory::MemoryLocation::GPU
-                                                                 : common::memory::MemoryLocation::CPU;
-      auto st = engine_->disable_remote_replica_access(key, location);
-      if (!st.ok()) {
-        LOG(WARNING) << context << ": disable_remote_replica_access failed for " << key << ": " << st;
-      }
-    }
   }
   retire_pending_.store(true);
   state_sync_cv_.notify_all();
   VLOG(1) << context << ": queued retire for " << newly_added.size() << " replicas";
+}
+
+void WorkerLifecycleManager::schedule_demotion_task(const store::loading::ReplicaKey& key, std::string_view context) {
+  auto* promotion_manager = engine_->promotion_manager();
+  if (promotion_manager == nullptr) {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    auto it = retire_queue_.find(key);
+    if (it != retire_queue_.end()) {
+      it->second.demotion_complete = true;
+    }
+    return;
+  }
+
+  auto& async_runtime = ports_.async_runtime;
+  if (async_runtime.is_shutting_down()) {
+    std::lock_guard<std::mutex> lock(retire_mu_);
+    auto it = retire_queue_.find(key);
+    if (it != retire_queue_.end()) {
+      it->second.demotion_complete = true;
+    }
+    return;
+  }
+
+  auto executor = async_runtime.blocking_executor();
+  executor->add([this, key, context = std::string(context)]() {
+    if (stop_.load()) {
+      return;
+    }
+    auto* promotion = engine_->promotion_manager();
+    if (promotion == nullptr) {
+      return;
+    }
+
+    const auto& promo_opts = engine_->options().promotion;
+    const auto drain_timeout = promo_opts.demotion_drain_timeout;
+    const auto deadline =
+        drain_timeout.count() > 0 ? std::chrono::steady_clock::now() + drain_timeout : std::chrono::steady_clock::now();
+
+    const uint64_t baseline = sync_success_.load();
+    const auto drain_status = promotion->mark_replica_draining(key);
+    if (!drain_status.ok()) {
+      LOG(WARNING) << context << ": mark_replica_draining failed for " << key << ": " << drain_status;
+    }
+    request_state_sync();
+
+    if (drain_timeout.count() > 0) {
+      if (!wait_for_state_sync_success(baseline, drain_timeout)) {
+        LOG(WARNING) << context << ": state sync barrier timed out for " << key;
+      }
+    }
+
+    if (drain_timeout.count() > 0) {
+      const auto now = std::chrono::steady_clock::now();
+      const auto remaining = now < deadline ? std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                                            : std::chrono::milliseconds(0);
+      if (remaining.count() > 0) {
+        auto replica_id = engine_->get_replica_global_store_id(key);
+        if (replica_id.has_value()) {
+          auto drain_or =
+              global_store_->wait_replica_drain(*replica_id, static_cast<uint32_t>(remaining.count()), context);
+          if (!drain_or.ok()) {
+            LOG(WARNING) << context << ": WaitReplicaDrain failed for " << key << ": " << drain_or.status();
+          } else if (!drain_or->drained) {
+            LOG(WARNING) << context << ": WaitReplicaDrain timed out for " << key
+                         << " current_requests=" << drain_or->current_requests;
+          }
+        } else {
+          VLOG(1) << context << ": no replica_id available for WaitReplicaDrain " << key;
+        }
+      }
+    }
+
+    if (drain_timeout.count() > 0) {
+      while (!stop_.load()) {
+        RetireGateSnapshot snapshot = ports_.retire_gates.snapshot_for(key);
+        if (snapshot.ready()) {
+          break;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+          LOG(WARNING) << context << ": local drain timeout for " << key << " refs=" << snapshot.ref_count
+                       << " uses=" << snapshot.use_count << " pins=" << snapshot.placement_pins
+                       << " transport_lock=" << (snapshot.has_transport_lock ? 1 : 0);
+          break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+    }
+
+    const auto finalize_status = promotion->finalize_replica_demotion(key);
+    if (!finalize_status.ok()) {
+      LOG(WARNING) << context << ": finalize_replica_demotion failed for " << key << ": " << finalize_status;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(retire_mu_);
+      auto it = retire_queue_.find(key);
+      if (it != retire_queue_.end()) {
+        it->second.demotion_complete = true;
+      }
+    }
+    state_sync_cv_.notify_all();
+  });
 }
 
 void WorkerLifecycleManager::process_retire_queue() {
@@ -1428,6 +1613,21 @@ void WorkerLifecycleManager::process_retire_queue() {
   }
 
   for (const auto& key : keys) {
+    {
+      std::lock_guard<std::mutex> lock(retire_mu_);
+      auto it = retire_queue_.find(key);
+      if (it == retire_queue_.end()) {
+        continue;
+      }
+      if (!it->second.demotion_started) {
+        it->second.demotion_started = true;
+        schedule_demotion_task(key, "retire_queue");
+        continue;
+      }
+      if (!it->second.demotion_complete) {
+        continue;
+      }
+    }
     RetireGateSnapshot snapshot = ports_.retire_gates.snapshot_for(key);
 
     if (!snapshot.ready()) {

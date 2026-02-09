@@ -11,7 +11,16 @@ from uuid import UUID, uuid4
 
 from tensorcast.global_store.exceptions import NotFoundError, ValidationError
 from tensorcast.global_store.metrics import observe_state_sync
-from tensorcast.global_store.models import ByteSpaceKind, ByteSpaceRef, Replica, Worker
+from tensorcast.global_store.models import (
+    Replica,
+    Worker,
+)
+from tensorcast.global_store.replica_memory_codec import (
+    export_state_to_proto,
+    memory_info_to_replica,
+    parse_transport_metadata,
+    replica_to_memory_info,
+)
 from tensorcast.global_store.repositories import ReplicaRepository, WorkerRepository
 from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.logger import init_logger
@@ -20,7 +29,7 @@ from tensorcast.proto.global_store.v1 import global_store_pb2
 
 logger = init_logger(__name__)
 
-ReplicaKey = tuple[str, str, str, int]
+ReplicaKey = tuple[str, str, str, str, int]
 
 
 class RecoveryService:
@@ -304,10 +313,19 @@ class RecoveryService:
                 return "RAM"
             return "DISK"
 
+        def _view_id_from_memory_info(mem_info: common_pb2.MemoryInfo) -> str:
+            if (
+                mem_info.HasField("byte_space")
+                and mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+            ):
+                return mem_info.byte_space.id.strip()
+            return ""
+
         # Convert to maps for comparison and fast lookup
         local_replicas_by_key: dict[ReplicaKey, common_pb2.ReplicaInfo] = {
             (
                 r.ref.artifact_id,
+                _view_id_from_memory_info(r.memory_info),
                 r.memory_info.node_id,
                 _memory_type_label(r.memory_info.memory_type),
                 r.memory_info.device_id,
@@ -316,7 +334,13 @@ class RecoveryService:
         }
 
         global_replicas_by_key: dict[ReplicaKey, Replica] = {
-            (r.artifact_id, r.node_id, r.memory_type.value, r.device_id): r
+            (
+                r.artifact_id,
+                r.byte_space.id or "",
+                r.node_id,
+                r.memory_type.value,
+                r.device_id,
+            ): r
             for r in global_replicas
         }
 
@@ -379,8 +403,14 @@ class RecoveryService:
             local_node_address = local_replica.memory_info.node_address
             local_node_port = local_replica.memory_info.node_port
             local_memory_size = local_replica.memory_info.memory_size
-            local_remote_keys = list(local_replica.memory_info.remote_memory_keys)
-            local_buffer_sizes = list(local_replica.memory_info.buffer_sizes)
+            (
+                transport_authoritative,
+                local_export_state,
+                local_export_generation,
+                local_remote_keys,
+                local_buffer_sizes,
+                local_verification_json,
+            ) = parse_transport_metadata(local_replica.memory_info)
 
             if local_node_address and local_node_address != global_replica.node_address:
                 node_address_changed = True
@@ -391,14 +421,37 @@ class RecoveryService:
                 and local_memory_size != global_replica.memory_size
             ):
                 memory_size_changed = True
-            if local_remote_keys:
+            export_state_changed = False
+            export_generation_changed = False
+            verification_changed = False
+
+            if transport_authoritative:
                 remote_keys_changed = local_remote_keys != list(
                     global_replica.remote_memory_keys
                 )
-            if local_buffer_sizes:
                 buffer_sizes_changed = local_buffer_sizes != list(
                     global_replica.buffer_sizes
                 )
+                export_state_changed = local_export_state != global_replica.export_state
+                export_generation_changed = (
+                    local_export_generation != global_replica.export_generation
+                )
+                verification_changed = (local_verification_json or "") != (
+                    global_replica.verification_json or ""
+                )
+            else:
+                if local_remote_keys:
+                    remote_keys_changed = local_remote_keys != list(
+                        global_replica.remote_memory_keys
+                    )
+                if local_buffer_sizes:
+                    buffer_sizes_changed = local_buffer_sizes != list(
+                        global_replica.buffer_sizes
+                    )
+                if local_verification_json:
+                    verification_changed = local_verification_json != (
+                        global_replica.verification_json or ""
+                    )
 
             if not any(
                 [
@@ -408,6 +461,9 @@ class RecoveryService:
                     memory_size_changed,
                     remote_keys_changed,
                     buffer_sizes_changed,
+                    export_state_changed,
+                    export_generation_changed,
+                    verification_changed,
                 ]
             ):
                 continue
@@ -426,12 +482,48 @@ class RecoveryService:
             if memory_size_changed:
                 updated_proto.memory_info.memory_size = local_memory_size
                 reasons.append("memory_size")
-            if remote_keys_changed:
+            if transport_authoritative and any(
+                [
+                    remote_keys_changed,
+                    buffer_sizes_changed,
+                    export_state_changed,
+                    export_generation_changed,
+                    verification_changed,
+                ]
+            ):
+                transport = updated_proto.memory_info.transport
+                transport.export_state = export_state_to_proto(local_export_state)
+                transport.export_generation = int(local_export_generation or 0)
+                transport.remote_memory_keys[:] = local_remote_keys
+                transport.buffer_sizes[:] = local_buffer_sizes
+                transport.verification_json = local_verification_json or ""
                 updated_proto.memory_info.remote_memory_keys[:] = local_remote_keys
-                reasons.append("remote_memory_keys")
-            if buffer_sizes_changed:
                 updated_proto.memory_info.buffer_sizes[:] = local_buffer_sizes
-                reasons.append("buffer_sizes")
+                updated_proto.memory_info.verification_json = (
+                    local_verification_json or ""
+                )
+                if export_state_changed:
+                    reasons.append("export_state")
+                if export_generation_changed:
+                    reasons.append("export_generation")
+                if remote_keys_changed:
+                    reasons.append("remote_memory_keys")
+                if buffer_sizes_changed:
+                    reasons.append("buffer_sizes")
+                if verification_changed:
+                    reasons.append("verification_json")
+            else:
+                if remote_keys_changed:
+                    updated_proto.memory_info.remote_memory_keys[:] = local_remote_keys
+                    reasons.append("remote_memory_keys")
+                if buffer_sizes_changed:
+                    updated_proto.memory_info.buffer_sizes[:] = local_buffer_sizes
+                    reasons.append("buffer_sizes")
+                if verification_changed:
+                    updated_proto.memory_info.verification_json = (
+                        local_verification_json or ""
+                    )
+                    reasons.append("verification_json")
 
             change = global_store_pb2.StateChange(
                 type=global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA,
@@ -477,35 +569,7 @@ class RecoveryService:
 
     def _convert_replica_to_proto(self, replica: Replica) -> common_pb2.ReplicaInfo:
         """Convert Replica to proto format."""
-        # Map domain MemoryType to proto MemoryType
-        if replica.memory_type.value == "GPU":
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_GPU
-        elif replica.memory_type.value == "RAM":
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_RAM
-        else:
-            proto_mem_type = common_pb2.MemoryType.MEMORY_TYPE_DISK
-
-        memory_info = common_pb2.MemoryInfo(
-            node_id=replica.node_id,
-            node_address=replica.node_address,
-            node_port=replica.node_port,
-            memory_size=replica.memory_size,
-            memory_type=proto_mem_type,
-            device_id=replica.device_id,
-            remote_memory_keys=replica.remote_memory_keys,
-            buffer_sizes=replica.buffer_sizes,
-        )
-        if replica.byte_space.kind == ByteSpaceKind.VIEW:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(
-                    kind=common_pb2.BYTE_SPACE_KIND_VIEW,
-                    id=replica.byte_space.id or "",
-                )
-            )
-        else:
-            memory_info.byte_space.CopyFrom(
-                common_pb2.ByteSpaceRef(kind=common_pb2.BYTE_SPACE_KIND_CANONICAL)
-            )
+        memory_info = replica_to_memory_info(replica=replica)
         stats = common_pb2.ReplicaStats(
             max_concurrency=replica.max_concurrency,
             current_requests=replica.current_requests,
@@ -531,53 +595,20 @@ class RecoveryService:
         self, proto_replica: common_pb2.ReplicaInfo, worker_id: str
     ) -> Replica:
         """Convert proto format to Replica."""
-        from tensorcast.global_store.models import MemoryType
-
-        # Map proto MemoryType to domain MemoryType string enum
-        if (
-            proto_replica.memory_info.memory_type
-            == common_pb2.MemoryType.MEMORY_TYPE_GPU
-        ):
-            dom_mem_type = "GPU"
-        elif (
-            proto_replica.memory_info.memory_type
-            == common_pb2.MemoryType.MEMORY_TYPE_RAM
-        ):
-            dom_mem_type = "RAM"
-        else:
-            dom_mem_type = "DISK"
-
-        byte_space = ByteSpaceRef.canonical()
-        if (
-            hasattr(proto_replica.memory_info, "byte_space")
-            and proto_replica.memory_info.HasField("byte_space")
-            and (
-                proto_replica.memory_info.byte_space.kind
-                == common_pb2.BYTE_SPACE_KIND_VIEW
-            )
-        ):
-            view_id = proto_replica.memory_info.byte_space.id.strip()
-            if view_id:
-                byte_space = ByteSpaceRef.view(view_id)
-
-        return Replica(
-            replica_id=UUID(proto_replica.ref.replica_id)
+        replica_id = (
+            UUID(proto_replica.ref.replica_id)
             if proto_replica.ref.replica_id
-            else uuid4(),
+            else uuid4()
+        )
+        return memory_info_to_replica(
+            mem_info=proto_replica.memory_info,
             artifact_id=proto_replica.ref.artifact_id,
-            byte_space=byte_space,
-            node_id=proto_replica.memory_info.node_id,
-            node_address=proto_replica.memory_info.node_address,
-            node_port=proto_replica.memory_info.node_port,
-            memory_size=proto_replica.memory_info.memory_size,
-            memory_type=MemoryType(dom_mem_type),
-            device_id=proto_replica.memory_info.device_id,
             max_concurrency=proto_replica.stats.max_concurrency,
+            worker_id=worker_id,
+            require_view_id=False,
+            replica_id=replica_id,
             current_requests=proto_replica.stats.current_requests,
             is_available=proto_replica.stats.is_available,
-            remote_memory_keys=list(proto_replica.memory_info.remote_memory_keys),
-            buffer_sizes=list(proto_replica.memory_info.buffer_sizes),
-            worker_id=worker_id,
         )
 
     def _compute_state_checksum(self, replicas: list[Replica]) -> str:
@@ -704,7 +735,7 @@ class RecoveryService:
             observe_state_sync(duration, success=False)
 
             logger.exception(f"Full state sync failed for worker {worker_id}: {e}")
-            return False, [], 0, "", False
+        return False, [], 0, "", False
 
     def is_recovery_complete(self) -> bool:
         """Check if recovery process is complete."""

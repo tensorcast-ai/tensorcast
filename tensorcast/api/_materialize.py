@@ -161,6 +161,15 @@ def _tensor_payload_from_proto(
     )
 
 
+def _export_policy_to_proto(value: str | None) -> store_daemon_pb2.ExportPolicy:
+    normalized = "never" if value is None else str(value).strip().lower()
+    if normalized == "force":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_FORCE
+    if normalized == "auto":
+        return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_AUTO
+    return store_daemon_pb2.ExportPolicy.EXPORT_POLICY_NEVER
+
+
 def materialize_artifact_v2(
     *,
     client: DaemonCtl,
@@ -174,7 +183,6 @@ def materialize_artifact_v2(
     view_id: str | None = None,
     placement: store_daemon_pb2.TransformPlacement | None = None,
     canonical_index_hint: bytes | None = None,
-    disk_path_hint: str | None = None,
     preference: store_daemon_pb2.SourcePreference | None = None,
     source_policy: store_daemon_pb2.SourcePolicy | None = None,
     tensor_names: Sequence[str] | None = None,
@@ -189,8 +197,8 @@ def materialize_artifact_v2(
 ) -> MaterializationPayload:
     if artifact_id is not None and key is not None:
         raise ValueError("Exactly one of artifact_id or key must be provided")
-    if artifact_id is None and key is None and not disk_path_hint:
-        raise ValueError("Either artifact_id, key, or disk_path_hint is required")
+    if artifact_id is None and key is None:
+        raise ValueError("Either artifact_id or key is required")
     if view is not None and view_id is not None:
         raise ValueError("Specify at most one of view or view_id")
 
@@ -227,7 +235,7 @@ def materialize_artifact_v2(
     )
 
     replica_uuid_value = replica_uuid or new_uuid()
-    disk_path: str | None = disk_path_hint
+    disk_path: str | None = None
     view_index_bytes: bytes | None = None
     materialized_source: store_daemon_pb2.MaterializationSource | None = None
 
@@ -264,6 +272,7 @@ def materialize_artifact_v2(
             )
         else:
             preference_value = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
+        export_policy = _export_policy_to_proto(opts.export_policy)
         response: (
             store_daemon_pb2.MaterializeReplicaResponse
             | store_daemon_pb2.MaterializeByKeyResponse
@@ -280,15 +289,15 @@ def materialize_artifact_v2(
                 device_uuid=request_device_uuid,
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
+                wait_for_shared_disk_ms=opts.wait_for_shared_disk_ms,
                 view=view,
                 view_id=view_id,
                 placement=placement,
                 return_response=True,
-                disk_path=disk_path_hint,
                 preference=preference_value,
                 source_policy=source_policy,
+                export_policy=export_policy,
                 tensor_names=tensor_names,
-                verify_checksums=verify_checksums,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
                 lease_mode=lease_mode,
@@ -309,9 +318,11 @@ def materialize_artifact_v2(
                 else int(dev_id),
                 pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
                 wait_for_completion=opts.wait_for_completion,
+                wait_for_shared_disk_ms=opts.wait_for_shared_disk_ms,
                 return_response=True,
                 preference=preference_value,
                 source_policy=source_policy,
+                export_policy=export_policy,
                 tensor_names=tensor_names,
                 view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
@@ -324,42 +335,9 @@ def materialize_artifact_v2(
                 )
             disk_path = response.used_disk_path or disk_path
             materialized_source = response.source
-        elif disk_path_hint:
-            # Disk-only materialization: no artifact_id or key, just a disk path.
-            # The daemon loads directly from disk via DiskFallbackHint.
-            response = client.materialize_by_artifact_id_v2(
-                artifact_id="",
-                replica_uuid=replica_uuid_value,
-                device_uuid=(
-                    ""
-                    if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                    else device_uuid_for(dev_id)
-                ),
-                pinned_allocation_timeout_ms=opts.pinned_allocation_timeout_ms,
-                wait_for_completion=opts.wait_for_completion,
-                view=view,
-                view_id=view_id,
-                placement=placement,
-                return_response=True,
-                disk_path=disk_path_hint,
-                preference=store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK,
-                source_policy=source_policy,
-                tensor_names=tensor_names,
-                verify_checksums=verify_checksums,
-                view_subset_hash=view_subset_hash,
-                target_device_type=target_device_type,
-                lease_mode=lease_mode,
-                timeout_s=effective_timeout_s,
-            )
-            if not isinstance(response, store_daemon_pb2.MaterializeReplicaResponse):
-                raise DaemonUnavailable(
-                    "Daemon returned unexpected response type for disk materialization v2"
-                )
-            disk_path = response.disk_path or disk_path
-            materialized_source = response.source
         else:
             raise ValueError(
-                "artifact_id, key, or disk_path_hint is required for materialize_artifact_v2"
+                "artifact_id or key is required for materialize_artifact_v2"
             )
 
     ticket_replica_uuid: str | None = None

@@ -71,6 +71,12 @@ class ReplicaRuntime {
 
   void set_replica_publish_state(const loading::ReplicaKey& key, ReplicaPublishState state);
   ReplicaPublishState get_replica_publish_state(const loading::ReplicaKey& key) const;
+  ReplicaTransportState get_transport_state(const loading::ReplicaKey& key) const;
+  void update_transport_state(const loading::ReplicaKey& key, const ReplicaTransportState& state);
+  void clear_transport_state(const loading::ReplicaKey& key);
+  void set_replica_global_id(const loading::ReplicaKey& key, std::string replica_id);
+  std::optional<std::string> get_replica_global_id(const loading::ReplicaKey& key) const;
+  void clear_replica_global_id(const loading::ReplicaKey& key);
 
   absl::StatusOr<ExportRegistration> enable_remote_replica_access(
       const loading::ReplicaKey& key,
@@ -130,6 +136,12 @@ class ReplicaRuntime {
   mutable absl::Mutex publish_state_mu_;
   absl::flat_hash_map<loading::ReplicaKey, ReplicaPublishState, loading::ReplicaKeyHash> publish_states_
       ABSL_GUARDED_BY(publish_state_mu_);
+  mutable absl::Mutex transport_state_mu_;
+  absl::flat_hash_map<loading::ReplicaKey, ReplicaTransportState, loading::ReplicaKeyHash> transport_states_
+      ABSL_GUARDED_BY(transport_state_mu_);
+  mutable absl::Mutex replica_id_mu_;
+  absl::flat_hash_map<loading::ReplicaKey, std::string, loading::ReplicaKeyHash> replica_ids_
+      ABSL_GUARDED_BY(replica_id_mu_);
 };
 
 } // namespace tensorcast::store::runtime

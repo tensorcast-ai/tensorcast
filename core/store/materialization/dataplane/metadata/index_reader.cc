@@ -1,9 +1,11 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
+#include <iterator>
 #include <system_error>
 
 #include "absl/log/log.h"
@@ -19,12 +21,12 @@
 namespace tensorcast::store::loader {
 namespace {
 
-uint64_t compute_total_size_bytes(const std::string& canonical_index_json) {
-  if (canonical_index_json.empty()) {
+uint64_t compute_total_size_bytes(std::string_view index_json) {
+  if (index_json.empty()) {
     return 0;
   }
   try {
-    const nlohmann::json idx = nlohmann::json::parse(canonical_index_json, nullptr, true);
+    const nlohmann::json idx = nlohmann::json::parse(index_json, nullptr, true);
     uint64_t total_size = 0;
     for (auto it = idx.begin(); it != idx.end(); ++it) {
       const auto& arr = it.value();
@@ -57,14 +59,38 @@ absl::StatusOr<std::string> load_tensor_index_json(const std::filesystem::path& 
   }
 }
 
+absl::StatusOr<std::string> load_tensor_index_cbor(const std::filesystem::path& tensor_index_path) {
+  std::ifstream f(tensor_index_path, std::ios::binary);
+  if (!f.is_open()) {
+    return absl::NotFoundError(absl::StrCat("tensor_index.cbor not found at ", tensor_index_path.string()));
+  }
+  std::vector<std::uint8_t> bytes;
+  bytes.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+  if (bytes.empty()) {
+    return absl::InternalError("tensor_index.cbor is empty");
+  }
+  try {
+    nlohmann::json j = nlohmann::json::from_cbor(bytes);
+    return j.dump();
+  } catch (const std::exception& e) {
+    LOG(WARNING) << "Failed to read/parse tensor_index.cbor: " << e.what();
+    return absl::InternalError("Failed to parse tensor_index.cbor");
+  }
+}
+
 IndexInfo make_index_info(
     std::string canonical_json,
     bool is_safetensors,
-    std::optional<std::string_view> existing_index_multihash) {
+    std::optional<std::string_view> existing_index_multihash,
+    std::optional<std::string> source_json = std::nullopt) {
   IndexInfo info;
   info.is_safetensors = is_safetensors;
   info.total_size_bytes = compute_total_size_bytes(canonical_json);
   info.canonical_index_json = std::move(canonical_json);
+  if (source_json.has_value() && !source_json->empty()) {
+    info.source_total_size_bytes = compute_total_size_bytes(*source_json);
+    info.source_index_json = std::move(source_json);
+  }
   if (existing_index_multihash.has_value() && !existing_index_multihash->empty()) {
     info.index_multihash = std::string(*existing_index_multihash);
   } else {
@@ -78,24 +104,6 @@ IndexInfo make_index_info(
     }
   }
   return info;
-}
-
-bool contains_safetensors(const std::filesystem::path& artifact_path) {
-  std::error_code ec;
-  for (const auto& entry : std::filesystem::directory_iterator(artifact_path, ec)) {
-    if (ec) {
-      LOG(WARNING) << "Failed to enumerate artifact directory '" << artifact_path.string() << "': " << ec.message();
-      return false;
-    }
-    if (!entry.is_regular_file()) {
-      continue;
-    }
-    const std::string name = entry.path().filename().string();
-    if (absl::EndsWith(name, ".safetensors")) {
-      return true;
-    }
-  }
-  return false;
 }
 
 std::vector<std::filesystem::path> collect_safetensors(const std::filesystem::path& artifact_path) {
@@ -136,12 +144,22 @@ absl::StatusOr<IndexInfo> build_from_safetensors(
   if (safetensor_files.empty()) {
     return absl::NotFoundError("No safetensors files provided");
   }
-  auto index_bytes_or = loader::BuildCanonicalIndexFromSafetensors(safetensor_files);
-  if (!index_bytes_or.ok()) {
-    LOG(WARNING) << "Failed to build canonical index from safetensors: " << index_bytes_or.status();
-    return index_bytes_or.status();
+  auto source_bytes_or = loader::BuildSourceIndexFromSafetensors(safetensor_files);
+  if (!source_bytes_or.ok()) {
+    LOG(WARNING) << "Failed to build source index from safetensors: " << source_bytes_or.status();
+    return source_bytes_or.status();
   }
-  return make_index_info(std::move(index_bytes_or).value(), /*is_safetensors=*/true, existing_index_multihash);
+  auto canonical_bytes_or =
+      loader::build_coalesced_canonical_index_from_source_index_json(*source_bytes_or, /*align_bytes=*/8);
+  if (!canonical_bytes_or.ok()) {
+    LOG(WARNING) << "Failed to build canonical index from safetensors: " << canonical_bytes_or.status();
+    return canonical_bytes_or.status();
+  }
+  return make_index_info(
+      std::move(canonical_bytes_or).value(),
+      /*is_safetensors=*/true,
+      existing_index_multihash,
+      std::move(source_bytes_or).value());
 }
 
 absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& artifact_path, int target_device_id) {
@@ -164,22 +182,44 @@ absl::StatusOr<IndexInfo> read_from_artifact_dir(const std::filesystem::path& ar
         absl::StrCat("Expected artifact path to be a directory: ", artifact_path.string()));
   }
 
-  if (contains_safetensors(artifact_path)) {
-    auto files = collect_safetensors(artifact_path);
+  const auto index_json_path = artifact_path / "tensor_index.json";
+  const auto index_cbor_path = artifact_path / "tensor_index.cbor";
+  std::error_code index_ec;
+  const bool has_json = std::filesystem::exists(index_json_path, index_ec);
+  if (index_ec) {
+    return absl::ErrnoToStatus(
+        index_ec.value(), absl::StrCat("Failed to stat tensor_index.json at ", index_json_path.string()));
+  }
+  if (has_json) {
+    auto raw_or = load_tensor_index_json(index_json_path);
+    if (!raw_or.ok()) {
+      return raw_or.status();
+    }
+    return canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+  }
+
+  const bool has_cbor = std::filesystem::exists(index_cbor_path, index_ec);
+  if (index_ec) {
+    return absl::ErrnoToStatus(
+        index_ec.value(), absl::StrCat("Failed to stat tensor_index.cbor at ", index_cbor_path.string()));
+  }
+  if (has_cbor) {
+    auto raw_or = load_tensor_index_cbor(index_cbor_path);
+    if (!raw_or.ok()) {
+      return raw_or.status();
+    }
+    return canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+  }
+
+  auto files = collect_safetensors(artifact_path);
+  if (!files.empty()) {
     return build_from_safetensors(files, std::nullopt);
   }
 
-  const auto index_json_path = artifact_path / "tensor_index.json";
-  if (!std::filesystem::exists(index_json_path)) {
-    return absl::NotFoundError(
-        absl::StrCat("tensor_index.json not found in artifact directory: ", artifact_path.string()));
-  }
-
-  auto raw_or = load_tensor_index_json(index_json_path);
-  if (!raw_or.ok()) {
-    return raw_or.status();
-  }
-  return canonicalize_from_raw_json(std::move(raw_or).value(), target_device_id);
+  return absl::NotFoundError(
+      absl::StrCat(
+          "tensor_index.json/tensor_index.cbor not found and no .safetensors files in artifact directory: ",
+          artifact_path.string()));
 }
 
 } // namespace tensorcast::store::loader

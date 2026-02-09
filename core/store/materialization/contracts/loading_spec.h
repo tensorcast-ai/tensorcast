@@ -36,6 +36,8 @@ enum class SourcePreference : uint8_t { kUnspecified, kAuto, kPreferP2P, kPrefer
 
 enum class MaterializationSource : uint8_t { kUnspecified, kDisk, kP2P, kLocalReplica };
 
+enum class ExportPolicy : uint8_t { kUnspecified, kNever, kAuto, kForce };
+
 struct MaterializeIntoTargetResult {
   MaterializationSource source{MaterializationSource::kUnspecified};
 };
@@ -86,9 +88,11 @@ struct DiskMetadata {
   bool descriptor_present{false};
   std::optional<std::string> schema_version;
   std::optional<std::string> canonical_index_json;
+  std::optional<std::string> source_index_json;
   std::optional<std::string> index_multihash;
   std::optional<std::string> data_multihash;
   std::optional<uint64_t> logical_total_size;
+  std::optional<uint64_t> source_total_size_bytes;
   std::optional<bool> is_safetensors;
 };
 
@@ -97,7 +101,6 @@ struct MaterializeHints {
   std::chrono::milliseconds pinned_timeout{0};
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
-  std::string disk_path;
   bool prefer_pageable_cpu{false};
   std::optional<DiskMetadata> disk_metadata;
 
@@ -106,6 +109,7 @@ struct MaterializeHints {
   SourcePreference source_preference{SourcePreference::kAuto};
   bool allow_p2p{true};
   bool allow_disk{true};
+  ExportPolicy export_policy{ExportPolicy::kNever};
 
   std::optional<VariantIdentity> variant;
 };

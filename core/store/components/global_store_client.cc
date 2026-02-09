@@ -92,6 +92,33 @@ const char* status_to_cstr(global_store::Status s) {
   }
 }
 
+const char* rpc_service_for_method(absl::string_view method_name) {
+  if (method_name == "HealthCheck" || method_name == "GetServerInfo") {
+    return "tensorcast.global_store.v1.ClusterAdminService";
+  }
+  if (method_name == "AcquireOperationLease" || method_name == "KeepaliveOperationLease" ||
+      method_name == "ReleaseOperationLease" || method_name == "GetOperation" || method_name == "UpdateOperation" ||
+      method_name == "PlanPlacement" || method_name == "ReportPersistenceStatus") {
+    return "tensorcast.global_store.v1.WorkflowOrchestrationService";
+  }
+  if (method_name == "GetArtifactBinding" || method_name == "UpsertArtifactBinding" ||
+      method_name == "GetArtifactIndex" || method_name == "GetArtifactIndexById" ||
+      method_name == "UpsertArtifactDiskLocation" || method_name == "ListArtifactDiskLocations" ||
+      method_name == "UpsertKeyMapping" || method_name == "SwapKeyMapping" || method_name == "ResolveKeyMapping" ||
+      method_name == "RevokeKeyMapping") {
+    return "tensorcast.global_store.v1.ArtifactCatalogService";
+  }
+  if (method_name == "GetArtifactInfoById" || method_name == "UpdateArtifactViewState" ||
+      method_name == "WriteTensorProofCommitments" || method_name == "CheckProofCommitmentsMatch" ||
+      method_name == "ListViews" || method_name == "PutLayoutSpec" || method_name == "GetLayoutSpec" ||
+      method_name == "GetAssemblyLayoutBinding" || method_name == "UpdateAssemblyLayoutBinding" ||
+      method_name == "AttachLayoutToArtifact" || method_name == "ListArtifactLayouts" ||
+      method_name == "GetAssemblyRuntimePolicy" || method_name == "UpdateAssemblyRuntimePolicy") {
+    return "tensorcast.global_store.v1.AssemblyViewService";
+  }
+  return "tensorcast.global_store.v1.ClusterRuntimeService";
+}
+
 memory_tier::LeaseKind to_proto_kind(MemoryTierLeaseKind kind) {
   switch (kind) {
     case MemoryTierLeaseKind::kPreemptible:
@@ -109,20 +136,6 @@ MemoryTierLeaseKind from_proto_kind(memory_tier::LeaseKind kind) {
     case memory_tier::LEASE_KIND_STABLE:
     default:
       return MemoryTierLeaseKind::kStable;
-  }
-}
-
-memory_tier::LeaseState to_proto_state(MemoryTierLeaseState state) {
-  switch (state) {
-    case MemoryTierLeaseState::kActive:
-      return memory_tier::LEASE_STATE_ACTIVE;
-    case MemoryTierLeaseState::kRevoking:
-      return memory_tier::LEASE_STATE_REVOKING;
-    case MemoryTierLeaseState::kExpired:
-      return memory_tier::LEASE_STATE_EXPIRED;
-    case MemoryTierLeaseState::kPending:
-    default:
-      return memory_tier::LEASE_STATE_PENDING;
   }
 }
 
@@ -214,9 +227,21 @@ std::shared_ptr<grpc::Channel> make_channel(const GlobalStoreClientConfig& confi
 GlobalStoreClient::GlobalStoreClient(GlobalStoreClientConfig config)
     : config_(std::move(config)),
       channel_(gsl::not_null<std::shared_ptr<grpc::Channel>>(make_channel(config_))),
-      stub_(
-          gsl::not_null<std::unique_ptr<global_store::GlobalStoreService::Stub>>(
-              global_store::GlobalStoreService::NewStub(channel_.get()))),
+      cluster_runtime_stub_(
+          gsl::not_null<std::unique_ptr<global_store::ClusterRuntimeService::Stub>>(
+              global_store::ClusterRuntimeService::NewStub(channel_.get()))),
+      artifact_catalog_stub_(
+          gsl::not_null<std::unique_ptr<global_store::ArtifactCatalogService::Stub>>(
+              global_store::ArtifactCatalogService::NewStub(channel_.get()))),
+      assembly_view_stub_(
+          gsl::not_null<std::unique_ptr<global_store::AssemblyViewService::Stub>>(
+              global_store::AssemblyViewService::NewStub(channel_.get()))),
+      workflow_orchestration_stub_(
+          gsl::not_null<std::unique_ptr<global_store::WorkflowOrchestrationService::Stub>>(
+              global_store::WorkflowOrchestrationService::NewStub(channel_.get()))),
+      cluster_admin_stub_(
+          gsl::not_null<std::unique_ptr<global_store::ClusterAdminService::Stub>>(
+              global_store::ClusterAdminService::NewStub(channel_.get()))),
       memory_tier_stub_(
           gsl::not_null<std::unique_ptr<memory_tier::MemoryTierService::Stub>>(
               memory_tier::MemoryTierService::NewStub(channel_.get()))) {}
@@ -243,11 +268,11 @@ absl::Status GlobalStoreClient::initialize() {
   auto span = tracer->StartSpan("GlobalStore/HealthCheck", opts);
   otel::trace::Scope scope(span);
   span->SetAttribute("rpc.system", "grpc");
-  span->SetAttribute("rpc.service", "tensorcast.global_store.GlobalStoreService");
+  span->SetAttribute("rpc.service", "tensorcast.global_store.v1.ClusterAdminService");
   span->SetAttribute("rpc.method", "HealthCheck");
   tensorcast::common::otel::inject_into_client_metadata(context);
 
-  auto status = stub_->HealthCheck(&context, req, &resp);
+  auto status = cluster_admin_stub_->HealthCheck(&context, req, &resp);
   if (!status.ok()) {
     return absl::UnavailableError(
         absl::StrFormat(
@@ -468,7 +493,7 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RegisterWorker(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) { return cluster_runtime_stub_->RegisterWorker(ctx, req, resp); },
       "RegisterWorker");
 
   if (!status.ok()) {
@@ -544,7 +569,7 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WorkerHeartbeat(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) { return cluster_runtime_stub_->WorkerHeartbeat(ctx, req, resp); },
       "WorkerHeartbeat(enhanced)",
       rpc_options);
   if (!status.ok())
@@ -569,7 +594,9 @@ absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bo
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UnregisterWorker(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->UnregisterWorker(ctx, req, resp);
+      },
       "UnregisterWorker");
 
   if (!status.ok()) {
@@ -615,7 +642,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RegisterReplica(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) { return cluster_runtime_stub_->RegisterReplica(ctx, req, resp); },
       "RegisterReplica");
 
   if (!status.ok()) {
@@ -704,7 +731,9 @@ absl::Status GlobalStoreClient::update_artifact_view_state(const ViewStateUpdate
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpdateArtifactViewState(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->UpdateArtifactViewState(ctx, req, resp);
+      },
       "UpdateArtifactViewState");
   if (!status.ok()) {
     return status;
@@ -739,7 +768,7 @@ absl::StatusOr<std::vector<ViewInfo>> GlobalStoreClient::list_views(std::string_
     auto status = execute_rpc_with_retry(
         request,
         &response,
-        [this](auto* ctx, const auto& req, auto* resp) { return stub_->ListViews(ctx, req, resp); },
+        [this](auto* ctx, const auto& req, auto* resp) { return assembly_view_stub_->ListViews(ctx, req, resp); },
         "ListViews");
     if (!status.ok()) {
       return status;
@@ -795,7 +824,9 @@ absl::StatusOr<global_store::AssemblyLayoutBinding> GlobalStoreClient::get_assem
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetAssemblyLayoutBinding(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->GetAssemblyLayoutBinding(ctx, req, resp);
+      },
       "GetAssemblyLayoutBinding");
   if (!status.ok()) {
     return status;
@@ -828,7 +859,7 @@ absl::StatusOr<layout::LayoutSpecRecord> GlobalStoreClient::get_layout_spec(std:
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetLayoutSpec(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) { return assembly_view_stub_->GetLayoutSpec(ctx, req, resp); },
       "GetLayoutSpec");
   if (!status.ok()) {
     return status;
@@ -861,7 +892,9 @@ absl::Status GlobalStoreClient::attach_layout_to_artifact(std::string_view mi2_i
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->AttachLayoutToArtifact(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->AttachLayoutToArtifact(ctx, req, resp);
+      },
       "AttachLayoutToArtifact");
   if (!status.ok()) {
     return status;
@@ -892,7 +925,9 @@ absl::StatusOr<std::vector<std::string>> GlobalStoreClient::list_artifact_layout
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ListArtifactLayouts(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->ListArtifactLayouts(ctx, req, resp);
+      },
       "ListArtifactLayouts");
   if (!status.ok()) {
     return status;
@@ -928,7 +963,9 @@ absl::StatusOr<global_store::WriteTensorProofCommitmentsResponse> GlobalStoreCli
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->WriteTensorProofCommitments(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->WriteTensorProofCommitments(ctx, req, resp);
+      },
       "WriteTensorProofCommitments");
   if (!status.ok()) {
     return status;
@@ -959,7 +996,9 @@ absl::StatusOr<global_store::CheckProofCommitmentsMatchResponse> GlobalStoreClie
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->CheckProofCommitmentsMatch(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->CheckProofCommitmentsMatch(ctx, req, resp);
+      },
       "CheckProofCommitmentsMatch");
   if (!status.ok()) {
     return status;
@@ -990,7 +1029,9 @@ absl::StatusOr<global_store::AssemblyRuntimePolicy> GlobalStoreClient::get_assem
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetAssemblyRuntimePolicy(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->GetAssemblyRuntimePolicy(ctx, req, resp);
+      },
       "GetAssemblyRuntimePolicy");
   if (!status.ok()) {
     return status;
@@ -1018,7 +1059,9 @@ absl::StatusOr<operation::AcquireOperationLeaseResponse> GlobalStoreClient::acqu
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->AcquireOperationLease(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->AcquireOperationLease(ctx, req, resp);
+      },
       "AcquireOperationLease");
   if (!status.ok()) {
     return status;
@@ -1036,7 +1079,9 @@ absl::StatusOr<operation::KeepaliveOperationLeaseResponse> GlobalStoreClient::ke
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->KeepaliveOperationLease(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->KeepaliveOperationLease(ctx, req, resp);
+      },
       "KeepaliveOperationLease");
   if (!status.ok()) {
     return status;
@@ -1054,7 +1099,9 @@ absl::StatusOr<operation::ReleaseOperationLeaseResponse> GlobalStoreClient::rele
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ReleaseOperationLease(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->ReleaseOperationLease(ctx, req, resp);
+      },
       "ReleaseOperationLease");
   if (!status.ok()) {
     return status;
@@ -1072,7 +1119,9 @@ absl::StatusOr<operation::GetOperationResponse> GlobalStoreClient::get_operation
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetOperation(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->GetOperation(ctx, req, resp);
+      },
       "GetOperation");
   if (!status.ok()) {
     return status;
@@ -1089,7 +1138,9 @@ absl::Status GlobalStoreClient::update_operation(const operation::UpdateOperatio
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpdateOperation(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->UpdateOperation(ctx, req, resp);
+      },
       "UpdateOperation");
   if (!status.ok()) {
     return status;
@@ -1110,7 +1161,9 @@ absl::StatusOr<ArtifactBinding> GlobalStoreClient::get_artifact_binding(std::str
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactBinding(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->GetArtifactBinding(ctx, req, resp);
+      },
       "GetArtifactBinding");
   if (!status.ok()) {
     return status;
@@ -1153,7 +1206,9 @@ absl::StatusOr<ArtifactBindingResult> GlobalStoreClient::upsert_artifact_binding
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpsertArtifactBinding(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->UpsertArtifactBinding(ctx, req, resp);
+      },
       "UpsertArtifactBinding");
   if (!status.ok()) {
     return status;
@@ -1214,9 +1269,6 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   if (!tensor_index_key.empty()) {
     mem_info->set_tensor_index_key(std::string(tensor_index_key));
   }
-  if (verification_json.has_value() && !verification_json->empty()) {
-    mem_info->set_verification_json(*verification_json);
-  }
   // Best-effort creation metadata
   {
     const auto now = std::chrono::system_clock::now();
@@ -1230,20 +1282,21 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     *request.mutable_descriptor_() = *descriptor;
   }
 
-  for (const auto& key : remote_memory_keys) {
-    mem_info->add_remote_memory_keys(key);
+  if (!remote_memory_keys.empty() || !buffer_sizes.empty() ||
+      (verification_json.has_value() && !verification_json->empty())) {
+    auto* transport = mem_info->mutable_transport();
+    transport->set_export_state(common::v1::ReplicaTransportMetadata::EXPORT_STATE_EXPORTABLE);
+    transport->set_export_generation(0);
+    for (const auto& key : remote_memory_keys) {
+      transport->add_remote_memory_keys(key);
+    }
+    for (const auto& sz : buffer_sizes) {
+      transport->add_buffer_sizes(sz);
+    }
+    if (verification_json.has_value() && !verification_json->empty()) {
+      transport->set_verification_json(*verification_json);
+    }
   }
-  for (const auto& sz : buffer_sizes) {
-    mem_info->add_buffer_sizes(sz);
-  }
-
-  // Attach remote memory keys and buffer sizes if present
-  // The header signature includes vectors; however, to maintain backward
-  // compatibility with existing callers we do not require them.
-  // Callers using enable_remote_replica_access should populate these via
-  // the Replica/CommunicationManager before calling this method.
-  // NOTE: We cannot reference parameters by name due to preexisting signature –
-  // adjust after refactor if needed.
 
   // Optionally include canonical index data for UPSERT on first write.
   if (tensor_index_data.has_value() && !tensor_index_data->empty()) {
@@ -1264,7 +1317,7 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RegisterReplica(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) { return cluster_runtime_stub_->RegisterReplica(ctx, req, resp); },
       "RegisterReplica(memory)");
 
   if (!status.ok()) {
@@ -1300,7 +1353,9 @@ absl::Status GlobalStoreClient::unregister_replica(std::string_view artifact_id,
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UnregisterReplica(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->UnregisterReplica(ctx, req, resp);
+      },
       "UnregisterReplica");
 
   if (!status.ok()) {
@@ -1333,7 +1388,9 @@ absl::Status GlobalStoreClient::unregister_replica_by_worker(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UnregisterReplicaByWorker(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->UnregisterReplicaByWorker(ctx, req, resp);
+      },
       "UnregisterReplicaByWorker");
   if (!status.ok()) {
     return status;
@@ -1342,6 +1399,104 @@ absl::Status GlobalStoreClient::unregister_replica_by_worker(
     return absl::InternalError(absl::StrFormat("UnregisterReplicaByWorker failed with status: %d", response.status()));
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<bool> GlobalStoreClient::mark_replica_unavailable(
+    std::string_view artifact_id,
+    std::string_view replica_id,
+    std::optional<std::string_view> reason,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+  global_store::MarkReplicaUnavailableRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_replica_id(std::string(replica_id));
+  if (reason.has_value()) {
+    request.set_reason(std::string(*reason));
+  }
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::MarkReplicaUnavailableResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->MarkReplicaUnavailable(ctx, req, resp);
+      },
+      "MarkReplicaUnavailable");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "MarkReplicaUnavailable failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  return response.updated();
+}
+
+absl::StatusOr<ReplicaDrainStatus> GlobalStoreClient::wait_replica_drain(
+    std::string_view replica_id,
+    uint32_t timeout_ms,
+    std::optional<std::string_view> operation_id) {
+  if (!is_connected()) {
+    return absl::FailedPreconditionError("GlobalStoreClient not connected");
+  }
+  if (replica_id.empty()) {
+    return absl::InvalidArgumentError("replica_id is required");
+  }
+
+  global_store::WaitReplicaDrainRequest request;
+  request.set_replica_id(std::string(replica_id));
+  request.set_timeout_ms(timeout_ms);
+  if (operation_id.has_value()) {
+    request.set_operation_id(std::string(*operation_id));
+  }
+
+  global_store::WaitReplicaDrainResponse response;
+  RpcOptions rpc_opts;
+  if (timeout_ms > 0) {
+    rpc_opts.timeout = absl::Milliseconds(timeout_ms) + absl::Seconds(1);
+  }
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->WaitReplicaDrain(ctx, req, resp);
+      },
+      "WaitReplicaDrain",
+      rpc_opts);
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError("replica not found");
+  }
+  if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_TIMED_OUT) {
+    return absl::InternalError(
+        absl::StrFormat(
+            "WaitReplicaDrain failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  ReplicaDrainStatus out;
+  out.drained = response.drained();
+  out.current_requests = response.current_requests();
+  if (response.has_oldest_transport_age_ms()) {
+    out.oldest_transport_age_ms = response.oldest_transport_age_ms();
+  }
+  return out;
 }
 
 absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
@@ -1372,7 +1527,9 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_replica_transport(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RequestReplicaTransport(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->RequestReplicaTransport(ctx, req, resp);
+      },
       "RequestReplicaTransport");
 
   if (!status.ok()) {
@@ -1435,7 +1592,9 @@ absl::StatusOr<TransportSession> GlobalStoreClient::request_view_transport(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RequestReplicaTransport(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->RequestReplicaTransport(ctx, req, resp);
+      },
       "RequestReplicaTransport(view)");
 
   if (!status.ok()) {
@@ -1474,7 +1633,9 @@ absl::Status GlobalStoreClient::complete_replica_transport(std::string_view tran
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->CompleteReplicaTransport(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->CompleteReplicaTransport(ctx, req, resp);
+      },
       "CompleteReplicaTransport");
 
   if (!status.ok()) {
@@ -1506,7 +1667,9 @@ absl::StatusOr<std::vector<RemoteReplicaInfo>> GlobalStoreClient::get_artifact_r
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactInfoById(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->GetArtifactInfoById(ctx, req, resp);
+      },
       "GetArtifactInfoById");
 
   if (!status.ok()) {
@@ -1575,7 +1738,7 @@ absl::Status GlobalStoreClient::batch_update_chunk_states(
   auto st = execute_rpc_with_retry(
       req,
       &resp,
-      [this](auto* ctx, const auto& r, auto* o) { return stub_->BatchUpdateChunkStates(ctx, r, o); },
+      [this](auto* ctx, const auto& r, auto* o) { return cluster_runtime_stub_->BatchUpdateChunkStates(ctx, r, o); },
       "BatchUpdateChunkStates");
   if (!st.ok())
     return st;
@@ -1689,15 +1852,27 @@ RemoteReplicaInfo GlobalStoreClient::convert_from_proto_memory_info(const tensor
   replica.memory_type = convert_from_proto_memory_type(info.memory_type());
   replica.device_id = info.device_id();
 
-  for (const auto& key : info.remote_memory_keys()) {
-    replica.remote_memory_keys.push_back(key);
-  }
-
-  for (const auto& size : info.buffer_sizes()) {
-    replica.buffer_sizes.push_back(size);
-  }
-  if (!info.verification_json().empty()) {
-    replica.verification_json = info.verification_json();
+  if (info.has_transport()) {
+    const auto& transport = info.transport();
+    for (const auto& key : transport.remote_memory_keys()) {
+      replica.remote_memory_keys.push_back(key);
+    }
+    for (const auto& size : transport.buffer_sizes()) {
+      replica.buffer_sizes.push_back(size);
+    }
+    if (!transport.verification_json().empty()) {
+      replica.verification_json = transport.verification_json();
+    }
+  } else {
+    for (const auto& key : info.remote_memory_keys()) {
+      replica.remote_memory_keys.push_back(key);
+    }
+    for (const auto& size : info.buffer_sizes()) {
+      replica.buffer_sizes.push_back(size);
+    }
+    if (!info.verification_json().empty()) {
+      replica.verification_json = info.verification_json();
+    }
   }
   if (info.has_byte_space() && info.byte_space().kind() == tensorcast::common::v1::BYTE_SPACE_KIND_VIEW) {
     if (!info.byte_space().id().empty()) {
@@ -1754,7 +1929,7 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     auto span = tracer->StartSpan(absl::StrFormat("GlobalStore/%s", method_name), opts);
     otel::trace::Scope scope(span);
     span->SetAttribute("rpc.system", "grpc");
-    span->SetAttribute("rpc.service", "tensorcast.global_store.GlobalStoreService");
+    span->SetAttribute("rpc.service", rpc_service_for_method(method_name));
     span->SetAttribute("rpc.method", method_name);
     tensorcast::common::otel::inject_into_client_metadata(context);
 
@@ -1827,7 +2002,9 @@ absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_lo
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->QueryChunkLocations(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->QueryChunkLocations(ctx, req, resp);
+      },
       "QueryChunkLocations");
 
   if (!status.ok()) {
@@ -1899,7 +2076,9 @@ absl::StatusOr<StateSyncResult> GlobalStoreClient::synchronize_worker_state(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->SynchronizeWorkerState(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->SynchronizeWorkerState(ctx, req, resp);
+      },
       "SynchronizeWorkerState",
       rpc_options);
   if (!status.ok())
@@ -1937,7 +2116,9 @@ absl::StatusOr<FullStateSyncResult> GlobalStoreClient::request_full_state_sync(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RequestFullStateSync(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return cluster_runtime_stub_->RequestFullStateSync(ctx, req, resp);
+      },
       "RequestFullStateSync",
       rpc_options);
   if (!status.ok())
@@ -1971,7 +2152,9 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ResolveKeyMapping(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->ResolveKeyMapping(ctx, req, resp);
+      },
       "ResolveKeyMapping");
 
   if (!status.ok()) {
@@ -1985,20 +2168,19 @@ absl::StatusOr<KeyMapping> GlobalStoreClient::resolve_key_mapping(std::string_vi
       .artifact_id = response.artifact_id(),
       .replica_uuid = response.replica_uuid(),
       .daemon_address = response.daemon_address(),
-      .disk_path = response.disk_path(),
   };
+  out.generation = response.generation();
+  out.cache_ttl_seconds = response.cache_ttl_seconds();
   return out;
 }
 
 absl::Status GlobalStoreClient::upsert_key_mapping(
     std::string_view key,
     std::string_view artifact_id,
-    std::string_view disk_path,
     absl::Duration ttl) {
   global_store::UpsertKeyMappingRequest request;
   request.set_key(std::string(key));
   request.set_artifact_id(std::string(artifact_id));
-  request.set_disk_path(std::string(disk_path));
   if (ttl > absl::ZeroDuration()) {
     auto* d = request.mutable_ttl();
     d->set_seconds(absl::ToInt64Seconds(ttl));
@@ -2009,7 +2191,9 @@ absl::Status GlobalStoreClient::upsert_key_mapping(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->UpsertKeyMapping(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->UpsertKeyMapping(ctx, req, resp);
+      },
       "UpsertKeyMapping");
   if (!status.ok())
     return status;
@@ -2017,6 +2201,39 @@ absl::Status GlobalStoreClient::upsert_key_mapping(
     return absl::AlreadyExistsError("key mapping conflict or error");
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<KeyMappingSwapResult> GlobalStoreClient::swap_key_mapping(
+    std::string_view key,
+    std::string_view new_artifact_id,
+    std::optional<std::string_view> expected_artifact_id,
+    std::optional<uint64_t> expected_generation) {
+  global_store::SwapKeyMappingRequest request;
+  request.set_key(std::string(key));
+  request.set_new_artifact_id(std::string(new_artifact_id));
+  if (expected_artifact_id.has_value()) {
+    request.set_expected_artifact_id(std::string(*expected_artifact_id));
+  }
+  if (expected_generation.has_value()) {
+    request.set_expected_generation(*expected_generation);
+  }
+
+  global_store::SwapKeyMappingResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return artifact_catalog_stub_->SwapKeyMapping(ctx, req, resp); },
+      "SwapKeyMapping");
+  if (!status.ok()) {
+    return status;
+  }
+
+  KeyMappingSwapResult result{
+      .ok = response.status() == global_store::STATUS_OK,
+      .artifact_id = response.artifact_id(),
+      .generation = response.generation(),
+  };
+  return result;
 }
 
 absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
@@ -2027,7 +2244,9 @@ absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->RevokeKeyMapping(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->RevokeKeyMapping(ctx, req, resp);
+      },
       "RevokeKeyMapping");
   if (!status.ok())
     return status;
@@ -2035,6 +2254,97 @@ absl::Status GlobalStoreClient::revoke_key_mapping(std::string_view key) {
     return absl::NotFoundError("key not found");
   }
   return absl::OkStatus();
+}
+
+absl::StatusOr<std::string> GlobalStoreClient::get_cluster_id() {
+  global_store::GetServerInfoRequest request;
+  global_store::GetServerInfoResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) { return cluster_admin_stub_->GetServerInfo(ctx, req, resp); },
+      "GetServerInfo");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError("GetServerInfo failed");
+  }
+  if (response.cluster_id().empty()) {
+    return absl::NotFoundError("cluster_id unavailable");
+  }
+  return response.cluster_id();
+}
+
+absl::Status GlobalStoreClient::upsert_artifact_disk_location(
+    std::string_view artifact_id,
+    std::string_view cluster_id,
+    std::string_view relative_path,
+    global_store::DiskLocationKind kind,
+    bool is_deleted) {
+  global_store::UpsertArtifactDiskLocationRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_cluster_id(std::string(cluster_id));
+  request.set_relative_path(std::string(relative_path));
+  request.set_kind(kind);
+  request.set_is_deleted(is_deleted);
+
+  global_store::UpsertArtifactDiskLocationResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->UpsertArtifactDiskLocation(ctx, req, resp);
+      },
+      "UpsertArtifactDiskLocation");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::InternalError("artifact disk location upsert failed");
+  }
+  return absl::OkStatus();
+}
+
+absl::StatusOr<std::vector<ArtifactDiskLocation>> GlobalStoreClient::list_artifact_disk_locations(
+    std::string_view artifact_id,
+    bool include_deleted) {
+  global_store::ListArtifactDiskLocationsRequest request;
+  request.set_artifact_id(std::string(artifact_id));
+  request.set_include_deleted(include_deleted);
+
+  global_store::ListArtifactDiskLocationsResponse response;
+  auto status = execute_rpc_with_retry(
+      request,
+      &response,
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->ListArtifactDiskLocations(ctx, req, resp);
+      },
+      "ListArtifactDiskLocations");
+  if (!status.ok()) {
+    return status;
+  }
+  if (response.status() != global_store::STATUS_OK) {
+    return absl::NotFoundError("artifact disk locations not found");
+  }
+
+  std::vector<ArtifactDiskLocation> out;
+  out.reserve(response.locations_size());
+  for (const auto& loc : response.locations()) {
+    ArtifactDiskLocation entry;
+    entry.artifact_id = loc.artifact_id();
+    entry.cluster_id = loc.cluster_id();
+    entry.relative_path = loc.relative_path();
+    entry.kind = loc.kind();
+    entry.is_deleted = loc.is_deleted();
+    entry.created_at = timestamp_to_absl(loc.created_at());
+    entry.updated_at = timestamp_to_absl(loc.updated_at());
+    if (loc.has_deleted_at()) {
+      entry.deleted_at = timestamp_to_absl(loc.deleted_at());
+    }
+    out.push_back(std::move(entry));
+  }
+  return out;
 }
 
 absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::string_view artifact_id) {
@@ -2045,7 +2355,9 @@ absl::StatusOr<std::string> GlobalStoreClient::get_artifact_index_by_id(std::str
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactIndexById(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return artifact_catalog_stub_->GetArtifactIndexById(ctx, req, resp);
+      },
       "GetArtifactIndexById");
   if (!status.ok())
     return status;
@@ -2086,7 +2398,9 @@ absl::StatusOr<ViewMetadata> GlobalStoreClient::get_view_metadata(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->GetArtifactInfoById(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return assembly_view_stub_->GetArtifactInfoById(ctx, req, resp);
+      },
       "GetArtifactInfoById");
   if (!status.ok()) {
     return status;
@@ -2144,7 +2458,9 @@ absl::StatusOr<PlacementPlanResult> GlobalStoreClient::plan_placement(
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->PlanPlacement(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->PlanPlacement(ctx, req, resp);
+      },
       "PlanPlacement");
   if (!status.ok()) {
     return status;
@@ -2228,7 +2544,9 @@ absl::Status GlobalStoreClient::report_persistence_status(const PersistenceRepor
   auto status = execute_rpc_with_retry(
       request,
       &response,
-      [this](auto* ctx, const auto& req, auto* resp) { return stub_->ReportPersistenceStatus(ctx, req, resp); },
+      [this](auto* ctx, const auto& req, auto* resp) {
+        return workflow_orchestration_stub_->ReportPersistenceStatus(ctx, req, resp);
+      },
       "ReportPersistenceStatus");
   if (!status.ok()) {
     return status;

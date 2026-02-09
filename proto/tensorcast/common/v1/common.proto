@@ -37,6 +37,21 @@ enum MemoryType {
   MEMORY_TYPE_DISK = 3;
 }
 
+message ReplicaTransportMetadata {
+  enum ExportState {
+    EXPORT_STATE_UNSPECIFIED = 0;
+    EXPORT_STATE_PRESENCE_ONLY = 1;
+    EXPORT_STATE_EXPORTABLE = 2;
+    EXPORT_STATE_DRAINING = 3;
+  }
+
+  ExportState export_state = 1;
+  uint64 export_generation = 2;
+  repeated string remote_memory_keys = 3;
+  repeated uint64 buffer_sizes = 4;
+  string verification_json = 5;
+}
+
 enum ByteSpaceKind {
   BYTE_SPACE_KIND_UNSPECIFIED = 0;
   BYTE_SPACE_KIND_CANONICAL = 1;
@@ -79,6 +94,9 @@ message MemoryInfo {
   string verification_json = 14;
   google.protobuf.Timestamp expires_at = 15;
   ByteSpaceRef byte_space = 16;
+  // Presence is critical: when present, the payload is authoritative even if
+  // keys/sizes are empty (intentional withdraw/clear).
+  optional ReplicaTransportMetadata transport = 17;
 }
 
 message ReplicaRef {

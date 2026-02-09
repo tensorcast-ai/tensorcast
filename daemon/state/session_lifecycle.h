@@ -157,6 +157,15 @@ class SessionLifecycleManager {
   // Attach a PID monitor (owned by the caller) for event-driven PID exit handling.
   void attach_pid_monitor(PidMonitor* mon) ABSL_LOCKS_EXCLUDED(mu_);
 
+  // External PID liveness watches (for resources that are not modeled as leases,
+  // e.g. long-lived VRAM region registrations with ttl_ms==0).
+  //
+  // These are reference-counted: callers should pair watch/unwatch. When the
+  // last external watch is removed and no lease PID guards remain, the PID is
+  // unwatched from the monitor.
+  void watch_pid(pid_t pid) ABSL_LOCKS_EXCLUDED(mu_);
+  void unwatch_pid(pid_t pid) ABSL_LOCKS_EXCLUDED(mu_);
+
   // Query counters for eviction and status.
   [[nodiscard]] size_t use_count_for(const store::loading::ReplicaKey& key) const ABSL_LOCKS_EXCLUDED(mu_);
 
@@ -209,6 +218,7 @@ class SessionLifecycleManager {
   absl::flat_hash_map<store::loading::ReplicaKey, Counts, store::loading::ReplicaKeyHash> counters_
       ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<pid_t, std::unordered_set<GuardId>> pid_index_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<pid_t, uint32_t> external_pid_watches_ ABSL_GUARDED_BY(mu_);
   std::function<void(const ReplicaSubject&)> eviction_notify_ ABSL_GUARDED_BY(mu_);
   std::function<void(absl::Time)> schedule_hook_ ABSL_GUARDED_BY(mu_);
 

@@ -18,6 +18,7 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/components/stable_dram_cache_policy.h"
 #include "core/store/components/worker_identity.h"
+#include "core/store/materialization/contracts/byte_range/byte_range_map.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/memory_tier_budget.h"
 #include "core/store/memory_tier_config.h"
@@ -29,6 +30,7 @@
 #include "core/store/runtime/metadata/metadata_gateway.h"
 #include "core/store/runtime/metadata/metadata_types.h"
 #include "core/store/runtime/replica/replica_info.h"
+#include "core/store/runtime/replica/replica_promotion_manager.h"
 #include "core/store/runtime/replica/replica_runtime.h"
 #include "core/store/runtime/runtime_env.h"
 #include "core/store/seal_assembly_result.h"
@@ -78,14 +80,25 @@ class StoreEngine {
   absl::StatusOr<loading::ReplicaHandle> materialize_replica(
       const DeviceKey& target_device,
       MaterializeMode mode = MaterializeMode::AUTO,
-      const loading::MaterializeHints& hints = {});
+      const loading::MaterializeHints& hints = {},
+      std::optional<loading::DiskSource> disk_source = std::nullopt);
 
   absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_into_target(
       const DeviceKey& target_device,
       const loading::IntoTargetLayout& target_layout,
       std::string_view canonical_index_json,
       uint64_t generation,
-      const loading::MaterializeHints& hints = {});
+      const loading::MaterializeHints& hints = {},
+      std::optional<loading::DiskSource> disk_source = std::nullopt);
+
+  absl::StatusOr<loading::MaterializeIntoTargetResult> materialize_mapped_into_target(
+      const DeviceKey& target_device,
+      const loading::IntoTargetLayout& target_layout,
+      const loader::ByteRangeMap& mapping,
+      std::string_view canonical_index_json,
+      uint64_t generation,
+      const loading::MaterializeHints& hints = {},
+      std::optional<loading::DiskSource> disk_source = std::nullopt);
 
   absl::StatusOr<loading::ReplicaHandle> materialize_view_from_assembly(
       std::string_view assembly_id,
@@ -199,6 +212,12 @@ class StoreEngine {
       std::optional<std::string_view> view_id = std::nullopt) const;
 
   [[nodiscard]] std::vector<ReplicaInventoryEntry> get_ha_inventory() const;
+  [[nodiscard]] std::optional<std::string> get_replica_global_store_id(const loading::ReplicaKey& key) const;
+  void set_replica_global_store_id(const loading::ReplicaKey& key, std::string replica_id);
+
+  [[nodiscard]] const StoreEngineOptions& options() const {
+    return options_;
+  }
 
   /**
    * @brief Returns a unique GPU device ordinal if the artifact resides on exactly
@@ -214,6 +233,11 @@ class StoreEngine {
    * Ownership is shared so tests may reuse the stub beyond the StoreEngine lifetime.
    */
   void set_global_store_client_for_testing(std::shared_ptr<components::IGlobalStoreClient> client);
+  void set_promotion_sync_hooks(runtime::PromotionSyncHooks hooks);
+
+  [[nodiscard]] runtime::ReplicaPromotionManager* promotion_manager() const {
+    return promotion_manager_.get();
+  }
 
   void set_stable_cache_spill_evictable(
       std::function<bool(const loading::ReplicaKey&, const components::StableDramCachePolicy&)> callback);
@@ -303,8 +327,12 @@ class StoreEngine {
   absl::Status upsert_key_mapping(
       std::string_view key,
       std::string_view artifact_id,
-      std::string_view disk_path = {},
       absl::Duration ttl = absl::ZeroDuration());
+  absl::StatusOr<components::KeyMappingSwapResult> swap_key_mapping(
+      std::string_view key,
+      std::string_view new_artifact_id,
+      std::optional<std::string_view> expected_artifact_id = std::nullopt,
+      std::optional<uint64_t> expected_generation = std::nullopt);
   absl::StatusOr<std::string> get_canonical_index_by_id(std::string_view artifact_id);
   absl::StatusOr<components::ViewMetadata> get_view_metadata(std::string_view artifact_id, std::string_view view_id);
   absl::Status revoke_key_mapping(std::string_view key);
@@ -358,6 +386,9 @@ class StoreEngine {
   // device ordinal. Returns empty on miss.
   [[nodiscard]] std::vector<replica::ChunkState> get_chunk_states_cpu_uma(std::string_view artifact_id) const;
 
+  // Returns base pointer for the CPU replica if loaded.
+  [[nodiscard]] absl::StatusOr<void*> get_replica_cpu_base_ptr(std::string_view artifact_id) const;
+
   // VS chunk locking APIs have been removed in UMA V3 final state.
 
   // Expose the configured communication manager to daemon for P2P export paths
@@ -384,6 +415,7 @@ class StoreEngine {
 
   std::unique_ptr<runtime::RuntimeEnv> runtime_env_;
   std::unique_ptr<runtime::ReplicaRuntime> replica_runtime_;
+  std::unique_ptr<runtime::ReplicaPromotionManager> promotion_manager_;
   std::unique_ptr<runtime::metadata::MetadataGateway> metadata_gateway_;
   std::unique_ptr<runtime::IngestionRuntime> ingestion_runtime_;
   static absl::StatusOr<loading::ReplicaHandle> ingest_from_buffer_internal(

@@ -7,7 +7,8 @@ description: ByteRangeMap/Program semantics, compilation, and execution pipeline
 
 This document describes the unified byte-range mapping and execution engine used across view selection, assembly,
 hashing, and materialize-into-target flows. It focuses on execution semantics and invariants, and defers canonical
-index format details to `docs/internals/canonical-index.md`.
+index format details to `docs/internals/canonical-index.md`. Source-aware scheduling (for non-canonical disk layouts)
+is covered below.
 
 # Scope
 
@@ -53,6 +54,20 @@ and `read_into_at`. Execution assumes total byte length is stable and known at c
 4) **Execute**: `ByteRangeMappedSource` runs the program against sized sources and writes into sinks or hashing.
 
 Missing coverage is detected before compilation. The executor never invents bytes to hide missing coverage.
+
+# Source-Aware Scheduling (Canonical → Source)
+
+Some disk formats (notably safetensors) expose a physical payload layout that differs from the canonical ByteSpace
+used for identity and views. In those cases:
+
+- A **canonical→source** map is built by pairing canonical offsets with source offsets (strict name/size validation).
+- View selection remains canonical; if a view is requested, the view map can be composed with the canonical→source
+  map to produce a single **view→source** plan, avoiding nested mapping sources.
+- The executor may choose a **source-ordered window schedule** that sorts DATA segments by source offset, merges
+  adjacent windows under gap/amplification limits, reads sequentially, and scatters into canonical destinations.
+
+This scheduling strategy changes only execution order; the realized destination bytes are identical to canonical-
+ordered execution. PAD ranges are still explicitly zero-filled.
 
 # Strided Coalescing
 
