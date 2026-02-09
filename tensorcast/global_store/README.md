@@ -474,8 +474,13 @@ Use `GlobalStoreServicer.reset_state()` for integration test isolation. It trunc
 ## Running
 
 ```bash
-# With config file
+# With explicit config file
 uv run -m tensorcast.global_store --config config/global_store.yaml
+
+# Or rely on config discovery:
+#   1) $TENSORCAST_GLOBAL_STORE_CONFIG
+#   2) examples/config/global_store_config.yaml (repo or packaged wheel)
+uv run -m tensorcast.global_store
 
 # Programmatically (for tests)
 servicer = GlobalStoreServicer(db_file=None)  # in-memory

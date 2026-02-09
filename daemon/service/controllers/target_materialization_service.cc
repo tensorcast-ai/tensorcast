@@ -234,7 +234,7 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
   context.gs_connected = global_store_client && global_store_client->is_connected();
   context.normalized_disk_path = resolve_managed_disk_path(
       global_store_client.get(), storage_path, context.resolved_artifact_id, context.effective_policy.allow_disk);
-  if (!context.normalized_disk_path.has_value() && !context.gs_connected && context.effective_policy.allow_disk) {
+  if (!context.normalized_disk_path.has_value() && context.effective_policy.allow_disk) {
     auto entry = disk_imports.lookup_import(context.resolved_artifact_id);
     if (entry.has_value()) {
       context.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);

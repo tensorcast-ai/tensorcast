@@ -191,10 +191,7 @@ def _read_auto_state_locked() -> dict[str, object]:
     if status not in _AUTO_STATUS_VALUES:
         status = _AUTO_STATUS_EMPTY
     normalized["status"] = status
-    try:
-        normalized["epoch"] = max(0, int(normalized.get("epoch", 0) or 0))
-    except Exception:
-        normalized["epoch"] = 0
+    normalized["epoch"] = max(0, _coerce_int(normalized.get("epoch"), default=0))
     return normalized
 
 
@@ -231,6 +228,34 @@ def _auto_wait_timeout_seconds() -> float:
     if value <= 0:
         return _AUTO_WAIT_TIMEOUT_SECONDS
     return value
+
+
+def _coerce_int(value: object, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_float(value: object, *, default: float = 0.0) -> float:
+    if isinstance(value, bool):
+        return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (str, bytes, bytearray)):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
 
 
 def _hash_file(path: Path | None) -> str | None:
@@ -298,13 +323,13 @@ def _auto_error(
     state: dict[str, object],
     wait_s: float | None = None,
 ) -> RuntimeError:
-    owner_pid = int(state.get("owner_pid", 0) or 0)
-    epoch = int(state.get("epoch", 0) or 0)
+    owner_pid = _coerce_int(state.get("owner_pid"), default=0)
+    epoch = _coerce_int(state.get("epoch"), default=0)
     session = str(state.get("session_id", "") or "")
     address = str(state.get("address", "") or "")
     logs_dir = str(state.get("logs_dir", "") or "")
     config_hash = str(state.get("config_hash", "") or "")
-    started_at = float(state.get("started_at", 0.0) or 0.0)
+    started_at = _coerce_float(state.get("started_at"), default=0.0)
     elapsed = max(0.0, time.time() - started_at) if started_at > 0 else 0.0
     wait_text = f", wait_s={wait_s:.2f}" if wait_s is not None else ""
     return RuntimeError(
@@ -505,17 +530,25 @@ def _init_auto_mode(
                 and state_address == existing_address
             )
             if enforce_hash and state_hash and state_hash != expected_hash:
-                raise _auto_error(
-                    code="AUTO_CONFIG_MISMATCH",
-                    reason="auto init configuration hash differs from active state",
-                    state=state,
-                )
-            if status == _AUTO_STATUS_FAILED:
+                hash_owner_pid = _coerce_int(state.get("owner_pid"), default=0)
+                if not _owner_alive(hash_owner_pid, state.get("owner_fingerprint")):
+                    reset_state = True
+                    _write_auto_state_locked(_default_auto_state())
+                    next_action = "reset"
+                else:
+                    raise _auto_error(
+                        code="AUTO_CONFIG_MISMATCH",
+                        reason="auto init configuration hash differs from active state",
+                        state=state,
+                    )
+            if next_action == "reset":
+                pass
+            elif status == _AUTO_STATUS_FAILED:
                 if existing_address:
                     connect_address = existing_address
                     next_action = "connect"
                 else:
-                    owner_pid = int(state.get("owner_pid", 0) or 0)
+                    owner_pid = _coerce_int(state.get("owner_pid"), default=0)
                     if owner_pid > 0 and not _owner_alive(
                         owner_pid, state.get("owner_fingerprint")
                     ):
@@ -531,7 +564,7 @@ def _init_auto_mode(
                             state=state,
                         )
             elif status == _AUTO_STATUS_READY:
-                owner_pid = int(state.get("owner_pid", 0) or 0)
+                owner_pid = _coerce_int(state.get("owner_pid"), default=0)
                 if owner_pid > 0 and not _owner_alive(
                     owner_pid, state.get("owner_fingerprint")
                 ):
@@ -553,34 +586,35 @@ def _init_auto_mode(
                             state=state,
                         )
             elif status == _AUTO_STATUS_STARTING:
-                owner_pid = int(state.get("owner_pid", 0) or 0)
+                owner_pid = _coerce_int(state.get("owner_pid"), default=0)
                 if not _owner_alive(owner_pid, state.get("owner_fingerprint")):
-                    raise _auto_error(
-                        code="AUTO_OWNER_LOST",
-                        reason="leader process exited before daemon became ready",
-                        state=state,
-                    )
-                started_at = float(state.get("started_at", 0.0) or 0.0)
-                elapsed = max(0.0, time.time() - started_at) if started_at > 0 else 0.0
-                if elapsed > timeout_s:
-                    raise _auto_error(
-                        code="AUTO_START_TIMEOUT",
-                        reason="waiting for leader startup timed out",
-                        state=state,
-                        wait_s=elapsed,
-                    )
-                if existing_address:
-                    connect_address = existing_address
-                    next_action = "connect"
+                    reset_state = True
+                    _write_auto_state_locked(_default_auto_state())
+                    next_action = "reset"
                 else:
-                    next_action = "wait"
+                    started_at = _coerce_float(state.get("started_at"), default=0.0)
+                    elapsed = (
+                        max(0.0, time.time() - started_at) if started_at > 0 else 0.0
+                    )
+                    if elapsed > timeout_s:
+                        raise _auto_error(
+                            code="AUTO_START_TIMEOUT",
+                            reason="waiting for leader startup timed out",
+                            state=state,
+                            wait_s=elapsed,
+                        )
+                    if existing_address:
+                        connect_address = existing_address
+                        next_action = "connect"
+                    else:
+                        next_action = "wait"
             else:
                 if existing_address:
                     connect_address = existing_address
                     next_action = "connect"
                 else:
                     leader_session_id = session_id
-                    epoch = int(state.get("epoch", 0) or 0) + 1
+                    epoch = _coerce_int(state.get("epoch"), default=0) + 1
                     leader_state = {
                         "schema_version": _AUTO_STATE_SCHEMA_VERSION,
                         "status": _AUTO_STATUS_STARTING,
@@ -620,7 +654,7 @@ def _init_auto_mode(
                 latest_status = str(
                     latest_state.get("status", _AUTO_STATUS_EMPTY)
                 ).upper()
-                latest_owner_pid = int(latest_state.get("owner_pid", 0) or 0)
+                latest_owner_pid = _coerce_int(latest_state.get("owner_pid"), default=0)
                 latest_owner_alive = _owner_alive(
                     latest_owner_pid, latest_state.get("owner_fingerprint")
                 )
@@ -650,7 +684,9 @@ def _init_auto_mode(
                         if isinstance(refreshed_address_raw, str)
                         else ""
                     )
-                    refreshed_owner_pid = int(refreshed.get("owner_pid", 0) or 0)
+                    refreshed_owner_pid = _coerce_int(
+                        refreshed.get("owner_pid"), default=0
+                    )
                     if (
                         refreshed_status in {_AUTO_STATUS_READY, _AUTO_STATUS_FAILED}
                         and refreshed_address == connect_address
@@ -756,9 +792,12 @@ def init(
         show_daemon_logs: Mirror daemon stdout/stderr to the current console when
             launching locally.
         global_store_mode: connect|start|none orchestration mode shared with CLI.
+            Applies only when launching daemon (mode="create"|"auto").
         global_store_address: Optional Global Store host:port to connect.
+            Applies only when launching daemon (mode="create"|"auto").
         global_store_config_path: Optional Global Store config path used when
-            global_store_mode="start". If omitted, the Global Store launcher
+            global_store_mode="start". Applies only when launching daemon
+            (mode="create"|"auto"). If omitted, the Global Store launcher
             discovers one via $TENSORCAST_GLOBAL_STORE_CONFIG or
             examples/config/global_store_config.yaml (repo or packaged wheel).
         cluster_id: Optional cluster identity to enforce when connecting/starting GS.
@@ -777,6 +816,18 @@ def init(
 
         if mode == "connect":
             # Connect path: never start/stop daemon; just bind to an existing session.
+            if (
+                global_store_mode != "none"
+                or global_store_address is not None
+                or global_store_config_path is not None
+            ):
+                logger.warning(
+                    "init(mode='connect') does not reconfigure daemon Global Store settings; "
+                    "global_store_mode/global_store_address/global_store_config_path are ignored. "
+                    "Set Global Store when creating/starting daemon via "
+                    "tc.init(mode='create'|'auto', ...) or "
+                    "`uv run tensorcast-cli daemon start ...`."
+                )
             target_address: str | None = None
             if address and address not in {"auto", "local"}:
                 target_address = address

@@ -38,18 +38,15 @@ dynamic = ["version"]
 
 [dependency-groups]
 dev = [
-    "accelerate>=1.6.0",
     "clang-format>=20.1.0",
     "clang-tidy>=20.1.0",
     "einops>=0.8.1",
     "grpcio-tools<=1.73.1",
     "httpx>=0.28.1",
-    "huggingface-hub[hf-xet]>=0.30.2",
     "hypothesis>=6.135.26",
     "ipdb>=0.13.13",
     "ipynb>=0.5.1",
     "mypy>=1.15.0",
-    "peft>=0.15.2",
     "pre-commit>=4.2.0",
     "pyright>=1.1.403",
     "pytest>=8.3.5",
@@ -57,11 +54,7 @@ dev = [
     "pytest-xdist>=3.8.0",
     "rich-click>=1.8.9",
     "ruff>=0.11.2",
-    "safetensors>=0.5.3",
-    "tiktoken>=0.9.0",
     "toml>=0.10.2",
-    "transformers>=4.51.3",
-    "transformers-stream-generator>=0.0.5",
     "types-protobuf==5.28.3.20241203",
 ]
 

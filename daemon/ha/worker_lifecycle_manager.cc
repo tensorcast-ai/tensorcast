@@ -381,17 +381,21 @@ absl::Status WorkerLifecycleManager::start() {
   LOG(INFO) << "Global Store registration endpoints: listen=" << opts_.listen_addr << " advertise=" << node_addr << ":"
             << grpc_port << " p2p_port=" << opts_.p2p_port;
 
-  auto reg_or = global_store_->register_worker(
-      node_id_,
-      node_addr,
-      grpc_port,
-      opts_.p2p_port,
-      engine_->get_mem_pool_size(),
-      engine_->get_available_memory(),
-      /*is_recovery_registration=*/false,
-      /*previous_worker_id=*/"",
-      /*daemon_id=*/daemon_id_,
-      /*capability_flags=*/opts_.capability_flags);
+  absl::StatusOr<store::components::WorkerRegistrationInfo> reg_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    reg_or = global_store_->register_worker(
+        node_id_,
+        node_addr,
+        grpc_port,
+        opts_.p2p_port,
+        engine_->get_mem_pool_size(),
+        engine_->get_available_memory(),
+        /*is_recovery_registration=*/false,
+        /*previous_worker_id=*/"",
+        /*daemon_id=*/daemon_id_,
+        /*capability_flags=*/opts_.capability_flags);
+  }
   if (!reg_or.ok())
     return reg_or.status();
   {
@@ -446,11 +450,15 @@ absl::Status WorkerLifecycleManager::start() {
 
   // Initial full-state sync: query GS for expected replicas and evict local
   // replicas not present in the expected set to remove drift.
-  auto full_or = global_store_->request_full_state_sync(
-      reg_or->worker_id,
-      reg_or->expected_state_version,
-      next_state_sync_token(state_sync_epoch_.load()),
-      build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+  absl::StatusOr<store::components::FullStateSyncResult> full_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    full_or = global_store_->request_full_state_sync(
+        reg_or->worker_id,
+        reg_or->expected_state_version,
+        next_state_sync_token(state_sync_epoch_.load()),
+        build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+  }
   if (full_or.ok()) {
     if (!full_or->ignored) {
       {
@@ -668,18 +676,22 @@ void WorkerLifecycleManager::heartbeat_loop() {
         std::lock_guard<std::mutex> lock(state_mu_);
         state_checksum_ = checksum;
       }
-      auto hb_or = global_store_->send_heartbeat_enhanced(
-          worker_id,
-          engine_->get_available_memory(),
-          accepting,
-          state_version,
-          checksum,
-          registered_ids,
-          last_sync_success_ts,
-          global_store::CONNECTION_STATUS_CONNECTED,
-          build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
-          daemon_id_,
-          opts_.capability_flags);
+      absl::StatusOr<global_store::WorkerHeartbeatResponse> hb_or;
+      {
+        std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+        hb_or = global_store_->send_heartbeat_enhanced(
+            worker_id,
+            engine_->get_available_memory(),
+            accepting,
+            state_version,
+            checksum,
+            registered_ids,
+            last_sync_success_ts,
+            global_store::CONNECTION_STATUS_CONNECTED,
+            build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
+            daemon_id_,
+            opts_.capability_flags);
+      }
       if (stop_.load() || hb_epoch_.load() != epoch) {
         break;
       }
@@ -960,11 +972,15 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   }
 
   const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && inventory.empty();
-  auto sync_or = global_store_->synchronize_worker_state(
-      local_state,
-      force_full_sync,
-      next_state_sync_token(epoch),
-      build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
+  absl::StatusOr<store::components::StateSyncResult> sync_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    sync_or = global_store_->synchronize_worker_state(
+        local_state,
+        force_full_sync,
+        next_state_sync_token(epoch),
+        build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
+  }
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
@@ -1109,11 +1125,15 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       counter->Add(1);
     }
     // Fallback to full-state sync if server indicates desync or errors persist
-    auto full_or = global_store_->request_full_state_sync(
-        worker_id,
-        state_version,
-        next_state_sync_token(epoch),
-        build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+    absl::StatusOr<store::components::FullStateSyncResult> full_or;
+    {
+      std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+      full_or = global_store_->request_full_state_sync(
+          worker_id,
+          state_version,
+          next_state_sync_token(epoch),
+          build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+    }
     if (stop_.load() || state_sync_epoch_.load() != epoch) {
       return;
     }
@@ -1158,17 +1178,21 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   const bool recovery = preserve_identity && !previous_worker_id.empty();
   LOG(INFO) << "Resolved advertised address for Global Store re-registration: " << node_addr
             << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
-  auto reg_or = global_store_->register_worker(
-      node_id_,
-      node_addr,
-      grpc_port,
-      opts_.p2p_port,
-      engine_->get_mem_pool_size(),
-      engine_->get_available_memory(),
-      /*is_recovery_registration=*/recovery,
-      /*previous_worker_id=*/recovery ? std::string_view(previous_worker_id) : std::string_view{},
-      /*daemon_id=*/daemon_id_,
-      /*capability_flags=*/opts_.capability_flags);
+  absl::StatusOr<store::components::WorkerRegistrationInfo> reg_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    reg_or = global_store_->register_worker(
+        node_id_,
+        node_addr,
+        grpc_port,
+        opts_.p2p_port,
+        engine_->get_mem_pool_size(),
+        engine_->get_available_memory(),
+        /*is_recovery_registration=*/recovery,
+        /*previous_worker_id=*/recovery ? std::string_view(previous_worker_id) : std::string_view{},
+        /*daemon_id=*/daemon_id_,
+        /*capability_flags=*/opts_.capability_flags);
+  }
   if (!reg_or.ok())
     return reg_or.status();
   const std::string& new_worker_id = reg_or->worker_id;
@@ -1183,11 +1207,15 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Perform a best-effort full-state sync after re-registration
-  auto full_or = global_store_->request_full_state_sync(
-      new_worker_id,
-      reg_or->expected_state_version,
-      next_state_sync_token(state_sync_epoch_.load()),
-      build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+  absl::StatusOr<store::components::FullStateSyncResult> full_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    full_or = global_store_->request_full_state_sync(
+        new_worker_id,
+        reg_or->expected_state_version,
+        next_state_sync_token(state_sync_epoch_.load()),
+        build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
+  }
   if (full_or.ok()) {
     if (!full_or->ignored) {
       {

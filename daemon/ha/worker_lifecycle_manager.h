@@ -132,6 +132,9 @@ class WorkerLifecycleManager {
   const WorkerLifecyclePorts ports_;
   const Options opts_;
   const std::string daemon_id_;
+  // Serialize control-plane RPCs that update the same worker row in Global Store
+  // (heartbeat/state-sync/full-sync/register) to avoid write-write conflicts.
+  mutable std::mutex worker_control_plane_rpc_mu_;
 
   static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
       const Options& opts);

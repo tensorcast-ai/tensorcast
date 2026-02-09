@@ -62,6 +62,16 @@ class WorkerRepository(BaseRepository):
         with self._write_lock, super().transaction() as cursor:
             yield cursor
 
+    @staticmethod
+    def _is_write_conflict(exc: Exception) -> bool:
+        message = str(exc).lower()
+        conflict_markers = (
+            "write-write conflict",
+            "conflict on update",
+            "failed to commit: write-write conflict on key",
+        )
+        return any(marker in message for marker in conflict_markers)
+
     def find_by_id(
         self, worker_id: str, *, include_inactive: bool = False
     ) -> Worker | None:
@@ -268,14 +278,33 @@ class WorkerRepository(BaseRepository):
             RETURNING workers.worker_id
         """
 
+        worker_ids = [worker_id for worker_id, _, _ in updates]
+        unique_worker_ids = list(dict.fromkeys(worker_ids))
+        seen_worker_ids: set[str] = set()
+        duplicate_worker_ids: set[str] = set()
+        for worker_id in worker_ids:
+            if worker_id in seen_worker_ids:
+                duplicate_worker_ids.add(worker_id)
+                continue
+            seen_worker_ids.add(worker_id)
+
         try:
             with self._write_lock:
                 cursor = self.get_cursor()
                 result = cursor.execute(sql, params)
                 updated_rows = result.fetchall()
                 return len(updated_rows)
-        except Exception:
-            logger.exception("Batch heartbeat update failed")
+        except Exception as exc:
+            is_conflict = self._is_write_conflict(exc)
+            logger.exception(
+                "Batch heartbeat update failed conflict=%s batch_size=%d unique_workers=%d "
+                "duplicate_worker_ids=%d worker_sample=%s",
+                is_conflict,
+                len(worker_ids),
+                len(unique_worker_ids),
+                len(duplicate_worker_ids),
+                unique_worker_ids[:8],
+            )
             return 0
 
     def delete(self, worker_id: str) -> bool:
@@ -300,20 +329,30 @@ class WorkerRepository(BaseRepository):
             List of (worker_id, node_id) tuples
         """
         cutoff_time = time.time() - timeout_seconds
-        with self._write_lock:
-            cursor = self.get_cursor()
-            rows = cursor.execute(
-                """
-                UPDATE workers
-                SET inactive_at = CURRENT_TIMESTAMP,
-                    accepting_new_requests = FALSE
-                WHERE inactive_at IS NULL
-                  AND EXTRACT(epoch FROM last_heartbeat) < ?
-                RETURNING worker_id, node_id
-                """,
-                [cutoff_time],
-            ).fetchall()
-            return rows
+        try:
+            with self._write_lock:
+                cursor = self.get_cursor()
+                rows = cursor.execute(
+                    """
+                    UPDATE workers
+                    SET inactive_at = CURRENT_TIMESTAMP,
+                        accepting_new_requests = FALSE
+                    WHERE inactive_at IS NULL
+                      AND EXTRACT(epoch FROM last_heartbeat) < ?
+                    RETURNING worker_id, node_id
+                    """,
+                    [cutoff_time],
+                ).fetchall()
+                return rows
+        except Exception as exc:
+            is_conflict = self._is_write_conflict(exc)
+            logger.exception(
+                "mark_inactive_by_timeout failed conflict=%s timeout_seconds=%.3f cutoff_ts=%.6f",
+                is_conflict,
+                timeout_seconds,
+                cutoff_time,
+            )
+            raise
 
     def delete_inactive(self, timeout_seconds: float) -> list[tuple[str, str]]:
         return self.mark_inactive_by_timeout(timeout_seconds)
