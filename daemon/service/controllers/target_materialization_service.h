@@ -8,6 +8,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
+#include "daemon/service/controllers/target_publish_service.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/ipc_region_registry.h"
@@ -59,7 +60,7 @@ class TargetMaterializationService {
   Dep d_;
   std::filesystem::path storage_path_;
   common::CapabilityTokenManager* capability_tokens_{nullptr};
-  TargetWriteRegistry target_write_registry_;
+  TargetPublishService target_publish_service_;
 };
 
 } // namespace tensorcast::daemon
