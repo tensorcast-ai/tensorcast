@@ -1035,14 +1035,6 @@ int main(int argc, char** argv) {
     if (cfg.high_availability().has_state_sync_rpc_max_retries()) {
       lopts.state_sync_rpc_max_retries = cfg.high_availability().state_sync_rpc_max_retries();
     }
-    if (cfg.high_availability().has_full_sync_rpc_timeout()) {
-      const auto& d = cfg.high_availability().full_sync_rpc_timeout();
-      lopts.full_sync_rpc_timeout_ms = static_cast<int>(d.seconds() * 1000 + d.nanos() / 1000000);
-    }
-    if (cfg.high_availability().has_full_sync_rpc_max_retries()) {
-      lopts.full_sync_rpc_max_retries = cfg.high_availability().full_sync_rpc_max_retries();
-    }
-    lopts.force_full_sync_on_empty_inventory = cfg.high_availability().force_full_sync_on_empty_inventory();
     lopts.cluster_token = cfg.meta().cluster_token();
     lopts.global_store_client = shared_global_store_client;
     lifecycle_opts = lopts;

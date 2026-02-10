@@ -48,26 +48,32 @@ struct RpcOptions {
 };
 
 struct StateSyncToken {
-  uint64_t epoch{0};
-  uint64_t request_id{0};
+  uint64_t generation{0};
+  uint64_t request_seq{0};
+};
+
+enum class ReconcileResultKind {
+  kUnspecified = 0,
+  kApplied,
+  kNoop,
+  kIgnoredStale,
+  kRetryLater,
+  kRebaseRequired,
+  kFatal,
 };
 
 struct StateSyncResult {
+  ReconcileResultKind result_kind{ReconcileResultKind::kUnspecified};
+  uint32_t retry_after_ms{0};
   uint64_t new_state_version{0};
   std::string new_state_checksum;
   std::vector<global_store::StateChange> state_changes;
-  bool ignored{false};
-};
-
-struct FullStateSyncResult {
-  uint64_t new_state_version{0};
-  std::string new_state_checksum;
   std::vector<common::v1::ReplicaInfo> expected_replicas;
-  bool ignored{false};
 };
 
 struct WorkerRegistrationInfo {
   std::string worker_id;
+  uint64_t reconcile_generation{1};
   uint64_t expected_state_version{0};
   bool state_sync_required{false};
   uint32_t heartbeat_interval_ms{0};
@@ -405,15 +411,11 @@ class IGlobalStoreClient {
       std::string_view artifact_id,
       const std::vector<uint32_t>& chunk_indices) = 0;
 
-  virtual absl::StatusOr<StateSyncResult> synchronize_worker_state(
-      const global_store::WorkerLocalState& local_state,
-      bool force_full_sync,
-      const StateSyncToken& token,
-      const RpcOptions& rpc_options = RpcOptions{}) = 0;
-
-  virtual absl::StatusOr<FullStateSyncResult> request_full_state_sync(
+  virtual absl::StatusOr<StateSyncResult> reconcile_worker_state(
       std::string_view worker_id,
-      uint64_t current_state_version,
+      std::string_view daemon_id,
+      const std::vector<common::v1::ReplicaInfo>& inventory,
+      bool snapshot_request,
       const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) = 0;
 
@@ -672,15 +674,11 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::vector<uint32_t>& chunk_indices) override;
 
   // HA State Synchronization
-  absl::StatusOr<StateSyncResult> synchronize_worker_state(
-      const global_store::WorkerLocalState& local_state,
-      bool force_full_sync,
-      const StateSyncToken& token,
-      const RpcOptions& rpc_options = RpcOptions{}) override;
-
-  absl::StatusOr<FullStateSyncResult> request_full_state_sync(
+  absl::StatusOr<StateSyncResult> reconcile_worker_state(
       std::string_view worker_id,
-      uint64_t current_state_version,
+      std::string_view daemon_id,
+      const std::vector<common::v1::ReplicaInfo>& inventory,
+      bool snapshot_request,
       const StateSyncToken& token,
       const RpcOptions& rpc_options = RpcOptions{}) override;
 

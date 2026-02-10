@@ -249,6 +249,45 @@ STATE_SYNC_DURATION_SECONDS = Histogram(
     ),
 )
 
+WORKER_CONTROL_REDUCER_QUEUE_DEPTH = Gauge(
+    "tc_worker_control_reducer_queue_depth",
+    "Current queue depth per worker control reducer shard.",
+    labelnames=("shard",),
+)
+
+WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS = Histogram(
+    "tc_worker_control_reducer_queue_latency_seconds",
+    "Queue wait latency for worker control reducer intents.",
+    buckets=(
+        0.0005,
+        0.001,
+        0.0025,
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1,
+        2,
+        5,
+        float("inf"),
+    ),
+)
+
+RECONCILE_RESULT_COUNTER = Counter(
+    "tc_reconcile_result_total",
+    "Total number of reconcile results emitted by Global Store.",
+    labelnames=("result_kind",),
+)
+
+CONTROL_PLANE_CONFLICT_COUNTER = Counter(
+    "tc_control_plane_conflicts_total",
+    "Total number of control-plane write conflicts observed by Global Store.",
+    labelnames=("scope",),
+)
+
 # Memory tier telemetry ------------------------------------------------------
 
 MEMORY_TIER_STABLE_BYTES = Gauge(
@@ -472,6 +511,26 @@ def observe_state_sync(duration_seconds: float, success: bool) -> None:
     result_label = "success" if success else "error"
     STATE_SYNC_COUNTER.labels(result=result_label).inc()
     STATE_SYNC_DURATION_SECONDS.observe(duration_seconds)
+
+
+def set_worker_control_reducer_queue_depth(*, shard: int, depth: int) -> None:
+    WORKER_CONTROL_REDUCER_QUEUE_DEPTH.labels(shard=str(int(shard))).set(max(0, depth))
+
+
+def observe_worker_control_reducer_queue_latency(*, wait_seconds: float) -> None:
+    WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS.observe(max(0.0, wait_seconds))
+
+
+def inc_reconcile_result(*, result_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    RECONCILE_RESULT_COUNTER.labels(result_kind=result_kind).inc(count)
+
+
+def inc_control_plane_conflict(*, scope: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    CONTROL_PLANE_CONFLICT_COUNTER.labels(scope=scope).inc(count)
 
 
 # ---------------------------------------------------------------------------

@@ -24,14 +24,14 @@ _WORKER_SELECT = """
         workers.grpc_port,
         workers.p2p_port,
         workers.mem_pool_total_size,
-        workers.mem_pool_available_size,
-        workers.accepting_new_requests,
-        workers.capability_flags,
+        COALESCE(worker_liveness.mem_pool_available_size, workers.mem_pool_total_size) AS mem_pool_available_size,
+        COALESCE(worker_liveness.accepting_new_requests, TRUE) AS accepting_new_requests,
+        COALESCE(worker_liveness.capability_flags, 0) AS capability_flags,
         workers.registered_at,
-        workers.last_heartbeat,
+        worker_liveness.last_heartbeat,
         workers.inactive_at,
-        COALESCE(workers.state_version, 1) AS state_version,
-        COALESCE(workers.state_checksum, '') AS state_checksum,
+        COALESCE(worker_reconcile_state.state_version, 1) AS state_version,
+        COALESCE(worker_reconcile_state.state_checksum, '') AS state_checksum,
         mt.stable_total_bytes,
         mt.stable_used_bytes,
         mt.preemptible_total_bytes,
@@ -42,6 +42,10 @@ _WORKER_SELECT = """
         mt.memory_tier_config_json,
         mt.snapshot_epoch_ns
     FROM workers
+    LEFT JOIN worker_liveness
+        ON worker_liveness.worker_id = workers.worker_id
+    LEFT JOIN worker_reconcile_state
+        ON worker_reconcile_state.worker_id = workers.worker_id
     LEFT JOIN node_memory_tier_latest AS mt
         ON mt.node_id = workers.node_id
 """
@@ -124,15 +128,13 @@ class WorkerRepository(BaseRepository):
 
     def create(self, worker: Worker) -> Worker:
         """Create a new worker."""
-        with self._write_lock:
-            cursor = self.get_cursor()
+        with self.transaction() as cursor:
             cursor.execute(
                 """
                 INSERT INTO workers (
                     worker_id, daemon_id, node_id, node_address, grpc_port, p2p_port,
-                    mem_pool_total_size, mem_pool_available_size,
-                    accepting_new_requests, capability_flags, state_version, state_checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    mem_pool_total_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     worker.worker_id,
@@ -142,14 +144,44 @@ class WorkerRepository(BaseRepository):
                     worker.grpc_port,
                     worker.p2p_port,
                     worker.mem_pool_total_size,
+                ],
+            )
+            cursor.execute(
+                """
+                INSERT INTO worker_liveness (
+                    worker_id,
+                    last_heartbeat,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    capability_flags,
+                    updated_at
+                ) VALUES (?, now(), ?, ?, ?, now())
+                """,
+                [
+                    worker.worker_id,
                     worker.mem_pool_available_size,
                     worker.accepting_new_requests,
                     int(worker.capability_flags),
-                    worker.state_version,
+                ],
+            )
+            cursor.execute(
+                """
+                INSERT INTO worker_reconcile_state (
+                    worker_id,
+                    generation,
+                    request_seq,
+                    state_version,
+                    state_checksum,
+                    last_reconcile_result,
+                    updated_at
+                ) VALUES (?, 1, 0, ?, ?, '', now())
+                """,
+                [
+                    worker.worker_id,
+                    max(1, int(worker.state_version)),
                     worker.state_checksum,
                 ],
             )
-
         return worker
 
     def create_or_update(self, worker: Worker) -> Worker:
@@ -162,24 +194,12 @@ class WorkerRepository(BaseRepository):
 
     def update(self, worker: Worker, *, reset_state_tracking: bool = False) -> Worker:
         """Update an existing worker."""
-        with self._write_lock:
-            cursor = self.get_cursor()
-            reset_clause = ""
-            if reset_state_tracking:
-                reset_clause = (
-                    ", state_version = 1, state_checksum = '',"
-                    " state_sync_epoch = 0, state_sync_request_id = 0"
-                )
+        with self.transaction() as cursor:
             result = cursor.execute(
-                f"""
+                """
                 UPDATE workers
                 SET daemon_id = ?, node_id = ?, node_address = ?, grpc_port = ?, p2p_port = ?,
-                    mem_pool_total_size = ?, mem_pool_available_size = ?,
-                    accepting_new_requests = ?,
-                    capability_flags = ?,
-                    last_heartbeat = CURRENT_TIMESTAMP,
-                    inactive_at = NULL
-                    {reset_clause}
+                    mem_pool_total_size = ?, inactive_at = NULL
                 WHERE worker_id = ?
                 RETURNING worker_id
                 """,
@@ -190,56 +210,173 @@ class WorkerRepository(BaseRepository):
                     worker.grpc_port,
                     worker.p2p_port,
                     worker.mem_pool_total_size,
-                    worker.mem_pool_available_size,
-                    worker.accepting_new_requests,
-                    int(worker.capability_flags),
                     worker.worker_id,
                 ],
             )
-
             if result.fetchone() is None:
                 raise ValueError(f"Worker {worker.worker_id} not found")
 
+            cursor.execute(
+                """
+                INSERT INTO worker_liveness (
+                    worker_id,
+                    last_heartbeat,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    capability_flags,
+                    updated_at
+                ) VALUES (?, now(), ?, ?, ?, now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    last_heartbeat = GREATEST(worker_liveness.last_heartbeat, EXCLUDED.last_heartbeat),
+                    mem_pool_available_size = EXCLUDED.mem_pool_available_size,
+                    accepting_new_requests = EXCLUDED.accepting_new_requests,
+                    capability_flags = EXCLUDED.capability_flags,
+                    updated_at = now()
+                """,
+                [
+                    worker.worker_id,
+                    worker.mem_pool_available_size,
+                    worker.accepting_new_requests,
+                    int(worker.capability_flags),
+                ],
+            )
+
+            if reset_state_tracking:
+                cursor.execute(
+                    """
+                    INSERT INTO worker_reconcile_state (
+                        worker_id,
+                        generation,
+                        request_seq,
+                        state_version,
+                        state_checksum,
+                        last_reconcile_result,
+                        updated_at
+                    ) VALUES (?, 1, 0, 1, '', '', now())
+                    ON CONFLICT (worker_id) DO UPDATE SET
+                        generation = worker_reconcile_state.generation + 1,
+                        request_seq = 0,
+                        state_version = 1,
+                        state_checksum = '',
+                        last_reconcile_result = '',
+                        updated_at = now()
+                    """,
+                    [worker.worker_id],
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO worker_reconcile_state (
+                        worker_id,
+                        generation,
+                        request_seq,
+                        state_version,
+                        state_checksum,
+                        last_reconcile_result,
+                        updated_at
+                    ) VALUES (?, 1, 0, 1, '', '', now())
+                    ON CONFLICT (worker_id) DO UPDATE SET
+                        generation = worker_reconcile_state.generation + 1,
+                        request_seq = 0,
+                        updated_at = now()
+                    """,
+                    [worker.worker_id],
+                )
         return worker
 
     def update_heartbeat(
         self, worker_id: str, mem_pool_available_size: int, accepting_new_requests: bool
     ) -> bool:
         """Update worker heartbeat and status."""
-        with self._write_lock:
-            cursor = self.get_cursor()
-            result = cursor.execute(
+        with self.transaction() as cursor:
+            row = cursor.execute(
                 """
-                UPDATE workers
-                SET last_heartbeat = CURRENT_TIMESTAMP,
-                    mem_pool_available_size = ?,
-                    accepting_new_requests = ?
-                WHERE worker_id = ?
-                  AND inactive_at IS NULL
-                RETURNING worker_id
+                SELECT COALESCE(worker_liveness.capability_flags, 0)
+                FROM workers
+                LEFT JOIN worker_liveness
+                  ON worker_liveness.worker_id = workers.worker_id
+                WHERE workers.worker_id = ?
+                  AND workers.inactive_at IS NULL
                 """,
-                [mem_pool_available_size, accepting_new_requests, worker_id],
-            )
+                [worker_id],
+            ).fetchone()
+            if row is None:
+                return False
 
-        return result.fetchone() is not None
+            cursor.execute(
+                """
+                INSERT INTO worker_liveness (
+                    worker_id,
+                    last_heartbeat,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    capability_flags,
+                    updated_at
+                ) VALUES (?, now(), ?, ?, ?, now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    last_heartbeat = GREATEST(worker_liveness.last_heartbeat, EXCLUDED.last_heartbeat),
+                    mem_pool_available_size = EXCLUDED.mem_pool_available_size,
+                    accepting_new_requests = EXCLUDED.accepting_new_requests,
+                    capability_flags = COALESCE(worker_liveness.capability_flags, EXCLUDED.capability_flags),
+                    updated_at = now()
+                """,
+                [
+                    worker_id,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    int(row[0] or 0),
+                ],
+            )
+            return True
 
     def update_capability_flags(self, worker_id: str, capability_flags: int) -> bool:
         """Update capability flags only when changed."""
-        with self._write_lock:
-            cursor = self.get_cursor()
+        with self.transaction() as cursor:
+            row = cursor.execute(
+                """
+                SELECT
+                    COALESCE(worker_liveness.last_heartbeat, now()),
+                    COALESCE(worker_liveness.mem_pool_available_size, workers.mem_pool_total_size),
+                    COALESCE(worker_liveness.accepting_new_requests, TRUE),
+                    COALESCE(worker_liveness.capability_flags, 0)
+                FROM workers
+                LEFT JOIN worker_liveness
+                  ON worker_liveness.worker_id = workers.worker_id
+                WHERE workers.worker_id = ?
+                  AND workers.inactive_at IS NULL
+                """,
+                [worker_id],
+            ).fetchone()
+            if row is None:
+                return False
+            if int(row[3] or 0) == int(capability_flags):
+                return False
             cursor.execute(
                 """
-                UPDATE workers
-                SET capability_flags = ?
-                WHERE worker_id = ?
-                  AND inactive_at IS NULL
-                  AND capability_flags != ?
-                RETURNING worker_id
+                INSERT INTO worker_liveness (
+                    worker_id,
+                    last_heartbeat,
+                    mem_pool_available_size,
+                    accepting_new_requests,
+                    capability_flags,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    last_heartbeat = EXCLUDED.last_heartbeat,
+                    mem_pool_available_size = EXCLUDED.mem_pool_available_size,
+                    accepting_new_requests = EXCLUDED.accepting_new_requests,
+                    capability_flags = EXCLUDED.capability_flags,
+                    updated_at = now()
                 """,
-                [int(capability_flags), worker_id, int(capability_flags)],
+                [
+                    worker_id,
+                    row[0],
+                    int(row[1] or 0),
+                    bool(row[2]),
+                    int(capability_flags),
+                ],
             )
-            row = cursor.fetchone()
-        return bool(row)
+            return True
 
     def batch_update_heartbeats(self, updates: list[tuple[str, int, bool]]) -> int:
         """
@@ -267,15 +404,43 @@ class WorkerRepository(BaseRepository):
         sql = f"""
             WITH upd(worker_id, mem_pool_available_size, accepting_new_requests) AS (
                 {values_sql}
+            ),
+            active AS (
+                SELECT
+                    workers.worker_id,
+                    upd.mem_pool_available_size,
+                    upd.accepting_new_requests,
+                    COALESCE(worker_liveness.capability_flags, 0) AS capability_flags
+                FROM upd
+                JOIN workers
+                  ON workers.worker_id = upd.worker_id
+                LEFT JOIN worker_liveness
+                  ON worker_liveness.worker_id = workers.worker_id
+                WHERE workers.inactive_at IS NULL
             )
-            UPDATE workers
-            SET last_heartbeat = CURRENT_TIMESTAMP,
-                mem_pool_available_size = upd.mem_pool_available_size,
-                accepting_new_requests = upd.accepting_new_requests
-            FROM upd
-            WHERE workers.worker_id = upd.worker_id
-              AND workers.inactive_at IS NULL
-            RETURNING workers.worker_id
+            INSERT INTO worker_liveness (
+                worker_id,
+                last_heartbeat,
+                mem_pool_available_size,
+                accepting_new_requests,
+                capability_flags,
+                updated_at
+            )
+            SELECT
+                active.worker_id,
+                now(),
+                active.mem_pool_available_size,
+                active.accepting_new_requests,
+                active.capability_flags,
+                now()
+            FROM active
+            ON CONFLICT (worker_id) DO UPDATE SET
+                last_heartbeat = GREATEST(worker_liveness.last_heartbeat, EXCLUDED.last_heartbeat),
+                mem_pool_available_size = EXCLUDED.mem_pool_available_size,
+                accepting_new_requests = EXCLUDED.accepting_new_requests,
+                capability_flags = COALESCE(worker_liveness.capability_flags, EXCLUDED.capability_flags),
+                updated_at = now()
+            RETURNING worker_id
         """
 
         worker_ids = [worker_id for worker_id, _, _ in updates]
@@ -309,8 +474,21 @@ class WorkerRepository(BaseRepository):
 
     def delete(self, worker_id: str) -> bool:
         """Delete a worker."""
-        with self._write_lock:
-            cursor = self.get_cursor()
+        with self.transaction() as cursor:
+            cursor.execute(
+                """
+                DELETE FROM worker_liveness
+                WHERE worker_id = ?
+                """,
+                [worker_id],
+            )
+            cursor.execute(
+                """
+                DELETE FROM worker_reconcile_state
+                WHERE worker_id = ?
+                """,
+                [worker_id],
+            )
             result = cursor.execute(
                 """
                 DELETE FROM workers
@@ -330,19 +508,36 @@ class WorkerRepository(BaseRepository):
         """
         cutoff_time = time.time() - timeout_seconds
         try:
-            with self._write_lock:
-                cursor = self.get_cursor()
+            with self.transaction() as cursor:
                 rows = cursor.execute(
                     """
+                    WITH stale AS (
+                        SELECT workers.worker_id, workers.node_id
+                        FROM workers
+                        JOIN worker_liveness
+                          ON worker_liveness.worker_id = workers.worker_id
+                        WHERE workers.inactive_at IS NULL
+                          AND EXTRACT(epoch FROM worker_liveness.last_heartbeat) < ?
+                    )
                     UPDATE workers
-                    SET inactive_at = CURRENT_TIMESTAMP,
-                        accepting_new_requests = FALSE
-                    WHERE inactive_at IS NULL
-                      AND EXTRACT(epoch FROM last_heartbeat) < ?
-                    RETURNING worker_id, node_id
+                    SET inactive_at = now()
+                    WHERE workers.worker_id IN (SELECT worker_id FROM stale)
+                    RETURNING workers.worker_id, workers.node_id
                     """,
                     [cutoff_time],
                 ).fetchall()
+                if rows:
+                    worker_ids = [row[0] for row in rows]
+                    placeholders = ", ".join(["?"] * len(worker_ids))
+                    cursor.execute(
+                        f"""
+                        UPDATE worker_liveness
+                        SET accepting_new_requests = FALSE,
+                            updated_at = now()
+                        WHERE worker_id IN ({placeholders})
+                        """,
+                        worker_ids,
+                    )
                 return rows
         except Exception as exc:
             is_conflict = self._is_write_conflict(exc)
@@ -367,7 +562,7 @@ class WorkerRepository(BaseRepository):
 
         query = f"""
             {_WORKER_SELECT}
-            WHERE EXTRACT(epoch FROM workers.last_heartbeat) > ?
+            WHERE EXTRACT(epoch FROM worker_liveness.last_heartbeat) > ?
               AND workers.inactive_at IS NULL
         """
         # Use configured heartbeat timeout instead of hardcoded value
@@ -375,9 +570,9 @@ class WorkerRepository(BaseRepository):
         params = [time.time() - timeout_seconds]
 
         if not include_unavailable:
-            query += " AND workers.accepting_new_requests = TRUE"
+            query += " AND worker_liveness.accepting_new_requests = TRUE"
 
-        query += " ORDER BY workers.last_heartbeat DESC"
+        query += " ORDER BY worker_liveness.last_heartbeat DESC"
 
         result = cursor.execute(query, params)
         workers = [self._row_to_model(row) for row in result.fetchall()]
@@ -405,8 +600,11 @@ class WorkerRepository(BaseRepository):
             cursor = cursor if cursor is not None else self.get_cursor()
             result = cursor.execute(
                 """
-                SELECT COALESCE(state_checksum, '') FROM workers
-                WHERE worker_id = ? AND inactive_at IS NULL
+                SELECT COALESCE(worker_reconcile_state.state_checksum, '')
+                FROM workers
+                LEFT JOIN worker_reconcile_state
+                  ON worker_reconcile_state.worker_id = workers.worker_id
+                WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
                 """,
                 [worker_id],
             ).fetchone()
@@ -422,24 +620,47 @@ class WorkerRepository(BaseRepository):
             cursor = cursor if cursor is not None else self.get_cursor()
             result = cursor.execute(
                 """
-                SELECT state_version FROM workers
-                WHERE worker_id = ? AND inactive_at IS NULL
+                SELECT
+                    workers.worker_id,
+                    COALESCE(worker_reconcile_state.state_version, 1),
+                    COALESCE(worker_reconcile_state.generation, 1),
+                    COALESCE(worker_reconcile_state.request_seq, 0),
+                    COALESCE(worker_reconcile_state.state_checksum, '')
+                FROM workers
+                LEFT JOIN worker_reconcile_state
+                  ON worker_reconcile_state.worker_id = workers.worker_id
+                WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
                 """,
                 [worker_id],
             ).fetchone()
             if not result:
                 raise ValueError(f"Worker {worker_id} not found")
-            current_version = int(result[0] or 0)
+            current_version = int(result[1] or 0)
             if current_version <= 0:
                 current_version = 1
-                cursor.execute(
-                    """
-                    UPDATE workers
-                    SET state_version = ?
-                    WHERE worker_id = ? AND inactive_at IS NULL
-                    """,
-                    [current_version, worker_id],
-                )
+            cursor.execute(
+                """
+                INSERT INTO worker_reconcile_state (
+                    worker_id,
+                    generation,
+                    request_seq,
+                    state_version,
+                    state_checksum,
+                    last_reconcile_result,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    state_version = EXCLUDED.state_version,
+                    updated_at = now()
+                """,
+                [
+                    worker_id,
+                    int(result[2] or 1),
+                    int(result[3] or 0),
+                    current_version,
+                    result[4] or "",
+                ],
+            )
             return current_version
 
     def update_state_version_and_checksum(
@@ -452,17 +673,45 @@ class WorkerRepository(BaseRepository):
         """Update the worker's state version and checksum together."""
         with self._write_guard(cursor):
             cursor = cursor if cursor is not None else self.get_cursor()
-            result = cursor.execute(
+            current = cursor.execute(
                 """
-                UPDATE workers
-                SET state_version = ?, state_checksum = ?
-                WHERE worker_id = ? AND inactive_at IS NULL
-                RETURNING worker_id
+                SELECT
+                    workers.worker_id,
+                    COALESCE(worker_reconcile_state.generation, 1),
+                    COALESCE(worker_reconcile_state.request_seq, 0)
+                FROM workers
+                LEFT JOIN worker_reconcile_state
+                  ON worker_reconcile_state.worker_id = workers.worker_id
+                WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
                 """,
-                [state_version, state_checksum, worker_id],
+                [worker_id],
             ).fetchone()
-            if result is None:
+            if current is None:
                 raise ValueError(f"Worker {worker_id} not found")
+            cursor.execute(
+                """
+                INSERT INTO worker_reconcile_state (
+                    worker_id,
+                    generation,
+                    request_seq,
+                    state_version,
+                    state_checksum,
+                    last_reconcile_result,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    state_version = EXCLUDED.state_version,
+                    state_checksum = EXCLUDED.state_checksum,
+                    updated_at = now()
+                """,
+                [
+                    worker_id,
+                    int(current[1] or 1),
+                    int(current[2] or 0),
+                    int(state_version),
+                    state_checksum,
+                ],
+            )
 
     def update_state_checksum(
         self,
@@ -473,52 +722,82 @@ class WorkerRepository(BaseRepository):
         """Update the worker's state checksum."""
         with self._write_guard(cursor):
             cursor = cursor if cursor is not None else self.get_cursor()
-            result = cursor.execute(
+            row = cursor.execute(
                 """
-                UPDATE workers
-                SET state_checksum = ?
-                WHERE worker_id = ? AND inactive_at IS NULL
-                RETURNING worker_id
+                SELECT
+                    workers.worker_id,
+                    COALESCE(worker_reconcile_state.generation, 1),
+                    COALESCE(worker_reconcile_state.request_seq, 0),
+                    COALESCE(worker_reconcile_state.state_version, 1)
+                FROM workers
+                LEFT JOIN worker_reconcile_state
+                  ON worker_reconcile_state.worker_id = workers.worker_id
+                WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
                 """,
-                [state_checksum, worker_id],
+                [worker_id],
             ).fetchone()
-            if result is None:
+            if row is None:
                 raise ValueError(f"Worker {worker_id} not found")
-
-    def try_advance_state_sync_token(
-        self,
-        worker_id: str,
-        sync_epoch: int,
-        sync_request_id: int,
-        cursor: DuckDBPyConnection | None = None,
-    ) -> bool:
-        """Advance the sync token if the incoming token is newer."""
-        with self._write_guard(cursor):
-            cursor = cursor if cursor is not None else self.get_cursor()
-            result = cursor.execute(
+            cursor.execute(
                 """
-                UPDATE workers
-                SET state_sync_epoch = ?, state_sync_request_id = ?
-                WHERE worker_id = ?
-                  AND inactive_at IS NULL
-                  AND (
-                    state_sync_epoch < ?
-                    OR (state_sync_epoch = ? AND state_sync_request_id < ?)
-                  )
-                RETURNING worker_id
+                INSERT INTO worker_reconcile_state (
+                    worker_id,
+                    generation,
+                    request_seq,
+                    state_version,
+                    state_checksum,
+                    last_reconcile_result,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, '', now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    state_checksum = EXCLUDED.state_checksum,
+                    updated_at = now()
                 """,
                 [
-                    sync_epoch,
-                    sync_request_id,
                     worker_id,
-                    sync_epoch,
-                    sync_epoch,
-                    sync_request_id,
+                    int(row[1] or 1),
+                    int(row[2] or 0),
+                    int(row[3] or 1),
+                    state_checksum,
                 ],
-            ).fetchone()
-            if result is not None:
-                return True
+            )
 
+    def get_reconcile_cursor(
+        self,
+        worker_id: str,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> tuple[int, int]:
+        with self._write_guard(cursor):
+            cursor = cursor if cursor is not None else self.get_cursor()
+            row = cursor.execute(
+                """
+                SELECT
+                    COALESCE(worker_reconcile_state.generation, 1),
+                    COALESCE(worker_reconcile_state.request_seq, 0)
+                FROM workers
+                LEFT JOIN worker_reconcile_state
+                  ON worker_reconcile_state.worker_id = workers.worker_id
+                WHERE workers.worker_id = ? AND workers.inactive_at IS NULL
+                """,
+                [worker_id],
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Worker {worker_id} not found")
+            return int(row[0] or 1), int(row[1] or 0)
+
+    def update_reconcile_cursor(
+        self,
+        worker_id: str,
+        *,
+        generation: int,
+        request_seq: int,
+        state_version: int,
+        state_checksum: str,
+        last_reconcile_result: str,
+        cursor: DuckDBPyConnection | None = None,
+    ) -> None:
+        with self._write_guard(cursor):
+            cursor = cursor if cursor is not None else self.get_cursor()
             exists = cursor.execute(
                 """
                 SELECT 1 FROM workers
@@ -526,25 +805,55 @@ class WorkerRepository(BaseRepository):
                 """,
                 [worker_id],
             ).fetchone()
-            if not exists:
+            if exists is None:
                 raise ValueError(f"Worker {worker_id} not found")
-            return False
+            cursor.execute(
+                """
+                INSERT INTO worker_reconcile_state (
+                    worker_id,
+                    generation,
+                    request_seq,
+                    state_version,
+                    state_checksum,
+                    last_reconcile_result,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, now())
+                ON CONFLICT (worker_id) DO UPDATE SET
+                    generation = EXCLUDED.generation,
+                    request_seq = EXCLUDED.request_seq,
+                    state_version = EXCLUDED.state_version,
+                    state_checksum = EXCLUDED.state_checksum,
+                    last_reconcile_result = EXCLUDED.last_reconcile_result,
+                    updated_at = now()
+                """,
+                [
+                    worker_id,
+                    int(generation),
+                    int(request_seq),
+                    int(state_version),
+                    state_checksum,
+                    last_reconcile_result,
+                ],
+            )
 
     def mark_as_stale(self, worker_id: str) -> bool:
         """Mark a worker as stale (for recovery purposes)."""
-        with self._write_lock:
-            cursor = self.get_cursor()
-            # We could add a 'stale' column, but for now we'll use a very old heartbeat
+        with self.transaction() as cursor:
             result = cursor.execute(
                 """
-                UPDATE workers
-                SET last_heartbeat = TIMESTAMP '1970-01-01 00:00:00'
-                WHERE worker_id = ? AND inactive_at IS NULL
+                UPDATE worker_liveness
+                SET last_heartbeat = TIMESTAMP '1970-01-01 00:00:00',
+                    updated_at = now()
+                WHERE worker_id = ?
+                  AND EXISTS (
+                    SELECT 1 FROM workers
+                    WHERE workers.worker_id = worker_liveness.worker_id
+                      AND workers.inactive_at IS NULL
+                  )
                 RETURNING worker_id
                 """,
                 [worker_id],
             )
-
             updated = result.fetchone() is not None
             if updated:
                 logger.debug(f"Marked worker {worker_id} as stale")
@@ -552,13 +861,11 @@ class WorkerRepository(BaseRepository):
 
     def mark_inactive(self, worker_id: str) -> bool:
         """Mark a worker as inactive."""
-        with self._write_lock:
-            cursor = self.get_cursor()
+        with self.transaction() as cursor:
             result = cursor.execute(
                 """
                 UPDATE workers
-                SET accepting_new_requests = FALSE,
-                    inactive_at = CURRENT_TIMESTAMP
+                SET inactive_at = now()
                 WHERE worker_id = ? AND inactive_at IS NULL
                 RETURNING worker_id
                 """,
@@ -567,6 +874,15 @@ class WorkerRepository(BaseRepository):
 
             updated = result.fetchone() is not None
             if updated:
+                cursor.execute(
+                    """
+                    UPDATE worker_liveness
+                    SET accepting_new_requests = FALSE,
+                        updated_at = now()
+                    WHERE worker_id = ?
+                    """,
+                    [worker_id],
+                )
                 logger.debug(f"Marked worker {worker_id} as inactive")
                 return True
             exists = cursor.execute(
@@ -582,9 +898,9 @@ class WorkerRepository(BaseRepository):
         result = cursor.execute(
             f"""
             {_WORKER_SELECT}
-            WHERE EXTRACT(epoch FROM workers.last_heartbeat) < ?
+            WHERE EXTRACT(epoch FROM worker_liveness.last_heartbeat) < ?
               AND workers.inactive_at IS NULL
-            ORDER BY workers.last_heartbeat DESC
+            ORDER BY worker_liveness.last_heartbeat DESC
             """,
             [recovery_time],
         )
@@ -598,19 +914,36 @@ class WorkerRepository(BaseRepository):
         Returns:
             List of (worker_id, node_id) tuples that were cleaned up
         """
-        with self._write_lock:
-            cursor = self.get_cursor()
+        with self.transaction() as cursor:
             rows = cursor.execute(
                 """
+                WITH stale AS (
+                    SELECT workers.worker_id, workers.node_id
+                    FROM workers
+                    JOIN worker_liveness
+                      ON worker_liveness.worker_id = workers.worker_id
+                    WHERE EXTRACT(epoch FROM worker_liveness.last_heartbeat) < ?
+                      AND workers.inactive_at IS NULL
+                )
                 UPDATE workers
-                SET inactive_at = CURRENT_TIMESTAMP,
-                    accepting_new_requests = FALSE
-                WHERE EXTRACT(epoch FROM last_heartbeat) < ?
-                  AND inactive_at IS NULL
-                RETURNING worker_id, node_id
+                SET inactive_at = now()
+                WHERE workers.worker_id IN (SELECT worker_id FROM stale)
+                RETURNING workers.worker_id, workers.node_id
                 """,
                 [recovery_time],
             ).fetchall()
+            if rows:
+                worker_ids = [row[0] for row in rows]
+                placeholders = ", ".join(["?"] * len(worker_ids))
+                cursor.execute(
+                    f"""
+                    UPDATE worker_liveness
+                    SET accepting_new_requests = FALSE,
+                        updated_at = now()
+                    WHERE worker_id IN ({placeholders})
+                    """,
+                    worker_ids,
+                )
 
         if rows:
             logger.info(f"Marked {len(rows)} stale workers as inactive")

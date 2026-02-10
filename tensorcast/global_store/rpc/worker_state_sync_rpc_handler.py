@@ -6,91 +6,76 @@ from __future__ import annotations
 
 import grpc
 
+from tensorcast.global_store.metrics import inc_reconcile_result
 from tensorcast.global_store.services.recovery_service import RecoveryService
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
 
 class WorkerStateSyncRpcHandler:
-    """Owns worker HA state sync/request-full-sync RPC behavior."""
+    """Owns worker HA reconcile RPC behavior."""
 
     def __init__(self, *, recovery_service: RecoveryService, logger) -> None:
         self._recovery_service = recovery_service
         self._logger = logger
 
-    def synchronize_worker_state(
+    def reconcile_worker_state(
         self,
-        request: global_store_pb2.SynchronizeWorkerStateRequest,
+        request: global_store_pb2.ReconcileWorkerStateRequest,
         context: grpc.ServicerContext,
-    ) -> global_store_pb2.SynchronizeWorkerStateResponse:
-        """Synchronize worker state for high availability."""
+    ) -> global_store_pb2.ReconcileWorkerStateResponse:
+        """Reconcile worker state for high availability."""
         try:
-            success, state_changes, new_version, new_checksum, ignored = (
-                self._recovery_service.synchronize_worker_state(
-                    request.worker_id,
-                    request.local_state,
-                    request.sync_epoch,
-                    request.sync_request_id,
-                    request.force_full_sync,
+            (
+                result_kind,
+                new_version,
+                new_checksum,
+                state_changes,
+                expected_replicas,
+                retry_after_ms,
+            ) = self._recovery_service.reconcile_worker_state(
+                worker_id=request.worker_id,
+                daemon_id=request.daemon_id,
+                generation=request.generation,
+                request_seq=request.request_seq,
+                inventory=list(request.inventory),
+                request_kind=request.request_kind,
+            )
+            return global_store_pb2.ReconcileWorkerStateResponse(
+                result_kind=result_kind,
+                retry_after_ms=retry_after_ms,
+                new_state_version=new_version,
+                new_state_checksum=new_checksum,
+                state_changes=state_changes,
+                expected_replicas=expected_replicas,
+            )
+        except ValueError as exc:
+            self._logger.warning(
+                "Reconcile request rejected for worker %s: %s",
+                request.worker_id,
+                exc,
+            )
+            inc_reconcile_result(
+                result_kind=global_store_pb2.ReconcileResultKind.Name(
+                    global_store_pb2.RECONCILE_RESULT_KIND_FATAL
                 )
             )
-
-            if success:
-                return global_store_pb2.SynchronizeWorkerStateResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    new_state_version=new_version,
-                    state_changes=state_changes,
-                    new_state_checksum=new_checksum,
-                    ignored=ignored,
-                )
-            return global_store_pb2.SynchronizeWorkerStateResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
+            context.set_code(grpc.StatusCode.NOT_FOUND)
+            context.set_details(str(exc))
+            return global_store_pb2.ReconcileWorkerStateResponse(
+                result_kind=global_store_pb2.RECONCILE_RESULT_KIND_FATAL
             )
-
         except Exception as exc:  # noqa: BLE001
             self._logger.exception(
-                "Error synchronizing worker state for %s",
+                "Error reconciling worker state for %s",
                 request.worker_id,
+            )
+            inc_reconcile_result(
+                result_kind=global_store_pb2.ReconcileResultKind.Name(
+                    global_store_pb2.RECONCILE_RESULT_KIND_FATAL
+                )
             )
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(exc))
-            return global_store_pb2.SynchronizeWorkerStateResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-
-    def request_full_state_sync(
-        self,
-        request: global_store_pb2.RequestFullStateSyncRequest,
-        context: grpc.ServicerContext,
-    ) -> global_store_pb2.RequestFullStateSyncResponse:
-        """Request full state synchronization for a worker."""
-        try:
-            success, expected_replicas, new_version, new_checksum, ignored = (
-                self._recovery_service.request_full_state_sync(
-                    request.worker_id,
-                    request.sync_epoch,
-                    request.sync_request_id,
-                )
-            )
-
-            if success:
-                return global_store_pb2.RequestFullStateSyncResponse(
-                    status=global_store_pb2.Status.STATUS_OK,
-                    new_state_version=new_version,
-                    expected_replicas=expected_replicas,
-                    new_state_checksum=new_checksum,
-                    ignored=ignored,
-                )
-            return global_store_pb2.RequestFullStateSyncResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
-            )
-
-        except Exception as exc:  # noqa: BLE001
-            self._logger.exception(
-                "Error requesting full state sync for %s",
-                request.worker_id,
-            )
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.RequestFullStateSyncResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
+            return global_store_pb2.ReconcileWorkerStateResponse(
+                result_kind=global_store_pb2.RECONCILE_RESULT_KIND_FATAL
             )

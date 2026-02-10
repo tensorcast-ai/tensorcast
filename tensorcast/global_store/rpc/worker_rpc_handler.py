@@ -133,6 +133,9 @@ class WorkerRpcHandler:
                         )
                     ),
                 )
+                reconcile_generation, _ = self._worker_repository.get_reconcile_cursor(
+                    registered.worker_id
+                )
 
                 return global_store_pb2.RegisterWorkerResponse(
                     status=global_store_pb2.Status.STATUS_OK,
@@ -142,6 +145,7 @@ class WorkerRpcHandler:
                     expected_state_version=self._recovery_service.ensure_worker_state_version(
                         registered.worker_id
                     ),
+                    reconcile_generation=int(reconcile_generation),
                 )
 
             existing = self._worker_service.find_worker_by_address(
@@ -168,6 +172,9 @@ class WorkerRpcHandler:
             expected_state_version = self._recovery_service.ensure_worker_state_version(
                 registered.worker_id
             )
+            reconcile_generation, _ = self._worker_repository.get_reconcile_cursor(
+                registered.worker_id
+            )
 
             self._logger.info(
                 "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s",
@@ -188,6 +195,7 @@ class WorkerRpcHandler:
                 heartbeat_interval_ms=self._default_heartbeat_interval_ms,
                 state_sync_required=False,
                 expected_state_version=expected_state_version,
+                reconcile_generation=int(reconcile_generation),
             )
 
         except ValidationError as exc:

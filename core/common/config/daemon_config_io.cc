@@ -315,8 +315,7 @@ void normalize_duration_fields(nlohmann::json& root) {
         "periodic_sync_interval",
         "registration_retry_delay",
         "heartbeat_rpc_timeout",
-        "state_sync_rpc_timeout",
-        "full_sync_rpc_timeout"};
+        "state_sync_rpc_timeout"};
     for (const char* f : ha_fields) {
       if (ha.contains(f))
         to_duration(ha[f]);

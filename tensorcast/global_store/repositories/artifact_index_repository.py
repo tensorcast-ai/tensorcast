@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for deduplicated tensor indices (artifact_indices).
 
@@ -22,13 +22,14 @@ class ArtifactIndexRepository(BaseRepository):
         index_data: bytes,
         encoding: str,
         schema_version: str,
+        cursor=None,
     ) -> str:
         """Insert or replace canonical index by its SHA-256 key.
 
         Returns the computed index_key (hex).
         """
         index_key = hashlib.sha256(index_data).hexdigest()
-        cursor = self.get_cursor()
+        cursor = cursor if cursor is not None else self.get_cursor()
         cursor.execute(
             """
             INSERT INTO artifact_indices (

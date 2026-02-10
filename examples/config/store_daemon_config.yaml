@@ -182,9 +182,6 @@ high_availability:
   max_retries: 3
   # Backoff between registration retries; currently not wired in the daemon.
   registration_retry_delay: 500ms
-  # When true, an empty local inventory is treated as authoritative and removes replicas during sync.
-  force_full_sync_on_empty_inventory: false
-
 # Background cleanup, eviction, and TTL scheduling.
 lifecycle:
   # GPU memory fraction that triggers eviction when periodic eviction is enabled; lower values evict earlier.

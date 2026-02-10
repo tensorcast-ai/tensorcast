@@ -124,6 +124,7 @@ from tensorcast.global_store.services import (
     RecoveryService,
     TransportService,
     ViewStateService,
+    WorkerControlReducer,
     WorkerService,
 )
 from tensorcast.logger import init_logger
@@ -374,6 +375,18 @@ class GlobalStoreServicer(
 
     def _rebuild_runtime_services_and_handlers(self) -> None:
         """Rebuild services/handlers that depend on mutable worker/replica repositories."""
+        reducer = getattr(self, "worker_control_reducer", None)
+        if reducer is None:
+            reducer_config = self.config.worker_control_reducer
+            reducer = WorkerControlReducer(
+                shard_count=reducer_config.shard_count,
+                queue_capacity=reducer_config.queue_capacity,
+                coalesce_window_ms=reducer_config.coalesce_window_ms,
+                logger=logger,
+            )
+            reducer.start()
+            self.worker_control_reducer = reducer
+
         self.artifact_service = ArtifactService(self.replica_repository)
         self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
             artifact_service=self.artifact_service,
@@ -401,13 +414,18 @@ class GlobalStoreServicer(
             logger=logger,
         )
         self.worker_service = WorkerService(
-            self.worker_repository, self.replica_repository
+            self.worker_repository,
+            self.replica_repository,
+            control_reducer=self.worker_control_reducer,
         )
         self.instance_service = InstanceService(
             self.instance_repository, self.worker_repository
         )
         self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository, self.worker_service
+            self.worker_repository,
+            self.replica_repository,
+            self.worker_service,
+            control_reducer=self.worker_control_reducer,
         )
         self.placement_service = PlacementService(
             self.worker_repository,
@@ -781,6 +799,8 @@ class GlobalStoreServicer(
             "artifact_disk_locations",
             "artifact_indices",
             "artifacts",
+            "worker_reconcile_state",
+            "worker_liveness",
             "workers",
             "instances",
         ]

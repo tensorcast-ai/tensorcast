@@ -19,7 +19,7 @@ Decouple heartbeat sampling from state synchronization so the daemon can keep he
 
 # Problem Statement
 
-`WorkerLifecycleManager::heartbeat_loop` currently performs both heartbeats and full state synchronization. If the loop blocks in RPCs or sync/unload paths, heartbeats stall and the monitor thread attempts to restart by `join`ing the stuck thread. This can deadlock the monitor and remove self-heal. In addition, a single long RPC can make heartbeats appear dead even when the process is healthy.
+`WorkerLifecycleManager::heartbeat_loop` previously performed both heartbeats and reconcile work. If the loop blocks in RPCs or unload paths, heartbeats stall and the monitor thread attempts to restart by `join`ing the stuck thread. This can deadlock the monitor and remove self-heal. In addition, a single long RPC can make heartbeats appear dead even when the process is healthy.
 
 # Goals / Non-Goals
 
@@ -57,7 +57,7 @@ flowchart LR
   - Send heartbeat RPC with short deadline and no or minimal retries.
   - Enqueue a sync request when `state_sync_required` or version mismatch is observed.
 - State sync worker
-  - Perform `synchronize_worker_state` and `request_full_state_sync` with longer timeouts.
+  - Perform `reconcile_worker_state` with longer timeouts.
   - Coalesce requests so only the latest sync request executes when multiple are queued.
   - Bound concurrency to one in-flight sync per worker.
 - Monitor loop
@@ -72,7 +72,7 @@ Proposed interface changes (C++):
 
 - `struct RpcOptions` with `timeout`, `max_retries`, and `retry_backoff`.
 - `execute_rpc_with_retry(...)` accepts an optional `RpcOptions` override.
-- `send_heartbeat_enhanced(...)` and `synchronize_worker_state(...)` accept `RpcOptions`.
+- `send_heartbeat_enhanced(...)` and `reconcile_worker_state(...)` accept `RpcOptions`.
 
 ## Configuration
 
@@ -82,8 +82,6 @@ Add per-RPC timeout fields to `tensorcast.config.v1.HighAvailability` and wire t
 - `heartbeat_rpc_max_retries`
 - `state_sync_rpc_timeout`
 - `state_sync_rpc_max_retries`
-- `full_sync_rpc_timeout`
-- `full_sync_rpc_max_retries`
 
 Defaults preserve existing behavior unless explicitly set.
 
@@ -91,7 +89,7 @@ Defaults preserve existing behavior unless explicitly set.
 
 - Heartbeat loop must not block on sync work.
 - At most one sync operation runs at a time per worker.
-- Sync RPCs carry a monotonic `(sync_epoch, sync_request_id)` token; stale tokens are ignored.
+- Reconcile RPCs carry a monotonic `(generation, request_seq)` token; stale tokens are ignored.
 - Restart requests must not block the monitor loop; cancellations are best-effort and bounded by RPC deadlines.
 - Heartbeat RPCs must always have a deadline; retry count must be explicit and low.
 - Sync failures do not change local state version or checksum and are logged with context.
@@ -101,7 +99,7 @@ Defaults preserve existing behavior unless explicitly set.
 - `RpcOptions` (struct, PascalCase)
 - `execute_rpc_with_retry` (function, snake_case)
 - `send_heartbeat_enhanced` overload with `RpcOptions` (function, snake_case)
-- `synchronize_worker_state` overload with `RpcOptions` (function, snake_case)
+- `reconcile_worker_state` overload with `RpcOptions` (function, snake_case)
 - `enqueue_state_sync` (function, snake_case)
 
 # Schema Changes
