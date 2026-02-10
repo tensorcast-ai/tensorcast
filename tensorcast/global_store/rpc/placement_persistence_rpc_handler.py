@@ -27,9 +27,11 @@ class PlacementPersistenceRpcHandler:
         self,
         *,
         placement_service: PlacementService,
-        policy_from_proto: Callable[[int], str],
-        persistence_state_from_proto: Callable[[int], str],
-        target_state_from_proto: Callable[[int], str],
+        policy_from_proto: Callable[[global_store_pb2.PlacementPolicy], str],
+        persistence_state_from_proto: Callable[
+            [global_store_pb2.PersistenceState], str
+        ],
+        target_state_from_proto: Callable[[global_store_pb2.PlacementTargetState], str],
         plan_to_proto: Callable[
             [PlacementPlan], global_store_pb2.PlanPlacementResponse
         ],

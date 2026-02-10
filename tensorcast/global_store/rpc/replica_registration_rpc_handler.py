@@ -17,6 +17,7 @@ from tensorcast.global_store.repositories.artifact_index_repository import (
 )
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
 from tensorcast.global_store.services.artifact_service import ArtifactService
+from tensorcast.global_store.services.worker_control_reducer import WorkerControlReducer
 from tensorcast.observability.otel import set_span_attributes
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
@@ -36,6 +37,7 @@ class ReplicaRegistrationRpcHandler:
         ],
         index_bytes_to_multibase_sha256: Callable[[bytes], str | None],
         hex_sha256_to_multibase: Callable[[str], str | None],
+        control_reducer: WorkerControlReducer | None,
         logger,
     ) -> None:
         self._artifact_service = artifact_service
@@ -44,6 +46,7 @@ class ReplicaRegistrationRpcHandler:
         self._memory_info_to_replica_artifact_id = memory_info_to_replica_artifact_id
         self._index_bytes_to_multibase_sha256 = index_bytes_to_multibase_sha256
         self._hex_sha256_to_multibase = hex_sha256_to_multibase
+        self._control_reducer = control_reducer
         self._logger = logger
 
     def register_replica(
@@ -65,96 +68,103 @@ class ReplicaRegistrationRpcHandler:
                 if candidate_schema_version:
                     schema_version_value = candidate_schema_version
 
-            replica = self._memory_info_to_replica_artifact_id(
-                request.mem_info,
-                request.artifact_id,
-                request.max_concurrency,
-                request.worker_id,
-            )
-            preserve_transport = not request.mem_info.HasField("transport")
-            artifact_id = request.artifact_id
-            descriptor = request.descriptor if request.HasField("descriptor") else None
-            if descriptor is not None and descriptor.artifact_id:
-                artifact_id = descriptor.artifact_id
-
-            kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
-            if descriptor is not None and descriptor.id_kind:
-                kind = (
-                    ArtifactIdKind.MI2
-                    if descriptor.id_kind
-                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
-                    else ArtifactIdKind.CGID
-                    if descriptor.id_kind
-                    == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
-                    else kind
+            def _register_impl() -> Replica:
+                replica = self._memory_info_to_replica_artifact_id(
+                    request.mem_info,
+                    request.artifact_id,
+                    request.max_concurrency,
+                    request.worker_id,
                 )
-
-            if artifact_id:
-                index_mh = None
-                data_mh = None
-                encoding = "json"
-                schema_version = schema_version_value
-                id_kind = "MI2" if kind is ArtifactIdKind.MI2 else "CGID"
-                if descriptor is not None:
-                    if descriptor.index_multihash:
-                        index_mh = descriptor.index_multihash
-                    if descriptor.data_multihash:
-                        data_mh = descriptor.data_multihash
-                    if descriptor.encoding:
-                        encoding = descriptor.encoding
-                    if descriptor.schema_version:
-                        schema_version = descriptor.schema_version
-                if kind is ArtifactIdKind.MI2 and (index_mh is None or data_mh is None):
-                    parts = artifact_id.split(":", 2)
-                    if len(parts) == 3:
-                        index_mh = index_mh or parts[1]
-                        data_mh = data_mh or parts[2]
-                if not index_mh:
-                    if (
-                        request.HasField("tensor_index_data")
-                        and request.tensor_index_data
-                    ):
-                        derived = self._index_bytes_to_multibase_sha256(
-                            request.tensor_index_data
-                        )
-                        if derived is not None:
-                            index_mh = derived
-                    if not index_mh and request.mem_info.tensor_index_key:
-                        derived = self._hex_sha256_to_multibase(
-                            request.mem_info.tensor_index_key
-                        )
-                        if derived is not None:
-                            index_mh = derived
-                artifact_index_encoding = (
-                    request.encoding if request.HasField("encoding") else "json"
+                preserve_transport = not request.mem_info.HasField("transport")
+                artifact_id = request.artifact_id
+                descriptor = (
+                    request.descriptor if request.HasField("descriptor") else None
                 )
-                with self._artifact_service.replica_repository.transaction() as cursor:
-                    self._artifact_repository.upsert_artifact(
-                        artifact_id=artifact_id,
-                        index_multihash=index_mh,
-                        data_multihash=data_mh,
-                        schema_version=schema_version,
-                        encoding=encoding,
-                        hash_params_json=None,
-                        id_kind=id_kind,
-                        cursor=cursor,
+                if descriptor is not None and descriptor.artifact_id:
+                    artifact_id = descriptor.artifact_id
+
+                kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
+                if descriptor is not None and descriptor.id_kind:
+                    kind = (
+                        ArtifactIdKind.MI2
+                        if descriptor.id_kind
+                        == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_MI2
+                        else ArtifactIdKind.CGID
+                        if descriptor.id_kind
+                        == common_pb2.ArtifactIdKind.ARTIFACT_ID_KIND_CGID
+                        else kind
                     )
-                    if (
-                        request.HasField("tensor_index_data")
-                        and request.tensor_index_data
+
+                if artifact_id:
+                    index_mh = None
+                    data_mh = None
+                    encoding = "json"
+                    schema_version = schema_version_value
+                    id_kind = "MI2" if kind is ArtifactIdKind.MI2 else "CGID"
+                    if descriptor is not None:
+                        if descriptor.index_multihash:
+                            index_mh = descriptor.index_multihash
+                        if descriptor.data_multihash:
+                            data_mh = descriptor.data_multihash
+                        if descriptor.encoding:
+                            encoding = descriptor.encoding
+                        if descriptor.schema_version:
+                            schema_version = descriptor.schema_version
+                    if kind is ArtifactIdKind.MI2 and (
+                        index_mh is None or data_mh is None
                     ):
-                        _ = self._artifact_index_repository.upsert_index(
-                            index_data=request.tensor_index_data,
-                            encoding=artifact_index_encoding,
-                            schema_version=schema_version_value,
+                        parts = artifact_id.split(":", 2)
+                        if len(parts) == 3:
+                            index_mh = index_mh or parts[1]
+                            data_mh = data_mh or parts[2]
+                    if not index_mh:
+                        if (
+                            request.HasField("tensor_index_data")
+                            and request.tensor_index_data
+                        ):
+                            derived = self._index_bytes_to_multibase_sha256(
+                                request.tensor_index_data
+                            )
+                            if derived is not None:
+                                index_mh = derived
+                        if not index_mh and request.mem_info.tensor_index_key:
+                            derived = self._hex_sha256_to_multibase(
+                                request.mem_info.tensor_index_key
+                            )
+                            if derived is not None:
+                                index_mh = derived
+                    artifact_index_encoding = (
+                        request.encoding if request.HasField("encoding") else "json"
+                    )
+                    with (
+                        self._artifact_service.replica_repository.transaction() as cursor
+                    ):
+                        self._artifact_repository.upsert_artifact(
+                            artifact_id=artifact_id,
+                            index_multihash=index_mh,
+                            data_multihash=data_mh,
+                            schema_version=schema_version,
+                            encoding=encoding,
+                            hash_params_json=None,
+                            id_kind=id_kind,
                             cursor=cursor,
                         )
-                    registered = self._artifact_service.register_replica(
-                        replica,
-                        preserve_transport=preserve_transport,
-                        cursor=cursor,
-                    )
-            else:
+                        if (
+                            request.HasField("tensor_index_data")
+                            and request.tensor_index_data
+                        ):
+                            _ = self._artifact_index_repository.upsert_index(
+                                index_data=request.tensor_index_data,
+                                encoding=artifact_index_encoding,
+                                schema_version=schema_version_value,
+                                cursor=cursor,
+                            )
+                        return self._artifact_service.register_replica(
+                            replica,
+                            preserve_transport=preserve_transport,
+                            cursor=cursor,
+                        )
+
                 with self._artifact_service.replica_repository.transaction() as cursor:
                     if (
                         request.HasField("tensor_index_data")
@@ -170,21 +180,30 @@ class ReplicaRegistrationRpcHandler:
                             schema_version=schema_version_value,
                             cursor=cursor,
                         )
-                    registered = self._artifact_service.register_replica(
+                    return self._artifact_service.register_replica(
                         replica,
                         preserve_transport=preserve_transport,
                         cursor=cursor,
                     )
 
+            if self._control_reducer is not None and request.worker_id:
+                registered = self._control_reducer.submit(
+                    worker_key=request.worker_id,
+                    kind="register_replica",
+                    operation=_register_impl,
+                )
+            else:
+                registered = _register_impl()
+
             with suppress(Exception):
                 span_attrs: dict[str, bool | int | float | str] = {
                     "tc.artifact.id": registered.artifact_id,
                     "tc.replica.id": str(registered.replica_id),
-                    "tc.memory.type": str(replica.memory_type.value),
-                    "tc.memory.size": int(replica.memory_size),
-                    "tc.device.id": int(replica.device_id),
+                    "tc.memory.type": str(registered.memory_type.value),
+                    "tc.memory.size": int(registered.memory_size),
+                    "tc.device.id": int(registered.device_id),
                 }
-                worker_id = replica.worker_id
+                worker_id = registered.worker_id
                 if worker_id:
                     span_attrs["tc.worker.id"] = worker_id
                 set_span_attributes(span_attrs)

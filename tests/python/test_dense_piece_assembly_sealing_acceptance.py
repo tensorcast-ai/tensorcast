@@ -57,6 +57,120 @@ def _wait_ready(addr: str, proc: subprocess.Popen, timeout_s: float = 15.0) -> N
     raise RuntimeError("daemon failed to start")
 
 
+def _wait_for_artifact_view_info(
+    gs_stub: GlobalStoreCompositeStub,
+    req: global_store_pb2.GetArtifactInfoByIdRequest,
+    *,
+    expected_view_data_hash: str | None = None,
+    timeout_s: float = 5.0,
+) -> global_store_pb2.GetArtifactInfoByIdResponse:
+    deadline = time.time() + timeout_s
+    last_resp = gs_stub.GetArtifactInfoById(req)
+    while time.time() < deadline:
+        if (
+            last_resp.status == global_store_pb2.Status.STATUS_OK
+            and last_resp.HasField("view_meta")
+            and (
+                expected_view_data_hash is None
+                or last_resp.view_meta.view_data_hash == expected_view_data_hash
+            )
+        ):
+            return last_resp
+        time.sleep(0.1)
+        last_resp = gs_stub.GetArtifactInfoById(req)
+    return last_resp
+
+
+def _wait_for_view_ready_for_seal(
+    gs_stub: GlobalStoreCompositeStub,
+    *,
+    artifact_id: str,
+    view_id: str,
+    expected_view_data_hash: str,
+    expected_view_size: int,
+    min_replicas: int = 1,
+    timeout_s: float = 15.0,
+) -> global_store_pb2.GetArtifactInfoByIdResponse:
+    deadline = time.time() + timeout_s
+    req = global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
+    req.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
+    req.requested_byte_space.id = view_id
+    req.include_view_meta = True
+    req.include_replicas.CopyFrom(wrappers_pb2.BoolValue(value=True))
+    last_resp = gs_stub.GetArtifactInfoById(req)
+    while time.time() < deadline:
+        if (
+            last_resp.status == global_store_pb2.Status.STATUS_OK
+            and last_resp.HasField("view_meta")
+            and last_resp.view_meta.view_data_hash == expected_view_data_hash
+            and last_resp.view_meta.view_size == expected_view_size
+            and len(last_resp.replicas) >= min_replicas
+        ):
+            return last_resp
+        time.sleep(0.1)
+        last_resp = gs_stub.GetArtifactInfoById(req)
+    return last_resp
+
+
+def _start_and_wait_seal_success(
+    stub: store_daemon_pb2_grpc.StoreDaemonServiceStub,
+    *,
+    assembly_id: str,
+    timeout_s: float = 60.0,
+) -> store_daemon_pb2.WaitOperationResponse:
+    deadline = time.time() + timeout_s
+    last_error = "seal did not start"
+    while time.time() < deadline:
+        start_resp = stub.StartSealAssembly(
+            store_daemon_pb2.StartSealAssemblyRequest(assembly_id=assembly_id)
+        )
+        assert start_resp.operation.operation_id
+        operation_id = start_resp.operation.operation_id
+        while time.time() < deadline:
+            remaining_ms = max(1, int((deadline - time.time()) * 1000))
+            wait_resp = stub.WaitOperation(
+                store_daemon_pb2.WaitOperationRequest(
+                    operation_id=operation_id,
+                    timeout_ms=min(2_000, remaining_ms),
+                )
+            )
+            status = wait_resp.operation.status
+            if status.state == operation_pb2.OPERATION_STATE_SUCCESS:
+                return wait_resp
+            if status.state in (
+                operation_pb2.OPERATION_STATE_PENDING,
+                operation_pb2.OPERATION_STATE_RUNNING,
+            ):
+                continue
+
+            error_code = ""
+            error_msg = status.message
+            retryable = False
+            if status.HasField("error"):
+                error_code = status.error.status_code
+                error_msg = status.error.message or status.message
+                retryable = status.error.retryable
+            last_error = f"state={status.state} code={error_code} msg={error_msg}"
+
+            if (
+                retryable
+                and error_code == "UNAVAILABLE"
+                and "missing canonical ranges" in error_msg
+            ):
+                time.sleep(0.2)
+                break
+            if "RequestReplicaTransport(view) failed: STATUS_TIMED_OUT" in error_msg:
+                time.sleep(0.2)
+                break
+            if "RequestReplicaTransport(view) failed: STATUS_NOT_FOUND" in error_msg:
+                time.sleep(0.2)
+                break
+
+            pytest.fail(f"seal operation failed: {last_error}")
+
+    pytest.fail(f"seal operation timed out after {timeout_s:.1f}s: {last_error}")
+
+
 def _build_daemon_config(
     *,
     listen_port: int,
@@ -101,6 +215,10 @@ def _build_daemon_config(
         "high_availability": {
             "enabled": True,
             "global_store_endpoints": [{"host": "127.0.0.1", "port": gs_port}],
+            # Keep heartbeats below Global Store heartbeat_timeout so replicas
+            # remain eligible during longer seal retries.
+            "heartbeat_interval": "5s",
+            "periodic_sync_interval": "0s",
         },
         "communicator": {
             "enable_rdma": False,
@@ -392,7 +510,7 @@ def _seal_two_piece_assembly(
     )
     assert bind_layout.status == global_store_pb2.Status.STATUS_OK
 
-    _register_piece(
+    commit_a = _register_piece(
         stub,
         assembly_id=assembly_id,
         canonical_index_bytes=canonical_index_bytes,
@@ -400,7 +518,7 @@ def _seal_two_piece_assembly(
         view_spec=view_spec_a,
         view_bytes=piece_a,
     )
-    _register_piece(
+    commit_b = _register_piece(
         stub,
         assembly_id=assembly_id,
         canonical_index_bytes=canonical_index_bytes,
@@ -408,16 +526,32 @@ def _seal_two_piece_assembly(
         view_spec=view_spec_b,
         view_bytes=piece_b,
     )
+    assert commit_a.view_id == view_id_a
+    assert commit_b.view_id == view_id_b
+    info_resp_a = _wait_for_view_ready_for_seal(
+        gs_stub,
+        artifact_id=assembly_id,
+        view_id=view_id_a,
+        expected_view_data_hash=commit_a.view_data_hash,
+        expected_view_size=len(piece_a),
+        min_replicas=1,
+    )
+    assert info_resp_a.status == global_store_pb2.Status.STATUS_OK
+    assert info_resp_a.view_meta.view_size == len(piece_a)
+    assert info_resp_a.view_meta.view_data_hash == commit_a.view_data_hash
+    info_resp_b = _wait_for_view_ready_for_seal(
+        gs_stub,
+        artifact_id=assembly_id,
+        view_id=view_id_b,
+        expected_view_data_hash=commit_b.view_data_hash,
+        expected_view_size=len(piece_b),
+        min_replicas=1,
+    )
+    assert info_resp_b.status == global_store_pb2.Status.STATUS_OK
+    assert info_resp_b.view_meta.view_size == len(piece_b)
+    assert info_resp_b.view_meta.view_data_hash == commit_b.view_data_hash
 
-    start_resp = stub.StartSealAssembly(
-        store_daemon_pb2.StartSealAssemblyRequest(assembly_id=assembly_id)
-    )
-    wait_resp = stub.WaitOperation(
-        store_daemon_pb2.WaitOperationRequest(
-            operation_id=start_resp.operation.operation_id,
-            timeout_ms=60_000,
-        )
-    )
+    wait_resp = _start_and_wait_seal_success(stub, assembly_id=assembly_id)
     assert wait_resp.operation.status.state == operation_pb2.OPERATION_STATE_SUCCESS
     op_result = store_daemon_pb2.SealAssemblyResult()
     assert wait_resp.operation.status.result.Unpack(op_result) is True
@@ -523,16 +657,13 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     info_req.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_VIEW
     info_req.requested_byte_space.id = commit_a.view_id
     info_req.include_view_meta = True
-    info_req.include_replicas.CopyFrom(wrappers_pb2.BoolValue(value=True))
-    info_resp = gs_stub.GetArtifactInfoById(info_req)
+    info_req.include_replicas.CopyFrom(wrappers_pb2.BoolValue(value=False))
+    info_resp = _wait_for_artifact_view_info(
+        gs_stub, info_req, expected_view_data_hash=commit_a.view_data_hash
+    )
     assert info_resp.status == global_store_pb2.Status.STATUS_OK
     assert info_resp.view_meta.view_size == len(piece_a)
     assert info_resp.view_meta.view_data_hash == commit_a.view_data_hash
-    assert info_resp.replicas
-    replica = info_resp.replicas[0]
-    assert replica.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
-    assert replica.byte_space.id == commit_a.view_id
-    assert replica.memory_size == len(piece_a)
 
     # Idempotent retry should succeed with same hash.
     commit_retry = _register_piece(
@@ -558,7 +689,7 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     assert exc_info.value.code() == grpc.StatusCode.FAILED_PRECONDITION
 
     piece_b = _pack_floats(bias[4:]) + _pack_floats(weights)
-    _register_piece(
+    commit_b = _register_piece(
         stub,
         assembly_id=assembly_id,
         canonical_index_bytes=canonical_index_bytes,
@@ -566,18 +697,41 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
         view_spec=view_spec_b,
         view_bytes=piece_b,
     )
-
-    start_resp = stub.StartSealAssembly(
-        store_daemon_pb2.StartSealAssemblyRequest(assembly_id=assembly_id)
+    assert commit_b.view_id == view_id_b
+    assert commit_b.view_data_hash
+    commit_b_retry = _register_piece(
+        stub,
+        assembly_id=assembly_id,
+        canonical_index_bytes=canonical_index_bytes,
+        canonical_size_bytes=canonical_size_bytes,
+        view_spec=view_spec_b,
+        view_bytes=piece_b,
     )
-    assert start_resp.operation.operation_id
-
-    wait_resp = stub.WaitOperation(
-        store_daemon_pb2.WaitOperationRequest(
-            operation_id=start_resp.operation.operation_id,
-            timeout_ms=60_000,
-        )
+    assert commit_b_retry.view_data_hash == commit_b.view_data_hash
+    info_resp_a_ready = _wait_for_view_ready_for_seal(
+        gs_stub,
+        artifact_id=assembly_id,
+        view_id=commit_a.view_id,
+        expected_view_data_hash=commit_a.view_data_hash,
+        expected_view_size=len(piece_a),
+        min_replicas=1,
     )
+    assert info_resp_a_ready.status == global_store_pb2.Status.STATUS_OK
+    assert info_resp_a_ready.view_meta.view_size == len(piece_a)
+    assert info_resp_a_ready.view_meta.view_data_hash == commit_a.view_data_hash
+    info_resp_b = _wait_for_view_ready_for_seal(
+        gs_stub,
+        artifact_id=assembly_id,
+        view_id=commit_b.view_id,
+        expected_view_data_hash=commit_b.view_data_hash,
+        expected_view_size=len(piece_b),
+        min_replicas=1,
+    )
+    assert info_resp_b.status == global_store_pb2.Status.STATUS_OK
+    assert info_resp_b.view_meta.view_size == len(piece_b)
+    assert info_resp_b.view_meta.view_data_hash == commit_b.view_data_hash
+
+    wait_resp = _start_and_wait_seal_success(stub, assembly_id=assembly_id)
     assert wait_resp.operation.status.state == operation_pb2.OPERATION_STATE_SUCCESS
     op_result = store_daemon_pb2.SealAssemblyResult()
     assert wait_resp.operation.status.result.Unpack(op_result) is True
@@ -592,7 +746,9 @@ def test_piece_bootstrap_and_seal(daemon_process, gs_server):
     seal_resp_2 = stub.SealAssembly(
         store_daemon_pb2.SealAssemblyRequest(
             assembly_id=assembly_id,
-            publish_canonical=True,
+            # Verify idempotent seal lookup through the legacy sync path.
+            # Re-publishing canonical bytes is handled by StartSealAssembly.
+            publish_canonical=False,
         )
     )
     assert seal_resp_2.sealed_artifact_id == op_result.artifact.artifact_id

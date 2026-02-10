@@ -31,7 +31,7 @@ class WorkerRpcHandler:
         worker_repository: WorkerRepository,
         recovery_service: RecoveryService,
         default_heartbeat_interval_ms: int,
-        determine_worker_status: Callable[[Worker], int],
+        determine_worker_status: Callable[[Worker], global_store_pb2.ConnectionStatus],
         logger,
     ) -> None:
         self._worker_service = worker_service

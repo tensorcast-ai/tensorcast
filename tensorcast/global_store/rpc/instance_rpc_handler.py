@@ -24,7 +24,9 @@ class InstanceRpcHandler:
         *,
         instance_service: InstanceService,
         default_heartbeat_interval_ms: int,
-        determine_instance_status: Callable[[Instance], int],
+        determine_instance_status: Callable[
+            [Instance], global_store_pb2.ConnectionStatus
+        ],
         logger,
     ) -> None:
         self._instance_service = instance_service
