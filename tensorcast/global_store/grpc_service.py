@@ -198,6 +198,9 @@ class GlobalStoreServicer(
         "MANAGED": global_store_pb2.DISK_LOCATION_KIND_MANAGED,
         "IMPORTED": global_store_pb2.DISK_LOCATION_KIND_IMPORTED,
     }
+    worker_service: WorkerService
+    instance_service: InstanceService
+    transport_service: TransportService
 
     def _init_repositories(self) -> None:
         """Initialize repository objects used by all domains."""
@@ -395,6 +398,7 @@ class GlobalStoreServicer(
             memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
             index_bytes_to_multibase_sha256=index_bytes_to_multibase_sha256,
             hex_sha256_to_multibase=hex_sha256_to_multibase,
+            control_reducer=self.worker_control_reducer,
             logger=logger,
         )
         self.transport_service = TransportService(

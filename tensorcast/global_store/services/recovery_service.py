@@ -9,7 +9,11 @@ Handles state recovery after failures, worker rediscovery, and state synchroniza
 import time
 from uuid import UUID, uuid4
 
-from tensorcast.global_store.exceptions import NotFoundError, ValidationError
+from tensorcast.global_store.exceptions import (
+    DatabaseError,
+    NotFoundError,
+    ValidationError,
+)
 from tensorcast.global_store.metrics import (
     inc_control_plane_conflict,
     inc_reconcile_result,
@@ -202,9 +206,9 @@ class RecoveryService:
         generation: int,
         request_seq: int,
         inventory: list[common_pb2.ReplicaInfo],
-        request_kind: global_store_pb2.ReconcileRequestKind.ValueType,
+        request_kind: global_store_pb2.ReconcileRequestKind,
     ) -> tuple[
-        global_store_pb2.ReconcileResultKind.ValueType,
+        global_store_pb2.ReconcileResultKind,
         int,
         str,
         list[global_store_pb2.StateChange],
@@ -212,27 +216,64 @@ class RecoveryService:
         int,
     ]:
         """Typed worker reconcile entrypoint for V2 control plane."""
+
+        def _is_transient_tx_conflict(exc: Exception) -> bool:
+            message = str(exc).lower()
+            conflict_markers = (
+                "write-write conflict",
+                "conflict on tuple deletion",
+                "conflict on update",
+                "serialization",
+                "transactioncontext error: conflict",
+            )
+            if isinstance(exc, DatabaseError):
+                return any(marker in message for marker in conflict_markers)
+            return any(marker in message for marker in conflict_markers)
+
+        def _run_reconcile_with_retry() -> tuple[
+            global_store_pb2.ReconcileResultKind,
+            int,
+            str,
+            list[global_store_pb2.StateChange],
+            list[common_pb2.ReplicaInfo],
+            int,
+        ]:
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                try:
+                    return self._reconcile_worker_state_internal(
+                        worker_id=worker_id,
+                        daemon_id=daemon_id,
+                        generation=generation,
+                        request_seq=request_seq,
+                        inventory=inventory,
+                        request_kind=request_kind,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    if (
+                        not _is_transient_tx_conflict(exc)
+                        or attempt == max_attempts - 1
+                    ):
+                        raise
+                    backoff_s = min(0.2, 0.01 * (2**attempt))
+                    logger.warning(
+                        "Transient reconcile transaction conflict for worker %s "
+                        "(attempt %s/%s): %s",
+                        worker_id,
+                        attempt + 1,
+                        max_attempts,
+                        exc,
+                    )
+                    time.sleep(backoff_s)
+            raise RuntimeError("unreachable")
+
         if self._control_reducer is not None:
             return self._control_reducer.submit(
                 worker_key=worker_id,
                 kind="reconcile",
-                operation=lambda: self._reconcile_worker_state_internal(
-                    worker_id=worker_id,
-                    daemon_id=daemon_id,
-                    generation=generation,
-                    request_seq=request_seq,
-                    inventory=inventory,
-                    request_kind=request_kind,
-                ),
+                operation=_run_reconcile_with_retry,
             )
-        return self._reconcile_worker_state_internal(
-            worker_id=worker_id,
-            daemon_id=daemon_id,
-            generation=generation,
-            request_seq=request_seq,
-            inventory=inventory,
-            request_kind=request_kind,
-        )
+        return _run_reconcile_with_retry()
 
     def _reconcile_worker_state_internal(
         self,
@@ -242,9 +283,9 @@ class RecoveryService:
         generation: int,
         request_seq: int,
         inventory: list[common_pb2.ReplicaInfo],
-        request_kind: global_store_pb2.ReconcileRequestKind.ValueType,
+        request_kind: global_store_pb2.ReconcileRequestKind,
     ) -> tuple[
-        global_store_pb2.ReconcileResultKind.ValueType,
+        global_store_pb2.ReconcileResultKind,
         int,
         str,
         list[global_store_pb2.StateChange],
@@ -252,7 +293,7 @@ class RecoveryService:
         int,
     ]:
         def _record_result(
-            result_kind: global_store_pb2.ReconcileResultKind.ValueType,
+            result_kind: global_store_pb2.ReconcileResultKind,
         ) -> None:
             inc_reconcile_result(
                 result_kind=global_store_pb2.ReconcileResultKind.Name(result_kind)
