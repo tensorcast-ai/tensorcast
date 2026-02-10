@@ -35,6 +35,13 @@ message WorkerPolicy {
   google.protobuf.Duration cleanup_interval = 2;
   google.protobuf.Duration default_heartbeat_interval = 3;
   MemoryTierPolicy memory_tiers = 4;
+  WorkerControlReducerPolicy control_reducer = 5;
+}
+
+message WorkerControlReducerPolicy {
+  uint32 shard_count = 1;
+  uint32 queue_capacity = 2;
+  google.protobuf.Duration coalesce_window = 3;
 }
 
 message GlobalStoreConfig {

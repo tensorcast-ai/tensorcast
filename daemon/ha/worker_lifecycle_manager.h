@@ -37,13 +37,8 @@ class WorkerLifecycleManager {
     int chunk_sync_interval_ms{10000}; // 0 to disable
     int heartbeat_rpc_timeout_ms{0};
     int state_sync_rpc_timeout_ms{0};
-    int full_sync_rpc_timeout_ms{0};
     std::optional<int32_t> heartbeat_rpc_max_retries;
     std::optional<int32_t> state_sync_rpc_max_retries;
-    std::optional<int32_t> full_sync_rpc_max_retries;
-    // When true, an empty local inventory is treated as authoritative and will
-    // drive removals via force_full_sync during synchronization.
-    bool force_full_sync_on_empty_inventory{false};
     // Optional cluster identity guard; if set, daemon will refuse to register
     // with a Global Store reporting a different token.
     std::string cluster_token;
@@ -124,7 +119,7 @@ class WorkerLifecycleManager {
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
-  store::components::StateSyncToken next_state_sync_token(uint64_t epoch);
+  store::components::StateSyncToken next_state_sync_token();
   void mark_state_sync_progress();
   std::optional<std::chrono::milliseconds> state_sync_stall_budget() const;
 
@@ -133,7 +128,7 @@ class WorkerLifecycleManager {
   const Options opts_;
   const std::string daemon_id_;
   // Serialize control-plane RPCs that update the same worker row in Global Store
-  // (heartbeat/state-sync/full-sync/register) to avoid write-write conflicts.
+  // (heartbeat/reconcile/register) to avoid write-write conflicts.
   mutable std::mutex worker_control_plane_rpc_mu_;
 
   static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
@@ -180,6 +175,7 @@ class WorkerLifecycleManager {
   std::atomic<bool> state_sync_inflight_{false};
   std::atomic<bool> sync_alive_{false};
   std::atomic<uint64_t> hb_epoch_{0};
+  std::atomic<uint64_t> reconcile_generation_{1};
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
   std::atomic<uint64_t> state_sync_request_id_{0};

@@ -23,7 +23,7 @@ links:
 
 # Summary
 
-Define a strict replica visibility model and a safe retire pipeline so HA reconciliation never deletes in-use replicas or advertises non-resident inventory. This design builds on the heartbeat/sync decoupling and persistent state versioning work and focuses on correctness of inventory, deletion semantics, and safe unload gates.
+Define a strict replica visibility model and a safe retire pipeline so HA reconciliation never deletes in-use replicas or advertises non-resident inventory. This design builds on the heartbeat/reconcile decoupling and persistent state versioning work and focuses on correctness of inventory, deletion semantics, and safe unload gates.
 
 # Problem Statement
 
@@ -40,7 +40,7 @@ The current HA flow conflates "present in registry" with "resident and publishab
 
 ## Non-Goals
 
-- Changing the heartbeat or sync protobuf schema.
+- Changing the heartbeat or reconcile protobuf schema.
 - Introducing new storage backends or new persistent replica types.
 - Reworking materialization pipelines or UMA memory management.
 
@@ -59,7 +59,7 @@ flowchart LR
   SU --> UL["Unload replica"]
 ```
 
-The heartbeat loop remains lightweight (per 0046). It enqueues sync work when GS reports drift or when local publish state changes. The sync worker builds a publishable inventory and performs `SynchronizeWorkerState`. Removal requests enter a retire queue and are only unloaded after safety gates pass.
+The heartbeat loop remains lightweight (per 0046). It enqueues reconcile work when GS reports drift or when local publish state changes. The reconcile worker builds a publishable inventory and performs `ReconcileWorkerState`. Removal requests enter a retire queue and are only unloaded after safety gates pass.
 
 ## Replica publish state
 
@@ -80,7 +80,7 @@ The sync worker builds an inventory snapshot using these rules:
 - Only include replicas with CPU or GPU residency; never map non-resident entries to DISK.
 - Do not include replicas that are `RETIRING` or `LOCAL_ONLY`.
 
-This snapshot becomes `WorkerLocalState.local_replicas` for `SynchronizeWorkerState`. It is the only source of truth for additions and removals.
+This snapshot becomes `ReconcileWorkerStateRequest.inventory`. It is the only source of truth for additions and removals.
 
 ## Safe retire pipeline
 

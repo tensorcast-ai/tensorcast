@@ -147,10 +147,12 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
 
   // Config setters (callable by tests after server start)
   void set_heartbeat_obsolete(std::vector<std::string> ids) {
+    absl::MutexLock l(&mu_);
     hb_obsolete_ids_ = std::move(ids);
   }
 
   void set_heartbeat_sync_required(bool required, uint64_t expected_ver) {
+    absl::MutexLock l(&mu_);
     hb_state_sync_required_ = required;
     hb_expected_state_version_ = expected_ver;
   }
@@ -165,15 +167,34 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
   }
 
   void set_sync_remove_specs(std::vector<RemoveSpec> specs) {
+    absl::MutexLock l(&mu_);
     sync_remove_specs_ = std::move(specs);
   }
 
   void set_sync_should_fail(bool v) {
+    absl::MutexLock l(&mu_);
     sync_should_fail_ = v;
   }
 
   void set_expected_replicas(std::vector<commonpb::ReplicaInfo> replicas) {
+    absl::MutexLock l(&mu_);
     expected_replicas_ = std::move(replicas);
+  }
+
+  void set_reconcile_result_kind(global_store::ReconcileResultKind kind, uint32_t retry_after_ms = 0) {
+    absl::MutexLock l(&mu_);
+    reconcile_result_kind_ = kind;
+    retry_after_ms_ = retry_after_ms;
+    retry_later_remaining_ = 0;
+  }
+
+  void set_retry_later_then_apply(int retries, uint32_t retry_after_ms) {
+    absl::MutexLock l(&mu_);
+    retry_later_remaining_ = std::max(0, retries);
+    retry_after_ms_ = retry_after_ms;
+    if (reconcile_result_kind_ == global_store::RECONCILE_RESULT_KIND_RETRY_LATER) {
+      reconcile_result_kind_ = global_store::RECONCILE_RESULT_KIND_APPLIED;
+    }
   }
 
   void set_outstanding_leases(std::vector<memory_tier::MemoryTierLease> leases) {
@@ -211,6 +232,11 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     return last_registered_daemon_id_;
   }
 
+  uint32_t reconcile_requests() const {
+    absl::MutexLock l(&mu_);
+    return reconcile_requests_;
+  }
+
   ::grpc::Status HealthCheck(
       ::grpc::ServerContext* /*context*/,
       const global_store::HealthCheckRequest* /*request*/,
@@ -232,6 +258,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     resp->set_heartbeat_interval_ms(1000);
     resp->set_state_sync_required(true);
     resp->set_expected_state_version(1);
+    resp->set_reconcile_generation(1);
     return ::grpc::Status::OK;
   }
 
@@ -240,54 +267,122 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
       const global_store::WorkerHeartbeatRequest* req,
       global_store::WorkerHeartbeatResponse* resp) override {
     (void)req;
+    bool state_sync_required = false;
+    uint64_t expected_state_version = 0;
+    std::vector<std::string> obsolete_ids;
+    {
+      absl::MutexLock l(&mu_);
+      state_sync_required = hb_state_sync_required_;
+      expected_state_version = hb_expected_state_version_;
+      obsolete_ids = hb_obsolete_ids_;
+    }
     resp->set_status(global_store::STATUS_OK);
-    resp->set_state_sync_required(hb_state_sync_required_);
-    if (hb_expected_state_version_ > 0)
-      resp->set_expected_state_version(hb_expected_state_version_);
-    for (const auto& id : hb_obsolete_ids_)
+    resp->set_state_sync_required(state_sync_required);
+    if (expected_state_version > 0)
+      resp->set_expected_state_version(expected_state_version);
+    for (const auto& id : obsolete_ids)
       resp->add_obsolete_replicas(id);
     return ::grpc::Status::OK;
   }
 
-  ::grpc::Status RequestFullStateSync(
+  ::grpc::Status ReconcileWorkerState(
       ::grpc::ServerContext* /*context*/,
-      const global_store::RequestFullStateSyncRequest* req,
-      global_store::RequestFullStateSyncResponse* resp) override {
-    (void)req;
-    resp->set_status(global_store::STATUS_OK);
-    resp->set_new_state_version(1);
-    resp->set_new_state_checksum("v1");
-    if (!expected_replicas_.empty()) {
-      for (const auto& rep : expected_replicas_) {
-        *resp->add_expected_replicas() = rep;
+      const global_store::ReconcileWorkerStateRequest* req,
+      global_store::ReconcileWorkerStateResponse* resp) override {
+    std::vector<RemoveSpec> remove_specs;
+    std::vector<commonpb::ReplicaInfo> expected_replicas;
+    global_store::ReconcileResultKind result_kind;
+    uint32_t retry_after_ms = 0;
+    {
+      absl::MutexLock l(&mu_);
+      ++reconcile_requests_;
+      if (sync_should_fail_) {
+        return ::grpc::Status(::grpc::StatusCode::UNAVAILABLE, "forced reconcile transport failure");
       }
-    } else {
+      if (retry_later_remaining_ > 0) {
+        --retry_later_remaining_;
+        result_kind = global_store::RECONCILE_RESULT_KIND_RETRY_LATER;
+        retry_after_ms = retry_after_ms_;
+      } else {
+        result_kind = reconcile_result_kind_;
+        retry_after_ms = retry_after_ms_;
+      }
+      remove_specs = sync_remove_specs_;
+      expected_replicas = expected_replicas_;
+    }
+    if (expected_replicas.empty()) {
+      expected_replicas.reserve(expected_ids_.size());
       for (const auto& id : expected_ids_) {
-        auto* rep = resp->add_expected_replicas();
-        rep->mutable_ref()->set_artifact_id(id);
-        // Default to GPU replicas when tests don't provide memory specs.
-        auto* mi = rep->mutable_memory_info();
+        commonpb::ReplicaInfo rep;
+        rep.mutable_ref()->set_artifact_id(id);
+        auto* mi = rep.mutable_memory_info();
         mi->set_memory_type(commonpb::MEMORY_TYPE_GPU);
         mi->set_device_id(0);
         mi->set_memory_size(0);
+        expected_replicas.push_back(std::move(rep));
       }
     }
-    return ::grpc::Status::OK;
-  }
-
-  ::grpc::Status SynchronizeWorkerState(
-      ::grpc::ServerContext* /*context*/,
-      const global_store::SynchronizeWorkerStateRequest* req,
-      global_store::SynchronizeWorkerStateResponse* resp) override {
-    (void)req;
-    if (sync_should_fail_) {
-      resp->set_status(global_store::STATUS_ERROR);
-      return ::grpc::Status::OK;
-    }
-    resp->set_status(global_store::STATUS_OK);
+    resp->set_result_kind(result_kind);
     resp->set_new_state_version(2);
     resp->set_new_state_checksum("v2");
-    for (const auto& spec : sync_remove_specs_) {
+    if (result_kind == global_store::RECONCILE_RESULT_KIND_RETRY_LATER) {
+      resp->set_retry_after_ms(retry_after_ms > 0 ? retry_after_ms : 25);
+      return ::grpc::Status::OK;
+    }
+    if (result_kind == global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED) {
+      for (const auto& rep : expected_replicas) {
+        *resp->add_expected_replicas() = rep;
+      }
+      return ::grpc::Status::OK;
+    }
+    if (result_kind == global_store::RECONCILE_RESULT_KIND_FATAL ||
+        result_kind == global_store::RECONCILE_RESULT_KIND_NOOP ||
+        result_kind == global_store::RECONCILE_RESULT_KIND_IGNORED_STALE ||
+        result_kind == global_store::RECONCILE_RESULT_KIND_UNSPECIFIED) {
+      return ::grpc::Status::OK;
+    }
+
+    auto has_expected_replica =
+        [&expected_replicas](std::string_view artifact_id, commonpb::MemoryType memory_type, uint32_t device_id) {
+          for (const auto& rep : expected_replicas) {
+            if (rep.ref().artifact_id() != artifact_id) {
+              continue;
+            }
+            if (rep.memory_info().memory_type() != memory_type) {
+              continue;
+            }
+            if (rep.memory_info().device_id() != device_id) {
+              continue;
+            }
+            return true;
+          }
+          return false;
+        };
+    for (const auto& local_replica : req->inventory()) {
+      const auto memory_type = local_replica.memory_info().memory_type();
+      if (memory_type != commonpb::MEMORY_TYPE_GPU && memory_type != commonpb::MEMORY_TYPE_RAM) {
+        continue;
+      }
+      const uint32_t device_id =
+          memory_type == commonpb::MEMORY_TYPE_GPU ? static_cast<uint32_t>(local_replica.memory_info().device_id()) : 0;
+      if (has_expected_replica(local_replica.ref().artifact_id(), memory_type, device_id)) {
+        continue;
+      }
+      const RemoveSpec spec{
+          .artifact_id = local_replica.ref().artifact_id(),
+          .memory_type = memory_type,
+          .device_id = device_id,
+      };
+      const bool already_present = std::any_of(remove_specs.begin(), remove_specs.end(), [&](const RemoveSpec& entry) {
+        return entry.artifact_id == spec.artifact_id && entry.memory_type == spec.memory_type &&
+            entry.device_id == spec.device_id;
+      });
+      if (!already_present) {
+        remove_specs.push_back(spec);
+      }
+    }
+
+    for (const auto& spec : remove_specs) {
       auto* ch = resp->add_state_changes();
       ch->set_type(global_store::StateChange::CHANGE_TYPE_REMOVE_REPLICA);
       auto* rep = ch->mutable_replica_info();
@@ -403,14 +498,19 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
 
  private:
   std::vector<std::string> expected_ids_;
-  std::vector<std::string> hb_obsolete_ids_;
-  bool hb_state_sync_required_{false};
-  uint64_t hb_expected_state_version_{0};
-  std::vector<RemoveSpec> sync_remove_specs_;
-  bool sync_should_fail_{false};
-  std::vector<commonpb::ReplicaInfo> expected_replicas_;
   mutable absl::Mutex mu_;
-  uint32_t total_chunk_updates_{0};
+  std::vector<std::string> hb_obsolete_ids_ ABSL_GUARDED_BY(mu_);
+  bool hb_state_sync_required_ ABSL_GUARDED_BY(mu_){false};
+  uint64_t hb_expected_state_version_ ABSL_GUARDED_BY(mu_){0};
+  std::vector<RemoveSpec> sync_remove_specs_ ABSL_GUARDED_BY(mu_);
+  bool sync_should_fail_ ABSL_GUARDED_BY(mu_){false};
+  global_store::ReconcileResultKind reconcile_result_kind_ ABSL_GUARDED_BY(mu_){
+      global_store::RECONCILE_RESULT_KIND_APPLIED};
+  uint32_t retry_after_ms_ ABSL_GUARDED_BY(mu_){0};
+  int retry_later_remaining_ ABSL_GUARDED_BY(mu_){0};
+  uint32_t reconcile_requests_ ABSL_GUARDED_BY(mu_){0};
+  std::vector<commonpb::ReplicaInfo> expected_replicas_ ABSL_GUARDED_BY(mu_);
+  uint32_t total_chunk_updates_ ABSL_GUARDED_BY(mu_){0};
   std::string last_registered_daemon_id_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::MemoryTierLease> outstanding_leases_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::MemoryTierStatus> published_statuses_ ABSL_GUARDED_BY(mu_);
@@ -492,7 +592,7 @@ static void load_artifact_cpu(StoreEngine& store, const ArtifactFixture& artifac
   }
 }
 
-TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daemon][ha][sync]") {
+TEST_CASE("WorkerLifecycleManager bootstrap reconcile removes drift", "[daemon][ha][sync]") {
   if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA sync test.");
     return;
@@ -548,7 +648,7 @@ TEST_CASE("WorkerLifecycleManager initial full state sync removes drift", "[daem
   REQUIRE(st.ok());
   REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
-  // Initial full-state sync happens in start(); poll until removal applied
+  // Bootstrap reconcile happens in start(); poll until removal applied.
   bool keep_gpu_present = false;
   bool keep_cpu_present = false;
   bool remove_present = false;
@@ -688,7 +788,7 @@ TEST_CASE("state_checksum_is_stable_and_availability_sensitive") {
   REQUIRE(checksum3 != checksum1);
 }
 
-TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[daemon][ha][delta]") {
+TEST_CASE("WorkerLifecycleManager applies REMOVE via ReconcileWorkerState", "[daemon][ha][delta]") {
   if (!tensorcast::testing::is_cuda_available()) {
     WARN("CUDA not available – skipping HA delta test.");
     return;
@@ -700,8 +800,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   const auto keep = make_standard_artifact(temp_root, "artifact_keep3", 1ULL * 1024 * 1024, 'E');
   const auto remove = make_standard_artifact(temp_root, "artifact_remove3", 1ULL * 1024 * 1024, 'F');
 
-  // Start fake GS server: full-state expects both; heartbeat demands a sync and SynchronizeWorkerState returns REMOVE
-  // for remove_id
+  // Start fake GS server: expected snapshot includes both, but reconcile requests an explicit GPU remove for remove_id.
   auto test_server = start_fake_server({keep.artifact_id, remove.artifact_id}, /*obsolete_id=*/"");
   test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
   test_server.service->set_expected_replicas(
@@ -729,7 +828,7 @@ TEST_CASE("WorkerLifecycleManager applies REMOVE via SynchronizeWorkerState", "[
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
   wopts.p2p_port = kTestP2PPort;
-  wopts.heartbeat_interval_ms = 50; // fast heartbeat to drive synchronize call
+  wopts.heartbeat_interval_ms = 50; // fast heartbeat to drive reconcile calls
   wopts.chunk_sync_interval_ms = 0;
 
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
@@ -898,23 +997,22 @@ TEST_CASE("WorkerLifecycleManager retire waits for transport locks", "[daemon][h
   fs::remove_all(temp_root, ec);
 }
 
-TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure", "[daemon][ha][fallback]") {
+TEST_CASE("WorkerLifecycleManager applies REBASE_REQUIRED expected snapshot", "[daemon][ha][rebase]") {
   if (!tensorcast::testing::is_cuda_available()) {
-    WARN("CUDA not available – skipping HA fallback test.");
+    WARN("CUDA not available – skipping HA rebase test.");
     return;
   }
 
   // Prepare dummy artifact directories
-  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_fallback";
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_rebase";
   fs::create_directories(temp_root);
   const auto keep = make_standard_artifact(temp_root, "artifact_keep4", 1ULL * 1024 * 1024, 'G');
   const auto remove = make_standard_artifact(temp_root, "artifact_remove4", 1ULL * 1024 * 1024, 'H');
 
-  // Start fake GS server: heartbeat demands sync, but SynchronizeWorkerState fails; RequestFullStateSync expects only
-  // keep_id
+  // Start fake GS server: reconcile requests a REBASE to expected snapshot containing only keep_id.
   auto test_server = start_fake_server({keep.artifact_id}, /*obsolete_id=*/"");
   test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
-  test_server.service->set_sync_should_fail(true);
+  test_server.service->set_reconcile_result_kind(global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED);
   REQUIRE(test_server.selected_port > 0);
 
   StoreEngineOptions opts;
@@ -940,7 +1038,7 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   REQUIRE(st.ok());
   REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
-  // Poll until fallback full-sync applied (remove_id removed, keep_id present)
+  // Poll until REBASE expected snapshot is applied (remove_id removed, keep_id present).
   bool removed = false;
   bool kept = false;
   for (int i = 0; i < 200; ++i) {
@@ -966,6 +1064,83 @@ TEST_CASE("WorkerLifecycleManager falls back to full-state sync on sync failure"
   }
   REQUIRE(kept);
   REQUIRE(removed);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager retries on RETRY_LATER and eventually applies reconcile", "[daemon][ha][retry]") {
+  if (!tensorcast::testing::is_cuda_available()) {
+    WARN("CUDA not available – skipping HA retry test.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_retry";
+  fs::create_directories(temp_root);
+  const auto keep = make_standard_artifact(temp_root, "artifact_keep_retry", 1ULL * 1024 * 1024, 'M');
+  const auto remove = make_standard_artifact(temp_root, "artifact_remove_retry", 1ULL * 1024 * 1024, 'N');
+
+  auto test_server = start_fake_server({keep.artifact_id, remove.artifact_id}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_retry_later_then_apply(/*retries=*/2, /*retry_after_ms=*/20);
+  test_server.service->set_sync_remove_specs(
+      {RemoveSpec{.artifact_id = remove.artifact_id, .memory_type = commonpb::MEMORY_TYPE_GPU, .device_id = 0}});
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+  load_artifact_gpu(*engine_ptr, keep);
+  load_artifact_gpu(*engine_ptr, remove);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
+
+  bool removed = false;
+  bool kept = false;
+  for (int i = 0; i < 300; ++i) {
+    auto infos = engine_ptr->get_all_replicas_info();
+    kept = false;
+    bool remove_present = false;
+    for (const auto& in : infos) {
+      if (in.artifact_id == keep.artifact_id) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
+          kept = true;
+        }
+      }
+      if (in.artifact_id == remove.artifact_id) {
+        if (in.cpu_state != tensorcast::common::memory::MemoryLocation::NONE ||
+            in.gpu_state != tensorcast::common::memory::MemoryLocation::NONE) {
+          remove_present = true;
+        }
+      }
+    }
+    removed = !remove_present;
+    if (kept && removed && test_server.service->reconcile_requests() >= 3) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(kept);
+  REQUIRE(removed);
+  REQUIRE(test_server.service->reconcile_requests() >= 3);
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -1206,8 +1381,8 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   const auto keep = make_standard_artifact(temp_root, "artifact_keep5", 1ULL * 1024 * 1024, 'K');
   const auto remove = make_standard_artifact(temp_root, "artifact_remove5", 1ULL * 1024 * 1024, 'L');
 
-  // Start fake GS server: full-state expects both; heartbeat indicates expected_version=2 (mismatch) but
-  // sync_required=false.
+  // Start fake GS server: expected snapshot includes both; heartbeat indicates expected_version=2 (mismatch) while
+  // state_sync_required=false.
   auto test_server = start_fake_server({keep.artifact_id, remove.artifact_id}, /*obsolete_id=*/"");
   test_server.service->set_heartbeat_sync_required(false, /*expected_ver=*/2);
   test_server.service->set_sync_remove_ids({remove.artifact_id});
@@ -1237,7 +1412,7 @@ TEST_CASE("WorkerLifecycleManager syncs on version mismatch without sync flag", 
   REQUIRE(st.ok());
   REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
 
-  // Poll until version-only hint triggers synchronize and removal applied
+  // Poll until version-only hint triggers reconcile and removal applied.
   bool removed = false;
   bool kept = false;
   for (int i = 0; i < 200; ++i) {

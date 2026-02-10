@@ -397,20 +397,14 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
     return absl::UnimplementedError("query_chunk_locations not used in tests");
   }
 
-  absl::StatusOr<tensorcast::store::components::StateSyncResult> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
+  absl::StatusOr<tensorcast::store::components::StateSyncResult> reconcile_worker_state(
+      std::string_view,
+      std::string_view,
+      const std::vector<tensorcast::common::v1::ReplicaInfo>&,
       bool,
       const tensorcast::store::components::StateSyncToken&,
       const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("synchronize_worker_state not used in tests");
-  }
-
-  absl::StatusOr<tensorcast::store::components::FullStateSyncResult> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      const tensorcast::store::components::StateSyncToken&,
-      const tensorcast::store::components::RpcOptions&) override {
-    return absl::UnimplementedError("request_full_state_sync not used in tests");
+    return absl::UnimplementedError("reconcile_worker_state not used in tests");
   }
 
   bool is_connected() const override {

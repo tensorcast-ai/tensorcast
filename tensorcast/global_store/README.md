@@ -252,8 +252,8 @@ counts by scope and capability.
 - Handles worker re-registration by transferring replicas to new worker ID
 - Computes state diffs between worker's local inventory and global state
 - Persists `state_version` and `state_checksum` per worker (non-null defaults); heartbeats use cached checksum to avoid full-table scans
-  - Tracks per-worker `state_sync_epoch`/`state_sync_request_id` tokens to ignore stale or duplicated sync requests
-  - Applies sync changes transactionally and only bumps `state_version` + checksum on full success (no-op syncs reconcile checksum without bump)
+  - Tracks per-worker reconcile cursor (`generation`, `request_seq`) and daemon incarnation (`daemon_id`) to reject stale requests and trigger explicit rebase
+  - Applies reconcile changes transactionally and only bumps `state_version` + checksum on full success (`NOOP` keeps version, refreshes checksum if needed)
 
 ### InstanceService
 

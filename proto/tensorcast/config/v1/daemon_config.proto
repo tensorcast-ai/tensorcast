@@ -76,6 +76,8 @@ message Lifecycle {
 message HighAvailability {
   bool enabled = 1;
   reserved 2; // global_store_address (host:port string)
+  reserved 11, 13, 14;
+  reserved "force_full_sync_on_empty_inventory", "full_sync_rpc_timeout", "full_sync_rpc_max_retries";
   // One or more control-plane endpoints for the Global Store.
   repeated tensorcast.config.v1.SocketAddress global_store_endpoints = 10;
   google.protobuf.Duration heartbeat_interval = 3;
@@ -88,12 +90,6 @@ message HighAvailability {
   // State sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
   google.protobuf.Duration state_sync_rpc_timeout = 9;
   optional int32 state_sync_rpc_max_retries = 12;
-  // Full-state sync RPC policy overrides (0/absent => use GlobalStoreClient defaults).
-  google.protobuf.Duration full_sync_rpc_timeout = 13;
-  optional int32 full_sync_rpc_max_retries = 14;
-  // When true, an empty local inventory is treated as authoritative and will
-  // remove replicas during sync (intended for drain/retire workflows).
-  bool force_full_sync_on_empty_inventory = 11;
 }
 
 message Engine {

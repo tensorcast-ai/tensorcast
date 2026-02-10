@@ -342,7 +342,7 @@ sequenceDiagram
   participant COMM as Communicator
 
   PM->>HA: force state sync (set export_state=DRAINING)
-  HA->>GS: SynchronizeWorkerState (withdraw applied)
+  HA->>GS: ReconcileWorkerState (withdraw applied)
   PM->>GS: WaitReplicaDrain (bounded)
   PM->>COMM: unexport (best-effort cleanup)
   PM->>HA: force state sync (set export_state=PRESENCE_ONLY, clear keys)
@@ -354,7 +354,7 @@ If drain times out but memory must be reclaimed (eviction/unload), demotion may 
 
 To make the above protocols implementable, HA state sync must satisfy:
 
-- **ByteSpace correctness:** `MemoryInfo.byte_space` must be populated for all replicas in `WorkerLocalState.local_replicas` so Global Store can reconcile canonical vs view replicas without collision.
+- **ByteSpace correctness:** `MemoryInfo.byte_space` must be populated for all replicas in `ReconcileWorkerStateRequest.inventory` so Global Store can reconcile canonical vs view replicas without collision.
 - **Authoritative transport updates:** when `MemoryInfo.transport` is present, Global Store must apply it even if keys/sizes are empty (withdraw/clear).
 - **Fail-safe on invalid transport metadata:** mismatched lengths or invalid size sums must result in the replica being treated as non-exportable (and should not “skip update” in a way that leaves stale exportable metadata in place).
 

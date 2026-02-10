@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repository for content-addressed artifacts metadata (RFC-0007).
 
@@ -30,12 +30,13 @@ class ArtifactRepository(BaseRepository):
         encoding: str,
         hash_params_json: Optional[str] = None,
         id_kind: str = "MI2",
+        cursor=None,
     ) -> None:
         """Create or update an artifact descriptor row by primary key `artifact_id`.
 
         Uses ON CONFLICT DO UPDATE for atomic upsert semantics.
         """
-        cursor = self.get_cursor()
+        cursor = cursor if cursor is not None else self.get_cursor()
         cursor.execute(
             """
             INSERT INTO artifacts (

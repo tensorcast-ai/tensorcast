@@ -531,6 +531,7 @@ absl::StatusOr<WorkerRegistrationInfo> GlobalStoreClient::register_worker(
   LOG(INFO) << "Registered worker with ID: " << response.worker_id();
   WorkerRegistrationInfo info;
   info.worker_id = response.worker_id();
+  info.reconcile_generation = response.reconcile_generation() > 0 ? response.reconcile_generation() : 1;
   info.expected_state_version = response.expected_state_version();
   info.state_sync_required = response.state_sync_required();
   info.heartbeat_interval_ms = response.heartbeat_interval_ms();
@@ -2060,80 +2061,67 @@ absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_lo
   return locations;
 }
 
-absl::StatusOr<StateSyncResult> GlobalStoreClient::synchronize_worker_state(
-    const global_store::WorkerLocalState& local_state,
-    bool force_full_sync,
+absl::StatusOr<StateSyncResult> GlobalStoreClient::reconcile_worker_state(
+    std::string_view worker_id,
+    std::string_view daemon_id,
+    const std::vector<common::v1::ReplicaInfo>& inventory,
+    bool snapshot_request,
     const StateSyncToken& token,
     const RpcOptions& rpc_options) {
-  global_store::SynchronizeWorkerStateRequest request;
-  request.set_worker_id(local_state.worker_id());
-  *request.mutable_local_state() = local_state;
-  request.set_force_full_sync(force_full_sync);
-  request.set_sync_epoch(token.epoch);
-  request.set_sync_request_id(token.request_id);
+  global_store::ReconcileWorkerStateRequest request;
+  request.set_worker_id(std::string(worker_id));
+  request.set_daemon_id(std::string(daemon_id));
+  request.set_generation(token.generation);
+  request.set_request_seq(token.request_seq);
+  request.set_request_kind(
+      snapshot_request ? global_store::RECONCILE_REQUEST_KIND_SNAPSHOT : global_store::RECONCILE_REQUEST_KIND_DELTA);
+  for (const auto& replica : inventory) {
+    *request.add_inventory() = replica;
+  }
 
-  global_store::SynchronizeWorkerStateResponse response;
+  global_store::ReconcileWorkerStateResponse response;
   auto status = execute_rpc_with_retry(
       request,
       &response,
       [this](auto* ctx, const auto& req, auto* resp) {
-        return cluster_runtime_stub_->SynchronizeWorkerState(ctx, req, resp);
+        return cluster_runtime_stub_->ReconcileWorkerState(ctx, req, resp);
       },
-      "SynchronizeWorkerState",
+      "ReconcileWorkerState",
       rpc_options);
   if (!status.ok())
     return status;
-  if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(
-        absl::StrFormat(
-            "SynchronizeWorkerState failed: %s (%d)",
-            status_to_cstr(response.status()),
-            static_cast<int>(response.status())));
-  }
   StateSyncResult result;
+  switch (response.result_kind()) {
+    case global_store::RECONCILE_RESULT_KIND_APPLIED:
+      result.result_kind = ReconcileResultKind::kApplied;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_NOOP:
+      result.result_kind = ReconcileResultKind::kNoop;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_IGNORED_STALE:
+      result.result_kind = ReconcileResultKind::kIgnoredStale;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_RETRY_LATER:
+      result.result_kind = ReconcileResultKind::kRetryLater;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED:
+      result.result_kind = ReconcileResultKind::kRebaseRequired;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_FATAL:
+      result.result_kind = ReconcileResultKind::kFatal;
+      break;
+    case global_store::RECONCILE_RESULT_KIND_UNSPECIFIED:
+    default:
+      result.result_kind = ReconcileResultKind::kUnspecified;
+      break;
+  }
+  result.retry_after_ms = response.retry_after_ms();
   result.new_state_version = response.new_state_version();
   result.new_state_checksum = response.new_state_checksum();
-  result.ignored = response.ignored();
   result.state_changes.reserve(response.state_changes_size());
   for (const auto& ch : response.state_changes()) {
     result.state_changes.push_back(ch);
   }
-  return result;
-}
-
-absl::StatusOr<FullStateSyncResult> GlobalStoreClient::request_full_state_sync(
-    std::string_view worker_id,
-    uint64_t current_state_version,
-    const StateSyncToken& token,
-    const RpcOptions& rpc_options) {
-  global_store::RequestFullStateSyncRequest request;
-  request.set_worker_id(std::string(worker_id));
-  request.set_current_state_version(current_state_version);
-  request.set_sync_epoch(token.epoch);
-  request.set_sync_request_id(token.request_id);
-
-  global_store::RequestFullStateSyncResponse response;
-  auto status = execute_rpc_with_retry(
-      request,
-      &response,
-      [this](auto* ctx, const auto& req, auto* resp) {
-        return cluster_runtime_stub_->RequestFullStateSync(ctx, req, resp);
-      },
-      "RequestFullStateSync",
-      rpc_options);
-  if (!status.ok())
-    return status;
-  if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(
-        absl::StrFormat(
-            "RequestFullStateSync failed: %s (%d)",
-            status_to_cstr(response.status()),
-            static_cast<int>(response.status())));
-  }
-  FullStateSyncResult result;
-  result.new_state_version = response.new_state_version();
-  result.new_state_checksum = response.new_state_checksum();
-  result.ignored = response.ignored();
   result.expected_replicas.reserve(response.expected_replicas_size());
   for (const auto& rep : response.expected_replicas()) {
     result.expected_replicas.push_back(rep);

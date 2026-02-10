@@ -32,28 +32,41 @@ CREATE TABLE IF NOT EXISTS workers (
     grpc_port INTEGER NOT NULL,
     p2p_port INTEGER NOT NULL,
     mem_pool_total_size BIGINT NOT NULL,
-    mem_pool_available_size BIGINT NOT NULL,
-    accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
-    capability_flags BIGINT NOT NULL DEFAULT 0,
     registered_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     inactive_at TIMESTAMP WITH TIME ZONE,
-    state_version BIGINT NOT NULL DEFAULT 1,
-    state_checksum TEXT NOT NULL DEFAULT '',
-    state_sync_epoch BIGINT NOT NULL DEFAULT 0,
-    state_sync_request_id BIGINT NOT NULL DEFAULT 0,
 
     -- Prevent duplicate registration for the same address:port
     UNIQUE(node_address, grpc_port)
 );
 
+CREATE TABLE IF NOT EXISTS worker_liveness (
+    worker_id TEXT PRIMARY KEY,
+    last_heartbeat TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    mem_pool_available_size BIGINT NOT NULL,
+    accepting_new_requests BOOLEAN NOT NULL DEFAULT TRUE,
+    capability_flags BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS worker_reconcile_state (
+    worker_id TEXT PRIMARY KEY,
+    generation BIGINT NOT NULL DEFAULT 1,
+    request_seq BIGINT NOT NULL DEFAULT 0,
+    state_version BIGINT NOT NULL DEFAULT 1,
+    state_checksum TEXT NOT NULL DEFAULT '',
+    last_reconcile_result TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Performance indexes
-CREATE INDEX IF NOT EXISTS idx_workers_last_heartbeat ON workers (last_heartbeat);
-CREATE INDEX IF NOT EXISTS idx_workers_accepting_requests ON workers (accepting_new_requests, last_heartbeat);
 CREATE INDEX IF NOT EXISTS idx_workers_node_id ON workers (node_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_daemon_id_unique ON workers (daemon_id);
 CREATE INDEX IF NOT EXISTS idx_workers_registered_at ON workers (registered_at);
 CREATE INDEX IF NOT EXISTS idx_workers_inactive_at ON workers (inactive_at);
+CREATE INDEX IF NOT EXISTS idx_worker_liveness_last_heartbeat ON worker_liveness (last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_worker_liveness_accepting ON worker_liveness (accepting_new_requests, last_heartbeat);
+CREATE INDEX IF NOT EXISTS idx_worker_reconcile_state_generation_seq
+    ON worker_reconcile_state (worker_id, generation, request_seq);
 
 -- Engine instance registry (node-local engine processes)
 CREATE TABLE IF NOT EXISTS instances (

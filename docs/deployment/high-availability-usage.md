@@ -8,21 +8,21 @@ sidebar_position: 3
 
 ## Overview
 
-TensorCast HA keeps the single Global Store resilient and consistent with Store Daemon state by combining startup recovery, enhanced heartbeats, incremental/full state sync, and drift pruning. Configuration is file-based (proto-backed) and orchestrated via the `tensorcast` CLI.
+TensorCast HA keeps the single Global Store resilient and consistent with Store Daemon state by combining startup recovery, enhanced heartbeats, typed reconcile, and drift pruning. Configuration is file-based (proto-backed) and orchestrated via the `tensorcast` CLI.
 
 ## Features
 
 ### Global Store
 - **Startup recovery**: marks workers and replicas stale, cleans orphaned replicas, and preserves persisted `state_version`/`state_checksum`.
-- **State sync pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts (heartbeats require `state_version >= 1`); incremental sync applies additions/removals with “addition over removal” semantics, transactionally bumps version/checksum on success, and no-op sync refreshes cached checksum; full-state sync returns the expected set without bumping versions.
+- **Reconcile pipeline**: enhanced heartbeats advertise version + checksum + registered artifacts (heartbeats require `state_version >= 1`); `ReconcileWorkerState` applies additions/removals with “addition over removal” semantics, transactionally updates version/checksum on success, and returns typed outcomes (`APPLIED`, `NOOP`, `IGNORED_STALE`, `RETRY_LATER`, `REBASE_REQUIRED`, `FATAL`).
 - **Identity guardrails**: rejects loopback/unspecified registration addresses; `HealthCheck` surfaces `cluster_token`, while `GetServerInfo` returns bind (`listen_*`) endpoints, advertise (`advertise_*`) endpoints, metrics port, and version.
 
 ### Store Daemon
 - **Routable registration**: requires a non-loopback advertise host and non-zero `server.p2p_listen.port` before enabling HA.
-- **Initial drift pruning**: on startup (and recovery re-registration) runs `RequestFullStateSync` then unloads local replicas (keyed by `(artifact_id, memory_type, device_id)`) not expected by the Global Store.
+- **Initial drift pruning**: on startup (and recovery re-registration) runs reconcile snapshot; when the server returns `REBASE_REQUIRED`, the daemon unloads local replicas (keyed by `(artifact_id, memory_type, device_id)`) not expected by the Global Store.
 - **Registration seeding**: initializes `state_version` from `RegisterWorkerResponse.expected_state_version` before the first heartbeat.
-- **Enhanced heartbeat loop**: sends version/checksum/inventory and queues background sync work; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and resyncs.
-- **Incremental sync handling**: applies obsolete removals immediately and prefetches server-requested `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.
+- **Enhanced heartbeat loop**: sends version/checksum/inventory and queues background reconcile work; if the server returns `NOT_FOUND` but the channel is healthy, the daemon re-registers with the previous worker id and re-enters reconcile bootstrap.
+- **Reconcile handling**: applies server-requested removals and prefetches `ADD_REPLICA` updates; toggles remote access for `UPDATE_REPLICA`.
 - **Bounded retries**: all RPCs use jittered exponential backoff (`max_retries=3`, base 100ms).
 
 ## Configuration
@@ -74,7 +74,6 @@ high_availability:
   periodic_sync_interval: 10s # chunk sync loop; 0 disables
   heartbeat_rpc_timeout: 2s   # optional per-RPC overrides
   state_sync_rpc_timeout: 5s
-  full_sync_rpc_timeout: 10s
 ```
 
 > The CLI (`tensorcast daemon start`) will inject `high_availability.global_store_endpoints` when you pass `--global-store-address` or `--global-store-endpoints`, and will auto-fill ports when set to 0. Keep `server.advertise.host` routable to avoid registration failures.
@@ -135,40 +134,33 @@ if resp.state_sync_required:
     ...
 ```
 
-State sync:
+Reconcile:
 
 ```python
-import time
-from google.protobuf import timestamp_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 from tensorcast.proto.common.v1 import common_pb2
 
-ts = timestamp_pb2.Timestamp()
-ts.FromSeconds(int(time.time()))
-local_state = global_store_pb2.WorkerLocalState(
-    worker_id="worker-node-1",
-    state_version=15,
-    state_checksum="local_state_checksum",
-    last_update_ts=ts,
-)
-replica = local_state.local_replicas.add()
+replica = common_pb2.ReplicaInfo()
 replica.ref.artifact_id = "artifact1"
 replica.memory_info.memory_type = common_pb2.MEMORY_TYPE_GPU
 replica.memory_info.device_id = 0
 replica.memory_info.memory_size = 1 * 1024**3
-resp = stub.SynchronizeWorkerState(
-    global_store_pb2.SynchronizeWorkerStateRequest(
+resp = stub.ReconcileWorkerState(
+    global_store_pb2.ReconcileWorkerStateRequest(
         worker_id="worker-node-1",
-        local_state=local_state,
-        force_full_sync=False,
-    )
+        daemon_id="daemon-node-1",
+        generation=1,
+        request_seq=1,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+        inventory=[replica],
+    ),
 )
 ```
 
 ## Failure Scenarios
 
-- **Global Store crash/restart**: recovery marks workers/replicas stale; daemons continue heartbeating, re-register on `NOT_FOUND`, run full-state sync, and prune drift. Persistent `db_file` keeps registry state.
-- **Daemon crash/restart**: a fresh process registers a new worker id, runs full-state sync, and unloads replicas not expected by the Global Store.
+- **Global Store crash/restart**: recovery marks workers/replicas stale; daemons continue heartbeating, re-register on `NOT_FOUND`, run reconcile bootstrap, and prune drift. Persistent `db_file` keeps registry state.
+- **Daemon crash/restart**: a fresh process registers a new worker id, runs reconcile bootstrap, and unloads replicas not expected by the Global Store.
 - **Network partition**: RPC retries are bounded; once connectivity returns the next heartbeat triggers sync. No offline queue is kept—state is rebuilt from the current engine snapshot.
 - **Registration rejected**: ensure `advertise.host` is routable and `p2p_listen.port` is set.
 
@@ -185,7 +177,6 @@ resp = stub.SynchronizeWorkerState(
 
 - Use persistent storage for the Global Store database; back up `cluster_token` with it.
 - Set a routable `server.advertise.host` and non-zero `server.p2p_listen.port` before enabling HA.
-- Only enable `high_availability.force_full_sync_on_empty_inventory` when deliberately draining/retiring a node; otherwise keep the default conservative behavior.
 - Start always waits for readiness and returns only when services are healthy (or on error) before clients connect; `--blocking` keeps the process attached after readiness.
 - Keep configs proto-valid (strict parsing) and avoid relying on multiple endpoints—the first `global_store_endpoints` entry is used today.
 
@@ -193,13 +184,13 @@ resp = stub.SynchronizeWorkerState(
 
 1. Add a persistent `database.db_file` and optional `meta.cluster_token` to the Global Store config, then restart with `uv run tensorcast global start --config=...`.
 2. Update daemon config to include `high_availability` and a routable `server.advertise.host`/`p2p_listen.port`, then restart with `uv run tensorcast daemon start --global-store-address <addr>`.
-3. Verify via `HealthCheck` + `GetServerInfo`, metrics scrape, and a forced `RequestFullStateSync` (daemon restart) before rolling out broadly.
+3. Verify via `HealthCheck` + `GetServerInfo`, metrics scrape, and a daemon restart that completes reconcile bootstrap before rolling out broadly.
 
 ## Limitations
 
 - Single Global Store instance; no automatic failover or multi-endpoint rotation (first endpoint only).
 - RPC retries are bounded; there is no durable queue of state changes while disconnected.
-- Eventual consistency: reconciles on heartbeat/sync, not instantly.
+- Eventual consistency: reconciles on heartbeat/reconcile loops, not instantly.
 
 ## Future Enhancements
 

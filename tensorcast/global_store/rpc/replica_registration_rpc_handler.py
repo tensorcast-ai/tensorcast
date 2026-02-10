@@ -72,25 +72,7 @@ class ReplicaRegistrationRpcHandler:
                 request.worker_id,
             )
             preserve_transport = not request.mem_info.HasField("transport")
-            registered = self._artifact_service.register_replica(
-                replica,
-                preserve_transport=preserve_transport,
-            )
-
-            with suppress(Exception):
-                span_attrs: dict[str, bool | int | float | str] = {
-                    "tc.artifact.id": registered.artifact_id,
-                    "tc.replica.id": str(registered.replica_id),
-                    "tc.memory.type": str(replica.memory_type.value),
-                    "tc.memory.size": int(replica.memory_size),
-                    "tc.device.id": int(replica.device_id),
-                }
-                worker_id = replica.worker_id
-                if worker_id:
-                    span_attrs["tc.worker.id"] = worker_id
-                set_span_attributes(span_attrs)
-
-            artifact_id = registered.artifact_id
+            artifact_id = request.artifact_id
             descriptor = request.descriptor if request.HasField("descriptor") else None
             if descriptor is not None and descriptor.artifact_id:
                 artifact_id = descriptor.artifact_id
@@ -143,7 +125,10 @@ class ReplicaRegistrationRpcHandler:
                         )
                         if derived is not None:
                             index_mh = derived
-                try:
+                artifact_index_encoding = (
+                    request.encoding if request.HasField("encoding") else "json"
+                )
+                with self._artifact_service.replica_repository.transaction() as cursor:
                     self._artifact_repository.upsert_artifact(
                         artifact_id=artifact_id,
                         index_multihash=index_mh,
@@ -152,29 +137,57 @@ class ReplicaRegistrationRpcHandler:
                         encoding=encoding,
                         hash_params_json=None,
                         id_kind=id_kind,
+                        cursor=cursor,
                     )
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.warning(
-                        "Failed to upsert artifacts entry for %s: %s",
-                        artifact_id,
-                        exc,
+                    if (
+                        request.HasField("tensor_index_data")
+                        and request.tensor_index_data
+                    ):
+                        _ = self._artifact_index_repository.upsert_index(
+                            index_data=request.tensor_index_data,
+                            encoding=artifact_index_encoding,
+                            schema_version=schema_version_value,
+                            cursor=cursor,
+                        )
+                    registered = self._artifact_service.register_replica(
+                        replica,
+                        preserve_transport=preserve_transport,
+                        cursor=cursor,
+                    )
+            else:
+                with self._artifact_service.replica_repository.transaction() as cursor:
+                    if (
+                        request.HasField("tensor_index_data")
+                        and request.tensor_index_data
+                    ):
+                        _ = self._artifact_index_repository.upsert_index(
+                            index_data=request.tensor_index_data,
+                            encoding=(
+                                request.encoding
+                                if request.HasField("encoding")
+                                else "json"
+                            ),
+                            schema_version=schema_version_value,
+                            cursor=cursor,
+                        )
+                    registered = self._artifact_service.register_replica(
+                        replica,
+                        preserve_transport=preserve_transport,
+                        cursor=cursor,
                     )
 
-            if request.HasField("tensor_index_data") and request.tensor_index_data:
-                try:
-                    _ = self._artifact_index_repository.upsert_index(
-                        index_data=request.tensor_index_data,
-                        encoding=(
-                            request.encoding if request.HasField("encoding") else "json"
-                        ),
-                        schema_version=schema_version_value,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    self._logger.warning(
-                        "Failed to upsert artifact index for artifact_id=%s: %s",
-                        artifact_id,
-                        exc,
-                    )
+            with suppress(Exception):
+                span_attrs: dict[str, bool | int | float | str] = {
+                    "tc.artifact.id": registered.artifact_id,
+                    "tc.replica.id": str(registered.replica_id),
+                    "tc.memory.type": str(replica.memory_type.value),
+                    "tc.memory.size": int(replica.memory_size),
+                    "tc.device.id": int(replica.device_id),
+                }
+                worker_id = replica.worker_id
+                if worker_id:
+                    span_attrs["tc.worker.id"] = worker_id
+                set_span_attributes(span_attrs)
 
             return global_store_pb2.RegisterReplicaResponse(
                 status=global_store_pb2.Status.STATUS_OK,

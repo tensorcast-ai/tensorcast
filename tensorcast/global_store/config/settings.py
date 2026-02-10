@@ -57,6 +57,14 @@ class GlobalStoreLimitsConfig(BaseModel):
     operation_writes: OperationWriteLimitsConfig = OperationWriteLimitsConfig()
 
 
+class WorkerControlReducerConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    shard_count: int = 1
+    queue_capacity: int = 2048
+    coalesce_window_ms: int = 50
+
+
 class GlobalStoreConfig(BaseModel):
     """Configuration for Global Store service."""
 
@@ -77,6 +85,7 @@ class GlobalStoreConfig(BaseModel):
     memory_tier_snapshot_retention_ms: int = 600000  # 10 minutes
     memory_tier_snapshot_max_rows: int = 200
     memory_tier_publish_interval_ms: int = 5000  # Daemon publish hint
+    worker_control_reducer: WorkerControlReducerConfig = WorkerControlReducerConfig()
 
     # Server settings
     listen_host: str = "127.0.0.1"
@@ -187,6 +196,7 @@ class GlobalStoreConfig(BaseModel):
         snapshot_retention_ms = 600_000
         snapshot_max_rows = 200
         publish_interval_ms = 5000
+        reducer_cfg = WorkerControlReducerConfig()
         if pb.worker_policy.HasField("memory_tiers"):
             mt = pb.worker_policy.memory_tiers
             snapshot_retention_ms = (
@@ -199,6 +209,22 @@ class GlobalStoreConfig(BaseModel):
                 _dur_ms(mt.publish_interval)
                 if mt.HasField("publish_interval")
                 else publish_interval_ms
+            )
+        if pb.worker_policy.HasField("control_reducer"):
+            reducer_pb = pb.worker_policy.control_reducer
+            reducer_cfg = WorkerControlReducerConfig(
+                shard_count=max(1, int(reducer_pb.shard_count or 0))
+                if int(reducer_pb.shard_count or 0) > 0
+                else reducer_cfg.shard_count,
+                queue_capacity=max(1, int(reducer_pb.queue_capacity or 0))
+                if int(reducer_pb.queue_capacity or 0) > 0
+                else reducer_cfg.queue_capacity,
+                coalesce_window_ms=max(
+                    0,
+                    _dur_ms(reducer_pb.coalesce_window)
+                    if reducer_pb.HasField("coalesce_window")
+                    else reducer_cfg.coalesce_window_ms,
+                ),
             )
 
         # Limits
@@ -272,6 +298,7 @@ class GlobalStoreConfig(BaseModel):
             memory_tier_snapshot_retention_ms=max(0, snapshot_retention_ms),
             memory_tier_snapshot_max_rows=max(0, snapshot_max_rows),
             memory_tier_publish_interval_ms=max(0, publish_interval_ms),
+            worker_control_reducer=reducer_cfg,
             listen_host=listen_host or "127.0.0.1",
             listen_port=listen_port if listen_port >= 0 else 0,
             advertise_host=advertise_host,

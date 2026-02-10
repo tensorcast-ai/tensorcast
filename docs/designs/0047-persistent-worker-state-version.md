@@ -15,11 +15,11 @@ links:
 
 # Summary
 
-Persist `state_version` and `state_checksum` in the Global Store database and make state synchronization transactional. This prevents version drift on partial failures, removes per-heartbeat full-table checksum scans, and keeps state version stable across restarts.
+Persist `state_version` and `state_checksum` in the Global Store database and make reconcile updates transactional. This prevents version drift on partial failures, removes per-heartbeat full-table checksum scans, and keeps state version stable across restarts.
 
 # Problem Statement
 
-The current recovery flow keeps `worker_state_versions` in memory and increments the version even if some state changes fail. On restart, versions reset and checksums are recomputed by scanning all replicas on each heartbeat. This allows silent drift where the version advances without fully applying state changes.
+The current recovery flow can increment version markers even when some state changes fail. This allows silent drift where the version advances without fully applying state changes.
 
 # Goals / Non-Goals
 
@@ -40,12 +40,12 @@ The current recovery flow keeps `worker_state_versions` in memory and increments
 
 ## Data model
 
-Store state version and checksum in the `workers` table. This keeps identity and HA state colocated and avoids extra joins.
+Store state version and checksum in `worker_reconcile_state`, with worker identity in `workers` and liveness in `worker_liveness`.
 
-## Recovery and sync flow
+## Recovery and reconcile flow
 
 - `RecoveryService` reads and writes `state_version` and `state_checksum` via `WorkerRepository`.
-- `synchronize_worker_state` runs in a single transaction:
+- `reconcile_worker_state` runs in a single transaction:
   - Apply all state changes.
   - If any operation fails, rollback and return error without bumping version.
   - On success, compute checksum once and update `(state_version, state_checksum)` together.
@@ -69,17 +69,22 @@ Store state version and checksum in the `workers` table. This keeps identity and
 
 # Schema Changes
 
-Define the columns in the canonical schema (declarative; no in-place migrations).
+Define reconcile columns in the canonical schema (declarative).
 
 ```sql
-state_version BIGINT NOT NULL DEFAULT 1,
-state_checksum TEXT NOT NULL DEFAULT ''
+CREATE TABLE IF NOT EXISTS worker_reconcile_state (
+  worker_id TEXT PRIMARY KEY,
+  generation BIGINT NOT NULL DEFAULT 1,
+  request_seq BIGINT NOT NULL DEFAULT 0,
+  state_version BIGINT NOT NULL DEFAULT 1,
+  state_checksum TEXT NOT NULL DEFAULT ''
+);
 ```
 
 # Trade-offs & Risks
 
-- Additional writes to `workers` on sync success; expected to be low frequency compared to heartbeats.
-- Schema updates require an explicit migration or a fresh database; startup does not alter existing tables.
+- Additional writes to `worker_reconcile_state` on reconcile success; expected to be low frequency compared to heartbeats.
+- Schema updates require canonical schema alignment.
 - Stored checksum could become stale if external writers bypass recovery service; mitigate by routing changes through recovery service or validating on demand.
 
 # Compatibility & Acceptance Criteria
