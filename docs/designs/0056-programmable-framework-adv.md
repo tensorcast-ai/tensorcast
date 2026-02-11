@@ -1,7 +1,7 @@
 ---
 slug: 0056-programmable-framework-adv
 title: Programmable Framework (Advanced Runtime + LLM Integration) (Design)
-description: Planned extensions on top of 0055 to support daemon-run plan execution (distributed controller), a unified process runtime, signals, and engine-agnostic KV-cache orchestration (HiCache-style blobs) for LLM applications.
+description: Planned extensions on top of 0055 to unify phased plan execution (local runner + optional daemon ingress), a unified process runtime, signals, and engine-agnostic KV-cache orchestration (HiCache-style blobs) for LLM applications.
 status: draft
 areas:
   - sdk
@@ -10,7 +10,7 @@ areas:
   - proto
   - integrations
 created: 2026-02-04
-last_updated: 2026-02-08
+last_updated: 2026-02-10
 related_code:
   - tensorcast/api/plan/plan.py
   - tensorcast/node_agent/executor.py
@@ -24,6 +24,8 @@ related_docs:
   - docs/designs/0039-artifact-first-sdk.md
   - docs/designs/0001-docs-system-design.md
   - docs/designs/0004-unified-runtime-config.md
+  - docs/distributed-coordination-series/01-global-optimum-vs-distributed-execution-framework.md
+  - docs/distributed-coordination-series/02-mode-switching-workload-playbook-and-governance.md
 links:
   predecessors:
     - ./0055-programmable-framework.md
@@ -51,7 +53,11 @@ ToT scheduler), under common production constraints:
 
 Planned extensions:
 
-- **Daemon-run Plan execution**: `Plan.run()` executes on a Store Daemon acting as a distributed controller (gateway).
+- **Phased Plan execution unification**:
+  - current baseline (as of 2026-02-10): `Plan.run()` is SDK-local and instance fragments are executed by
+    `NodeAgent.ExecutePlan`,
+  - planned extension: optionally add daemon ingress `ExecutePlan` (gateway role) without creating a second execution
+    semantics.
 - **Unified process runtime**: all caller processes use one `Runtime`/`ProcessContext` object returned by
   `tensorcast.connect(...)` (no separate `init_app(...)`).
 - **Daemon-served Signals**: `TensorCastSignals` is served by daemons with explicit staleness budgets; Global Store is
@@ -61,6 +67,18 @@ Planned extensions:
 
 This design intentionally keeps TensorCast core **KV-semantics-free**: TensorCast stores/moves blobs; inference engines
 remain the source of truth for request→token→KV-key mapping.
+
+Consistency and migration guardrails (required):
+
+- **Single execution semantics**: Node Agent remains the canonical plan-fragment executor for instance-scoped actions.
+  Gateway/daemon ingress is routing/scheduling glue and MUST NOT become a parallel execution plane.
+- **Gateway is a role, not a new service type**: any Store Daemon may serve ingress; no separate gateway registry entity.
+- **Contract reuse over implementation reuse**: directory/cache behavior SHOULD reuse `CapabilityDirectory` semantics
+  (freshness, invalidation, fallback), but daemon implementations remain native (no cross-language runtime coupling).
+- **LaneContext must close the loop**: lane/policy metadata MUST propagate consistently across plan and non-plan hot-path
+  RPCs (materialize/prefetch/KV), with auditable logs and retry stability.
+- **De-hotization cannot weaken correctness**: when moving source/routing decisions local, preserve claim/reservation and
+  fencing-equivalent invariants; do not trade away overload safety.
 
 ---
 
@@ -73,6 +91,8 @@ Goals
 - Keep the Python SDK a clean boundary: caller processes connect to exactly **one** daemon and do not call Global Store
   directly.
 - Push control-plane execution down to Store Daemons so the system scales without a single centralized controller.
+- Avoid creating parallel execution planes (`gateway executor` vs `NodeAgent executor`) with diverging retry/idempotency
+  semantics.
 - Minimize Global Store load by globally registering only long-lived entities (**Worker / Instance / NodeAgent
   endpoint**) and by using watch/stream + caching inside daemons.
 - Define a node‑local **Instance Agent (node_agent boundary) / Engine Adapter** boundary so instance steps can safely
@@ -153,9 +173,10 @@ flowchart LR
 
 - **Store Daemon (Worker process)** (existing; extended in 0056): owns TensorCast data plane (replicas, tiers, P2P
   copies, placement pins) and additionally hosts control-plane services:
-  - `ExecutePlan` (daemon-run plan execution; distributed controller),
+  - optional ingress `ExecutePlan` role (gateway) for single-entry clients,
   - `TensorCastSignals` (cached signals/directory; bounded staleness),
-  - internal dispatch to other daemons and local instance agents (node_agent boundary).
+  - internal dispatch to other daemons and local instance agents (node_agent boundary),
+  - no parallel execution semantics: instance-scoped execution remains aligned with `NodeAgent.ExecutePlan`.
 - **Global Store** (existing): durable coordination + registries and persistence metadata.
   - 0056 goal: keep it off the hot path by registering only long-lived entities and using watch/stream updates to
     populate daemon caches.
@@ -197,7 +218,8 @@ Remote-safety rules (unchanged from 0055; reiterated):
   Daemon** unless explicitly qualified (e.g., “Global Store server”).
 - **Store Daemon (concrete process)**:
   - owns TensorCast data plane (replicas, tiers, P2P copies, placement pins),
-  - runs control-plane endpoints required by 0056 (daemon-run `ExecutePlan`, daemon-served signals/directory),
+  - runs control-plane endpoints required by 0056 (daemon-served signals/directory, and optional ingress
+    `ExecutePlan`),
   - maintains a directory/signal cache backed by Global Store watch streams.
 - A Store Daemon is identified by a stable **`daemon_id`** (HA-safe). Network addresses are routing attributes only.
 
@@ -284,7 +306,7 @@ All caller processes use the same entrypoint and the same object:
 - `Runtime` is a lightweight RPC client bound to exactly one Store Daemon endpoint.
 - It provides access to:
   - the 0055 Store/data-plane API,
-  - daemon-run plan execution,
+  - phased plan execution (current local runner, optional ingress later),
   - daemon-served signals/directory queries.
 - It is **not** globally scheduled/registered (only Workers/Instances/NodeAgents are registered). It is an API boundary
   handle for a caller process.
@@ -332,8 +354,8 @@ Semantics (planned):
 
 ### Initialization UX (planned)
 
-The 0055 `tensorcast.init(mode=...)` is primarily a data-plane initializer. 0056 adds daemon-run plan execution and
-signals that must be usable from network-restricted apps (single entrypoint), so the recommended UX is:
+The 0055 `tensorcast.init(mode=...)` is primarily a data-plane initializer. 0056 adds phased plan execution and signals
+that must be usable from network-restricted apps (single entrypoint), so the recommended UX is:
 
 - **one** primary entrypoint: `tensorcast.connect(...) → Runtime`
 - optional dev tooling: `tensorcast.init(mode="create")` / `launch_local_store(...)`
@@ -350,9 +372,11 @@ This maps the older 4-mode mental model into a single connect + optional instanc
 
 `Plan` construction routing (planned):
 
-- `runtime.plan(ctx)` builds a plan bound to a daemon-run executor.
+- `runtime.plan(ctx)` builds a plan bound to the unified execution semantics:
+  - current baseline: SDK local runner + NodeAgent execution path,
+  - optional ingress phase: daemon `ExecutePlan` as entrypoint with identical semantics.
 - For simplicity, module-level `tensorcast.plan(ctx)` SHOULD:
-  - delegate to `runtime().plan(ctx)` when an active `Runtime` exists (daemon-run), and
+  - delegate to `runtime().plan(ctx)` when an active `Runtime` exists (local runner or ingress, depending on rollout), and
   - otherwise build a locally-executed plan per 0055 (useful for tests and in-cluster debugging).
 - `tensorcast.local_plan(ctx)` (planned) forces the 0055 local-run behavior even when a `Runtime` exists.
 
@@ -363,20 +387,26 @@ Recommended usage patterns (planned):
   the engine’s HiCache storage backend uses the 0055 Store client against the co-located daemon.
 - **Offline tooling**: `rt = tc.connect(daemon)` and use `Artifact.prefetch/into` or daemon-run plans.
 
-## Daemon-run Plan execution (planned)
+## Phased Plan execution (planned)
 
-In 0055, `Plan.run()` executes in the caller process. For external apps that cannot directly reach every daemon/agent,
-0056 plans to support daemon-run execution:
+Current baseline (as of 2026-02-10):
 
-1. SDK serializes `Plan` → `PlanSpec`.
-2. SDK calls `StoreDaemonService.ExecutePlan(PlanSpec)` on the connected gateway daemon and receives an
-   `Operation[PlanResult]` (plan operation).
-3. Gateway daemon schedules the DAG and dispatches per-target fragments:
-   - worker steps → the target Store Daemon(s),
-   - instance steps → the target Store Daemon, which invokes its local Instance Agent (node_agent boundary) / Engine
-     Adapter boundary.
-4. Gateway daemon aggregates step results into a `PlanResult`. The caller observes completion via the returned
-   `Operation` (status/wait/cancel), which is daemon-scoped (no Global Store hot-path).
+- In 0055/current code, `Plan.run()` executes in the caller process.
+- Instance fragments already have a concrete executor path via `NodeAgent.ExecutePlan`.
+- SDK/client plumbing is not complete yet: the SDK does not ship a Node Agent discovery+client path, and Global Store instance registry does not yet expose a dialable `node_agent_endpoint` fact (so direct-dispatch requires out-of-band endpoint knowledge in dev).
+
+Planned migration sequence for external apps that cannot directly reach every daemon/agent:
+
+1. SDK serializes `Plan` -> `PlanSpec`.
+2. Plan submission uses one of two equivalent ingress shapes:
+   - preferred once available: SDK calls `StoreDaemonService.ExecutePlan(PlanSpec)` on a gateway daemon and receives
+     `Operation[PlanResult]`,
+   - transitional/current path: SDK local runner dispatches using the same deterministic step/operation identities in
+     deployments where callers can directly reach required execution endpoints.
+3. Dispatch semantics are shared:
+   - worker steps -> target Store Daemon(s),
+   - instance steps -> target Store Daemon -> local `NodeAgent.ExecutePlan` / Engine Adapter boundary.
+4. Completion is exposed as `Operation[PlanResult]` semantics with at-least-once-safe retries and idempotent joins.
 
 Plan operation semantics (planned):
 
@@ -1265,20 +1295,22 @@ Planned call flow (control plane + node-local boundaries):
    - `plan2.on_worker(worker_b).prefetch_many([...], device="dram")` (optional; batch)
    - `plan2.on_instance(inst_b).kvcache_prefetch(engine_request_id="rid-123", key_set=key_set)`
    - `plan2.run(...)`
-2. **Plan.run dispatch**:
-   - `Plan.run()` → `StoreDaemonService.ExecutePlan(PlanSpec)` (on the gateway daemon)
-3. **Gateway daemon dispatches instance step (flush)**:
-   - gateway daemon → `StoreDaemonService.ExecutePlan(...)` (subplan for `inst_a`’s daemon)
-   - target daemon → local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_a)`
+2. **Plan.run submission (planned ingress, with transitional fallback)**:
+   - preferred when ingress is available: `Plan.run()` -> `StoreDaemonService.ExecutePlan(PlanSpec)` (gateway daemon),
+   - transitional/current path: SDK local runner dispatches equivalent fragments using the same deterministic ids when
+     the caller has direct reachability.
+3. **Gateway/runner dispatches instance step (flush)**:
+   - gateway/runner -> target daemon dispatch path (subplan for `inst_a`’s daemon),
+   - target daemon -> local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_a)`
    - Instance Agent calls `EngineKvCacheAdapter.kv_flush(...)`
    - Adapter enumerates per-page keys (SGLang page hashes) and writes missing `cgid:kvcache~...` blobs to backend using
      batch put (PutIfAbsent/JoinIfMatch).
-4. **Gateway daemon dispatches worker step (prefetch_many)** (optional):
-   - gateway daemon → `StoreDaemonService.ExecutePlan(...)` (subplan for Worker B)
+4. **Gateway/runner dispatches worker step (prefetch_many)** (optional):
+   - gateway/runner -> target daemon dispatch path (subplan for Worker B)
    - Store Daemon B prefetches the listed CGID selections into daemon-owned DRAM tier.
-5. **Gateway daemon dispatches instance step (kvcache_prefetch)**:
-   - gateway daemon → `StoreDaemonService.ExecutePlan(...)` (subplan for `inst_b`’s daemon)
-   - target daemon → local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_b)`
+5. **Gateway/runner dispatches instance step (kvcache_prefetch)**:
+   - gateway/runner -> target daemon dispatch path (subplan for `inst_b`’s daemon)
+   - target daemon -> local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_b)`
    - Instance Agent calls `EngineKvCacheAdapter.kv_prefetch(engine_request_id=..., key_set=...)`
    - Adapter batch-reads blobs (possibly hitting local daemon DRAM if prefetch_many ran) and rehydrates engine-local KV.
 6. **App reassigns request**:
@@ -1307,10 +1339,14 @@ Two integration modes (recommended):
 
 This section is illustrative and intentionally separated from 0055.
 
-- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` with daemon-run control-plane RPCs:
-  - `ExecutePlan(PlanSpec) -> Operation[PlanResult]` (the gateway daemon acts as a distributed controller).
-  - `GetSignals/ListWorkers/ListInstances/...` (daemon-served signals/directory; bounded staleness).
-  - Optional: `ExecutePlanFragment` (or reuse `ExecutePlan`) for daemon↔daemon dispatch of per-target subplans.
+- Extend `proto/tensorcast/daemon/v2/store_daemon.proto` in phases:
+  - required first: `GetSignals/ListWorkers/ListInstances/...` (daemon-served signals/directory; bounded staleness),
+  - optional ingress phase: `ExecutePlan(PlanSpec) -> Operation[PlanResult]` (gateway role only; execution semantics
+    remain aligned with `NodeAgent.ExecutePlan` + daemon action handlers),
+  - optional: `ExecutePlanFragment` (or reuse `ExecutePlan`) for daemon<->daemon dispatch of per-target subplans.
+- Add LaneContext/policy propagation plumbing for plan and non-plan hot paths:
+  - short term: metadata + audit fields (no proto bloat on every request),
+  - long term: explicit wire fields where interoperability/observability requires stronger contracts.
 - Extend `proto/tensorcast/daemon/v2/store_daemon.proto` with KV shard/data-plane RPCs (planned):
   - home-scoped, fenced: `KvBatchExists/KvBatchGet/KvBatchPutIfAbsent/KvTouchTtl`
   - shard lease caches + redirect semantics (`FAILED_PRECONDITION` with updated `{holder_daemon_id, lease_generation}`).
@@ -1324,6 +1360,8 @@ This section is illustrative and intentionally separated from 0055.
   - `KvShardLease` records (`shard_id`, `holder_daemon_id`, `lease_generation`, `expires_at_ms`)
   - `AcquireKvShardLease/KeepaliveKvShardLease/ReleaseKvShardLease`
   - watch stream for shard lease updates for daemon caches.
+- For GS de-hotization paths (routing/source selection), any new local-first dispatch contract MUST preserve
+  claim/reservation/fencing-equivalent safety; avoid regressions relative to current GS atomic coordination semantics.
 - Extend `proto/tensorcast/node_agent/v1/node_agent.proto` / implementation to execute the new instance actions.
 - Extend `proto/tensorcast/global_store/v1/global_store.proto` + `schema.sql` for scalable registries:
   - store only long-lived entities (workers, instances, node agents) and routable endpoints,
@@ -1341,16 +1379,20 @@ Suggested code locations for implementing the planned features in this design:
   - `tensorcast/api/runtime.py` (new; `Runtime`, `connect`, `runtime`)
   - `tensorcast/startup.py` (existing; add UX aliases for `connect(...)` if desired)
   - `tensorcast/__init__.py` and `tensorcast/api/__init__.py` (export `connect`, `runtime`)
-  - `tensorcast/api/plan/plan.py` (add daemon-run execution path: `StoreDaemonService.ExecutePlan`)
+  - `tensorcast/api/plan/plan.py` (phase 1 keep local runner + NodeAgent execution semantics; optional ingress path
+    via daemon `ExecutePlan`)
+  - `tensorcast/api/context.py` + `tensorcast/api/store/*` (align lane/policy metadata propagation across non-plan RPCs)
 - Signals (SDK surface + daemon-served signals):
   - `tensorcast/api/signals.py` (new; `TensorCastSignals`, `ExecutionSignals`, `SignalSnapshot`)
 - Store Daemon control plane (distributed “controller”):
-  - `proto/tensorcast/daemon/v2/store_daemon.proto` (add `ExecutePlan` + signals RPCs)
+  - `proto/tensorcast/daemon/v2/store_daemon.proto` (signals/directory RPCs first; optional ingress `ExecutePlan`)
   - `daemon/service/controllers/plan_executor_controller.cc` (new; DAG scheduling + dispatch)
   - `daemon/service/controllers/signals_controller.cc` (new; caching + staleness budgets)
   - `daemon/service/controllers/directory_cache_controller.cc` (new; instance/worker directory caches)
   - `daemon/service/mesh/daemon_mesh_client.*` (new; daemon↔daemon dispatch)
   - `daemon/ha/global_store_watch_client.*` (new; watch/stream updates for caches)
+  - `core/store/materialization/control/materialize_orchestrator.*` + GS transport coordination points (preserve
+    claim/reservation/fencing-equivalent safety while de-hotizing source selection)
 - Placement modeling (semantic tier vs wire encoding):
   - `tensorcast/types.py` (add `Placement` type; map `device` inputs to placement)
   - `proto/tensorcast/common/v1/common.proto` (optional future: add explicit `Placement` message; keep `device_id=-1`
@@ -1364,7 +1406,7 @@ Suggested code locations for implementing the planned features in this design:
   - `tensorcast/api/plan/plan.py` (add `WorkerStepBuilder.prefetch_many`, `InstanceStepBuilder.materialize_into`, `InstanceStepBuilder.kvcache_*`)
   - `tensorcast/api/plan/targets.py` and `tensorcast/api/plan/transforms.py` (KV layout hashes / transform hooks as needed)
 - Global Store (registry + watches for daemon caches):
-  - `proto/tensorcast/global_store/v1/global_store.proto` (`RegisterInstance`/`ListActiveInstances` carry `node_agent_endpoint`)
+  - `proto/tensorcast/global_store/v1/global_store.proto` (planned: extend instance registry to carry a dialable `node_agent_endpoint` for discovery)
   - `proto/tensorcast/global_store/v1/global_store.proto` (add `WatchWorkers/WatchInstances/WatchNodeAgents` streams)
   - `proto/tensorcast/global_store/v1/global_store.proto` (add KV shard lease RPCs + watch stream)
   - `tensorcast/global_store/services/instance_service.py`
@@ -1372,7 +1414,7 @@ Suggested code locations for implementing the planned features in this design:
   - `tensorcast/global_store/models/kv_shard_lease.py` (new; `KvShardLease`)
   - `tensorcast/global_store/repositories/kv_shard_lease_repository.py` (new; lease acquire/keepalive)
   - `tensorcast/global_store/services/kv_shard_lease_service.py` (new; fencing + monotonic generation)
-  - `schema.sql` (instances table columns for `daemon_id` (NOT NULL) and optional `node_agent_endpoint`)
+  - `schema.sql` (planned: add optional `node_agent_endpoint` column for instance discovery)
   - `schema.sql` (new `kv_shard_leases` table)
 - KV service (home shards + fencing; GS-not-hot-path):
   - `daemon/service/controllers/kv_shard_controller.cc` (new; home-scoped exists/get/put + invariants)

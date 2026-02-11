@@ -19,6 +19,12 @@ Understand how TensorCast works:
 - **[Artifact Views and Retrieval](architecture/artifact-views-and-retrieval.md)** - View semantics, planning, and materialization overview
 - **[View Replicas and Assembly](architecture/view-replicas-and-assembly.md)** - Dense pieces, assembly, and sealing semantics
 
+## 🧭 Coordination Strategy Series
+
+Cross-cutting high-level reasoning for centralized vs decentralized coordination, hot/cold state placement, and workload-driven mode switching:
+
+- **[Distributed Coordination Series](distributed-coordination-series/README.md)** - Index for the full strategy and trade-off document set
+
 ## 📘 User Guides
 
 Integration-oriented guides for SDK consumers:
