@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Mapping
 
 import grpc
 from google.protobuf import timestamp_pb2
@@ -25,8 +25,8 @@ class DiskLocationRpcHandler:
         disk_location_repository: ArtifactDiskLocationRepository,
         cluster_id: str,
         is_safe_relative_path: Callable[[str], bool],
-        disk_location_kind_from_proto: dict[int, str],
-        disk_location_kind_to_proto: dict[str, int],
+        disk_location_kind_from_proto: Mapping[global_store_pb2.DiskLocationKind, str],
+        disk_location_kind_to_proto: Mapping[str, global_store_pb2.DiskLocationKind],
         datetime_to_timestamp: Callable[
             [datetime | None], timestamp_pb2.Timestamp | None
         ],

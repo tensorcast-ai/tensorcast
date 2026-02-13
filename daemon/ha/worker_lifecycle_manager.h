@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -37,13 +38,8 @@ class WorkerLifecycleManager {
     int chunk_sync_interval_ms{10000}; // 0 to disable
     int heartbeat_rpc_timeout_ms{0};
     int state_sync_rpc_timeout_ms{0};
-    int full_sync_rpc_timeout_ms{0};
     std::optional<int32_t> heartbeat_rpc_max_retries;
     std::optional<int32_t> state_sync_rpc_max_retries;
-    std::optional<int32_t> full_sync_rpc_max_retries;
-    // When true, an empty local inventory is treated as authoritative and will
-    // drive removals via force_full_sync during synchronization.
-    bool force_full_sync_on_empty_inventory{false};
     // Optional cluster identity guard; if set, daemon will refuse to register
     // with a Global Store reporting a different token.
     std::string cluster_token;
@@ -123,8 +119,9 @@ class WorkerLifecycleManager {
   void queue_obsolete_replicas(std::vector<std::string> obsolete);
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
+  absl::Status unregister_worker_single_flight(std::string_view worker_id, bool is_graceful_shutdown);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
-  store::components::StateSyncToken next_state_sync_token(uint64_t epoch);
+  store::components::StateSyncToken next_state_sync_token();
   void mark_state_sync_progress();
   std::optional<std::chrono::milliseconds> state_sync_stall_budget() const;
 
@@ -132,6 +129,9 @@ class WorkerLifecycleManager {
   const WorkerLifecyclePorts ports_;
   const Options opts_;
   const std::string daemon_id_;
+  // Serialize control-plane RPCs that update the same worker row in Global Store
+  // (heartbeat/reconcile/register) to avoid write-write conflicts.
+  mutable std::mutex worker_control_plane_rpc_mu_;
 
   static gsl::not_null<std::shared_ptr<store::components::IGlobalStoreClient>> make_global_store_client(
       const Options& opts);
@@ -151,6 +151,8 @@ class WorkerLifecycleManager {
   // explicit shutdown path and destructor). When true, subsequent calls to
   // stop() are no-ops.
   std::atomic<bool> stop_called_{false};
+  // Ensure worker unregister is sent at most once for this lifecycle manager.
+  std::atomic<bool> unregister_worker_submitted_{false};
   std::mutex stop_mu_;
   std::condition_variable stop_cv_;
   std::thread hb_thread_;
@@ -177,9 +179,16 @@ class WorkerLifecycleManager {
   std::atomic<bool> state_sync_inflight_{false};
   std::atomic<bool> sync_alive_{false};
   std::atomic<uint64_t> hb_epoch_{0};
+  std::atomic<uint64_t> reconcile_generation_{1};
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
   std::atomic<uint64_t> state_sync_request_id_{0};
+  std::atomic<uint64_t> state_sync_enqueue_suppressed_{0};
+  std::atomic<uint32_t> state_sync_consecutive_failures_{0};
+  std::atomic<int64_t> state_sync_next_retry_ns_{0};
+  std::atomic<bool> state_sync_outage_mode_active_{false};
+  std::atomic<int64_t> state_sync_outage_enter_ns_{0};
+  std::atomic<int64_t> last_reconnect_latency_ms_{0};
   std::atomic<int64_t> state_sync_last_progress_ns_{0};
   std::atomic<bool> state_sync_restart_pending_{false};
   std::mutex state_sync_mu_;
@@ -243,6 +252,18 @@ class WorkerLifecycleManager {
 
   bool sync_alive() const {
     return sync_alive_.load();
+  }
+
+  uint64_t state_sync_enqueue_suppressed() const {
+    return state_sync_enqueue_suppressed_.load();
+  }
+
+  bool state_sync_outage_mode_active() const {
+    return state_sync_outage_mode_active_.load();
+  }
+
+  int64_t last_reconnect_latency_ms() const {
+    return last_reconnect_latency_ms_.load();
   }
 };
 

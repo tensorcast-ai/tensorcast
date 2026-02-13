@@ -8,6 +8,7 @@ from typing import Callable
 
 import grpc
 
+from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import (
     PersistenceShardStatus,
@@ -16,6 +17,7 @@ from tensorcast.global_store.models import (
     PlacementShard,
     PlacementTarget,
 )
+from tensorcast.global_store.repositories.base import is_transient_tx_conflict
 from tensorcast.global_store.services.placement_service import PlacementService
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -27,9 +29,11 @@ class PlacementPersistenceRpcHandler:
         self,
         *,
         placement_service: PlacementService,
-        policy_from_proto: Callable[[int], str],
-        persistence_state_from_proto: Callable[[int], str],
-        target_state_from_proto: Callable[[int], str],
+        policy_from_proto: Callable[[global_store_pb2.PlacementPolicy], str],
+        persistence_state_from_proto: Callable[
+            [global_store_pb2.PersistenceState], str
+        ],
+        target_state_from_proto: Callable[[global_store_pb2.PlacementTargetState], str],
         plan_to_proto: Callable[
             [PlacementPlan], global_store_pb2.PlanPlacementResponse
         ],
@@ -168,7 +172,25 @@ class PlacementPersistenceRpcHandler:
                 degraded_reason=request.degraded_reason or None,
             )
             self._placement_service.record_status(status_model, shard_statuses)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            if is_transient_tx_conflict(exc):
+                gs_metrics.inc_control_plane_conflict(
+                    scope="placement_persistence_tx_conflict"
+                )
+                context.set_code(grpc.StatusCode.ABORTED)
+                context.set_details(
+                    f"ReportPersistenceStatus transaction conflict: {exc}"
+                )
+                self._logger.warning(
+                    "ReportPersistenceStatus transaction conflict task_id=%s plan_id=%s artifact_id=%s error=%s",
+                    request.task_id,
+                    request.plan_id,
+                    request.artifact_id,
+                    exc,
+                )
+                return global_store_pb2.ReportPersistenceStatusResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
             self._logger.exception("Failed to persist ReportPersistenceStatus")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details("Failed to persist ReportPersistenceStatus")

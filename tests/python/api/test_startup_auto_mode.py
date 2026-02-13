@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,21 +83,34 @@ def test_auto_mode_creates_daemon_when_missing(monkeypatch: pytest.MonkeyPatch) 
         startup.shutdown()
 
 
-def test_auto_mode_fails_fast_when_owner_lost(
+def test_auto_mode_recovers_from_stale_starting_owner_dead(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(startup.runtime, "status", lambda _session_id=None: None)
-    monkeypatch.setattr(startup, "ping_daemon", lambda _address: False)
+    daemon_address = "127.0.0.1:64002"
+    started: dict[str, object] = {}
 
-    expected_hash = startup._compute_auto_config_hash(
-        daemon_config_path=None,
-        global_store_mode="none",
-        global_store_address=None,
-        global_store_config_path=None,
-        cluster_id=None,
-        allow_gs_fallback=False,
-        session_id=None,
+    def _fake_start(**kwargs):
+        started.update(kwargs)
+        return runtime.RuntimeSession(
+            session_id="sess-starting-recovered",
+            daemon_pid=5454,
+            daemon_address=daemon_address,
+            daemon_p2p_address="127.0.0.1:64003",
+            logs_dir=session_paths("sess-starting-recovered").logs,
+            started_at=time.time(),
+            owner=True,
+        )
+
+    monkeypatch.setattr(startup.runtime, "status", lambda _session_id=None: None)
+    monkeypatch.setattr(startup.runtime, "start", _fake_start)
+    monkeypatch.setattr(
+        startup, "ping_daemon", lambda addr: bool(addr == daemon_address)
     )
+    monkeypatch.setattr(
+        "tensorcast.daemon_ctl.get_daemon_client", lambda _address: object()
+    )
+    monkeypatch.setattr(startup.runtime, "stop", lambda **_kwargs: None)
+
     startup.atomic_write_json(
         startup._auto_state_path(),
         {
@@ -105,7 +119,7 @@ def test_auto_mode_fails_fast_when_owner_lost(
             "epoch": 3,
             "owner_pid": 0,
             "owner_fingerprint": {},
-            "config_hash": expected_hash,
+            "config_hash": "stale-config-hash",
             "session_id": "sess-dead",
             "started_at": time.time(),
             "address": "",
@@ -115,7 +129,49 @@ def test_auto_mode_fails_fast_when_owner_lost(
         },
     )
 
-    with pytest.raises(RuntimeError, match="AUTO_OWNER_LOST"):
+    ctx = startup.init(mode="auto", show_daemon_logs=False)
+    try:
+        assert ctx.is_owner is True
+        assert ctx.address == daemon_address
+        assert started["session_id"] is None
+        auto_state = read_json_default(startup._auto_state_path(), {})
+        assert auto_state["status"] == "READY"
+        assert auto_state["session_id"] == "sess-starting-recovered"
+        assert auto_state["address"] == daemon_address
+    finally:
+        startup.shutdown()
+
+
+def test_auto_mode_rejects_config_mismatch_when_owner_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(startup.runtime, "status", lambda _session_id=None: None)
+    monkeypatch.setattr(startup, "ping_daemon", lambda _address: False)
+    monkeypatch.setattr(
+        startup.runtime,
+        "start",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not start")),
+    )
+
+    startup.atomic_write_json(
+        startup._auto_state_path(),
+        {
+            "schema_version": 1,
+            "status": "STARTING",
+            "epoch": 7,
+            "owner_pid": os.getpid(),
+            "owner_fingerprint": startup.instance_fingerprint(),
+            "config_hash": "different-config-hash",
+            "session_id": "sess-live",
+            "started_at": time.time(),
+            "address": "",
+            "logs_dir": "/tmp/live-logs",
+            "error_code": "",
+            "error_message": "",
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="AUTO_CONFIG_MISMATCH"):
         startup.init(mode="auto")
 
 

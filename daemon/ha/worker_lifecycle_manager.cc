@@ -24,6 +24,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
@@ -166,6 +167,128 @@ opentelemetry::metrics::Counter<uint64_t>* sync_failure_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_failure_total");
   return ctr.get();
+}
+
+opentelemetry::metrics::Counter<uint64_t>* reconcile_enqueue_suppressed_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_reconcile_enqueue_suppressed_total");
+  return ctr.get();
+}
+
+opentelemetry::metrics::UpDownCounter<int64_t>* outage_mode_active_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateInt64UpDownCounter("tc_daemon_ha_outage_mode_active");
+  return ctr.get();
+}
+
+opentelemetry::metrics::Histogram<double>* reconnect_latency_histogram_ms() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto hist = meter->CreateDoubleHistogram("tc_daemon_ha_reconnect_latency_ms");
+  return hist.get();
+}
+
+enum class HeartbeatFailureClass {
+  kConflict,
+  kIdentity,
+  kConnectivity,
+  kOther,
+};
+
+const char* heartbeat_failure_class_to_cstr(HeartbeatFailureClass klass) {
+  switch (klass) {
+    case HeartbeatFailureClass::kConflict:
+      return "conflict";
+    case HeartbeatFailureClass::kIdentity:
+      return "identity";
+    case HeartbeatFailureClass::kConnectivity:
+      return "connectivity";
+    case HeartbeatFailureClass::kOther:
+    default:
+      return "other";
+  }
+}
+
+bool message_contains_marker(absl::string_view message, std::initializer_list<absl::string_view> markers) {
+  const std::string lowered = absl::AsciiStrToLower(message);
+  return std::any_of(markers.begin(), markers.end(), [&](absl::string_view marker) {
+    return lowered.find(marker) != std::string::npos;
+  });
+}
+
+HeartbeatFailureClass classify_heartbeat_failure(const absl::Status& status) {
+  if (absl::IsAborted(status) ||
+      message_contains_marker(
+          status.message(),
+          {"write-write conflict", "conflict on tuple deletion", "conflict on update", "serialization"})) {
+    return HeartbeatFailureClass::kConflict;
+  }
+  if (absl::IsNotFound(status) || absl::IsFailedPrecondition(status) ||
+      message_contains_marker(status.message(), {"status_not_found", "worker not found"})) {
+    return HeartbeatFailureClass::kIdentity;
+  }
+  if (absl::IsUnavailable(status) || absl::IsDeadlineExceeded(status) || absl::IsCancelled(status) ||
+      absl::IsResourceExhausted(status)) {
+    return HeartbeatFailureClass::kConnectivity;
+  }
+  return HeartbeatFailureClass::kOther;
+}
+
+std::chrono::milliseconds bounded_backoff(
+    uint32_t failure_count,
+    std::chrono::milliseconds base,
+    std::chrono::milliseconds max_backoff) {
+  if (failure_count == 0) {
+    return base;
+  }
+  const uint32_t shift = std::min<uint32_t>(failure_count - 1, 8);
+  const auto multiplier = static_cast<int64_t>(1ULL << shift);
+  const auto candidate = std::chrono::milliseconds(base.count() * multiplier);
+  return std::min(candidate, max_backoff);
+}
+
+enum class StateSyncFailureClass {
+  kConflict,
+  kConnectivity,
+  kOther,
+};
+
+const char* state_sync_failure_class_to_cstr(StateSyncFailureClass klass) {
+  switch (klass) {
+    case StateSyncFailureClass::kConflict:
+      return "conflict";
+    case StateSyncFailureClass::kConnectivity:
+      return "connectivity";
+    case StateSyncFailureClass::kOther:
+    default:
+      return "other";
+  }
+}
+
+StateSyncFailureClass classify_state_sync_failure(const absl::Status& status) {
+  if (absl::IsAborted(status) ||
+      message_contains_marker(
+          status.message(),
+          {"write-write conflict", "conflict on tuple deletion", "conflict on update", "serialization"})) {
+    return StateSyncFailureClass::kConflict;
+  }
+  if (absl::IsUnavailable(status) || absl::IsDeadlineExceeded(status) || absl::IsCancelled(status) ||
+      absl::IsResourceExhausted(status) ||
+      message_contains_marker(status.message(), {"connection refused", "failed to connect to all addresses"})) {
+    return StateSyncFailureClass::kConnectivity;
+  }
+  return StateSyncFailureClass::kOther;
+}
+
+std::chrono::milliseconds state_sync_failure_backoff(StateSyncFailureClass failure_class, uint32_t failure_count) {
+  switch (failure_class) {
+    case StateSyncFailureClass::kConnectivity:
+      return bounded_backoff(failure_count, 500ms, 30s);
+    case StateSyncFailureClass::kConflict:
+      return bounded_backoff(failure_count, 100ms, 3s);
+    case StateSyncFailureClass::kOther:
+    default:
+      return bounded_backoff(failure_count, 200ms, 10s);
+  }
 }
 
 bool is_loopback_or_unspecified(absl::string_view addr) {
@@ -381,23 +504,28 @@ absl::Status WorkerLifecycleManager::start() {
   LOG(INFO) << "Global Store registration endpoints: listen=" << opts_.listen_addr << " advertise=" << node_addr << ":"
             << grpc_port << " p2p_port=" << opts_.p2p_port;
 
-  auto reg_or = global_store_->register_worker(
-      node_id_,
-      node_addr,
-      grpc_port,
-      opts_.p2p_port,
-      engine_->get_mem_pool_size(),
-      engine_->get_available_memory(),
-      /*is_recovery_registration=*/false,
-      /*previous_worker_id=*/"",
-      /*daemon_id=*/daemon_id_,
-      /*capability_flags=*/opts_.capability_flags);
+  absl::StatusOr<store::components::WorkerRegistrationInfo> reg_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    reg_or = global_store_->register_worker(
+        node_id_,
+        node_addr,
+        grpc_port,
+        opts_.p2p_port,
+        engine_->get_mem_pool_size(),
+        engine_->get_available_memory(),
+        /*is_recovery_registration=*/false,
+        /*previous_worker_id=*/"",
+        /*daemon_id=*/daemon_id_,
+        /*capability_flags=*/opts_.capability_flags);
+  }
   if (!reg_or.ok())
     return reg_or.status();
   {
     std::lock_guard<std::mutex> lock(state_mu_);
     worker_id_ = reg_or->worker_id;
     state_version_ = reg_or->expected_state_version;
+    reconcile_generation_.store(std::max<uint64_t>(1, reg_or->reconcile_generation));
   }
   ports_.identity_store.set_registered(reg_or->worker_id, node_id_);
   // Propagate worker identity into the engine so subsequent GS registrations
@@ -406,6 +534,12 @@ absl::Status WorkerLifecycleManager::start() {
   const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
   state_sync_epoch_.store(epoch_seed);
   state_sync_request_id_.store(0);
+  state_sync_enqueue_suppressed_.store(0);
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
+  state_sync_outage_mode_active_.store(false);
+  state_sync_outage_enter_ns_.store(0);
+  last_reconnect_latency_ms_.store(0);
   state_sync_last_progress_ns_.store(0);
   state_sync_restart_pending_.store(false);
 
@@ -444,35 +578,6 @@ absl::Status WorkerLifecycleManager::start() {
     request_state_sync();
   });
 
-  // Initial full-state sync: query GS for expected replicas and evict local
-  // replicas not present in the expected set to remove drift.
-  auto full_or = global_store_->request_full_state_sync(
-      reg_or->worker_id,
-      reg_or->expected_state_version,
-      next_state_sync_token(state_sync_epoch_.load()),
-      build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
-  if (full_or.ok()) {
-    if (!full_or->ignored) {
-      {
-        std::lock_guard<std::mutex> lock(state_mu_);
-        state_version_ = full_or->new_state_version;
-        state_checksum_ = full_or->new_state_checksum;
-      }
-      apply_full_state(full_or->expected_replicas);
-      const int64_t last_sync_success = static_cast<int64_t>(
-          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-              .count());
-      {
-        std::lock_guard<std::mutex> lock(state_mu_);
-        last_sync_success_ts_ = last_sync_success;
-      }
-    } else {
-      VLOG(1) << "Skipping ignored initial full-state sync for worker_id=" << reg_or->worker_id;
-    }
-  } else {
-    LOG(WARNING) << "Initial RequestFullStateSync failed: " << full_or.status();
-  }
-
   memory_tier_enabled_ = engine_->get_memory_tier_config().has_value();
   if (memory_tier_enabled_) {
     reconcile_memory_tier_leases_once();
@@ -486,6 +591,12 @@ absl::Status WorkerLifecycleManager::start() {
     sync_thread_ = std::thread(&WorkerLifecycleManager::chunk_sync_loop, this);
   }
   monitor_thread_ = std::thread(&WorkerLifecycleManager::monitor_loop, this);
+  const uint64_t baseline = sync_success_.load();
+  request_state_sync();
+  const auto bootstrap_timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
+  if (!wait_for_state_sync_success(baseline, bootstrap_timeout)) {
+    LOG(WARNING) << "Bootstrap reconcile did not complete before timeout";
+  }
   return absl::OkStatus();
 }
 
@@ -496,6 +607,12 @@ void WorkerLifecycleManager::stop() {
     return;
   }
   stop_.store(true);
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+  }
+  state_sync_outage_enter_ns_.store(0);
   stop_cv_.notify_all();
   state_sync_cv_.notify_all();
   sync_success_cv_.notify_all();
@@ -539,7 +656,7 @@ void WorkerLifecycleManager::stop() {
   }
   if (!worker_id_snapshot.empty()) {
     const std::string id = worker_id_snapshot;
-    auto st = global_store_->unregister_worker(id, /*is_graceful_shutdown=*/true);
+    auto st = unregister_worker_single_flight(id, /*is_graceful_shutdown=*/true);
     if (!st.ok()) {
       LOG(WARNING) << "GlobalStore unregister_worker failed: " << st;
     } else {
@@ -549,6 +666,19 @@ void WorkerLifecycleManager::stop() {
       worker_id_.clear();
     }
   }
+}
+
+absl::Status WorkerLifecycleManager::unregister_worker_single_flight(
+    std::string_view worker_id,
+    bool is_graceful_shutdown) {
+  bool expected = false;
+  if (!unregister_worker_submitted_.compare_exchange_strong(expected, true)) {
+    VLOG(1) << "Skipping duplicate GlobalStore unregister_worker for worker_id=" << worker_id;
+    return absl::OkStatus();
+  }
+
+  std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+  return global_store_->unregister_worker_idempotent(worker_id, is_graceful_shutdown);
 }
 
 bool WorkerLifecycleManager::wait_for_stop(std::chrono::milliseconds interval) {
@@ -569,10 +699,10 @@ store::components::RpcOptions WorkerLifecycleManager::build_rpc_options(
   return opts;
 }
 
-store::components::StateSyncToken WorkerLifecycleManager::next_state_sync_token(uint64_t epoch) {
+store::components::StateSyncToken WorkerLifecycleManager::next_state_sync_token() {
   return store::components::StateSyncToken{
-      .epoch = epoch,
-      .request_id = state_sync_request_id_.fetch_add(1) + 1,
+      .generation = reconcile_generation_.load(),
+      .request_seq = state_sync_request_id_.load() + 1,
   };
 }
 
@@ -584,13 +714,12 @@ void WorkerLifecycleManager::mark_state_sync_progress() {
 
 std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stall_budget() const {
   constexpr uint32_t kDefaultRpcMaxRetries = 3;
-  const int base_timeout_ms = std::max(opts_.state_sync_rpc_timeout_ms, opts_.full_sync_rpc_timeout_ms);
+  const int base_timeout_ms = opts_.state_sync_rpc_timeout_ms;
   if (base_timeout_ms <= 0) {
     return std::nullopt;
   }
   const uint32_t state_sync_retries = opts_.state_sync_rpc_max_retries.value_or(kDefaultRpcMaxRetries);
-  const uint32_t full_sync_retries = opts_.full_sync_rpc_max_retries.value_or(kDefaultRpcMaxRetries);
-  const uint32_t retries = std::max(state_sync_retries, full_sync_retries);
+  const uint32_t retries = state_sync_retries;
   const int64_t attempts = static_cast<int64_t>(retries) + 1;
   const int64_t budget_ms =
       static_cast<int64_t>(base_timeout_ms) * attempts + std::min<int64_t>(base_timeout_ms, 1000) * attempts;
@@ -598,7 +727,14 @@ std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stal
 }
 
 void WorkerLifecycleManager::request_state_sync() {
-  state_sync_requests_.fetch_add(1);
+  uint64_t expected = 0;
+  if (!state_sync_requests_.compare_exchange_strong(expected, 1)) {
+    state_sync_enqueue_suppressed_.fetch_add(1);
+    if (auto* counter = reconcile_enqueue_suppressed_counter()) {
+      counter->Add(1);
+    }
+    return;
+  }
   state_sync_cv_.notify_all();
 }
 
@@ -636,6 +772,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
   hb_alive_.store(true);
   const uint64_t epoch = hb_epoch_.load();
   const auto interval = std::chrono::milliseconds(opts_.heartbeat_interval_ms);
+  uint32_t consecutive_heartbeat_failures = 0;
+  uint32_t consecutive_reregister_failures = 0;
+  auto next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
   try {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
@@ -668,37 +807,76 @@ void WorkerLifecycleManager::heartbeat_loop() {
         std::lock_guard<std::mutex> lock(state_mu_);
         state_checksum_ = checksum;
       }
-      auto hb_or = global_store_->send_heartbeat_enhanced(
-          worker_id,
-          engine_->get_available_memory(),
-          accepting,
-          state_version,
-          checksum,
-          registered_ids,
-          last_sync_success_ts,
-          global_store::CONNECTION_STATUS_CONNECTED,
-          build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
-          daemon_id_,
-          opts_.capability_flags);
+      absl::StatusOr<global_store::WorkerHeartbeatResponse> hb_or;
+      {
+        std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+        hb_or = global_store_->send_heartbeat_enhanced(
+            worker_id,
+            engine_->get_available_memory(),
+            accepting,
+            state_version,
+            checksum,
+            registered_ids,
+            last_sync_success_ts,
+            global_store::CONNECTION_STATUS_CONNECTED,
+            build_rpc_options(opts_.heartbeat_rpc_timeout_ms, opts_.heartbeat_rpc_max_retries),
+            daemon_id_,
+            opts_.capability_flags);
+      }
       if (stop_.load() || hb_epoch_.load() != epoch) {
         break;
       }
+      auto loop_delay = interval;
       if (!hb_or.ok()) {
-        LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
+        const absl::Status hb_status = hb_or.status();
+        ++consecutive_heartbeat_failures;
+        const HeartbeatFailureClass failure_class = classify_heartbeat_failure(hb_status);
+        const auto heartbeat_backoff = bounded_backoff(consecutive_heartbeat_failures, std::max(interval, 100ms), 5s);
+        loop_delay = std::max(loop_delay, heartbeat_backoff);
+        LOG(WARNING) << "Enhanced heartbeat failed: " << hb_status
+                     << " class=" << heartbeat_failure_class_to_cstr(failure_class)
+                     << " consecutive_failures=" << consecutive_heartbeat_failures
+                     << " backoff_ms=" << loop_delay.count();
         hb_failure_.fetch_add(1);
         if (auto* counter = hb_failure_counter()) {
           counter->Add(1);
         }
-        // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
-        // perform recovery-aware re-registration to preserve identity.
-        if (global_store_->is_connected()) {
-          auto st_re = reregister_worker(/*preserve_identity=*/true);
-          if (!st_re.ok()) {
-            LOG(WARNING) << "Re-registration attempt failed: " << st_re;
+        // Re-registration is reserved for identity-loss failures (e.g., worker row
+        // missing after control-plane restart). Conflict/connectivity classes stay
+        // on backoff-only path to prevent re-registration storms.
+        if (failure_class == HeartbeatFailureClass::kIdentity && global_store_->is_connected()) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= next_reregister_attempt_at) {
+            auto st_re = reregister_worker(/*preserve_identity=*/true);
+            if (!st_re.ok()) {
+              ++consecutive_reregister_failures;
+              const auto reregister_backoff = bounded_backoff(consecutive_reregister_failures, 200ms, 10s);
+              next_reregister_attempt_at = now + reregister_backoff;
+              loop_delay = std::max(loop_delay, reregister_backoff);
+              LOG(WARNING) << "Re-registration attempt failed: " << st_re
+                           << " consecutive_reregister_failures=" << consecutive_reregister_failures
+                           << " next_reregister_backoff_ms=" << reregister_backoff.count();
+            } else {
+              consecutive_reregister_failures = 0;
+              next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
+            }
+          } else {
+            const auto until_next =
+                std::chrono::duration_cast<std::chrono::milliseconds>(next_reregister_attempt_at - now);
+            if (until_next.count() > 0) {
+              loop_delay = std::max(loop_delay, until_next);
+              VLOG(1) << "Skipping re-registration due to cooldown for worker_id=" << worker_id
+                      << " wait_ms=" << until_next.count();
+            }
           }
+        } else if (failure_class == HeartbeatFailureClass::kConflict) {
+          VLOG(1) << "Suppressing re-registration for conflict-class heartbeat failure";
         }
       } else {
         const auto& hb = *hb_or;
+        consecutive_heartbeat_failures = 0;
+        consecutive_reregister_failures = 0;
+        next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
         hb_success_.fetch_add(1);
         if (auto* counter = hb_success_counter()) {
           counter->Add(1);
@@ -721,7 +899,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           request_state_sync();
         }
       }
-      if (wait_for_stop(interval)) {
+      if (wait_for_stop(loop_delay)) {
         break;
       }
       if (hb_epoch_.load() != epoch) {
@@ -835,15 +1013,32 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   state_sync_inflight_.store(true);
   absl::Cleanup inflight_guard([this]() { state_sync_inflight_.store(false); });
   mark_state_sync_progress();
+  const int64_t next_retry_ns = state_sync_next_retry_ns_.load();
+  if (next_retry_ns > 0) {
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now_ns < next_retry_ns) {
+      const auto wait_duration =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::nanoseconds(next_retry_ns - now_ns));
+      if (wait_duration.count() > 0) {
+        VLOG(1) << "State sync retry backoff active; delaying reconcile for " << wait_duration.count() << "ms";
+        if (wait_for_stop(wait_duration)) {
+          return;
+        }
+        if (stop_.load() || state_sync_epoch_.load() != epoch) {
+          return;
+        }
+      }
+    }
+  }
   const auto inventory = engine_->get_ha_inventory();
   std::string worker_id;
   std::string node_address;
-  uint64_t state_version = 0;
   {
     std::lock_guard<std::mutex> lock(state_mu_);
     worker_id = worker_id_;
     node_address = node_address_;
-    state_version = state_version_;
   }
   if (worker_id.empty()) {
     VLOG(1) << "Skipping state sync without registered worker_id";
@@ -856,28 +1051,19 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       state_checksum_ = checksum;
     }
   }
-
-  global_store::WorkerLocalState local_state;
-  local_state.set_worker_id(worker_id);
-  local_state.set_state_version(state_version);
-  local_state.set_state_checksum(checksum);
-  {
-    auto* ts = local_state.mutable_last_update_ts();
-    ts->set_seconds(
-        static_cast<int64_t>(
-            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-                .count()));
-    ts->set_nanos(0);
-  }
+  const int64_t reconcile_ts_s = static_cast<int64_t>(
+      std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+  std::vector<commonpb::ReplicaInfo> inventory_proto;
+  inventory_proto.reserve(inventory.size());
   for (const auto& entry : inventory) {
     if (entry.memory_location != common::memory::MemoryLocation::GPU &&
         entry.memory_location != common::memory::MemoryLocation::CPU) {
       continue;
     }
-    auto* rep = local_state.add_local_replicas();
-    rep->mutable_ref()->set_artifact_id(entry.key.artifact_id);
-    rep->mutable_ref()->set_replica_id("");
-    auto* mi = rep->mutable_memory_info();
+    commonpb::ReplicaInfo rep;
+    rep.mutable_ref()->set_artifact_id(entry.key.artifact_id);
+    rep.mutable_ref()->set_replica_id("");
+    auto* mi = rep.mutable_memory_info();
     mi->set_node_id(node_id_);
     mi->set_node_address(node_address);
     mi->set_node_port(opts_.p2p_port);
@@ -952,32 +1138,84 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     if (!entry.verification_json.empty()) {
       transport->set_verification_json(entry.verification_json);
     }
-    rep->mutable_stats()->set_max_concurrency(1);
+    rep.mutable_stats()->set_max_concurrency(1);
     // Reconcile current_requests with active PID refs tracked by the service
-    rep->mutable_stats()->set_current_requests(static_cast<uint32_t>(ports_.retire_gates.ref_count_for(entry.key)));
-    rep->mutable_stats()->set_is_available(entry.is_available);
-    rep->mutable_stats()->mutable_registered_ts()->CopyFrom(local_state.last_update_ts());
+    rep.mutable_stats()->set_current_requests(static_cast<uint32_t>(ports_.retire_gates.ref_count_for(entry.key)));
+    rep.mutable_stats()->set_is_available(entry.is_available);
+    auto* registered_ts = rep.mutable_stats()->mutable_registered_ts();
+    registered_ts->set_seconds(reconcile_ts_s);
+    registered_ts->set_nanos(0);
+    inventory_proto.push_back(std::move(rep));
   }
 
-  const bool force_full_sync = opts_.force_full_sync_on_empty_inventory && inventory.empty();
-  auto sync_or = global_store_->synchronize_worker_state(
-      local_state,
-      force_full_sync,
-      next_state_sync_token(epoch),
-      build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
+  absl::StatusOr<store::components::StateSyncResult> sync_or;
+  const auto sync_token = next_state_sync_token();
+  {
+    std::scoped_lock lock(worker_control_plane_rpc_mu_);
+    sync_or = global_store_->reconcile_worker_state(
+        worker_id,
+        daemon_id_,
+        inventory_proto,
+        /*snapshot_request=*/true,
+        sync_token,
+        build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
+  }
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
-  if (sync_or.ok()) {
-    mark_state_sync_progress();
-    if (sync_or->ignored) {
-      VLOG(1) << "Skipping ignored state sync for worker_id=" << worker_id;
-      return;
+  if (!sync_or.ok()) {
+    const absl::Status sync_status = sync_or.status();
+    const StateSyncFailureClass failure_class = classify_state_sync_failure(sync_status);
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (failure_class == StateSyncFailureClass::kConnectivity) {
+      bool expected_outage = false;
+      if (state_sync_outage_mode_active_.compare_exchange_strong(expected_outage, true)) {
+        state_sync_outage_enter_ns_.store(now_ns);
+        if (auto* gauge = outage_mode_active_counter()) {
+          gauge->Add(1);
+        }
+      }
     }
-    if (stop_.load() || state_sync_epoch_.load() != epoch) {
-      return;
+    const uint32_t consecutive_failures = state_sync_consecutive_failures_.fetch_add(1) + 1;
+    const auto retry_delay = state_sync_failure_backoff(failure_class, consecutive_failures);
+    const int64_t retry_not_before_ns =
+        now_ns + std::chrono::duration_cast<std::chrono::nanoseconds>(retry_delay).count();
+    state_sync_next_retry_ns_.store(retry_not_before_ns);
+    LOG(WARNING) << "ReconcileWorkerState returned: " << sync_status
+                 << " class=" << state_sync_failure_class_to_cstr(failure_class)
+                 << " consecutive_failures=" << consecutive_failures
+                 << " next_retry_backoff_ms=" << retry_delay.count();
+    sync_failure_.fetch_add(1);
+    if (auto* counter = sync_failure_counter()) {
+      counter->Add(1);
     }
-    int64_t last_sync_success = local_state.last_update_ts().seconds();
+    request_state_sync();
+    return;
+  }
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+    const int64_t outage_enter_ns = state_sync_outage_enter_ns_.exchange(0);
+    if (outage_enter_ns > 0) {
+      const int64_t now_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      const int64_t latency_ns = std::max<int64_t>(0, now_ns - outage_enter_ns);
+      const int64_t latency_ms = latency_ns / 1000000;
+      last_reconnect_latency_ms_.store(latency_ms);
+      if (auto* hist = reconnect_latency_histogram_ms()) {
+        hist->Record(static_cast<double>(latency_ms), opentelemetry::context::Context{});
+      }
+    }
+  }
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
+  mark_state_sync_progress();
+
+  auto record_sync_success = [this, epoch, &sync_or](int64_t last_sync_success) {
     {
       std::lock_guard<std::mutex> lock(state_mu_);
       if (state_sync_epoch_.load() == epoch) {
@@ -991,15 +1229,23 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     if (auto* counter = sync_success_counter()) {
       counter->Add(1);
     }
-    if (stop_.load() || state_sync_epoch_.load() != epoch) {
+    last_sync_ts_s_.store(last_sync_success);
+  };
+
+  auto ack_state_sync_token = [this, sync_token]() {
+    if (sync_token.request_seq == 0) {
       return;
     }
-    for (const auto& entry : inventory) {
-      if (entry.publish_state == store::StoreEngine::ReplicaPublishState::kPublishPending) {
-        engine_->set_replica_publish_state(entry.key, store::StoreEngine::ReplicaPublishState::kPublished);
-      }
+    const uint64_t expected_previous = sync_token.request_seq - 1;
+    uint64_t observed_previous = expected_previous;
+    if (!state_sync_request_id_.compare_exchange_strong(observed_previous, sync_token.request_seq)) {
+      VLOG(1) << "Skipping reconcile request_seq ack due to concurrent cursor update: expected_prev="
+              << expected_previous << " observed_prev=" << observed_previous << " ack_seq=" << sync_token.request_seq;
     }
-    // Apply server-suggested removals
+  };
+
+  auto apply_state_changes = [this, &inventory, &sync_or]() {
+    // Apply server-suggested state changes.
     std::vector<store::loading::ReplicaKey> retire_keys;
     retire_keys.reserve(sync_or->state_changes.size());
     auto engine_for_unload = engine_.get();
@@ -1024,7 +1270,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           break;
         }
         case global_store::StateChange::CHANGE_TYPE_ADD_REPLICA: {
-          // Proactively materialize the replica locally on the indicated memory
+          // Proactively materialize the replica locally on the indicated memory.
           const auto& ri = ch.replica_info();
           store::DeviceKey dev{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
           if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_GPU) {
@@ -1032,7 +1278,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           } else if (ri.memory_info().memory_type() == commonpb::MEMORY_TYPE_RAM) {
             dev = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
           } else {
-            // Ignore DISK-only add in daemon prefetch
+            // Ignore DISK-only add in daemon prefetch.
             break;
           }
           std::string artifact_id = ri.ref().artifact_id();
@@ -1054,15 +1300,16 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           break;
         }
         case global_store::StateChange::CHANGE_TYPE_UPDATE_REPLICA: {
-          // Reconcile availability (enable/disable remote access) if applicable
+          // Reconcile availability (enable/disable remote access) if applicable.
           const auto& ri = ch.replica_info();
           const auto artifact_id = ri.ref().artifact_id();
-          // Find local replica info to get device id and comm registration
           for (const auto& li : engine_->get_all_replicas_info()) {
-            if (li.artifact_id != artifact_id)
+            if (li.artifact_id != artifact_id) {
               continue;
-            if (li.gpu_state == common::memory::MemoryLocation::NONE)
+            }
+            if (li.gpu_state == common::memory::MemoryLocation::NONE) {
               continue;
+            }
             if (li.key.device.type != DeviceType::GPU) {
               continue;
             }
@@ -1099,44 +1346,65 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       }
     }
     if (!retire_keys.empty()) {
-      enqueue_retire_keys(std::move(retire_keys), "synchronize_worker_state");
+      enqueue_retire_keys(std::move(retire_keys), "reconcile_worker_state");
     }
-    last_sync_ts_s_.store(last_sync_success);
-  } else {
-    VLOG(1) << "SynchronizeWorkerState returned: " << sync_or.status();
-    sync_failure_.fetch_add(1);
-    if (auto* counter = sync_failure_counter()) {
-      counter->Add(1);
+
+    for (const auto& entry : inventory) {
+      if (entry.publish_state == store::StoreEngine::ReplicaPublishState::kPublishPending) {
+        engine_->set_replica_publish_state(entry.key, store::StoreEngine::ReplicaPublishState::kPublished);
+      }
     }
-    // Fallback to full-state sync if server indicates desync or errors persist
-    auto full_or = global_store_->request_full_state_sync(
-        worker_id,
-        state_version,
-        next_state_sync_token(epoch),
-        build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
-    if (stop_.load() || state_sync_epoch_.load() != epoch) {
-      return;
-    }
-    if (full_or.ok()) {
-      mark_state_sync_progress();
-      if (full_or->ignored) {
-        VLOG(1) << "Skipping ignored full-state sync for worker_id=" << worker_id;
+  };
+
+  switch (sync_or->result_kind) {
+    case store::components::ReconcileResultKind::kApplied:
+    case store::components::ReconcileResultKind::kNoop: {
+      ack_state_sync_token();
+      record_sync_success(reconcile_ts_s);
+      if (stop_.load() || state_sync_epoch_.load() != epoch) {
         return;
       }
-      int64_t last_sync_success = static_cast<int64_t>(
-          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-              .count());
-      {
-        std::lock_guard<std::mutex> lock(state_mu_);
-        if (state_sync_epoch_.load() == epoch) {
-          state_version_ = full_or->new_state_version;
-          state_checksum_ = full_or->new_state_checksum;
-          last_sync_success_ts_ = last_sync_success;
-        }
-      }
-      apply_full_state(full_or->expected_replicas);
-      last_sync_ts_s_.store(last_sync_success);
+      apply_state_changes();
+      return;
     }
+    case store::components::ReconcileResultKind::kIgnoredStale:
+      VLOG(1) << "ReconcileWorkerState returned IGNORED_STALE for worker_id=" << worker_id;
+      ack_state_sync_token();
+      record_sync_success(reconcile_ts_s);
+      return;
+    case store::components::ReconcileResultKind::kRebaseRequired:
+      VLOG(1) << "ReconcileWorkerState requested REBASE for worker_id=" << worker_id
+              << " expected_replicas=" << sync_or->expected_replicas.size();
+      ack_state_sync_token();
+      record_sync_success(reconcile_ts_s);
+      if (stop_.load() || state_sync_epoch_.load() != epoch) {
+        return;
+      }
+      apply_full_state(sync_or->expected_replicas);
+      return;
+    case store::components::ReconcileResultKind::kRetryLater: {
+      const auto retry_after_ms = sync_or->retry_after_ms > 0 ? sync_or->retry_after_ms : 100;
+      VLOG(1) << "ReconcileWorkerState asked to retry later for worker_id=" << worker_id
+              << " retry_after_ms=" << retry_after_ms;
+      if (wait_for_stop(std::chrono::milliseconds(retry_after_ms))) {
+        return;
+      }
+      if (stop_.load() || state_sync_epoch_.load() != epoch) {
+        return;
+      }
+      request_state_sync();
+      return;
+    }
+    case store::components::ReconcileResultKind::kFatal:
+    case store::components::ReconcileResultKind::kUnspecified:
+    default:
+      LOG(WARNING) << "ReconcileWorkerState returned terminal result for worker_id=" << worker_id
+                   << " result_kind=" << static_cast<int>(sync_or->result_kind);
+      sync_failure_.fetch_add(1);
+      if (auto* counter = sync_failure_counter()) {
+        counter->Add(1);
+      }
+      return;
   }
 }
 
@@ -1158,17 +1426,21 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
   const bool recovery = preserve_identity && !previous_worker_id.empty();
   LOG(INFO) << "Resolved advertised address for Global Store re-registration: " << node_addr
             << " (source=" << advertised_source_to_cstr(node_addr_or->source) << ")";
-  auto reg_or = global_store_->register_worker(
-      node_id_,
-      node_addr,
-      grpc_port,
-      opts_.p2p_port,
-      engine_->get_mem_pool_size(),
-      engine_->get_available_memory(),
-      /*is_recovery_registration=*/recovery,
-      /*previous_worker_id=*/recovery ? std::string_view(previous_worker_id) : std::string_view{},
-      /*daemon_id=*/daemon_id_,
-      /*capability_flags=*/opts_.capability_flags);
+  absl::StatusOr<store::components::WorkerRegistrationInfo> reg_or;
+  {
+    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    reg_or = global_store_->register_worker(
+        node_id_,
+        node_addr,
+        grpc_port,
+        opts_.p2p_port,
+        engine_->get_mem_pool_size(),
+        engine_->get_available_memory(),
+        /*is_recovery_registration=*/recovery,
+        /*previous_worker_id=*/recovery ? std::string_view(previous_worker_id) : std::string_view{},
+        /*daemon_id=*/daemon_id_,
+        /*capability_flags=*/opts_.capability_flags);
+  }
   if (!reg_or.ok())
     return reg_or.status();
   const std::string& new_worker_id = reg_or->worker_id;
@@ -1179,33 +1451,29 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
     std::lock_guard<std::mutex> lock(state_mu_);
     worker_id_ = new_worker_id;
     state_version_ = reg_or->expected_state_version;
+    reconcile_generation_.store(std::max<uint64_t>(1, reg_or->reconcile_generation));
+    state_checksum_.clear();
+    last_sync_success_ts_ = 0;
   }
+  state_sync_request_id_.store(0);
+  state_sync_enqueue_suppressed_.store(0);
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+  }
+  state_sync_outage_enter_ns_.store(0);
+  last_reconnect_latency_ms_.store(0);
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
-  // Perform a best-effort full-state sync after re-registration
-  auto full_or = global_store_->request_full_state_sync(
-      new_worker_id,
-      reg_or->expected_state_version,
-      next_state_sync_token(state_sync_epoch_.load()),
-      build_rpc_options(opts_.full_sync_rpc_timeout_ms, opts_.full_sync_rpc_max_retries));
-  if (full_or.ok()) {
-    if (!full_or->ignored) {
-      {
-        std::lock_guard<std::mutex> lock(state_mu_);
-        state_version_ = full_or->new_state_version;
-        state_checksum_ = full_or->new_state_checksum;
-      }
-      apply_full_state(full_or->expected_replicas);
-      const int64_t last_sync_success = static_cast<int64_t>(
-          std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
-              .count());
-      {
-        std::lock_guard<std::mutex> lock(state_mu_);
-        last_sync_success_ts_ = last_sync_success;
-      }
-    } else {
-      VLOG(1) << "Skipping ignored full-state sync after re-registration: worker_id=" << new_worker_id;
-    }
+  // Bootstrap reconcile once after re-registration.
+  const uint64_t baseline = sync_success_.load();
+  request_state_sync();
+  const auto timeout = state_sync_stall_budget().value_or(std::chrono::seconds(10));
+  if (!wait_for_state_sync_success(baseline, timeout)) {
+    return absl::DeadlineExceededError("reconcile bootstrap timed out after worker re-registration");
   }
   return absl::OkStatus();
 }

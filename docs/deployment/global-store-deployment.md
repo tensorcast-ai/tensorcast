@@ -267,7 +267,7 @@ export RECONNECT_MAX_RETRIES=10
 ```bash
 # Enable debug logging
 export LOG_LEVEL=DEBUG
-python -m tensorcast.global_store
+uv run tensorcast global start --config=/etc/tensorcast/global_store.yaml
 ```
 
 ### Recovery Procedures
@@ -288,10 +288,10 @@ python -m tensorcast.global_store
 
 2. **Worker State Resync**
    ```bash
-   # Trigger full state sync for specific worker
-   grpcurl -d '{"worker_id": "worker-123"}' \
+   # Trigger reconcile snapshot for specific worker
+   grpcurl -d '{"worker_id":"worker-123","daemon_id":"daemon-123","generation":"1","request_seq":"1","request_kind":"RECONCILE_REQUEST_KIND_SNAPSHOT","inventory":[]}' \
      localhost:50051 \
-     tensorcast.global_store.v1.ClusterRuntimeService/RequestFullStateSync
+     tensorcast.global_store.v1.ClusterRuntimeService/ReconcileWorkerState
    ```
 
 ## Conclusion

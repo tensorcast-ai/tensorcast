@@ -201,6 +201,27 @@ TEST_CASE("PersistenceManager requests placement plans", "[daemon][persistence][
   REQUIRE_FALSE(client_ptr->persistence_reports.empty());
 }
 
+TEST_CASE("PersistenceManager throttles unchanged status reports", "[daemon][persistence][report]") {
+  auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
+  auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());
+  client_ptr->deny_leases = true;
+
+  PersistenceManager mgr(nullptr, nullptr, nullptr, nullptr, 4ULL * 1024 * 1024, std::chrono::milliseconds(1));
+  mgr.set_global_store_client(client_ptr);
+  mgr.set_local_node_id("node-local");
+
+  auto task =
+      mgr.start_task_for_test("artifact-report-throttle", PLACEMENT_POLICY_REPLICATED, false, 140ULL * 1024 * 1024);
+  for (int i = 0; i < 20; ++i) {
+    mgr.advance_once_for_test();
+  }
+
+  REQUIRE_FALSE(client_ptr->persistence_reports.empty());
+  REQUIRE(client_ptr->persistence_reports.size() <= 8);
+  auto latest = mgr.get_by_task_id(task.task_id);
+  REQUIRE(latest.has_value());
+}
+
 TEST_CASE("PersistenceManager degrades when plan fails", "[daemon][persistence][plan][degraded]") {
   auto client = tensorcast::store::testing::MakeRecordingGlobalStoreClient();
   auto* client_ptr = static_cast<tensorcast::store::testing::RecordingGlobalStoreClient*>(client.get());

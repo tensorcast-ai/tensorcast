@@ -19,6 +19,7 @@
 #include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
+#include "daemon/util/atomic_file_utils.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::daemon::materialization_index_source {
@@ -159,24 +160,23 @@ void maybe_backfill_tensor_index(const std::filesystem::path& artifact_dir, std:
   }
 
   if (!has_json) {
-    std::ofstream out(json_path, std::ios::trunc);
-    if (!out.is_open()) {
-      PLOG(WARNING) << "Failed to write tensor_index.json at " << json_path.string();
+    auto write_status = atomic_file_utils::write_file_atomically(json_path, canonical_index_json);
+    if (!write_status.ok()) {
+      LOG(WARNING) << "Failed to write tensor_index.json at " << json_path.string() << ": " << write_status;
       return;
     }
-    out << canonical_index_json;
   }
 
   if (!has_cbor) {
     try {
       nlohmann::json j = nlohmann::json::parse(canonical_index_json, nullptr, true);
       const std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(j);
-      std::ofstream out(cbor_path, std::ios::binary | std::ios::trunc);
-      if (!out.is_open()) {
-        PLOG(WARNING) << "Failed to write tensor_index.cbor at " << cbor_path.string();
+      const std::string cbor_payload(reinterpret_cast<const char*>(cbor.data()), cbor.size());
+      auto write_status = atomic_file_utils::write_file_atomically(cbor_path, cbor_payload);
+      if (!write_status.ok()) {
+        LOG(WARNING) << "Failed to write tensor_index.cbor at " << cbor_path.string() << ": " << write_status;
         return;
       }
-      out.write(reinterpret_cast<const char*>(cbor.data()), static_cast<std::streamsize>(cbor.size()));
     } catch (const std::exception& ex) {
       LOG(WARNING) << "Failed to backfill tensor_index.cbor at " << cbor_path.string() << ": " << ex.what();
     }

@@ -8,6 +8,7 @@ from importlib import resources
 import duckdb
 from duckdb import DuckDBPyConnection
 
+from tensorcast.global_store.repositories.base import db_execution_lock
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -77,79 +78,18 @@ def _resolve_schema_path() -> str:
     )
 
 
-def _column_exists(db: DuckDBPyConnection, table: str, column: str) -> bool:
-    try:
-        rows = db.execute(f"PRAGMA table_info('{table}')").fetchall()
-    except Exception:
-        return False
-    return any(row[1] == column for row in rows)
-
-
-def _apply_schema_migrations(db: DuckDBPyConnection) -> None:
-    # Drop legacy key_mappings.disk_path column if present
-    if _column_exists(db, "key_mappings", "disk_path"):
-        try:
-            db.execute("ALTER TABLE key_mappings DROP COLUMN disk_path")
-            logger.info("Dropped legacy key_mappings.disk_path column")
-        except Exception:
-            logger.exception("Failed to drop legacy key_mappings.disk_path column")
-            raise
-
-    # Soft-delete columns for managed shared-disk GC.
-    if not _column_exists(db, "artifact_disk_locations", "is_deleted"):
-        try:
-            # DuckDB may reject NOT NULL for ADD COLUMN on some versions; keep it nullable and
-            # treat NULL as false in queries.
-            db.execute(
-                "ALTER TABLE artifact_disk_locations ADD COLUMN is_deleted BOOLEAN DEFAULT FALSE"
-            )
-            logger.info("Added artifact_disk_locations.is_deleted column")
-        except Exception:
-            logger.exception("Failed to add artifact_disk_locations.is_deleted column")
-            raise
-    if not _column_exists(db, "artifact_disk_locations", "deleted_at"):
-        try:
-            db.execute(
-                "ALTER TABLE artifact_disk_locations ADD COLUMN deleted_at TIMESTAMP WITH TIME ZONE"
-            )
-            logger.info("Added artifact_disk_locations.deleted_at column")
-        except Exception:
-            logger.exception("Failed to add artifact_disk_locations.deleted_at column")
-            raise
-
-    if not _column_exists(db, "artifact_replicas", "export_state"):
-        try:
-            db.execute(
-                "ALTER TABLE artifact_replicas ADD COLUMN export_state TEXT DEFAULT 'PRESENCE_ONLY'"
-            )
-            logger.info("Added artifact_replicas.export_state column")
-        except Exception:
-            logger.exception("Failed to add artifact_replicas.export_state column")
-            raise
-    if not _column_exists(db, "artifact_replicas", "export_generation"):
-        try:
-            db.execute(
-                "ALTER TABLE artifact_replicas ADD COLUMN export_generation BIGINT DEFAULT 0"
-            )
-            logger.info("Added artifact_replicas.export_generation column")
-        except Exception:
-            logger.exception("Failed to add artifact_replicas.export_generation column")
-            raise
-
-
 def init_db(db: DuckDBPyConnection) -> None:
     sql_file_path = _resolve_schema_path()
     statements = parse_sql_file(sql_file_path)
-    for statement in statements:
-        if statement.strip():  # 只执行非空语句
-            try:
-                db.execute(statement)
-                logger.debug(f"Executed SQL: {statement[:50]}...")
-            except Exception:
-                logger.exception("Failed to execute SQL statement: %s", statement)
-                raise
-
-    _apply_schema_migrations(db)
+    with db_execution_lock():
+        for statement in statements:
+            if statement.strip():  # 只执行非空语句
+                try:
+                    db.execute(statement)
+                    logger.debug(f"Executed SQL: {statement[:50]}...")
+                except Exception:
+                    logger.exception("Failed to execute SQL statement: %s", statement)
+                    raise
 
 
 def optimize_db(db: DuckDBPyConnection) -> None:
@@ -158,7 +98,12 @@ def optimize_db(db: DuckDBPyConnection) -> None:
     Currently targets `replica_counters`, which receives frequent updates.
     """
     try:
-        db.execute("VACUUM replica_counters;")
+        with db_execution_lock():
+            cursor = db.cursor()
+            try:
+                cursor.execute("VACUUM replica_counters;")
+            finally:
+                cursor.close()
         # Note: DuckDB doesn't support OPTIMIZE command like PostgreSQL
         # VACUUM already performs optimization for DuckDB
         logger.debug("Database maintenance (VACUUM) finished for replica_counters")

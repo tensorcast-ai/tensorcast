@@ -424,7 +424,9 @@ def _resolve_global_store(
                 cluster_token=health.cluster_token or cluster_id or cluster_token_hint,
             )
 
-        raise ServiceError("Global Store connect mode requires a reachable address")
+        raise ServiceError(
+            f"Global Store connect mode requires a reachable address, got {candidates}"
+        )
 
     if runtime_gs_address:
         health = ping_global_store(runtime_gs_address, timeout=2.0)

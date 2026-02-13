@@ -10,6 +10,7 @@ import duckdb
 import pytest
 
 from tensorcast.global_store.db_utils import init_db
+from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.global_store.models import (
     PersistenceShardStatus,
     PersistenceStatus,
@@ -190,3 +191,83 @@ def test_record_status_updates_targets_and_task_state() -> None:
         ["task-1"],
     ).fetchone()
     assert status_row == ("running", pytest.approx(0.5), None)
+
+
+def test_record_status_retries_transient_conflict(monkeypatch) -> None:
+    shard = _shard(16 * 1024 * 1024)
+    remote_ok = Worker(
+        daemon_id="daemon-ok",
+        node_id="node-ok",
+        memory_tier_state=WorkerMemoryTierState(
+            stable_total_bytes=128 * 1024 * 1024,
+            stable_used_bytes=0,
+        ),
+    )
+    service, conn = _service_with_workers([remote_ok])
+    plan = service.plan_placement(
+        artifact_id="artifact-retry",
+        placement_policy="replicated",
+        shards=[shard],
+        source_node_id="node-source",
+    )
+
+    calls = {"count": 0}
+    original_update_targets = service.placement_repository.update_targets
+
+    def _flaky_update_targets(targets):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise DatabaseError(
+                "Transaction failed: Failed to commit: write-write conflict on key: "
+                '"artifact-retry, 0, node-ok"'
+            )
+        return original_update_targets(targets)
+
+    monkeypatch.setattr(
+        service.placement_repository,
+        "update_targets",
+        _flaky_update_targets,
+    )
+
+    shard_status = PersistenceShardStatus(
+        shard_id=plan.shards[0].shard_id,
+        shard_idx=0,
+        state="running",
+        progress=0.3,
+        degraded_reason=None,
+        last_error=None,
+        targets=[
+            PlacementTarget(
+                plan_id=plan.plan_id,
+                shard_idx=0,
+                node_id=remote_ok.node_id,
+                lease_id="lease-retry",
+                target_state="copying",
+                degraded_reason=None,
+            )
+        ],
+    )
+
+    service.record_status(
+        PersistenceStatus(
+            task_id="task-retry",
+            plan_id=plan.plan_id,
+            artifact_id="artifact-retry",
+            state="running",
+            progress=0.3,
+            last_error=None,
+            degraded_reason=None,
+        ),
+        [shard_status],
+    )
+
+    assert calls["count"] == 2
+    row = conn.execute(
+        """
+        SELECT target_state, lease_id
+        FROM artifact_placement_targets
+        WHERE plan_id = ? AND shard_idx = 0 AND node_id = ?
+        """,
+        [plan.plan_id, remote_ok.node_id],
+    ).fetchone()
+    assert row == ("copying", "lease-retry")

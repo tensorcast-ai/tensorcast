@@ -342,20 +342,14 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return absl::UnimplementedError("query_chunk_locations not supported in test stub");
   }
 
-  absl::StatusOr<components::StateSyncResult> synchronize_worker_state(
-      const tensorcast::global_store::v1::WorkerLocalState&,
+  absl::StatusOr<components::StateSyncResult> reconcile_worker_state(
+      std::string_view,
+      std::string_view,
+      const std::vector<tensorcast::common::v1::ReplicaInfo>&,
       bool,
       const components::StateSyncToken&,
       const components::RpcOptions&) override {
-    return absl::UnimplementedError("synchronize_worker_state not supported in test stub");
-  }
-
-  absl::StatusOr<components::FullStateSyncResult> request_full_state_sync(
-      std::string_view,
-      uint64_t,
-      const components::StateSyncToken&,
-      const components::RpcOptions&) override {
-    return absl::UnimplementedError("request_full_state_sync not supported in test stub");
+    return absl::UnimplementedError("reconcile_worker_state not supported in test stub");
   }
 
   bool is_connected() const override {

@@ -1381,37 +1381,6 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     }
   }
 
-  if (publisher_) {
-    RegistrationPublication publication{
-        .artifact_id = entry->artifact_id,
-        .device = device,
-        .size_bytes = entry->size_bytes,
-        .view_id = (entry->view_state && entry->view_state->options.registration_kind == ViewRegistrationKind::kPiece &&
-                    !entry->view_state->options.view_id.empty())
-            ? std::optional<std::string>(entry->view_state->options.view_id)
-            : std::nullopt,
-        .tensor_index_key = entry->tensor_index_key,
-        .remote_memory_keys = remote_keys,
-        .buffer_sizes = buffer_sizes,
-        .tensor_index_data = entry->tensor_index_data,
-        .encoding = entry->encoding,
-        .schema_version = entry->schema_version,
-        .verification_json = verification_json,
-        .index_multihash = index_multihash,
-        .data_multihash = data_multihash,
-        .id_kind = entry->id_kind};
-    absl::Status registration_status = publisher_->publish_registration(publication);
-    if (!registration_status.ok()) {
-      // GlobalStore not connected - skip publication in standalone mode.
-      // Local registration remains valid; artifact is usable on this node.
-      if (absl::IsFailedPrecondition(registration_status)) {
-        LOG(INFO) << "Skipping GlobalStore publication (not connected): " << registration_status.message();
-      } else {
-        return registration_status;
-      }
-    }
-  }
-
   size_t pending_size_after = 0;
   erase_pending(registration_id, &pending_size_after);
   record_pending_gauge(pending_size_after);
@@ -1468,6 +1437,38 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       }
     }
   }
+
+  if (publisher_) {
+    RegistrationPublication publication{
+        .artifact_id = entry->artifact_id,
+        .device = device,
+        .size_bytes = entry->size_bytes,
+        .view_id = (entry->view_state && entry->view_state->options.registration_kind == ViewRegistrationKind::kPiece &&
+                    !entry->view_state->options.view_id.empty())
+            ? std::optional<std::string>(entry->view_state->options.view_id)
+            : std::nullopt,
+        .tensor_index_key = entry->tensor_index_key,
+        .remote_memory_keys = remote_keys,
+        .buffer_sizes = buffer_sizes,
+        .tensor_index_data = entry->tensor_index_data,
+        .encoding = entry->encoding,
+        .schema_version = entry->schema_version,
+        .verification_json = verification_json,
+        .index_multihash = index_multihash,
+        .data_multihash = data_multihash,
+        .id_kind = entry->id_kind};
+    absl::Status registration_status = publisher_->publish_registration(publication);
+    if (!registration_status.ok()) {
+      // GlobalStore not connected - skip publication in standalone mode.
+      // Local registration remains valid; artifact is usable on this node.
+      if (absl::IsFailedPrecondition(registration_status)) {
+        LOG(INFO) << "Skipping GlobalStore publication (not connected): " << registration_status.message();
+      } else {
+        return registration_status;
+      }
+    }
+  }
+
   {
     const auto location = entry->plan == PendingRegistrationContext::Plan::kStableDram
         ? common::memory::MemoryLocation::CPU

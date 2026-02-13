@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 import tensorcast
 from tensorcast.api._config import OverflowPolicy, StorePolicy, StorePolicyProfile
+from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.types import PersistenceStatusResult, TensorDict
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,7 @@ class WeightPublisher:
         last_err: Exception | None = None
         while time.monotonic() < deadline:
             try:
-                resolved = tensorcast.artifact(key=str(artifact_key)).artifact_id
+                resolved = resolve_artifact(key=str(artifact_key)).artifact_id
             except Exception as exc:  # noqa: BLE001
                 last_err = exc
                 time.sleep(float(self._config.key_mapping_poll_interval_s))

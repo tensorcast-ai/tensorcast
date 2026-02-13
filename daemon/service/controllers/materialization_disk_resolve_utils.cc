@@ -3,7 +3,6 @@
 #include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 
 #include <filesystem>
-#include <fstream>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,6 +11,7 @@
 #include "absl/strings/str_cat.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
+#include "daemon/util/atomic_file_utils.h"
 #include "daemon/util/path_utils.h"
 #include "nlohmann/json.hpp"
 #include "opentelemetry/metrics/provider.h"
@@ -47,12 +47,7 @@ absl::Status write_artifact_descriptor(
     desc["total_size"] = *total_size;
   }
   const auto descriptor_path = artifact_dir / "artifact_descriptor.json";
-  std::ofstream out(descriptor_path, std::ios::trunc);
-  if (!out.is_open()) {
-    return absl::InternalError("failed to open artifact_descriptor.json for writing");
-  }
-  out << desc.dump(2);
-  return absl::OkStatus();
+  return atomic_file_utils::write_file_atomically(descriptor_path, desc.dump(2));
 }
 
 } // namespace

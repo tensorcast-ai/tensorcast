@@ -35,6 +35,7 @@ sc_cc_library(
         "@cudart",
         "@cudnn",
         "@cufft",
+        "@cufile",
         "@cupti",
         "@curand",
         "@cusparse",

@@ -71,6 +71,10 @@ from tensorcast.global_store.repositories.artifact_index_repository import (
     ArtifactIndexRepository,
 )
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
+from tensorcast.global_store.repositories.base import db_execution_lock
+from tensorcast.global_store.repositories.idempotency_repository import (
+    IdempotencyRepository,
+)
 from tensorcast.global_store.repositories.key_mapping_repository import (
     KeyMappingRepository,
 )
@@ -124,6 +128,7 @@ from tensorcast.global_store.services import (
     RecoveryService,
     TransportService,
     ViewStateService,
+    WorkerControlReducer,
     WorkerService,
 )
 from tensorcast.logger import init_logger
@@ -197,6 +202,9 @@ class GlobalStoreServicer(
         "MANAGED": global_store_pb2.DISK_LOCATION_KIND_MANAGED,
         "IMPORTED": global_store_pb2.DISK_LOCATION_KIND_IMPORTED,
     }
+    worker_service: WorkerService
+    instance_service: InstanceService
+    transport_service: TransportService
 
     def _init_repositories(self) -> None:
         """Initialize repository objects used by all domains."""
@@ -206,6 +214,7 @@ class GlobalStoreServicer(
         self.artifact_indices = ArtifactIndexRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
+        self.idempotency_repository = IdempotencyRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
         self.view_repository = ViewRepository(self.connection)
@@ -359,8 +368,12 @@ class GlobalStoreServicer(
             self.connection = duckdb.connect(str(db_path))
 
         # Initialize database schema
-        cursor = self.connection.cursor()
-        init_db(cursor)
+        with db_execution_lock():
+            cursor = self.connection.cursor()
+            try:
+                init_db(cursor)
+            finally:
+                cursor.close()
 
         self._init_repositories()
         self._init_catalog_handlers()
@@ -374,14 +387,28 @@ class GlobalStoreServicer(
 
     def _rebuild_runtime_services_and_handlers(self) -> None:
         """Rebuild services/handlers that depend on mutable worker/replica repositories."""
+        reducer = getattr(self, "worker_control_reducer", None)
+        if reducer is None:
+            reducer_config = self.config.worker_control_reducer
+            reducer = WorkerControlReducer(
+                shard_count=reducer_config.shard_count,
+                queue_capacity=reducer_config.queue_capacity,
+                coalesce_window_ms=reducer_config.coalesce_window_ms,
+                logger=logger,
+            )
+            reducer.start()
+            self.worker_control_reducer = reducer
+
         self.artifact_service = ArtifactService(self.replica_repository)
         self.replica_registration_rpc_handler = ReplicaRegistrationRpcHandler(
             artifact_service=self.artifact_service,
             artifact_repository=self.artifacts_repo,
             artifact_index_repository=self.artifact_indices,
+            idempotency_repository=self.idempotency_repository,
             memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
             index_bytes_to_multibase_sha256=index_bytes_to_multibase_sha256,
             hex_sha256_to_multibase=hex_sha256_to_multibase,
+            control_reducer=self.worker_control_reducer,
             logger=logger,
         )
         self.transport_service = TransportService(
@@ -401,13 +428,18 @@ class GlobalStoreServicer(
             logger=logger,
         )
         self.worker_service = WorkerService(
-            self.worker_repository, self.replica_repository
+            self.worker_repository,
+            self.replica_repository,
+            control_reducer=self.worker_control_reducer,
         )
         self.instance_service = InstanceService(
             self.instance_repository, self.worker_repository
         )
         self.recovery_service = RecoveryService(
-            self.worker_repository, self.replica_repository, self.worker_service
+            self.worker_repository,
+            self.replica_repository,
+            self.worker_service,
+            control_reducer=self.worker_control_reducer,
         )
         self.placement_service = PlacementService(
             self.worker_repository,
@@ -438,6 +470,7 @@ class GlobalStoreServicer(
         self.worker_rpc_handler = WorkerRpcHandler(
             worker_service=self.worker_service,
             worker_repository=self.worker_repository,
+            idempotency_repository=self.idempotency_repository,
             recovery_service=self.recovery_service,
             default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
             determine_worker_status=self._determine_worker_status,
@@ -771,8 +804,6 @@ class GlobalStoreServicer(
         slate while keeping the same DuckDB connection and background worker
         threads alive.
         """
-        cursor = self.connection.cursor()
-
         # Order matters due to foreign-key constraints (replica_counters ➜ artifact_replicas)
         tables = [
             "artifact_transports",  # Depends on artifact_replicas via replica_id FK
@@ -781,14 +812,23 @@ class GlobalStoreServicer(
             "artifact_disk_locations",
             "artifact_indices",
             "artifacts",
+            "worker_reconcile_state",
+            "worker_liveness",
             "workers",
             "instances",
         ]
-        for table in tables:
+        with db_execution_lock():
+            cursor = self.connection.cursor()
             try:
-                cursor.execute(f"DELETE FROM {table}")
-            except Exception:  # noqa: BLE001 – best-effort cleanup for tests
-                logger.exception(f"Failed to truncate table {table} during reset_state")
+                for table in tables:
+                    try:
+                        cursor.execute(f"DELETE FROM {table}")
+                    except Exception:  # noqa: BLE001 – best-effort cleanup for tests
+                        logger.exception(
+                            f"Failed to truncate table {table} during reset_state"
+                        )
+            finally:
+                cursor.close()
 
         # Reset Prometheus gauges that might retain state across tests
         try:

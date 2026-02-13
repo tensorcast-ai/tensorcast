@@ -243,6 +243,8 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<LocalDiskImportCatalog::Entry> local_import = std::move(artifact_resolution.local_import);
   std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
+  span->SetAttribute("tc.store.gs_connected", gs_connected);
+  span->SetAttribute("tc.store.local_import_fallback", local_import.has_value());
 
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
   resp.set_artifact_id(resolved_artifact_id);
@@ -846,6 +848,7 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
   std::string used_disk_path = normalized_disk_path.has_value() ? normalized_disk_path->string() : std::string();
+  span->SetAttribute("tc.store.gs_connected", artifact_resolution.gs_connected);
 
   // Try LIP fast path first (GPU only)
   if (!cpu_target) {

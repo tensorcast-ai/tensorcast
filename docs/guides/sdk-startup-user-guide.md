@@ -139,6 +139,11 @@ art = tc.artifact(key="model:v1")
 weights = art.tensor_dict(device="cuda:0")
 ```
 
+Note: `init(mode="connect")` only attaches to an existing daemon. `global_store_mode`,
+`global_store_address`, and `global_store_config_path` do not reconfigure that daemon.
+Set Global Store when daemon is created/started (`init(mode="create"|"auto", ...)` or
+`uv run tensorcast-cli daemon start ...`).
+
 ### 5.2 Explicit `Store` object (advanced tuning)
 
 ```python
@@ -222,7 +227,7 @@ def worker_main(rank: int, daemon_addr: str) -> None:
 |---|---|---|
 | `No local daemon session found` in `connect` | No running daemon, or no discovered local session | Start daemon via CLI or pass explicit `address` |
 | `AUTO_CONFIG_MISMATCH` in `auto` | Different init/config params across processes | Make all `auto` startup args identical |
-| `Materialization requires a Global Store connection` | Daemon not connected to Global Store for requested operation | Start/attach Global Store (`global_store_mode="start"` or `connect`) |
+| `Materialization requires a Global Store connection` | Daemon not connected to Global Store for requested operation | Configure Global Store at daemon startup (`init(mode="create"|"auto", global_store_...)` or `tensorcast-cli daemon start --global-store-...`) |
 | `client already initialized for address ... refusing second client` | Same process tried to bind to another daemon address | Use one daemon endpoint per process; restart process if switching is needed |
 
 ## 8. Production Checklist

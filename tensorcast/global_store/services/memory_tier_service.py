@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 # Copyright (c) 2025, TensorCast Team.
 
@@ -42,14 +42,21 @@ class MemoryTierService:
 
     def publish_status(self, snapshot: MemoryTierSnapshot) -> None:
         """Persist telemetry snapshot and emit metrics."""
-        self.snapshot_repository.insert(snapshot)
-        if self.snapshot_retention_ns > 0:
-            cutoff = snapshot.epoch_ns - self.snapshot_retention_ns
-            self.snapshot_repository.prune_before(snapshot.node_id, cutoff)
-        if self.snapshot_max_rows > 0:
-            self.snapshot_repository.prune_to_limit(
-                snapshot.node_id, self.snapshot_max_rows
-            )
+        with self.snapshot_repository.transaction() as cursor:
+            self.snapshot_repository.insert(snapshot, cursor=cursor)
+            if self.snapshot_retention_ns > 0:
+                cutoff = snapshot.epoch_ns - self.snapshot_retention_ns
+                self.snapshot_repository.prune_before(
+                    snapshot.node_id,
+                    cutoff,
+                    cursor=cursor,
+                )
+            if self.snapshot_max_rows > 0:
+                self.snapshot_repository.prune_to_limit(
+                    snapshot.node_id,
+                    self.snapshot_max_rows,
+                    cursor=cursor,
+                )
 
         metrics.observe_memory_tier_snapshot(
             snapshot.node_id,

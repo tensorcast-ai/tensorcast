@@ -108,6 +108,8 @@ struct PersistenceTaskState {
   bool by_key_linked{false};
   bool metrics_active{false};
   bool metrics_closed{false};
+  uint64_t last_report_signature{0};
+  int64_t last_report_ts_ns{0};
 };
 
 // Persistence task tracker with lightweight shard planning/state machine.
@@ -219,7 +221,7 @@ class PersistenceManager {
       ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void update_durability_locked(const PersistenceTaskState& task) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   void maybe_report_status_locked(
-      const PersistenceTaskState& task,
+      PersistenceTaskState& task,
       std::vector<store::components::PersistenceReport>& reports) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   absl::Status ack_and_register_remote(
       const PersistenceTaskState& task,

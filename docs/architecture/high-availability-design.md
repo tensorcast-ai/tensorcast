@@ -18,7 +18,7 @@ This document explains High Availability (HA) as implemented in code: startup re
 
 - Global Store
   - Recovery/state sync service: `tensorcast/global_store/services/recovery_service.py`
-  - gRPC surface (registration, heartbeat, sync, health): `tensorcast/global_store/grpc_service.py`
+  - gRPC surface (registration, heartbeat, reconcile, health): `tensorcast/global_store/grpc_service.py`
 - Store Daemon (C++)
   - Lifecycle + heartbeat + sync + drift eviction: `daemon/ha/worker_lifecycle_manager.cc`
   - Global Store client + retries/backoff: `core/store/components/global_store_client.{h,cc}`
@@ -57,44 +57,38 @@ Heartbeats are always enhanced and must include a non-zero `state_version` so th
 - Daemon behavior (`WorkerLifecycleManager` + `GlobalStoreClient`):
   - Collects publishable, resident replicas, computes a checksum, and calls `send_heartbeat_enhanced`.
 - Heartbeat is lightweight and only queues sync work; state synchronization runs in a separate loop with a single in-flight sync, and the monitor requests cancel only when progress exceeds the configured RPC-timeout budget, restarting after the thread exits to avoid overlap.
-  - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a full-state sync before resuming heartbeats.
+  - If the RPC returns `NOT_FOUND` while the channel is healthy, the daemon re-registers with the preserved identity and triggers a reconcile bootstrap cycle before resuming heartbeats.
 
-## State Synchronization
+## State Reconcile (V2)
 
-When `state_sync_required` is returned (or the daemon detects its version/checksum diverged), the daemon submits its full inventory through `SynchronizeWorkerState`.
+When `state_sync_required` is returned (or the daemon detects its version/checksum diverged), the daemon submits inventory through `ReconcileWorkerState`.
 
-- Global Store computes diffs with “addition over removal” semantics: additions are always applied, removals are only applied when the daemon provided a non-empty inventory to avoid deleting during partial reports.
-- Synchronization applies changes transactionally and only bumps `state_version` + checksum when all changes succeed.
-- No-op sync keeps the version and refreshes the persisted checksum if it is stale.
-- The daemon stores the returned version and checksum so subsequent heartbeats can short-circuit unnecessary syncs.
+- Request identity is `(worker_id, daemon_id, generation, request_seq)`. `generation` identifies daemon incarnation; `request_seq` is monotonic within one generation.
+- Global Store returns typed outcomes: `APPLIED`, `NOOP`, `IGNORED_STALE`, `RETRY_LATER`, `REBASE_REQUIRED`, `FATAL`.
+- `APPLIED/NOOP` update daemon-local `state_version` + checksum. `IGNORED_STALE` is treated as success for stale/duplicate requests.
+- `RETRY_LATER` provides `retry_after_ms`; daemon backs off and retries reconcile.
+- `REBASE_REQUIRED` returns authoritative `expected_replicas`; daemon applies local rebase from that snapshot.
 - `StateChange` removals are applied per replica key `(artifact_id, memory_type, device_id)` so GPU/CPU tiers are reconciled independently.
 - The daemon’s inventory is publishable + resident only; non-resident replicas are never mapped to DISK.
 - `StateChange` removals enqueue a safe-retire flow; unload happens only after ref counts, use leases, placement pins, and transport locks clear.
 - `StateChange` updates propagate endpoint metadata drift (node address/port, memory size, and transport keys when reported) so routing stays accurate.
 - Checksum parity: both sides compute a stable FNV-1a hash over a sorted inventory of `(artifact_id, node_id, node_address, node_port, memory_type, device_id, availability)`. Order never changes the checksum, and availability or endpoint drift intentionally mutates it to trigger reconciliation.
-- Authoritative empties: when `high_availability.force_full_sync_on_empty_inventory=true`, an empty inventory is treated as authoritative and removals are applied (for drains/retirements). Default keeps the conservative behavior (empty = “unknown”, no removals).
-
-## Full-State Sync
-
-The daemon requests the authoritative replica set after cold start, re-registration, or when drift is suspected. Full-state sync returns the current checksum and expected set without bumping versions (and refreshes the cached checksum if stale).
-
-- `request_full_state_sync` provides a complete snapshot the daemon treats as source of truth.
-- During startup, `WorkerLifecycleManager::start` performs this call once, enqueues retire for any local replicas not present in the expected set (keyed by `(artifact_id, memory_type, device_id)`), and only then starts serving traffic.
+- Authoritative empties: when `request_kind=SNAPSHOT`, empty inventory is authoritative and removals are applied (for drains/retirements). `DELTA` keeps conservative behavior for empty inventory.
 
 ## Connection Management & Retries (Daemon)
 
 All Global Store RPCs use bounded retries with exponential backoff and jitter (`max_retries=3`, initial backoff 100ms, doubled per attempt with ±50% jitter). Each call also sets deadlines so stalled channels fail fast.
 
 - The retry helper is centralized in `GlobalStoreClient::execute_rpc_with_retry`, so heartbeat, registration, sync, and health probes share the same policy.
-- HA config can override heartbeat/state sync/full sync RPC timeouts and retry limits to bound recovery latency without affecting other calls.
+- HA config can override heartbeat/reconcile RPC timeouts and retry limits to bound recovery latency without affecting other calls.
 - Endpoint selection: the daemon currently uses the first entry in `high_availability.global_store_endpoints` as `global_store_address` (single Global Store only; additional endpoints are ignored for now).
 - Advertise constraints: `RegisterWorker` rejects loopback or unspecified addresses; `resolve_advertised_address` prefers `server.advertise.host`, then a routable `server.listen.host`, then the outbound route IP to the configured Global Store endpoint, and finally the default interface IP.
 - Health check: `GlobalStoreClient::initialize` issues a `HealthCheck` before registration; failing the probe aborts HA startup early instead of hanging during registration. When a `meta.cluster_token` is configured, the daemon refuses to proceed unless the HealthCheck token matches, preventing accidental cross-cluster registration. Endpoint metadata (bind/advertise) is returned by `GetServerInfo` for operators and CLI tooling.
 
 ## Responsibilities
 
-- Global Store: persist registry; accept heartbeats and synchronize state; compute/apply changes; serve expected state for full sync; reject ambiguous loopback registrations; expose cluster token via HealthCheck and endpoints via GetServerInfo.
-- Store Daemon: maintain authoritative publishable inventory; send enhanced heartbeats; perform incremental/full syncs; enqueue safe retire for drift/removals; re-register on desync; prefetch adds returned by sync; never unload directly from heartbeat obsolete hints.
+- Global Store: persist registry; accept heartbeats and reconcile state; compute/apply changes; return expected snapshots on `REBASE_REQUIRED`; reject ambiguous loopback registrations; expose cluster token via HealthCheck and endpoints via GetServerInfo.
+- Store Daemon: maintain authoritative publishable inventory; send enhanced heartbeats; run typed reconcile loop; enqueue safe retire for drift/removals; re-register on desync; prefetch adds returned by reconcile; never unload directly from heartbeat obsolete hints.
 
 ## Failure Modes and Recovery Behavior
 
@@ -102,16 +96,16 @@ All Global Store RPCs use bounded retries with exponential backoff and jitter (`
   - Heartbeats log warnings and retry with backoff; `is_connected()` flips false when the gRPC channel is not READY, so P2P transports and registrations reject with `FailedPrecondition` unless a disk hint is provided.
   - Store Daemons continue serving already-materialized replicas locally; inventory remains authoritative on the node, but new replicas are not registered while the outage lasts.
   - In-flight transports keep streaming because the data plane is daemon-to-daemon; the follow-up `complete_replica_transport` call may fail and leak counters temporarily, but `cleanup_expired_transports()` on the Global Store cleans them up.
-  - When the Global Store comes back, the next enhanced heartbeat can return `NOT_FOUND`; the daemon automatically re-registers with preserved identity and performs a full-state sync to reconcile drift before resuming normal heartbeats.
+  - When the Global Store comes back, the next enhanced heartbeat can return `NOT_FOUND`; the daemon automatically re-registers with preserved identity and performs reconcile bootstrap to reconcile drift before resuming normal heartbeats.
 
 - **Store Daemon crash or shutdown**
 - Heartbeats stop; Global Store marks the worker stale after `heartbeat_timeout`, sets it inactive, and removes it from transport selection. Existing replicas remain in the registry but are not assigned because `find_available_for_transport()` filters by heartbeat freshness and inactivity.
   - Stuck transports sourced from the crashed daemon are force-completed by the Global Store sweeper; P2P sessions targeting the crashed daemon fail at connection time and surface an error to callers.
-  - On restart, the daemon re-registers, runs full-state sync, and prunes obsolete replicas locally so it rejoins routing without manual cleanup.
+  - On restart, the daemon re-registers, runs reconcile bootstrap, and prunes obsolete replicas locally so it rejoins routing without manual cleanup.
 
 - **Network partition between daemon and Global Store**
   - RPCs exhaust retry budgets (`execute_rpc_with_retry`), heartbeats record failures, and the daemon eventually considers the channel disconnected. Local reads still succeed; any operation requiring coordination (registration, transport request, chunk sync) fails fast to clients with the underlying gRPC status.
-  - When connectivity resumes, the daemon resumes heartbeats, re-registers if needed, and performs an incremental or full sync depending on version drift.
+  - When connectivity resumes, the daemon resumes heartbeats, re-registers if needed, and performs reconcile with typed outcomes depending on drift.
 
 - **P2P transport failure (network or source-side)**
   - `MaterializeOrchestrator` always calls `complete_replica_transport()` even when `ingest_from_p2p()` fails, releasing source-side counters promptly.
@@ -133,7 +127,8 @@ sequenceDiagram
     participant CL as Client SDK
 
     CL->>SD: Materialize request
-    SD->>GS: RegisterWorker + FullStateSync
+    SD->>GS: RegisterWorker
+    SD->>GS: ReconcileWorkerState (SNAPSHOT)
     SD->>GS: Heartbeat (enhanced)
     GS-->>SD: HB OK (no sync)
 
@@ -141,9 +136,9 @@ sequenceDiagram
     SD->>GS: Heartbeat retries w/ backoff
     GS-->>SD: NOT_FOUND (after restart)
     SD->>GS: Re-register (preserve identity)
-    SD->>GS: RequestFullStateSync
-    GS-->>SD: Expected replicas + checksum
-    SD->>SD: Prune drift, resume traffic
+    SD->>GS: ReconcileWorkerState (SNAPSHOT)
+    GS-->>SD: REBASE_REQUIRED + expected_replicas
+    SD->>SD: Apply rebase, resume traffic
 
     CL->>SD: New request during outage
     SD-->>CL: Serve local replica OR error (needs GS / no disk hint)
@@ -174,22 +169,22 @@ flowchart TD
 
 From `proto/tensorcast/global_store/v1/global_store.proto`:
 
-- `WorkerLocalState`: worker id, state version, checksum, full `ReplicaInfo` list, and last update timestamp.
-- `SynchronizeWorkerStateRequest`: worker id plus `WorkerLocalState`, with `force_full_sync` to bypass diffing if needed; `sync_epoch` and `sync_request_id` must be monotonic per worker to reject stale updates.
-- `SynchronizeWorkerStateResponse`: status, new state version, new checksum, and a list of `StateChange` entries describing applied add/update/remove operations (with reasons).
+- `ReconcileWorkerStateRequest`: `worker_id`, `daemon_id`, `generation`, `request_seq`, `request_kind`, and inventory (`ReplicaInfo` list).
+- `ReconcileWorkerStateResponse`: `result_kind`, `retry_after_ms`, `new_state_version`, `new_state_checksum`, `state_changes`, and optional `expected_replicas` (for rebase).
+- `RegisterWorkerResponse.reconcile_generation`: daemon-incarnation generation assigned by Global Store at registration.
 
 ## End-to-End Flows
 
-- Startup recovery: validate DB, mark stale, preserve persisted versions/checksums → workers re-register/heartbeat → server may request sync.
-- Heartbeat loop: daemon sends enhanced heartbeat → server compares version/checksum and obsolete set → may request sync.
-- Incremental sync: daemon sends `WorkerLocalState.local_replicas` snapshot → server computes StateChange list and applies → returns new version/checksum.
-- Full-state sync: daemon requests expected replicas (also carrying sync tokens) → prunes drift locally → resumes incremental syncs.
+- Startup recovery: validate DB, mark stale, preserve persisted versions/checksums -> workers re-register/heartbeat -> server may request reconcile.
+- Heartbeat loop: daemon sends enhanced heartbeat -> server compares version/checksum and obsolete set -> may request reconcile.
+- Reconcile loop: daemon sends `ReconcileWorkerState` with monotonic generation/sequence -> server computes/apply StateChange list and returns typed result.
+- Rebase path: server returns `REBASE_REQUIRED` with expected replicas -> daemon prunes/apply local state to match authoritative snapshot.
 
 ## Reconciliation Invariants
 
 - Authoritative inventory: daemon’s `local_replicas` is the source of truth for local presence.
 - Addition over removal: removals are suppressed if the daemon provides no inventory; only add/remove based on explicit differences, and state versions bump only when changes are applied.
-- Idempotency: repeated adds resolve to the same replica logically; sync tokens ensure stale requests are ignored; full-state sync is informational and does not mutate versions.
+- Idempotency: repeated adds resolve to the same replica logically; generation/request_seq ensure stale requests are ignored.
 - Publishable-only visibility: only resident replicas marked publishable are advertised; non-resident replicas are never mapped to DISK.
 - Safe retire: unload only after ref counts, use leases, placement pins, and transport locks clear; heartbeat obsolete hints never trigger unload directly.
 
@@ -233,10 +228,8 @@ high_availability:
       port: 50051
   heartbeat_interval: 5s      # defaults to 5s if omitted
   periodic_sync_interval: 10s # drives chunk_sync_loop; 0 disables
-  force_full_sync_on_empty_inventory: false # set true to drain/retire nodes
   heartbeat_rpc_timeout: 2s   # optional per-RPC overrides
   state_sync_rpc_timeout: 5s
-  full_sync_rpc_timeout: 10s
 server:
   listen:
     host: 0.0.0.0

@@ -64,7 +64,7 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
               : tensorcast::common::v1::ArtifactIdKind::ARTIFACT_ID_KIND_MI2);
       descriptor = std::move(desc);
     }
-    auto reg_or = client->register_memory_replica(
+    auto reg_or = client->register_memory_replica_idempotent(
         publication.artifact_id,
         worker_id(),
         publication.device,
@@ -78,7 +78,8 @@ class GlobalStoreRegistrationPublisher final : public RegistrationPublisher {
         /*max_concurrency=*/1,
         publication.verification_json,
         publication.view_id ? std::optional<std::string_view>(*publication.view_id) : std::nullopt,
-        descriptor);
+        descriptor,
+        std::nullopt);
     if (!reg_or.ok()) {
       return reg_or.status();
     }
@@ -218,7 +219,8 @@ absl::Status MetadataGateway::register_replica(
       key.device,
       loc,
       *size_or,
-      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt);
+      key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
+      publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
   if (!register_or.ok()) {
     return register_or.status();
   }

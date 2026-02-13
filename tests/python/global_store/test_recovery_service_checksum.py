@@ -1,10 +1,9 @@
 #  Copyright (c) 2025-2026, TensorCast Team.
 
-# Copyright (c) 2025, TensorCast Team.
-
-from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
+from tensorcast.global_store.exceptions import DatabaseError
+from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.services.recovery_service import RecoveryService
 from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.proto.common.v1 import common_pb2
@@ -30,6 +29,52 @@ def _make_recovery_service(repositories) -> RecoveryService:
         repositories["worker"],
         repositories["replica"],
         worker_service,
+    )
+
+
+def _make_inventory_replica(
+    *,
+    artifact_id: str,
+    node_id: str,
+    memory_type: common_pb2.MemoryType.ValueType,
+    device_id: int,
+    node_address: str = "",
+    node_port: int = 0,
+    memory_size: int = 0,
+    is_available: bool = True,
+) -> common_pb2.ReplicaInfo:
+    replica = common_pb2.ReplicaInfo()
+    replica.ref.artifact_id = artifact_id
+    replica.memory_info.node_id = node_id
+    replica.memory_info.memory_type = memory_type
+    replica.memory_info.device_id = device_id
+    if node_address:
+        replica.memory_info.node_address = node_address
+    if node_port > 0:
+        replica.memory_info.node_port = node_port
+    if memory_size > 0:
+        replica.memory_info.memory_size = memory_size
+    replica.stats.is_available = is_available
+    return replica
+
+
+def _reconcile(
+    *,
+    recovery: RecoveryService,
+    worker_id: str,
+    generation: int,
+    request_seq: int,
+    inventory: list[common_pb2.ReplicaInfo],
+    request_kind: global_store_pb2.ReconcileRequestKind.ValueType,
+    daemon_id: str = "",
+):
+    return recovery.reconcile_worker_state(
+        worker_id=worker_id,
+        daemon_id=daemon_id,
+        generation=generation,
+        request_seq=request_seq,
+        inventory=inventory,
+        request_kind=request_kind,
     )
 
 
@@ -118,7 +163,6 @@ def test_checksum_is_stable_and_availability_sensitive(repositories):
     ]
 
     checksum1 = service._compute_state_checksum(replicas)
-    # Order should not matter once sorted
     checksum2 = service._compute_state_checksum(list(reversed(replicas)))
     assert checksum1 == checksum2
 
@@ -127,7 +171,7 @@ def test_checksum_is_stable_and_availability_sensitive(repositories):
     assert checksum3 != checksum1
 
 
-def test_force_full_sync_allows_empty_inventory_removal(repositories):
+def test_snapshot_request_allows_empty_inventory_removal(repositories):
     recovery = _make_recovery_service(repositories)
     worker_id = "worker-force"
     repositories["worker"].create_or_update(
@@ -168,24 +212,20 @@ def test_force_full_sync_allows_empty_inventory_removal(repositories):
     for replica in replicas:
         repositories["replica"].create_or_update(replica)
 
-    local_state = global_store_pb2.WorkerLocalState(
+    result_kind, new_version, _, state_changes, _, _ = _reconcile(
+        recovery=recovery,
         worker_id=worker_id,
-        state_version=1,
-        state_checksum="",
+        generation=1,
+        request_seq=1,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
     )
 
-    success, changes, new_version, checksum, ignored = (
-        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, True)
-    )
-
-    assert success is True
-    assert ignored is False
-    assert any(
-        change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
-        for change in changes
-    )
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_APPLIED
     assert sum(
-        1 for change in changes if change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
+        1
+        for change in state_changes
+        if change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
     ) == len(replicas)
     assert new_version >= 1
 
@@ -220,30 +260,29 @@ def test_availability_drift_triggers_update(repositories):
     )
     repositories["replica"].create(replica)
 
-    local_state = global_store_pb2.WorkerLocalState(
+    inventory = [
+        _make_inventory_replica(
+            artifact_id=replica.artifact_id,
+            node_id=replica.node_id,
+            memory_type=common_pb2.MEMORY_TYPE_GPU,
+            device_id=replica.device_id,
+            is_available=False,
+        )
+    ]
+    result_kind, new_version, new_checksum, state_changes, _, _ = _reconcile(
+        recovery=recovery,
         worker_id=worker_id,
-        state_version=1,
-        state_checksum="",
-    )
-    local_replica = local_state.local_replicas.add()
-    local_replica.ref.artifact_id = replica.artifact_id
-    local_replica.memory_info.node_id = replica.node_id
-    local_replica.memory_info.memory_type = common_pb2.MEMORY_TYPE_GPU
-    local_replica.memory_info.device_id = replica.device_id
-    local_replica.stats.is_available = False
-
-    original_checksum = recovery._compute_state_checksum([replica])
-
-    success, changes, new_version, new_checksum, ignored = (
-        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+        generation=1,
+        request_seq=1,
+        inventory=inventory,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
     )
 
-    assert success is True
-    assert ignored is False
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_APPLIED
     assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
-        for change in changes
+        for change in state_changes
     )
 
     updated_replicas = repositories["replica"].get_replicas_by_worker(worker_id)
@@ -267,7 +306,7 @@ def test_availability_drift_triggers_update(repositories):
     assert new_checksum == expected_checksum
 
 
-def test_stale_sync_token_is_ignored(repositories):
+def test_reconcile_replay_is_idempotent_and_stale_lower_seq_is_ignored(repositories):
     recovery = _make_recovery_service(repositories)
     worker_id = "worker-stale"
     repositories["worker"].create_or_update(
@@ -283,25 +322,51 @@ def test_stale_sync_token_is_ignored(repositories):
         )
     )
 
-    local_state = global_store_pb2.WorkerLocalState(
+    first = _reconcile(
+        recovery=recovery,
         worker_id=worker_id,
-        state_version=1,
-        state_checksum="",
+        generation=1,
+        request_seq=1,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
+    )
+    assert first[0] in (
+        global_store_pb2.RECONCILE_RESULT_KIND_APPLIED,
+        global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
     )
 
-    success, changes, new_version, checksum, ignored = (
-        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+    second = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
     )
-    assert success is True
-    assert ignored is False
-    first_checksum = checksum
+    assert second[0] in (
+        global_store_pb2.RECONCILE_RESULT_KIND_APPLIED,
+        global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
+    )
 
-    success, changes, new_version, checksum, ignored = (
-        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+    replay = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
     )
-    assert success is True
-    assert ignored is True
-    assert checksum == first_checksum
+    assert replay[0] == global_store_pb2.RECONCILE_RESULT_KIND_NOOP
+
+    stale = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=1,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
+    )
+    assert stale[0] == global_store_pb2.RECONCILE_RESULT_KIND_IGNORED_STALE
 
 
 def test_endpoint_drift_triggers_update(repositories):
@@ -334,31 +399,32 @@ def test_endpoint_drift_triggers_update(repositories):
     )
     repositories["replica"].create(replica)
 
-    local_state = global_store_pb2.WorkerLocalState(
+    inventory = [
+        _make_inventory_replica(
+            artifact_id=replica.artifact_id,
+            node_id=replica.node_id,
+            node_address="10.0.0.20",
+            node_port=55000,
+            memory_type=common_pb2.MEMORY_TYPE_GPU,
+            device_id=replica.device_id,
+            memory_size=replica.memory_size,
+            is_available=True,
+        )
+    ]
+    result_kind, new_version, new_checksum, state_changes, _, _ = _reconcile(
+        recovery=recovery,
         worker_id=worker_id,
-        state_version=1,
-        state_checksum="",
-    )
-    local_replica = local_state.local_replicas.add()
-    local_replica.ref.artifact_id = replica.artifact_id
-    local_replica.memory_info.node_id = replica.node_id
-    local_replica.memory_info.node_address = "10.0.0.20"
-    local_replica.memory_info.node_port = 55000
-    local_replica.memory_info.memory_type = common_pb2.MEMORY_TYPE_GPU
-    local_replica.memory_info.device_id = replica.device_id
-    local_replica.memory_info.memory_size = replica.memory_size
-    local_replica.stats.is_available = replica.is_available
-
-    success, changes, new_version, new_checksum, ignored = (
-        recovery.synchronize_worker_state(worker_id, local_state, 1, 1, False)
+        generation=1,
+        request_seq=1,
+        inventory=inventory,
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
     )
 
-    assert success is True
-    assert ignored is False
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_APPLIED
     assert new_version == 2
     assert any(
         change.type == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
-        for change in changes
+        for change in state_changes
     )
 
     updated_replicas = repositories["replica"].get_replicas_by_worker(worker_id)
@@ -381,3 +447,55 @@ def test_endpoint_drift_triggers_update(repositories):
         ]
     )
     assert new_checksum == expected_checksum
+
+
+def test_transient_reconcile_conflict_exhausted_returns_retry_later(
+    repositories,
+    monkeypatch,
+):
+    recovery = _make_recovery_service(repositories)
+    worker_id = "worker-conflict-retry-later"
+
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            daemon_id="daemon-conflict-retry-later",
+            node_id="node-conflict-retry-later",
+            node_address="10.0.0.40",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=2048,
+            mem_pool_available_size=2048,
+        )
+    )
+
+    def _always_conflict(**kwargs):
+        del kwargs
+        raise DatabaseError(
+            "Transaction failed: TransactionContext Error: Conflict on tuple deletion!"
+        )
+
+    monkeypatch.setattr(
+        recovery,
+        "_reconcile_worker_state_internal",
+        _always_conflict,
+    )
+
+    result_kind, version, checksum, state_changes, expected_replicas, retry_after_ms = (
+        _reconcile(
+            recovery=recovery,
+            worker_id=worker_id,
+            generation=1,
+            request_seq=1,
+            inventory=[],
+            request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+            daemon_id="daemon-conflict-retry-later",
+        )
+    )
+
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER
+    assert version >= 1
+    assert isinstance(checksum, str)
+    assert state_changes == []
+    assert expected_replicas == []
+    assert retry_after_ms == 500

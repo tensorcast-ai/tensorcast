@@ -23,9 +23,8 @@ service ClusterRuntimeService {
   rpc UnregisterInstance(UnregisterInstanceRequest) returns (UnregisterInstanceResponse) {}
   rpc ListActiveInstances(ListActiveInstancesRequest) returns (ListActiveInstancesResponse) {}
 
-  // High Availability and State Synchronization
-  rpc SynchronizeWorkerState(SynchronizeWorkerStateRequest) returns (SynchronizeWorkerStateResponse) {}
-  rpc RequestFullStateSync(RequestFullStateSyncRequest) returns (RequestFullStateSyncResponse) {}
+  // High Availability and State Reconciliation
+  rpc ReconcileWorkerState(ReconcileWorkerStateRequest) returns (ReconcileWorkerStateResponse) {}
 
   // Replica lifecycle
   rpc RegisterReplica(RegisterReplicaRequest) returns (RegisterReplicaResponse) {}
@@ -134,6 +133,22 @@ enum ConnectionStatus {
   CONNECTION_STATUS_CONNECTED = 3;
 }
 
+enum ReconcileRequestKind {
+  RECONCILE_REQUEST_KIND_UNSPECIFIED = 0;
+  RECONCILE_REQUEST_KIND_SNAPSHOT = 1;
+  RECONCILE_REQUEST_KIND_DELTA = 2;
+}
+
+enum ReconcileResultKind {
+  RECONCILE_RESULT_KIND_UNSPECIFIED = 0;
+  RECONCILE_RESULT_KIND_APPLIED = 1;
+  RECONCILE_RESULT_KIND_NOOP = 2;
+  RECONCILE_RESULT_KIND_IGNORED_STALE = 3;
+  RECONCILE_RESULT_KIND_RETRY_LATER = 4;
+  RECONCILE_RESULT_KIND_REBASE_REQUIRED = 5;
+  RECONCILE_RESULT_KIND_FATAL = 6;
+}
+
 // Worker/daemon capability flags (bit positions in capability_flags).
 enum WorkerCapabilityFlag {
   WORKER_CAPABILITY_FLAG_UNSPECIFIED = 0;
@@ -175,6 +190,7 @@ message RegisterWorkerResponse {
   // HA fields
   bool state_sync_required = 4; // 是否需要状态同步
   uint64 expected_state_version = 5; // 期望的状态版本
+  uint64 reconcile_generation = 6; // Worker reconcile generation for this daemon incarnation
 }
 
 // Enhanced Worker心跳
@@ -207,6 +223,7 @@ message WorkerHeartbeatResponse {
 message UnregisterWorkerRequest {
   string worker_id = 1;
   bool is_graceful_shutdown = 2; // 是否为优雅关闭
+  optional string client_request_id = 3;
 }
 
 message UnregisterWorkerResponse {
@@ -297,35 +314,24 @@ message ListActiveInstancesResponse {
   repeated InstanceInfo instances = 1;
 }
 
-// ========== State Synchronization Messages ==========
+// ========== Worker state reconciliation ==========
 
-message WorkerLocalState {
+message ReconcileWorkerStateRequest {
   string worker_id = 1;
-  uint64 state_version = 2;
-  string state_checksum = 3;
-  repeated tensorcast.common.v1.ReplicaInfo local_replicas = 4;
-  google.protobuf.Timestamp last_update_ts = 5;
+  string daemon_id = 2;
+  uint64 generation = 3;
+  uint64 request_seq = 4;
+  repeated tensorcast.common.v1.ReplicaInfo inventory = 5;
+  ReconcileRequestKind request_kind = 6;
 }
 
-// ReplicaInfo moved to common
-
-// RFC-0007 descriptor for content-addressed identity
-// Moved to tensorcast.artifact.v1.ArtifactDescriptor
-
-message SynchronizeWorkerStateRequest {
-  string worker_id = 1;
-  WorkerLocalState local_state = 2;
-  bool force_full_sync = 3; // 强制完整同步
-  uint64 sync_epoch = 4; // 单调递增的同步世代
-  uint64 sync_request_id = 5; // 单调递增的请求序号
-}
-
-message SynchronizeWorkerStateResponse {
-  Status status = 1;
-  uint64 new_state_version = 2;
-  repeated StateChange state_changes = 3;
+message ReconcileWorkerStateResponse {
+  ReconcileResultKind result_kind = 1;
+  uint32 retry_after_ms = 2;
+  uint64 new_state_version = 3;
   string new_state_checksum = 4;
-  bool ignored = 5; // 过期/重复请求被忽略
+  repeated StateChange state_changes = 5;
+  repeated tensorcast.common.v1.ReplicaInfo expected_replicas = 6;
 }
 
 message StateChange {
@@ -339,21 +345,6 @@ message StateChange {
   ChangeType type = 1;
   tensorcast.common.v1.ReplicaInfo replica_info = 2;
   string reason = 3;
-}
-
-message RequestFullStateSyncRequest {
-  string worker_id = 1;
-  uint64 current_state_version = 2;
-  uint64 sync_epoch = 3; // 单调递增的同步世代
-  uint64 sync_request_id = 4; // 单调递增的请求序号
-}
-
-message RequestFullStateSyncResponse {
-  Status status = 1;
-  uint64 new_state_version = 2;
-  repeated tensorcast.common.v1.ReplicaInfo expected_replicas = 3;
-  string new_state_checksum = 4;
-  bool ignored = 5; // 过期/重复请求被忽略
 }
 
 // Removed legacy disk-path based artifact info messages
@@ -706,6 +697,7 @@ message RegisterReplicaRequest {
 
   // RFC-0007: Optionally include content-addressed descriptor for persistence
   optional tensorcast.common.v1.ArtifactDescriptor descriptor = 9;
+  optional string client_request_id = 10;
 }
 
 message RegisterReplicaResponse {

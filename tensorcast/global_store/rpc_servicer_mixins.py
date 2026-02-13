@@ -284,15 +284,8 @@ class ClusterRuntimeRpcServicerMixin:
     def ListActiveInstances(self, request: Any, context: grpc.ServicerContext) -> Any:
         return self.instance_rpc_handler.list_active_instances(request, context)
 
-    def SynchronizeWorkerState(
-        self, request: Any, context: grpc.ServicerContext
-    ) -> Any:
-        return self.worker_state_sync_rpc_handler.synchronize_worker_state(
-            request, context
-        )
-
-    def RequestFullStateSync(self, request: Any, context: grpc.ServicerContext) -> Any:
-        return self.worker_state_sync_rpc_handler.request_full_state_sync(
+    def ReconcileWorkerState(self, request: Any, context: grpc.ServicerContext) -> Any:
+        return self.worker_state_sync_rpc_handler.reconcile_worker_state(
             request, context
         )
 

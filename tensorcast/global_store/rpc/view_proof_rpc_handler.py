@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Callable
 
 import grpc
@@ -42,7 +43,9 @@ class ViewProofRpcHandler:
         proof_repository: ProofRepository,
         view_state_service: ViewStateService,
         timestamp_to_datetime: Callable,
-        datetime_to_timestamp: Callable[[object], timestamp_pb2.Timestamp | None],
+        datetime_to_timestamp: Callable[
+            [datetime | None], timestamp_pb2.Timestamp | None
+        ],
         get_tensor_intervals_for_artifact_id: Callable[..., dict[str, tuple[int, int]]],
         logger,
     ) -> None:

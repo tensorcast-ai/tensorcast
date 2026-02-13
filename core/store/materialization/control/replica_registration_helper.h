@@ -22,7 +22,8 @@ class ReplicaRegistrationHelper {
       const DeviceKey& device,
       common::memory::MemoryLocation location,
       uint64_t size_bytes,
-      std::optional<std::string_view> view_id = std::nullopt);
+      std::optional<std::string_view> view_id = std::nullopt,
+      std::optional<std::string_view> client_request_id = std::nullopt);
 };
 
 } // namespace tensorcast::store::materialization::control
