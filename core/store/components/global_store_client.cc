@@ -3,7 +3,10 @@
 #include "core/store/components/global_store_client.h"
 
 #include <unistd.h>
+#include <array>
 #include <chrono>
+#include <cstdint>
+#include <format>
 #include <random>
 #include <thread>
 #include <utility>
@@ -11,6 +14,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
@@ -119,6 +123,63 @@ const char* rpc_service_for_method(absl::string_view method_name) {
   return "tensorcast.global_store.v1.ClusterRuntimeService";
 }
 
+bool is_transient_tx_conflict_message(absl::string_view message) {
+  const std::string lowered = absl::AsciiStrToLower(message);
+  constexpr std::array<absl::string_view, 6> kConflictMarkers = {
+      "write-write conflict",
+      "conflict on tuple deletion",
+      "conflict on update",
+      "failed to commit: write-write conflict on key",
+      "serialization",
+      "transactioncontext error: conflict",
+  };
+  return std::any_of(kConflictMarkers.begin(), kConflictMarkers.end(), [&](absl::string_view marker) {
+    return lowered.find(marker) != std::string::npos;
+  });
+}
+
+absl::Status map_grpc_failure_to_absl(grpc::StatusCode code, absl::string_view message, bool tx_conflict) {
+  if (tx_conflict) {
+    return absl::AbortedError(std::string(message));
+  }
+  switch (code) {
+    case grpc::StatusCode::FAILED_PRECONDITION:
+      return absl::FailedPreconditionError(std::string(message));
+    case grpc::StatusCode::INVALID_ARGUMENT:
+      return absl::InvalidArgumentError(std::string(message));
+    case grpc::StatusCode::NOT_FOUND:
+      return absl::NotFoundError(std::string(message));
+    case grpc::StatusCode::ALREADY_EXISTS:
+      return absl::AlreadyExistsError(std::string(message));
+    case grpc::StatusCode::PERMISSION_DENIED:
+      return absl::PermissionDeniedError(std::string(message));
+    case grpc::StatusCode::UNAUTHENTICATED:
+      return absl::UnauthenticatedError(std::string(message));
+    case grpc::StatusCode::RESOURCE_EXHAUSTED:
+      return absl::ResourceExhaustedError(std::string(message));
+    case grpc::StatusCode::ABORTED:
+      return absl::AbortedError(std::string(message));
+    case grpc::StatusCode::OUT_OF_RANGE:
+      return absl::OutOfRangeError(std::string(message));
+    case grpc::StatusCode::UNIMPLEMENTED:
+      return absl::UnimplementedError(std::string(message));
+    case grpc::StatusCode::DATA_LOSS:
+      return absl::DataLossError(std::string(message));
+    case grpc::StatusCode::CANCELLED:
+      return absl::CancelledError(std::string(message));
+    case grpc::StatusCode::DEADLINE_EXCEEDED:
+      return absl::DeadlineExceededError(std::string(message));
+    case grpc::StatusCode::INTERNAL:
+      return absl::InternalError(std::string(message));
+    case grpc::StatusCode::UNKNOWN:
+      return absl::UnknownError(std::string(message));
+    case grpc::StatusCode::UNAVAILABLE:
+      return absl::UnavailableError(std::string(message));
+    default:
+      return absl::UnknownError(std::string(message));
+  }
+}
+
 memory_tier::LeaseKind to_proto_kind(MemoryTierLeaseKind kind) {
   switch (kind) {
     case MemoryTierLeaseKind::kPreemptible:
@@ -203,6 +264,17 @@ std::optional<absl::Time> timestamp_to_absl(const google::protobuf::Timestamp& t
     return std::nullopt;
   }
   return absl::UnixEpoch() + absl::Seconds(ts.seconds()) + absl::Nanoseconds(ts.nanos());
+}
+
+uint64_t fnv1a64(std::string_view payload) {
+  constexpr uint64_t kOffset = 14695981039346656037ULL;
+  constexpr uint64_t kPrime = 1099511628211ULL;
+  uint64_t hash = kOffset;
+  for (char c : payload) {
+    hash ^= static_cast<uint8_t>(c);
+    hash *= kPrime;
+  }
+  return hash;
 }
 } // namespace
 
@@ -575,20 +647,54 @@ absl::StatusOr<global_store::WorkerHeartbeatResponse> GlobalStoreClient::send_he
       rpc_options);
   if (!status.ok())
     return status;
-  if (response.status() != global_store::STATUS_OK && response.status() != global_store::STATUS_STATE_SYNC_REQUIRED) {
-    return absl::InternalError(
+  if (response.status() == global_store::STATUS_OK || response.status() == global_store::STATUS_STATE_SYNC_REQUIRED) {
+    return response;
+  }
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    return absl::NotFoundError(
         absl::StrFormat(
             "WorkerHeartbeat(enhanced) failed: %s (%d)",
             status_to_cstr(response.status()),
             static_cast<int>(response.status())));
   }
-  return response;
+  if (response.status() == global_store::STATUS_TIMED_OUT) {
+    return absl::DeadlineExceededError(
+        absl::StrFormat(
+            "WorkerHeartbeat(enhanced) failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  if (response.status() == global_store::STATUS_TOO_MANY_REQUESTS) {
+    return absl::ResourceExhaustedError(
+        absl::StrFormat(
+            "WorkerHeartbeat(enhanced) failed: %s (%d)",
+            status_to_cstr(response.status()),
+            static_cast<int>(response.status())));
+  }
+  return absl::InternalError(
+      absl::StrFormat(
+          "WorkerHeartbeat(enhanced) failed: %s (%d)",
+          status_to_cstr(response.status()),
+          static_cast<int>(response.status())));
 }
 
 absl::Status GlobalStoreClient::unregister_worker(std::string_view worker_id, bool is_graceful_shutdown) {
+  return unregister_worker_idempotent(worker_id, is_graceful_shutdown, std::nullopt);
+}
+
+absl::Status GlobalStoreClient::unregister_worker_idempotent(
+    std::string_view worker_id,
+    bool is_graceful_shutdown,
+    std::optional<std::string_view> client_request_id) {
   global_store::UnregisterWorkerRequest request;
   request.set_worker_id(std::string(worker_id));
   request.set_is_graceful_shutdown(is_graceful_shutdown);
+  if (client_request_id.has_value() && !client_request_id->empty()) {
+    request.set_client_request_id(std::string(*client_request_id));
+  } else {
+    request.set_client_request_id(build_client_request_id(
+        "unregister_worker", absl::StrCat(worker_id, "|", is_graceful_shutdown ? "graceful" : "forced")));
+  }
 
   global_store::UnregisterWorkerResponse response;
 
@@ -628,10 +734,45 @@ absl::StatusOr<std::string> GlobalStoreClient::register_replica(
     uint64_t memory_size,
     uint32_t max_concurrency,
     std::optional<std::string_view> view_id) {
+  return register_replica_idempotent(
+      artifact_id, worker_id, device, location, memory_size, max_concurrency, view_id, std::nullopt);
+}
+
+absl::StatusOr<std::string> GlobalStoreClient::register_replica_idempotent(
+    std::string_view artifact_id,
+    std::string_view worker_id,
+    const DeviceKey& device,
+    MemoryLocation location,
+    uint64_t memory_size,
+    uint32_t max_concurrency,
+    std::optional<std::string_view> view_id,
+    std::optional<std::string_view> client_request_id) {
   global_store::RegisterReplicaRequest request;
   request.set_artifact_id(std::string(artifact_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
+  if (client_request_id.has_value() && !client_request_id->empty()) {
+    request.set_client_request_id(std::string(*client_request_id));
+  } else {
+    request.set_client_request_id(build_client_request_id(
+        "register_replica",
+        absl::StrCat(
+            worker_id,
+            "|",
+            artifact_id,
+            "|",
+            static_cast<int>(device.type),
+            "|",
+            device.ordinal,
+            "|",
+            static_cast<int>(location),
+            "|",
+            memory_size,
+            "|",
+            max_concurrency,
+            "|",
+            view_id.has_value() ? std::string(*view_id) : std::string())));
+  }
 
   auto* mem_info = request.mutable_mem_info();
   if (auto fill_st = fill_memory_info(mem_info, device, location, memory_size, view_id); !fill_st.ok()) {
@@ -1248,6 +1389,40 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
     const std::optional<std::string>& verification_json,
     std::optional<std::string_view> view_id,
     const std::optional<common::v1::ArtifactDescriptor>& descriptor) {
+  return register_memory_replica_idempotent(
+      artifact_id,
+      worker_id,
+      device,
+      memory_size,
+      tensor_index_key,
+      remote_memory_keys,
+      buffer_sizes,
+      tensor_index_data,
+      encoding,
+      schema_version,
+      max_concurrency,
+      verification_json,
+      view_id,
+      descriptor,
+      std::nullopt);
+}
+
+absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica_idempotent(
+    std::string_view artifact_id,
+    std::string_view worker_id,
+    const DeviceKey& device,
+    uint64_t memory_size,
+    std::string_view tensor_index_key,
+    const std::vector<std::string>& remote_memory_keys,
+    const std::vector<uint64_t>& buffer_sizes,
+    const std::optional<std::string>& tensor_index_data,
+    std::string_view encoding,
+    std::string_view schema_version,
+    uint32_t max_concurrency,
+    const std::optional<std::string>& verification_json,
+    std::optional<std::string_view> view_id,
+    const std::optional<common::v1::ArtifactDescriptor>& descriptor,
+    std::optional<std::string_view> client_request_id) {
   // NOTE: This implementation relies on proto/global_store.proto support for
   // memory replicas with tensor index key. If the server does not support the
   // new fields it will still accept the request but ignore extra data.
@@ -1256,6 +1431,48 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica(
   request.set_artifact_id(std::string(artifact_id));
   request.set_worker_id(std::string(worker_id));
   request.set_max_concurrency(max_concurrency);
+  if (client_request_id.has_value() && !client_request_id->empty()) {
+    request.set_client_request_id(std::string(*client_request_id));
+  } else {
+    uint64_t buffer_size_total = 0;
+    for (uint64_t size : buffer_sizes) {
+      buffer_size_total += size;
+    }
+    request.set_client_request_id(build_client_request_id(
+        "register_memory_replica",
+        absl::StrCat(
+            worker_id,
+            "|",
+            artifact_id,
+            "|",
+            static_cast<int>(device.type),
+            "|",
+            device.ordinal,
+            "|",
+            memory_size,
+            "|",
+            tensor_index_key,
+            "|",
+            encoding,
+            "|",
+            schema_version,
+            "|",
+            max_concurrency,
+            "|",
+            view_id.has_value() ? std::string(*view_id) : std::string(),
+            "|",
+            remote_memory_keys.size(),
+            "|",
+            buffer_sizes.size(),
+            "|",
+            buffer_size_total,
+            "|",
+            tensor_index_data.has_value() ? tensor_index_data->size() : 0U,
+            "|",
+            verification_json.has_value() ? verification_json->size() : 0U,
+            "|",
+            descriptor.has_value() ? descriptor->artifact_id() : std::string())));
+  }
 
   auto* mem_info = request.mutable_mem_info();
   if (auto fill_st = fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size, view_id); !fill_st.ok()) {
@@ -1780,6 +1997,13 @@ MemoryLocation GlobalStoreClient::convert_from_proto_memory_type(tensorcast::com
   }
 }
 
+std::string GlobalStoreClient::build_client_request_id(
+    std::string_view operation_kind,
+    std::string_view canonical_payload) {
+  const uint64_t payload_hash = fnv1a64(canonical_payload);
+  return std::format("{}:{:016x}", operation_kind, payload_hash);
+}
+
 absl::Status GlobalStoreClient::fill_memory_info(
     tensorcast::common::v1::MemoryInfo* info,
     const DeviceKey& device,
@@ -1915,6 +2139,8 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
   const uint32_t max_retries = rpc_options.max_retries.value_or(config_.max_retries);
   const absl::Duration retry_backoff = rpc_options.retry_backoff.value_or(config_.retry_backoff);
   static thread_local std::mt19937_64 rng{std::random_device{}()};
+  absl::Status final_error =
+      absl::UnavailableError(absl::StrFormat("RPC %s failed after %d retries", method_name, max_retries + 1));
   for (uint32_t attempt = 0; attempt <= max_retries; ++attempt) {
     grpc::ClientContext context;
     context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(absl::ToInt64Seconds(timeout)));
@@ -1945,31 +2171,23 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
     }
 
     const auto code = status.error_code();
+    const bool tx_conflict = is_transient_tx_conflict_message(status.error_message());
+    const absl::Status mapped_error = map_grpc_failure_to_absl(code, status.error_message(), tx_conflict);
+
     switch (code) {
       case grpc::StatusCode::FAILED_PRECONDITION:
-        return absl::FailedPreconditionError(status.error_message());
       case grpc::StatusCode::INVALID_ARGUMENT:
-        return absl::InvalidArgumentError(status.error_message());
       case grpc::StatusCode::NOT_FOUND:
-        return absl::NotFoundError(status.error_message());
       case grpc::StatusCode::ALREADY_EXISTS:
-        return absl::AlreadyExistsError(status.error_message());
       case grpc::StatusCode::PERMISSION_DENIED:
-        return absl::PermissionDeniedError(status.error_message());
       case grpc::StatusCode::UNAUTHENTICATED:
-        return absl::UnauthenticatedError(status.error_message());
       case grpc::StatusCode::RESOURCE_EXHAUSTED:
-        return absl::ResourceExhaustedError(status.error_message());
       case grpc::StatusCode::ABORTED:
-        return absl::AbortedError(status.error_message());
       case grpc::StatusCode::OUT_OF_RANGE:
-        return absl::OutOfRangeError(status.error_message());
       case grpc::StatusCode::UNIMPLEMENTED:
-        return absl::UnimplementedError(status.error_message());
       case grpc::StatusCode::DATA_LOSS:
-        return absl::DataLossError(status.error_message());
       case grpc::StatusCode::CANCELLED:
-        return absl::CancelledError(status.error_message());
+        return mapped_error;
       default:
         break;
     }
@@ -1980,13 +2198,14 @@ absl::Status GlobalStoreClient::execute_rpc_with_retry(
       double jitter = std::uniform_real_distribution<double>(0.5, 1.5)(rng);
       auto jittered = absl::Milliseconds(static_cast<int64_t>(absl::ToInt64Milliseconds(base) * jitter));
       LOG(WARNING) << "RPC " << method_name << " failed (attempt " << attempt + 1 << "/" << max_retries + 1
-                   << "): " << status.error_message() << ". Retrying in " << absl::ToInt64Milliseconds(jittered)
-                   << "ms";
+                   << ", tx_conflict=" << (tx_conflict ? "true" : "false") << "): " << status.error_message()
+                   << ". Retrying in " << absl::ToInt64Milliseconds(jittered) << "ms";
       std::this_thread::sleep_for(std::chrono::milliseconds(absl::ToInt64Milliseconds(jittered)));
     }
+    final_error = mapped_error;
   }
 
-  return absl::UnavailableError(absl::StrFormat("RPC %s failed after %d retries", method_name, max_retries + 1));
+  return final_error;
 }
 
 absl::StatusOr<std::vector<ChunkLocationInfo>> GlobalStoreClient::query_chunk_locations(

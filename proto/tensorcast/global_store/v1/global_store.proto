@@ -223,6 +223,7 @@ message WorkerHeartbeatResponse {
 message UnregisterWorkerRequest {
   string worker_id = 1;
   bool is_graceful_shutdown = 2; // 是否为优雅关闭
+  optional string client_request_id = 3;
 }
 
 message UnregisterWorkerResponse {
@@ -696,6 +697,7 @@ message RegisterReplicaRequest {
 
   // RFC-0007: Optionally include content-addressed descriptor for persistence
   optional tensorcast.common.v1.ArtifactDescriptor descriptor = 9;
+  optional string client_request_id = 10;
 }
 
 message RegisterReplicaResponse {

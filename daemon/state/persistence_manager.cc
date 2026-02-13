@@ -6,6 +6,7 @@
 #include <cctype>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <map>
 #include <random>
 #include <sstream>
@@ -46,8 +47,64 @@ constexpr uint64_t kShardThresholdBytes = 128ULL * 1024 * 1024;
 constexpr uint64_t kDefaultChunkBytes = 4ULL * 1024 * 1024;
 constexpr uint32_t kMaxLeaseAttempts = 3;
 constexpr uint32_t kMaxCooldownTicks = 8;
+constexpr auto kUnchangedReportMinInterval = std::chrono::seconds(1);
 
 enum class DiskFailureStage { kWrite, kFinalize, kRegister };
+
+uint32_t quantize_progress_bucket(double progress) {
+  if (progress <= 0.0) {
+    return 0;
+  }
+  if (progress >= 1.0) {
+    return 1000;
+  }
+  return static_cast<uint32_t>(progress * 1000.0);
+}
+
+uint64_t compute_persistence_report_signature(const PersistenceTaskState& task) {
+  std::string signature;
+  absl::StrAppend(
+      &signature,
+      static_cast<int>(task.state),
+      "|",
+      quantize_progress_bucket(task.progress),
+      "|",
+      task.degraded_reason,
+      "|",
+      task.last_error,
+      "|",
+      task.disk_location_registered ? "1" : "0",
+      "|");
+
+  for (const auto& shard : task.shards) {
+    absl::StrAppend(
+        &signature,
+        shard.shard_idx,
+        ":",
+        static_cast<int>(shard.state),
+        ":",
+        quantize_progress_bucket(shard.progress),
+        ":",
+        shard.degraded_reason,
+        ":",
+        shard.last_error,
+        "|");
+    for (const auto& target : shard.targets) {
+      absl::StrAppend(
+          &signature,
+          target.node_id,
+          ":",
+          target.lease_id,
+          ":",
+          static_cast<int>(target.target_state),
+          ":",
+          target.degraded_reason,
+          "|");
+    }
+  }
+
+  return std::hash<std::string>{}(signature);
+}
 
 std::string make_digest(absl::string_view artifact_id, uint32_t shard_idx, uint64_t start, uint64_t length) {
   const std::string payload = absl::StrCat(artifact_id, ":", shard_idx, ":", start, ":", length);
@@ -1431,12 +1488,29 @@ void PersistenceManager::advance_shard_locked(PersistenceTaskState& task, Persis
 }
 
 void PersistenceManager::maybe_report_status_locked(
-    const PersistenceTaskState& task,
+    PersistenceTaskState& task,
     std::vector<comps::PersistenceReport>& reports) {
   if (global_store_ == nullptr) {
     return;
   }
+  const int64_t now_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+  const auto min_interval = std::max<std::chrono::milliseconds>(
+      tick_interval_, std::chrono::duration_cast<std::chrono::milliseconds>(kUnchangedReportMinInterval));
+  const int64_t min_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(min_interval).count();
+  const uint64_t signature = compute_persistence_report_signature(task);
+  const bool first_report = task.last_report_ts_ns == 0;
+  const bool signature_changed = task.last_report_signature != signature;
+  const bool interval_elapsed = first_report || (now_ns - task.last_report_ts_ns) >= min_interval_ns;
+  const bool terminal = is_terminal(task.state);
+
+  if (!first_report && !signature_changed && !terminal && !interval_elapsed) {
+    return;
+  }
+
   reports.push_back(build_report(task));
+  task.last_report_signature = signature;
+  task.last_report_ts_ns = now_ns;
 }
 
 store::components::PersistenceReport PersistenceManager::build_report(const PersistenceTaskState& task) {

@@ -9,12 +9,13 @@ import uuid
 import grpc
 from google.protobuf import duration_pb2, timestamp_pb2, wrappers_pb2
 
-from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.global_store.config.settings import (
     GlobalStoreConfig,
     get_config,
     set_config,
 )
+from tensorcast.global_store.exceptions import DatabaseError
+from tensorcast.global_store.grpc_service import GlobalStoreServicer
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.global_store.v1 import global_store_pb2
 
@@ -33,9 +34,7 @@ class TestGRPCService:
             max_concurrency=10,
             worker_id=registered_worker,
         )
-        register_response = servicer.RegisterReplica(
-            register_request, test_context
-        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
 
         # Now update it
         update_request = global_store_pb2.UpdateReplicaRequest(
@@ -75,6 +74,117 @@ class TestGRPCService:
         assert response.status == global_store_pb2.Status.STATUS_ERROR
         assert test_context.code == grpc.StatusCode.INVALID_ARGUMENT
 
+    def test_register_replica_idempotent_replay(
+        self, servicer, test_context, memory_info, registered_worker, monkeypatch
+    ):
+        calls = {"count": 0}
+        original = servicer.artifact_service.register_replica
+
+        def _wrapped(*args, **kwargs):
+            calls["count"] += 1
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(servicer.artifact_service, "register_replica", _wrapped)
+
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:replay:index",
+            mem_info=memory_info,
+            max_concurrency=10,
+            worker_id=registered_worker,
+            client_request_id="register-replay-1",
+        )
+        first = servicer.RegisterReplica(request, test_context)
+        assert first.status == global_store_pb2.Status.STATUS_OK
+
+        test_context.code = None
+        test_context.details = None
+        second = servicer.RegisterReplica(request, test_context)
+        assert second.status == global_store_pb2.Status.STATUS_OK
+        assert second.replica_id == first.replica_id
+        assert calls["count"] == 1
+
+    def test_register_replica_idempotent_payload_mismatch(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
+        first = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:mismatch:index",
+            mem_info=memory_info,
+            max_concurrency=5,
+            worker_id=registered_worker,
+            client_request_id="register-mismatch-1",
+        )
+        second = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:mismatch:changed",
+            mem_info=memory_info,
+            max_concurrency=5,
+            worker_id=registered_worker,
+            client_request_id="register-mismatch-1",
+        )
+
+        first_resp = servicer.RegisterReplica(first, test_context)
+        assert first_resp.status == global_store_pb2.Status.STATUS_OK
+
+        test_context.code = None
+        test_context.details = None
+        second_resp = servicer.RegisterReplica(second, test_context)
+        assert second_resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+
+    def test_register_replica_routes_reducer_by_artifact(
+        self, servicer, test_context, memory_info, registered_worker, monkeypatch
+    ):
+        reducer = servicer.worker_control_reducer
+        captured = {"worker_key": ""}
+        original_submit = reducer.submit
+
+        def _wrapped(*, worker_key, kind, operation, timeout_s=None):
+            captured["worker_key"] = worker_key
+            return original_submit(
+                worker_key=worker_key,
+                kind=kind,
+                operation=operation,
+                timeout_s=timeout_s,
+            )
+
+        monkeypatch.setattr(reducer, "submit", _wrapped)
+
+        artifact_id = "mi2:lane:index"
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id=artifact_id,
+            mem_info=memory_info,
+            max_concurrency=2,
+            worker_id=registered_worker,
+        )
+        resp = servicer.RegisterReplica(request, test_context)
+        assert resp.status == global_store_pb2.Status.STATUS_OK
+        assert captured["worker_key"] == f"artifact:{artifact_id}"
+
+    def test_register_replica_tx_conflict_fails_fast(
+        self, servicer, test_context, memory_info, registered_worker, monkeypatch
+    ):
+        calls = {"count": 0}
+
+        def _raise_conflict(*args, **kwargs):
+            calls["count"] += 1
+            raise DatabaseError("write-write conflict on key artifacts.artifact_id")
+
+        monkeypatch.setattr(
+            servicer.artifact_service,
+            "register_replica",
+            _raise_conflict,
+        )
+        request = global_store_pb2.RegisterReplicaRequest(
+            artifact_id="mi2:conflict:index",
+            mem_info=memory_info,
+            max_concurrency=1,
+            worker_id=registered_worker,
+            client_request_id="register-conflict-1",
+        )
+        response = servicer.RegisterReplica(request, test_context)
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.ABORTED
+        assert calls["count"] == 1
+
     def test_unregister_artifact_replica(
         self, servicer, test_context, memory_info, registered_worker
     ):
@@ -86,9 +196,7 @@ class TestGRPCService:
             max_concurrency=10,
             worker_id=registered_worker,
         )
-        register_response = servicer.RegisterReplica(
-            register_request, test_context
-        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
 
         # Now unregister it
         unregister_request = global_store_pb2.UnregisterReplicaRequest(
@@ -203,9 +311,9 @@ class TestGRPCService:
         )
 
     def test_worker_capability_flags_filtering(self, servicer, test_context):
-        flags = (
-            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
-        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+        flags = (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED) | (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED
+        )
         register_request = global_store_pb2.RegisterWorkerRequest(
             node_id="cap_worker",
             node_address="192.168.2.10",
@@ -234,7 +342,8 @@ class TestGRPCService:
         list_response = servicer.ListActiveWorkers(
             global_store_pb2.ListActiveWorkersRequest(
                 required_capability_flags=(
-                    1 << global_store_pb2.WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED
+                    1
+                    << global_store_pb2.WORKER_CAPABILITY_FLAG_CAPABILITY_TOKENS_V2_ENABLED
                 )
             ),
             test_context,
@@ -279,12 +388,10 @@ class TestGRPCService:
             for inst in list_response.instances
         )
 
-    def test_worker_capability_flags_clear_on_heartbeat(
-        self, servicer, test_context
-    ):
-        flags = (
-            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED
-        ) | (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED)
+    def test_worker_capability_flags_clear_on_heartbeat(self, servicer, test_context):
+        flags = (1 << global_store_pb2.WORKER_CAPABILITY_FLAG_QUEUE_BROKER_ENABLED) | (
+            1 << global_store_pb2.WORKER_CAPABILITY_FLAG_RETENTION_HANDLES_ENABLED
+        )
         register_request = global_store_pb2.RegisterWorkerRequest(
             node_id="cap_worker_clear",
             node_address="192.168.2.20",
@@ -310,9 +417,7 @@ class TestGRPCService:
         )
 
         list_response = servicer.ListActiveWorkers(
-            global_store_pb2.ListActiveWorkersRequest(
-                required_capability_flags=flags
-            ),
+            global_store_pb2.ListActiveWorkersRequest(required_capability_flags=flags),
             test_context,
         )
         assert all(
@@ -320,9 +425,7 @@ class TestGRPCService:
             for worker in list_response.workers
         )
 
-    def test_instance_capability_flags_clear_on_heartbeat(
-        self, servicer, test_context
-    ):
+    def test_instance_capability_flags_clear_on_heartbeat(self, servicer, test_context):
         flags = 1 << global_store_pb2.INSTANCE_CAPABILITY_FLAG_EXECUTION_SIGNALS_ENABLED
         register_request = global_store_pb2.RegisterInstanceRequest(
             instance_id="instance-cap-clear-1",
@@ -526,7 +629,10 @@ class TestGRPCService:
         )
         view_response = servicer.RequestReplicaTransport(view_request, test_context)
         assert view_response.status == global_store_pb2.Status.STATUS_OK
-        assert view_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+        assert (
+            view_response.remote_memory_info.byte_space.kind
+            == common_pb2.BYTE_SPACE_KIND_VIEW
+        )
         assert view_response.remote_memory_info.byte_space.id == view_id
 
         canonical_request = global_store_pb2.RequestReplicaTransportRequest(
@@ -544,9 +650,14 @@ class TestGRPCService:
             canonical_request, test_context
         )
         assert canonical_response.status == global_store_pb2.Status.STATUS_OK
-        assert canonical_response.remote_memory_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_CANONICAL
+        assert (
+            canonical_response.remote_memory_info.byte_space.kind
+            == common_pb2.BYTE_SPACE_KIND_CANONICAL
+        )
 
-    def test_get_artifact_index_by_id_with_multibase(self, servicer, test_context, memory_info, registered_worker):
+    def test_get_artifact_index_by_id_with_multibase(
+        self, servicer, test_context, memory_info, registered_worker
+    ):
         index_bytes = b'{"tensor":[0,4,[1],[1],"float32",0]}'
 
         def _multibase(d: bytes) -> str:
@@ -764,9 +875,7 @@ class TestGRPCService:
             max_concurrency=10,
             worker_id=registered_worker,
         )
-        register_response = servicer.RegisterReplica(
-            register_request, test_context
-        )
+        register_response = servicer.RegisterReplica(register_request, test_context)
 
         assert register_response.status == global_store_pb2.Status.STATUS_OK
         replica_id = register_response.replica_id
@@ -884,6 +993,49 @@ class TestGRPCService:
 
         assert heartbeat_response.status == global_store_pb2.Status.STATUS_OK
 
+    def test_worker_heartbeat_tx_conflict_fails_fast(
+        self, servicer, test_context, monkeypatch
+    ):
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_hb_conflict",
+            node_address="192.168.1.40",
+            grpc_port=8040,
+            p2p_port=8041,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+            daemon_id="daemon_hb_conflict",
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        calls = {"count": 0}
+
+        def _raise_conflict(*args, **kwargs):
+            del args, kwargs
+            calls["count"] += 1
+            raise DatabaseError(
+                "Transaction failed: TransactionContext Error: Conflict on tuple deletion!"
+            )
+
+        monkeypatch.setattr(
+            servicer.worker_service,
+            "heartbeat",
+            _raise_conflict,
+        )
+
+        heartbeat_request = global_store_pb2.WorkerHeartbeatRequest(
+            worker_id=register_response.worker_id,
+            mem_pool_available_size=7000000000,
+            accepting_new_requests=True,
+            state_version=1,
+            daemon_id="daemon_hb_conflict",
+        )
+        heartbeat_response = servicer.WorkerHeartbeat(heartbeat_request, test_context)
+
+        assert heartbeat_response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.ABORTED
+        assert calls["count"] == 1
+
     def test_worker_unregistration(self, servicer, test_context):
         """Test worker unregistration functionality"""
         # First register a worker
@@ -909,6 +1061,114 @@ class TestGRPCService:
 
         assert unregister_response.status == global_store_pb2.Status.STATUS_OK
 
+    def test_unregister_worker_idempotent_replay(
+        self, servicer, test_context, monkeypatch
+    ):
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_unreg_replay",
+            node_address="192.168.1.30",
+            grpc_port=8030,
+            p2p_port=8031,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+            daemon_id="daemon_unreg_replay",
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        calls = {"count": 0}
+        original = servicer.worker_service.unregister_worker
+
+        def _wrapped(worker_id):
+            calls["count"] += 1
+            return original(worker_id)
+
+        monkeypatch.setattr(servicer.worker_service, "unregister_worker", _wrapped)
+
+        request = global_store_pb2.UnregisterWorkerRequest(
+            worker_id=register_response.worker_id,
+            is_graceful_shutdown=True,
+            client_request_id="unregister-replay-1",
+        )
+        first = servicer.UnregisterWorker(request, test_context)
+        assert first.status == global_store_pb2.Status.STATUS_OK
+
+        test_context.code = None
+        test_context.details = None
+        second = servicer.UnregisterWorker(request, test_context)
+        assert second.status == global_store_pb2.Status.STATUS_OK
+        assert calls["count"] == 1
+
+    def test_unregister_worker_idempotent_payload_mismatch(
+        self, servicer, test_context
+    ):
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_unreg_mismatch",
+            node_address="192.168.1.31",
+            grpc_port=8032,
+            p2p_port=8033,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+            daemon_id="daemon_unreg_mismatch",
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        first = global_store_pb2.UnregisterWorkerRequest(
+            worker_id=register_response.worker_id,
+            is_graceful_shutdown=True,
+            client_request_id="unregister-mismatch-1",
+        )
+        second = global_store_pb2.UnregisterWorkerRequest(
+            worker_id=register_response.worker_id,
+            is_graceful_shutdown=False,
+            client_request_id="unregister-mismatch-1",
+        )
+
+        first_resp = servicer.UnregisterWorker(first, test_context)
+        assert first_resp.status == global_store_pb2.Status.STATUS_OK
+
+        test_context.code = None
+        test_context.details = None
+        second_resp = servicer.UnregisterWorker(second, test_context)
+        assert second_resp.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.FAILED_PRECONDITION
+
+    def test_unregister_worker_tx_conflict_fails_fast(
+        self, servicer, test_context, monkeypatch
+    ):
+        register_request = global_store_pb2.RegisterWorkerRequest(
+            node_id="test_node_unreg_conflict",
+            node_address="192.168.1.32",
+            grpc_port=8034,
+            p2p_port=8035,
+            mem_pool_total_size=10000000000,
+            mem_pool_available_size=8000000000,
+            daemon_id="daemon_unreg_conflict",
+        )
+        register_response = servicer.RegisterWorker(register_request, test_context)
+        assert register_response.status == global_store_pb2.Status.STATUS_OK
+
+        calls = {"count": 0}
+
+        def _raise_conflict(worker_id):
+            calls["count"] += 1
+            raise DatabaseError("write-write conflict on key workers.worker_id")
+
+        monkeypatch.setattr(
+            servicer.worker_service,
+            "unregister_worker",
+            _raise_conflict,
+        )
+        request = global_store_pb2.UnregisterWorkerRequest(
+            worker_id=register_response.worker_id,
+            client_request_id="unregister-conflict-1",
+        )
+        response = servicer.UnregisterWorker(request, test_context)
+        assert response.status == global_store_pb2.Status.STATUS_ERROR
+        assert test_context.code == grpc.StatusCode.ABORTED
+        assert calls["count"] == 1
+
     def test_list_active_workers(self, servicer, test_context):
         """Test listing active workers"""
         # Register multiple workers
@@ -917,7 +1177,7 @@ class TestGRPCService:
             register_request = global_store_pb2.RegisterWorkerRequest(
                 node_id=f"test_node_{i}",
                 daemon_id=f"daemon_{i}",
-                node_address=f"192.168.1.{10+i}",
+                node_address=f"192.168.1.{10 + i}",
                 grpc_port=8001 + i,
                 p2p_port=8002 + i,
                 mem_pool_total_size=10000000000,
@@ -955,7 +1215,9 @@ class TestGRPCService:
 
         # Get artifact info
         # New API: GetArtifactInfoById
-        info_request = global_store_pb2.GetArtifactInfoByIdRequest(artifact_id=artifact_id)
+        info_request = global_store_pb2.GetArtifactInfoByIdRequest(
+            artifact_id=artifact_id
+        )
         info_response = servicer.GetArtifactInfoById(info_request, test_context)
 
         assert info_response.status == global_store_pb2.Status.STATUS_OK
@@ -1017,9 +1279,7 @@ class TestGRPCService:
             ],
         )
 
-        update_response = servicer.UpdateArtifactViewState(
-            update_request, test_context
-        )
+        update_response = servicer.UpdateArtifactViewState(update_request, test_context)
         assert update_response.status == global_store_pb2.Status.STATUS_OK
         assert test_context.code is None
 
@@ -1049,7 +1309,9 @@ class TestGRPCService:
             include_replicas=wrappers_pb2.BoolValue(value=False),
             include_leaves=True,
         )
-        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
+        canonical_request.requested_byte_space.kind = (
+            common_pb2.BYTE_SPACE_KIND_CANONICAL
+        )
         canonical_response = servicer.GetArtifactInfoById(
             canonical_request, test_context
         )
@@ -1301,7 +1563,9 @@ class TestGRPCService:
             artifact_id=artifact_id,
             include_leaves=True,
         )
-        canonical_request.requested_byte_space.kind = common_pb2.BYTE_SPACE_KIND_CANONICAL
+        canonical_request.requested_byte_space.kind = (
+            common_pb2.BYTE_SPACE_KIND_CANONICAL
+        )
         canonical_request.leaf_idxs.extend([0, 2])
         response = servicer.GetArtifactInfoById(canonical_request, test_context)
 

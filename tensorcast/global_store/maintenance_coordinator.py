@@ -12,6 +12,7 @@ from typing import Any
 
 from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.db_utils import optimize_db
+from tensorcast.global_store.repositories.base import db_execution_lock
 
 
 class GlobalStoreMaintenanceCoordinator:
@@ -92,73 +93,82 @@ class GlobalStoreMaintenanceCoordinator:
         retention = self._config.limits.retention
         now = datetime.now(timezone.utc)
 
-        if retention.operations_ttl_ms > 0:
-            cutoff = now - timedelta(milliseconds=int(retention.operations_ttl_ms))
-            row = self._connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM operations
-                WHERE state IN ('success','failed','cancelled','degraded')
-                  AND updated_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self._connection.execute(
-                    """
-                    DELETE FROM operations
-                    WHERE state IN ('success','failed','cancelled','degraded')
-                      AND updated_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(table="operations", count=count)
+        with db_execution_lock():
+            cursor = self._connection.cursor()
+            try:
+                if retention.operations_ttl_ms > 0:
+                    cutoff = now - timedelta(
+                        milliseconds=int(retention.operations_ttl_ms)
+                    )
+                    row = cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM operations
+                        WHERE state IN ('success','failed','cancelled','degraded')
+                          AND updated_at < ?
+                        """,
+                        [cutoff],
+                    ).fetchone()
+                    count = int(row[0]) if row else 0
+                    if count > 0:
+                        cursor.execute(
+                            """
+                            DELETE FROM operations
+                            WHERE state IN ('success','failed','cancelled','degraded')
+                              AND updated_at < ?
+                            """,
+                            [cutoff],
+                        )
+                        gs_metrics.inc_gc_rows_deleted(table="operations", count=count)
 
-        if retention.assembly_proof_commitments_ttl_ms > 0:
-            cutoff = now - timedelta(
-                milliseconds=int(retention.assembly_proof_commitments_ttl_ms)
-            )
-            row = self._connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM assembly_proof_commitments
-                WHERE created_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self._connection.execute(
-                    """
-                    DELETE FROM assembly_proof_commitments
-                    WHERE created_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(
-                    table="assembly_proof_commitments", count=count
-                )
+                if retention.assembly_proof_commitments_ttl_ms > 0:
+                    cutoff = now - timedelta(
+                        milliseconds=int(retention.assembly_proof_commitments_ttl_ms)
+                    )
+                    row = cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM assembly_proof_commitments
+                        WHERE created_at < ?
+                        """,
+                        [cutoff],
+                    ).fetchone()
+                    count = int(row[0]) if row else 0
+                    if count > 0:
+                        cursor.execute(
+                            """
+                            DELETE FROM assembly_proof_commitments
+                            WHERE created_at < ?
+                            """,
+                            [cutoff],
+                        )
+                        gs_metrics.inc_gc_rows_deleted(
+                            table="assembly_proof_commitments", count=count
+                        )
 
-        if retention.piece_proof_digests_ttl_ms > 0:
-            cutoff = now - timedelta(
-                milliseconds=int(retention.piece_proof_digests_ttl_ms)
-            )
-            row = self._connection.execute(
-                """
-                SELECT COUNT(*)
-                FROM piece_proof_digests
-                WHERE created_at < ?
-                """,
-                [cutoff],
-            ).fetchone()
-            count = int(row[0]) if row else 0
-            if count > 0:
-                self._connection.execute(
-                    """
-                    DELETE FROM piece_proof_digests
-                    WHERE created_at < ?
-                    """,
-                    [cutoff],
-                )
-                gs_metrics.inc_gc_rows_deleted(table="piece_proof_digests", count=count)
+                if retention.piece_proof_digests_ttl_ms > 0:
+                    cutoff = now - timedelta(
+                        milliseconds=int(retention.piece_proof_digests_ttl_ms)
+                    )
+                    row = cursor.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM piece_proof_digests
+                        WHERE created_at < ?
+                        """,
+                        [cutoff],
+                    ).fetchone()
+                    count = int(row[0]) if row else 0
+                    if count > 0:
+                        cursor.execute(
+                            """
+                            DELETE FROM piece_proof_digests
+                            WHERE created_at < ?
+                            """,
+                            [cutoff],
+                        )
+                        gs_metrics.inc_gc_rows_deleted(
+                            table="piece_proof_digests", count=count
+                        )
+            finally:
+                cursor.close()

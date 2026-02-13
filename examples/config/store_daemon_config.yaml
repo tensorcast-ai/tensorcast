@@ -29,7 +29,7 @@ server:
     port: 65090
   # Optional default root for relative disk_path values.
   # When empty, disk materialization accepts absolute disk_path only.
-  storage_path: ""
+  storage_path: "/data/models"
   # StoreEngine I/O worker threads; tune for disk/P2P parallelism vs CPU contention.
   num_threads: 16
   # gRPC server channel args and TLS.

@@ -10,12 +10,22 @@ from typing import Callable
 import grpc
 
 from tensorcast.common.identity import ArtifactIdKind, infer_artifact_id_kind
+from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Replica
 from tensorcast.global_store.repositories.artifact_index_repository import (
     ArtifactIndexRepository,
 )
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
+from tensorcast.global_store.repositories.base import is_transient_tx_conflict
+from tensorcast.global_store.repositories.idempotency_repository import (
+    IdempotencyRepository,
+)
+from tensorcast.global_store.rpc.idempotency import (
+    begin_idempotent_operation,
+    decode_stored_grpc_status,
+    encode_stored_grpc_status,
+)
 from tensorcast.global_store.services.artifact_service import ArtifactService
 from tensorcast.global_store.services.worker_control_reducer import WorkerControlReducer
 from tensorcast.observability.otel import set_span_attributes
@@ -32,6 +42,7 @@ class ReplicaRegistrationRpcHandler:
         artifact_service: ArtifactService,
         artifact_repository: ArtifactRepository,
         artifact_index_repository: ArtifactIndexRepository,
+        idempotency_repository: IdempotencyRepository,
         memory_info_to_replica_artifact_id: Callable[
             [common_pb2.MemoryInfo, str, int, str], Replica
         ],
@@ -43,11 +54,55 @@ class ReplicaRegistrationRpcHandler:
         self._artifact_service = artifact_service
         self._artifact_repository = artifact_repository
         self._artifact_index_repository = artifact_index_repository
+        self._idempotency_repository = idempotency_repository
         self._memory_info_to_replica_artifact_id = memory_info_to_replica_artifact_id
         self._index_bytes_to_multibase_sha256 = index_bytes_to_multibase_sha256
         self._hex_sha256_to_multibase = hex_sha256_to_multibase
         self._control_reducer = control_reducer
         self._logger = logger
+
+    @staticmethod
+    def _client_request_id(
+        request: global_store_pb2.RegisterReplicaRequest,
+    ) -> str:
+        if not request.HasField("client_request_id"):
+            return ""
+        return request.client_request_id.strip()
+
+    @staticmethod
+    def _resolved_artifact_id(
+        request: global_store_pb2.RegisterReplicaRequest,
+    ) -> str:
+        if request.HasField("descriptor") and request.descriptor.artifact_id:
+            return request.descriptor.artifact_id
+        return request.artifact_id
+
+    @staticmethod
+    def _apply_grpc_status(
+        *,
+        context: grpc.ServicerContext,
+        code: grpc.StatusCode | None,
+        details: str,
+    ) -> None:
+        if code is None or code == grpc.StatusCode.OK:
+            return
+        context.set_code(code)
+        context.set_details(details)
+
+    @staticmethod
+    def _replay_response(
+        *,
+        context: grpc.ServicerContext,
+        record_response_status: str,
+        record_response_proto: bytes,
+    ) -> global_store_pb2.RegisterReplicaResponse:
+        response = global_store_pb2.RegisterReplicaResponse()
+        response.ParseFromString(record_response_proto)
+        code, details = decode_stored_grpc_status(record_response_status)
+        if code != grpc.StatusCode.OK:
+            context.set_code(code)
+            context.set_details(details)
+        return response
 
     def register_replica(
         self,
@@ -55,33 +110,90 @@ class ReplicaRegistrationRpcHandler:
         context: grpc.ServicerContext,
     ) -> global_store_pb2.RegisterReplicaResponse:
         """Register or update an artifact replica."""
+        response = global_store_pb2.RegisterReplicaResponse(
+            status=global_store_pb2.Status.STATUS_ERROR
+        )
+        grpc_code: grpc.StatusCode | None = None
+        grpc_details = ""
+        should_finalize_idempotency = False
+        client_request_id = self._client_request_id(request)
+        operation_kind = "register_replica"
+        resolved_artifact_id = self._resolved_artifact_id(request)
         try:
             schema_version_value = "v3"
             if request.HasField("schema_version"):
                 candidate_schema_version = request.schema_version.strip()
                 if candidate_schema_version and candidate_schema_version != "v3":
-                    context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-                    context.set_details("schema_version must be 'v3'")
-                    return global_store_pb2.RegisterReplicaResponse(
-                        status=global_store_pb2.Status.STATUS_ERROR
+                    grpc_code = grpc.StatusCode.INVALID_ARGUMENT
+                    grpc_details = "schema_version must be 'v3'"
+                    self._apply_grpc_status(
+                        context=context,
+                        code=grpc_code,
+                        details=grpc_details,
                     )
+                    return response
                 if candidate_schema_version:
                     schema_version_value = candidate_schema_version
+
+            if client_request_id:
+                idempotency_result = begin_idempotent_operation(
+                    idempotency_repository=self._idempotency_repository,
+                    operation_kind=operation_kind,
+                    client_request_id=client_request_id,
+                    request_payload=request.SerializeToString(deterministic=True),
+                )
+                if idempotency_result.payload_mismatch:
+                    grpc_code = grpc.StatusCode.FAILED_PRECONDITION
+                    grpc_details = (
+                        "client_request_id already used with a different payload"
+                    )
+                    self._apply_grpc_status(
+                        context=context,
+                        code=grpc_code,
+                        details=grpc_details,
+                    )
+                    return response
+                if idempotency_result.timed_out_waiting_for_replay:
+                    grpc_code = grpc.StatusCode.ABORTED
+                    grpc_details = (
+                        "duplicate request is still in progress for client_request_id"
+                    )
+                    self._apply_grpc_status(
+                        context=context,
+                        code=grpc_code,
+                        details=grpc_details,
+                    )
+                    return response
+                if not idempotency_result.should_execute:
+                    replay_record = idempotency_result.replay_record
+                    if replay_record is None:
+                        grpc_code = grpc.StatusCode.INTERNAL
+                        grpc_details = "idempotency replay record is missing"
+                        self._apply_grpc_status(
+                            context=context,
+                            code=grpc_code,
+                            details=grpc_details,
+                        )
+                        return response
+                    return self._replay_response(
+                        context=context,
+                        record_response_status=replay_record.response_status,
+                        record_response_proto=replay_record.response_proto,
+                    )
+                should_finalize_idempotency = True
 
             def _register_impl() -> Replica:
                 replica = self._memory_info_to_replica_artifact_id(
                     request.mem_info,
-                    request.artifact_id,
+                    resolved_artifact_id,
                     request.max_concurrency,
                     request.worker_id,
                 )
                 preserve_transport = not request.mem_info.HasField("transport")
-                artifact_id = request.artifact_id
+                artifact_id = resolved_artifact_id
                 descriptor = (
                     request.descriptor if request.HasField("descriptor") else None
                 )
-                if descriptor is not None and descriptor.artifact_id:
-                    artifact_id = descriptor.artifact_id
 
                 kind = infer_artifact_id_kind(artifact_id) if artifact_id else None
                 if descriptor is not None and descriptor.id_kind:
@@ -186,9 +298,15 @@ class ReplicaRegistrationRpcHandler:
                         cursor=cursor,
                     )
 
-            if self._control_reducer is not None and request.worker_id:
+            reducer_key = ""
+            if resolved_artifact_id:
+                reducer_key = f"artifact:{resolved_artifact_id}"
+            elif request.worker_id:
+                reducer_key = f"worker:{request.worker_id}"
+
+            if self._control_reducer is not None and reducer_key:
                 registered = self._control_reducer.submit(
-                    worker_key=request.worker_id,
+                    worker_key=reducer_key,
                     kind="register_replica",
                     operation=_register_impl,
                 )
@@ -208,23 +326,66 @@ class ReplicaRegistrationRpcHandler:
                     span_attrs["tc.worker.id"] = worker_id
                 set_span_attributes(span_attrs)
 
-            return global_store_pb2.RegisterReplicaResponse(
+            response = global_store_pb2.RegisterReplicaResponse(
                 status=global_store_pb2.Status.STATUS_OK,
                 artifact_id=registered.artifact_id,
                 replica_id=str(registered.replica_id),
             )
+            return response
 
         except ValidationError as exc:
             self._logger.error("Validation error: %s", exc)
-            context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
-            context.set_details(str(exc))
-            return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
+            grpc_code = grpc.StatusCode.INVALID_ARGUMENT
+            grpc_details = str(exc)
+            self._apply_grpc_status(
+                context=context,
+                code=grpc_code,
+                details=grpc_details,
             )
+            return response
         except Exception as exc:  # noqa: BLE001
+            if is_transient_tx_conflict(exc):
+                gs_metrics.inc_control_plane_conflict(
+                    scope="register_replica_tx_conflict"
+                )
+                grpc_code = grpc.StatusCode.ABORTED
+                grpc_details = f"RegisterReplica transaction conflict: {exc}"
+                self._logger.error(
+                    "Control-plane conflict operation_kind=%s worker_id=%s artifact_id=%s client_request_id=%s error=%s",
+                    operation_kind,
+                    request.worker_id,
+                    resolved_artifact_id,
+                    client_request_id,
+                    exc,
+                )
+                self._apply_grpc_status(
+                    context=context,
+                    code=grpc_code,
+                    details=grpc_details,
+                )
+                return response
             self._logger.exception("Error registering artifact replica")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.RegisterReplicaResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
+            grpc_code = grpc.StatusCode.INTERNAL
+            grpc_details = str(exc)
+            self._apply_grpc_status(
+                context=context,
+                code=grpc_code,
+                details=grpc_details,
             )
+            return response
+        finally:
+            if should_finalize_idempotency and client_request_id:
+                try:
+                    self._idempotency_repository.finalize_operation(
+                        client_request_id=client_request_id,
+                        response_status=encode_stored_grpc_status(
+                            grpc_code,
+                            grpc_details,
+                        ),
+                        response_proto=response.SerializeToString(),
+                    )
+                except Exception:  # noqa: BLE001
+                    self._logger.exception(
+                        "Failed to finalize idempotency record for RegisterReplica client_request_id=%s",
+                        client_request_id,
+                    )

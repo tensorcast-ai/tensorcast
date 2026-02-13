@@ -276,16 +276,34 @@ WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS = Histogram(
     ),
 )
 
+WORKER_CONTROL_REDUCER_INTENT_COUNTER = Counter(
+    "tc_worker_control_reducer_intents_total",
+    "Total worker control reducer intents by shard/kind/result.",
+    labelnames=("shard", "kind", "result"),
+)
+
 RECONCILE_RESULT_COUNTER = Counter(
     "tc_reconcile_result_total",
     "Total number of reconcile results emitted by Global Store.",
     labelnames=("result_kind",),
 )
 
+RECONCILE_RETRY_LATER_COUNTER = Counter(
+    "tc_reconcile_retry_later_total",
+    "Total number of reconcile RETRY_LATER responses by reason.",
+    labelnames=("reason",),
+)
+
 CONTROL_PLANE_CONFLICT_COUNTER = Counter(
     "tc_control_plane_conflicts_total",
     "Total number of control-plane write conflicts observed by Global Store.",
     labelnames=("scope",),
+)
+
+IDEMPOTENCY_REPLAY_COUNTER = Counter(
+    "tc_control_plane_idempotency_replay_total",
+    "Total number of control-plane idempotency replay outcomes.",
+    labelnames=("operation_kind", "result"),  # result=hit|payload_conflict
 )
 
 # Memory tier telemetry ------------------------------------------------------
@@ -521,16 +539,50 @@ def observe_worker_control_reducer_queue_latency(*, wait_seconds: float) -> None
     WORKER_CONTROL_REDUCER_QUEUE_LATENCY_SECONDS.observe(max(0.0, wait_seconds))
 
 
+def inc_worker_control_reducer_intent(
+    *, shard: int, kind: str, result: str, count: int = 1
+) -> None:
+    if count <= 0:
+        return
+    WORKER_CONTROL_REDUCER_INTENT_COUNTER.labels(
+        shard=str(int(shard)),
+        kind=kind,
+        result=result,
+    ).inc(count)
+
+
 def inc_reconcile_result(*, result_kind: str, count: int = 1) -> None:
     if count <= 0:
         return
     RECONCILE_RESULT_COUNTER.labels(result_kind=result_kind).inc(count)
 
 
+def inc_reconcile_retry_later(*, reason: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    RECONCILE_RETRY_LATER_COUNTER.labels(reason=reason).inc(count)
+
+
 def inc_control_plane_conflict(*, scope: str, count: int = 1) -> None:
     if count <= 0:
         return
     CONTROL_PLANE_CONFLICT_COUNTER.labels(scope=scope).inc(count)
+
+
+def inc_idempotency_replay_hit(*, operation_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    IDEMPOTENCY_REPLAY_COUNTER.labels(operation_kind=operation_kind, result="hit").inc(
+        count
+    )
+
+
+def inc_idempotency_replay_conflict(*, operation_kind: str, count: int = 1) -> None:
+    if count <= 0:
+        return
+    IDEMPOTENCY_REPLAY_COUNTER.labels(
+        operation_kind=operation_kind, result="payload_conflict"
+    ).inc(count)
 
 
 # ---------------------------------------------------------------------------

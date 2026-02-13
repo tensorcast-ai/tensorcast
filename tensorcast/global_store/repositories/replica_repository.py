@@ -252,55 +252,67 @@ class ReplicaRepository(BaseRepository):
         """Return True when at least one replica exists for *artifact_id*."""
 
         cursor = self.get_cursor()
-        row = cursor.execute(
-            "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '') LIMIT 1",
-            [artifact_id, view_id or ""],
-        ).fetchone()
-        return row is not None
+        try:
+            row = cursor.execute(
+                "SELECT 1 FROM artifact_replicas WHERE artifact_id = ? AND COALESCE(view_id, '') = COALESCE(?, '') LIMIT 1",
+                [artifact_id, view_id or ""],
+            ).fetchone()
+            return row is not None
+        finally:
+            cursor.close()
 
     def find_by_id(self, replica_id: UUID, artifact_id: str) -> Replica | None:
         """Find a replica by ID and content-addressed artifact_id."""
         cursor = self.get_cursor()
-        sql = (
-            self._replica_select_sql("LEFT JOIN")
-            + " WHERE mr.replica_id = ? AND mr.artifact_id = ?"
-        )
-        query = cursor.execute(sql, [str(replica_id), artifact_id])
+        try:
+            sql = (
+                self._replica_select_sql("LEFT JOIN")
+                + " WHERE mr.replica_id = ? AND mr.artifact_id = ?"
+            )
+            query = cursor.execute(sql, [str(replica_id), artifact_id])
 
-        row = query.fetchone()
-        if row:
-            assert query.description is not None
-            columns = [desc[0] for desc in query.description]
-            return self._row_to_model(row, columns)
-        return None
+            row = query.fetchone()
+            if row:
+                assert query.description is not None
+                columns = [desc[0] for desc in query.description]
+                return self._row_to_model(row, columns)
+            return None
+        finally:
+            cursor.close()
 
     def find_by_replica_id(self, replica_id: UUID) -> Replica | None:
         """Find a replica by ID (artifact_id not required)."""
         cursor = self.get_cursor()
-        sql = self._replica_select_sql("LEFT JOIN") + " WHERE mr.replica_id = ?"
-        query = cursor.execute(sql, [str(replica_id)])
-        row = query.fetchone()
-        if row:
-            assert query.description is not None
-            columns = [desc[0] for desc in query.description]
-            return self._row_to_model(row, columns)
-        return None
+        try:
+            sql = self._replica_select_sql("LEFT JOIN") + " WHERE mr.replica_id = ?"
+            query = cursor.execute(sql, [str(replica_id)])
+            row = query.fetchone()
+            if row:
+                assert query.description is not None
+                columns = [desc[0] for desc in query.description]
+                return self._row_to_model(row, columns)
+            return None
+        finally:
+            cursor.close()
 
     def get_current_requests(self, replica_id: UUID) -> int | None:
         """Return current_requests for a replica, or None if not found."""
         cursor = self.get_cursor()
-        row = cursor.execute(
-            """
-            SELECT COALESCE(rc.current_requests, 0) AS current_requests
-            FROM artifact_replicas mr
-            LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
-            WHERE mr.replica_id = ?
-            """,
-            [str(replica_id)],
-        ).fetchone()
-        if row is None:
-            return None
-        return int(row[0] or 0)
+        try:
+            row = cursor.execute(
+                """
+                SELECT COALESCE(rc.current_requests, 0) AS current_requests
+                FROM artifact_replicas mr
+                LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id
+                WHERE mr.replica_id = ?
+                """,
+                [str(replica_id)],
+            ).fetchone()
+            if row is None:
+                return None
+            return int(row[0] or 0)
+        finally:
+            cursor.close()
 
     def find_existing(
         self,
@@ -314,35 +326,38 @@ class ReplicaRepository(BaseRepository):
     ) -> Replica | None:
         """Find existing replica with same identifying information."""
         cursor = self.get_cursor()
-        sql = (
-            self._replica_select_sql("LEFT JOIN")
-            + " WHERE mr.artifact_id = ?"
-            + " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
-            + " AND mr.node_id = ?"
-            + " AND mr.node_address = ?"
-            + " AND mr.node_port = ?"
-            + " AND mr.memory_type = ?"
-            + " AND mr.device_id = ?"
-        )
-        query = cursor.execute(
-            sql,
-            [
-                artifact_id,
-                view_id,
-                node_id,
-                node_address,
-                node_port,
-                memory_type.value,
-                device_id,
-            ],
-        )
+        try:
+            sql = (
+                self._replica_select_sql("LEFT JOIN")
+                + " WHERE mr.artifact_id = ?"
+                + " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
+                + " AND mr.node_id = ?"
+                + " AND mr.node_address = ?"
+                + " AND mr.node_port = ?"
+                + " AND mr.memory_type = ?"
+                + " AND mr.device_id = ?"
+            )
+            query = cursor.execute(
+                sql,
+                [
+                    artifact_id,
+                    view_id,
+                    node_id,
+                    node_address,
+                    node_port,
+                    memory_type.value,
+                    device_id,
+                ],
+            )
 
-        row = query.fetchone()
-        if row:
-            assert query.description is not None
-            columns = [desc[0] for desc in query.description]
-            return self._row_to_model(row, columns)
-        return None
+            row = query.fetchone()
+            if row:
+                assert query.description is not None
+                columns = [desc[0] for desc in query.description]
+                return self._row_to_model(row, columns)
+            return None
+        finally:
+            cursor.close()
 
     def find_available_for_transport(
         self,
@@ -356,89 +371,92 @@ class ReplicaRepository(BaseRepository):
         Atomically increments current_requests counter.
         """
         cursor = self.get_cursor()
-        query = (
-            "SELECT "
-            + self._REPLICA_PROJECTION
-            + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
-            + "wl.accepting_new_requests AS worker_accepting, "
-            + "wl.last_heartbeat AS worker_last_heartbeat, "
-            + "w.inactive_at AS worker_inactive_at "
-            + "FROM artifact_replicas mr "
-            + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
-            + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
-            + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
-            + "WHERE mr.artifact_id = ? "
-            + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
-            + "ORDER BY "
-            + "CASE "
-            + "WHEN mr.memory_type = 'GPU' THEN 0 "
-            + "WHEN mr.memory_type = 'RAM' THEN 1 "
-            + "WHEN mr.memory_type = 'DISK' THEN 2 "
-            + "ELSE 3 "
-            + "END, "
-            + "mr.max_concurrency ASC, "
-            + "(COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(mr.max_concurrency, 1)), "
-            + "mr.updated_at ASC"
-        )
-        result = cursor.execute(query, [artifact_id, view_id or ""])
-        rows = result.fetchall()
-        if not rows:
-            return TransportSelectionResult(replica=None, exportable_replicas=0)
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        now_ts = time.time()
-        exportable_replicas = 0
-
-        for row in rows:
-            candidate = self._build_transport_candidate(
-                row,
-                columns,
-                now_ts=now_ts,
-                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+        try:
+            query = (
+                "SELECT "
+                + self._REPLICA_PROJECTION
+                + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+                + "wl.accepting_new_requests AS worker_accepting, "
+                + "wl.last_heartbeat AS worker_last_heartbeat, "
+                + "w.inactive_at AS worker_inactive_at "
+                + "FROM artifact_replicas mr "
+                + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+                + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+                + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
+                + "WHERE mr.artifact_id = ? "
+                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+                + "ORDER BY "
+                + "CASE "
+                + "WHEN mr.memory_type = 'GPU' THEN 0 "
+                + "WHEN mr.memory_type = 'RAM' THEN 1 "
+                + "WHEN mr.memory_type = 'DISK' THEN 2 "
+                + "ELSE 3 "
+                + "END, "
+                + "mr.max_concurrency ASC, "
+                + "(COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(mr.max_concurrency, 1)), "
+                + "mr.updated_at ASC"
             )
-            transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
-            if transport_ok:
-                exportable_replicas += 1
+            result = cursor.execute(query, [artifact_id, view_id or ""])
+            rows = result.fetchall()
+            if not rows:
+                return TransportSelectionResult(replica=None, exportable_replicas=0)
 
-            eligible, reason = self._evaluate_transport_candidate(candidate)
-            if not eligible:
-                inc_transport_filter(artifact_id, reason)
-                continue
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            now_ts = time.time()
+            exportable_replicas = 0
 
-            replica_id = str(candidate.replica.replica_id)
-            claim = cursor.execute(
-                """
-                UPDATE replica_counters
-                SET current_requests = current_requests + 1,
-                    last_assigned_at = now()
-                WHERE replica_id = ?
-                  AND current_requests < (
-                    SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
-                  )
-                RETURNING current_requests
-                """,
-                [replica_id, replica_id],
-            ).fetchone()
-            if not claim:
-                continue
-
-            sql = self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?"
-            full_result = cursor.execute(sql, [replica_id])
-            full_row = full_result.fetchone()
-            if full_row:
-                assert full_result.description is not None
-                full_columns = [desc[0] for desc in full_result.description]
-                replica = self._row_to_model(full_row, full_columns)
-                return TransportSelectionResult(
-                    replica=replica,
-                    exportable_replicas=exportable_replicas,
+            for row in rows:
+                candidate = self._build_transport_candidate(
+                    row,
+                    columns,
+                    now_ts=now_ts,
+                    heartbeat_timeout_seconds=heartbeat_timeout_seconds,
                 )
-            break
+                transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
+                if transport_ok:
+                    exportable_replicas += 1
 
-        return TransportSelectionResult(
-            replica=None, exportable_replicas=exportable_replicas
-        )
+                eligible, reason = self._evaluate_transport_candidate(candidate)
+                if not eligible:
+                    inc_transport_filter(artifact_id, reason)
+                    continue
+
+                replica_id = str(candidate.replica.replica_id)
+                claim = cursor.execute(
+                    """
+                    UPDATE replica_counters
+                    SET current_requests = current_requests + 1,
+                        last_assigned_at = now()
+                    WHERE replica_id = ?
+                      AND current_requests < (
+                        SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
+                      )
+                    RETURNING current_requests
+                    """,
+                    [replica_id, replica_id],
+                ).fetchone()
+                if not claim:
+                    continue
+
+                sql = self._replica_select_sql("JOIN") + " WHERE mr.replica_id = ?"
+                full_result = cursor.execute(sql, [replica_id])
+                full_row = full_result.fetchone()
+                if full_row:
+                    assert full_result.description is not None
+                    full_columns = [desc[0] for desc in full_result.description]
+                    replica = self._row_to_model(full_row, full_columns)
+                    return TransportSelectionResult(
+                        replica=replica,
+                        exportable_replicas=exportable_replicas,
+                    )
+                break
+
+            return TransportSelectionResult(
+                replica=None, exportable_replicas=exportable_replicas
+            )
+        finally:
+            cursor.close()
 
     def get_transport_eligibility_snapshot(
         self,
@@ -449,181 +467,186 @@ class ReplicaRepository(BaseRepository):
     ) -> TransportEligibilitySnapshot:
         """Return a snapshot of replica eligibility for transport debugging."""
         cursor = self.get_cursor()
-        query = (
-            "SELECT "
-            + self._REPLICA_PROJECTION
-            + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
-            + "wl.accepting_new_requests AS worker_accepting, "
-            + "wl.last_heartbeat AS worker_last_heartbeat, "
-            + "w.inactive_at AS worker_inactive_at "
-            + "FROM artifact_replicas mr "
-            + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
-            + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
-            + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
-            + "WHERE mr.artifact_id = ? "
-            + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
-            + "ORDER BY mr.updated_at ASC"
-        )
-        result = cursor.execute(query, [artifact_id, view_id or ""])
-        rows = result.fetchall()
-        if not rows:
-            return TransportEligibilitySnapshot(
-                artifact_id=artifact_id,
-                total_replicas=0,
-                exportable_replicas=0,
-                eligible_replicas=0,
-                available_replicas=0,
-                capacity_replicas=0,
-                over_capacity_replicas=0,
-                worker_present_replicas=0,
-                worker_missing_replicas=0,
-                accepting_workers=0,
-                fresh_heartbeat_replicas=0,
-                stale_heartbeat_replicas=0,
-                sample_replicas=[],
+        try:
+            query = (
+                "SELECT "
+                + self._REPLICA_PROJECTION
+                + ", COALESCE(w.worker_id, '') AS gs_worker_id, "
+                + "wl.accepting_new_requests AS worker_accepting, "
+                + "wl.last_heartbeat AS worker_last_heartbeat, "
+                + "w.inactive_at AS worker_inactive_at "
+                + "FROM artifact_replicas mr "
+                + "LEFT JOIN replica_counters rc ON rc.replica_id = mr.replica_id "
+                + "LEFT JOIN workers w ON mr.worker_id = w.worker_id "
+                + "LEFT JOIN worker_liveness wl ON wl.worker_id = w.worker_id "
+                + "WHERE mr.artifact_id = ? "
+                + "AND COALESCE(mr.view_id, '') = COALESCE(?, '') "
+                + "ORDER BY mr.updated_at ASC"
             )
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        now_ts = time.time()
-
-        total_replicas = 0
-        exportable_replicas = 0
-        eligible_replicas = 0
-        available_replicas = 0
-        capacity_replicas = 0
-        over_capacity_replicas = 0
-        worker_present_replicas = 0
-        worker_missing_replicas = 0
-        accepting_workers = 0
-        fresh_heartbeat_replicas = 0
-        stale_heartbeat_replicas = 0
-        sample_replicas: list[TransportReplicaSnapshot] = []
-
-        for row in rows:
-            total_replicas += 1
-            candidate = self._build_transport_candidate(
-                row,
-                columns,
-                now_ts=now_ts,
-                heartbeat_timeout_seconds=heartbeat_timeout_seconds,
-            )
-            if candidate.worker_present:
-                worker_present_replicas += 1
-                if candidate.worker_accepting:
-                    accepting_workers += 1
-            else:
-                worker_missing_replicas += 1
-
-            if candidate.heartbeat_fresh:
-                fresh_heartbeat_replicas += 1
-            elif candidate.worker_present:
-                stale_heartbeat_replicas += 1
-
-            if candidate.replica.is_available:
-                available_replicas += 1
-
-            if candidate.replica.has_capacity:
-                capacity_replicas += 1
-            else:
-                over_capacity_replicas += 1
-
-            transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
-            if transport_ok:
-                exportable_replicas += 1
-
-            eligible, _ = self._evaluate_transport_candidate(candidate)
-            if eligible:
-                eligible_replicas += 1
-
-            if sample_limit > 0 and len(sample_replicas) < sample_limit:
-                sample_replicas.append(
-                    TransportReplicaSnapshot(
-                        replica_id=str(candidate.replica.replica_id),
-                        node_id=candidate.replica.node_id,
-                        node_address=candidate.replica.node_address,
-                        node_port=int(candidate.replica.node_port),
-                        memory_type=candidate.replica.memory_type.value,
-                        device_id=int(candidate.replica.device_id),
-                        is_available=candidate.replica.is_available,
-                        current_requests=int(candidate.replica.current_requests),
-                        max_concurrency=int(candidate.replica.max_concurrency),
-                        worker_id=candidate.replica.worker_id or "",
-                        worker_present=candidate.worker_present,
-                        worker_accepting=candidate.worker_accepting,
-                        heartbeat_age_sec=candidate.heartbeat_age_sec,
-                        heartbeat_fresh=candidate.heartbeat_fresh,
-                        export_state=candidate.replica.export_state.value,
-                        transport_valid=transport_ok,
-                    )
+            result = cursor.execute(query, [artifact_id, view_id or ""])
+            rows = result.fetchall()
+            if not rows:
+                return TransportEligibilitySnapshot(
+                    artifact_id=artifact_id,
+                    total_replicas=0,
+                    exportable_replicas=0,
+                    eligible_replicas=0,
+                    available_replicas=0,
+                    capacity_replicas=0,
+                    over_capacity_replicas=0,
+                    worker_present_replicas=0,
+                    worker_missing_replicas=0,
+                    accepting_workers=0,
+                    fresh_heartbeat_replicas=0,
+                    stale_heartbeat_replicas=0,
+                    sample_replicas=[],
                 )
 
-        return TransportEligibilitySnapshot(
-            artifact_id=artifact_id,
-            total_replicas=total_replicas,
-            exportable_replicas=exportable_replicas,
-            eligible_replicas=eligible_replicas,
-            available_replicas=available_replicas,
-            capacity_replicas=capacity_replicas,
-            over_capacity_replicas=over_capacity_replicas,
-            worker_present_replicas=worker_present_replicas,
-            worker_missing_replicas=worker_missing_replicas,
-            accepting_workers=accepting_workers,
-            fresh_heartbeat_replicas=fresh_heartbeat_replicas,
-            stale_heartbeat_replicas=stale_heartbeat_replicas,
-            sample_replicas=sample_replicas,
-        )
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            now_ts = time.time()
+
+            total_replicas = 0
+            exportable_replicas = 0
+            eligible_replicas = 0
+            available_replicas = 0
+            capacity_replicas = 0
+            over_capacity_replicas = 0
+            worker_present_replicas = 0
+            worker_missing_replicas = 0
+            accepting_workers = 0
+            fresh_heartbeat_replicas = 0
+            stale_heartbeat_replicas = 0
+            sample_replicas: list[TransportReplicaSnapshot] = []
+
+            for row in rows:
+                total_replicas += 1
+                candidate = self._build_transport_candidate(
+                    row,
+                    columns,
+                    now_ts=now_ts,
+                    heartbeat_timeout_seconds=heartbeat_timeout_seconds,
+                )
+                if candidate.worker_present:
+                    worker_present_replicas += 1
+                    if candidate.worker_accepting:
+                        accepting_workers += 1
+                else:
+                    worker_missing_replicas += 1
+
+                if candidate.heartbeat_fresh:
+                    fresh_heartbeat_replicas += 1
+                elif candidate.worker_present:
+                    stale_heartbeat_replicas += 1
+
+                if candidate.replica.is_available:
+                    available_replicas += 1
+
+                if candidate.replica.has_capacity:
+                    capacity_replicas += 1
+                else:
+                    over_capacity_replicas += 1
+
+                transport_ok, _ = self._evaluate_transport_metadata(candidate.replica)
+                if transport_ok:
+                    exportable_replicas += 1
+
+                eligible, _ = self._evaluate_transport_candidate(candidate)
+                if eligible:
+                    eligible_replicas += 1
+
+                if sample_limit > 0 and len(sample_replicas) < sample_limit:
+                    sample_replicas.append(
+                        TransportReplicaSnapshot(
+                            replica_id=str(candidate.replica.replica_id),
+                            node_id=candidate.replica.node_id,
+                            node_address=candidate.replica.node_address,
+                            node_port=int(candidate.replica.node_port),
+                            memory_type=candidate.replica.memory_type.value,
+                            device_id=int(candidate.replica.device_id),
+                            is_available=candidate.replica.is_available,
+                            current_requests=int(candidate.replica.current_requests),
+                            max_concurrency=int(candidate.replica.max_concurrency),
+                            worker_id=candidate.replica.worker_id or "",
+                            worker_present=candidate.worker_present,
+                            worker_accepting=candidate.worker_accepting,
+                            heartbeat_age_sec=candidate.heartbeat_age_sec,
+                            heartbeat_fresh=candidate.heartbeat_fresh,
+                            export_state=candidate.replica.export_state.value,
+                            transport_valid=transport_ok,
+                        )
+                    )
+
+            return TransportEligibilitySnapshot(
+                artifact_id=artifact_id,
+                total_replicas=total_replicas,
+                exportable_replicas=exportable_replicas,
+                eligible_replicas=eligible_replicas,
+                available_replicas=available_replicas,
+                capacity_replicas=capacity_replicas,
+                over_capacity_replicas=over_capacity_replicas,
+                worker_present_replicas=worker_present_replicas,
+                worker_missing_replicas=worker_missing_replicas,
+                accepting_workers=accepting_workers,
+                fresh_heartbeat_replicas=fresh_heartbeat_replicas,
+                stale_heartbeat_replicas=stale_heartbeat_replicas,
+                sample_replicas=sample_replicas,
+            )
+        finally:
+            cursor.close()
 
     def create(self, replica: Replica) -> Replica:
         """Create a new replica."""
         cursor = self.get_cursor()
+        try:
+            # Insert into artifact_replicas (without current_requests)
+            cursor.execute(
+                """
+                INSERT INTO artifact_replicas (
+                    replica_id, artifact_id, view_id, node_id, node_address, node_port,
+                    memory_size, memory_type, device_id, max_concurrency,
+                    is_available, remote_memory_keys, buffer_sizes, export_state, export_generation,
+                    verification_json, worker_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(replica.replica_id),
+                    replica.artifact_id,
+                    replica.byte_space.id,
+                    replica.node_id,
+                    replica.node_address,
+                    replica.node_port,
+                    replica.memory_size,
+                    replica.memory_type.value,
+                    replica.device_id
+                    if replica.device_id is not None
+                    else -1,  # Use -1 for NULL device_id
+                    replica.max_concurrency,
+                    replica.is_available,
+                    list(replica.remote_memory_keys),
+                    list(replica.buffer_sizes),
+                    replica.export_state.value,
+                    replica.export_generation,
+                    replica.verification_json,
+                    replica.worker_id,
+                ],
+            )
 
-        # Insert into artifact_replicas (without current_requests)
-        cursor.execute(
-            """
-            INSERT INTO artifact_replicas (
-                replica_id, artifact_id, view_id, node_id, node_address, node_port,
-                memory_size, memory_type, device_id, max_concurrency,
-                is_available, remote_memory_keys, buffer_sizes, export_state, export_generation,
-                verification_json, worker_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                str(replica.replica_id),
-                replica.artifact_id,
-                replica.byte_space.id,
-                replica.node_id,
-                replica.node_address,
-                replica.node_port,
-                replica.memory_size,
-                replica.memory_type.value,
-                replica.device_id
-                if replica.device_id is not None
-                else -1,  # Use -1 for NULL device_id
-                replica.max_concurrency,
-                replica.is_available,
-                list(replica.remote_memory_keys),
-                list(replica.buffer_sizes),
-                replica.export_state.value,
-                replica.export_generation,
-                replica.verification_json,
-                replica.worker_id,
-            ],
-        )
+            # Ensure corresponding counter record exists (atomic upsert)
+            cursor.execute(
+                """
+                INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
+                VALUES (?, ?, now())
+                ON CONFLICT (replica_id) DO UPDATE SET
+                    current_requests = EXCLUDED.current_requests,
+                    last_assigned_at = now()
+                """,
+                [str(replica.replica_id), replica.current_requests],
+            )
 
-        # Ensure corresponding counter record exists (atomic upsert)
-        cursor.execute(
-            """
-            INSERT INTO replica_counters (replica_id, current_requests, last_assigned_at)
-            VALUES (?, ?, now())
-            ON CONFLICT (replica_id) DO UPDATE SET
-                current_requests = EXCLUDED.current_requests,
-                last_assigned_at = now()
-            """,
-            [str(replica.replica_id), replica.current_requests],
-        )
-
-        return replica
+            return replica
+        finally:
+            cursor.close()
 
     def create_or_update(self, replica: Replica) -> Replica:
         """Create a new replica or update existing one."""
@@ -862,64 +885,68 @@ class ReplicaRepository(BaseRepository):
     def update(self, replica: Replica) -> Replica:
         """Update an existing replica."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET
+                    updated_at = CURRENT_TIMESTAMP,
+                    node_id = ?,
+                    node_address = ?,
+                    node_port = ?,
+                    is_available = ?,
+                    max_concurrency = ?,
+                    remote_memory_keys = ?,
+                    buffer_sizes = ?,
+                    export_state = ?,
+                    export_generation = ?,
+                    verification_json = ?,
+                    memory_size = ?,
+                    worker_id = ?
+                WHERE replica_id = ?
+                RETURNING replica_id
+                """,
+                [
+                    replica.node_id,
+                    replica.node_address,
+                    replica.node_port,
+                    replica.is_available,
+                    replica.max_concurrency,
+                    list(replica.remote_memory_keys),
+                    list(replica.buffer_sizes),
+                    replica.export_state.value,
+                    replica.export_generation,
+                    replica.verification_json,
+                    replica.memory_size,
+                    replica.worker_id,
+                    str(replica.replica_id),
+                ],
+            )
 
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET
-                updated_at = CURRENT_TIMESTAMP,
-                node_id = ?,
-                node_address = ?,
-                node_port = ?,
-                is_available = ?,
-                max_concurrency = ?,
-                remote_memory_keys = ?,
-                buffer_sizes = ?,
-                export_state = ?,
-                export_generation = ?,
-                verification_json = ?,
-                memory_size = ?,
-                worker_id = ?
-            WHERE replica_id = ?
-            RETURNING replica_id
-            """,
-            [
-                replica.node_id,
-                replica.node_address,
-                replica.node_port,
-                replica.is_available,
-                replica.max_concurrency,
-                list(replica.remote_memory_keys),
-                list(replica.buffer_sizes),
-                replica.export_state.value,
-                replica.export_generation,
-                replica.verification_json,
-                replica.memory_size,
-                replica.worker_id,
-                str(replica.replica_id),
-            ],
-        )
+            if result.fetchone() is None:
+                raise NotFoundError(f"Replica {replica.replica_id} not found")
 
-        if result.fetchone() is None:
-            raise NotFoundError(f"Replica {replica.replica_id} not found")
-
-        return replica
+            return replica
+        finally:
+            cursor.close()
 
     def update_heartbeat(self, replica_id: UUID, artifact_id: str) -> bool:
         """Update the heartbeat timestamp for a replica."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE replica_id = ? AND artifact_id = ?
+                RETURNING replica_id
+                """,
+                [str(replica_id), artifact_id],
+            )
 
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET updated_at = CURRENT_TIMESTAMP
-            WHERE replica_id = ? AND artifact_id = ?
-            RETURNING replica_id
-            """,
-            [str(replica_id), artifact_id],
-        )
-
-        return result.fetchone() is not None
+            return result.fetchone() is not None
+        finally:
+            cursor.close()
 
     def decrement_requests(self, replica_id: UUID) -> tuple[int, int]:
         """
@@ -930,68 +957,73 @@ class ReplicaRepository(BaseRepository):
         """
         cursor = self.get_cursor()
 
-        # Update counter table
-        cnt_row = cursor.execute(
-            """
-            UPDATE replica_counters
-            SET current_requests = GREATEST(0, current_requests - 1)
-            WHERE replica_id = ?
-            RETURNING current_requests
-            """,
-            [str(replica_id)],
-        ).fetchone()
+        try:
+            # Update counter table
+            cnt_row = cursor.execute(
+                """
+                UPDATE replica_counters
+                SET current_requests = GREATEST(0, current_requests - 1)
+                WHERE replica_id = ?
+                RETURNING current_requests
+                """,
+                [str(replica_id)],
+            ).fetchone()
 
-        if not cnt_row:
-            return 0, 0
+            if not cnt_row:
+                return 0, 0
 
-        current_requests = int(cnt_row[0])
+            current_requests = int(cnt_row[0])
 
-        # Fetch max_concurrency from artifact_replicas
-        max_row = cursor.execute(
-            """
-            SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
-            """,
-            [str(replica_id)],
-        ).fetchone()
+            # Fetch max_concurrency from artifact_replicas
+            max_row = cursor.execute(
+                """
+                SELECT max_concurrency FROM artifact_replicas WHERE replica_id = ?
+                """,
+                [str(replica_id)],
+            ).fetchone()
 
-        max_conc = int(max_row[0]) if max_row else 0
+            max_conc = int(max_row[0]) if max_row else 0
 
-        return current_requests, max_conc
+            return current_requests, max_conc
+        finally:
+            cursor.close()
 
     def delete(self, replica_id: UUID, artifact_id: str | None = None) -> bool:
         """Delete a replica."""
         cursor = self.get_cursor()
-
-        # First delete from replica_counters (due to foreign key constraint)
-        cursor.execute(
-            """
-            DELETE FROM replica_counters
-            WHERE replica_id = ?
-            """,
-            [str(replica_id)],
-        )
-
-        # Then delete from artifact_replicas
-        if artifact_id:
-            result = cursor.execute(
+        try:
+            # First delete from replica_counters (due to foreign key constraint)
+            cursor.execute(
                 """
-                DELETE FROM artifact_replicas
-                WHERE replica_id = ? AND artifact_id = ?
-                RETURNING replica_id
-                """,
-                [str(replica_id), artifact_id],
-            )
-        else:
-            result = cursor.execute(
-                """
-                DELETE FROM artifact_replicas
+                DELETE FROM replica_counters
                 WHERE replica_id = ?
-                RETURNING replica_id
                 """,
                 [str(replica_id)],
             )
 
-        return result.fetchone() is not None
+            # Then delete from artifact_replicas
+            if artifact_id:
+                result = cursor.execute(
+                    """
+                    DELETE FROM artifact_replicas
+                    WHERE replica_id = ? AND artifact_id = ?
+                    RETURNING replica_id
+                    """,
+                    [str(replica_id), artifact_id],
+                )
+            else:
+                result = cursor.execute(
+                    """
+                    DELETE FROM artifact_replicas
+                    WHERE replica_id = ?
+                    RETURNING replica_id
+                    """,
+                    [str(replica_id)],
+                )
+
+            return result.fetchone() is not None
+        finally:
+            cursor.close()
 
     def find_by_artifact(
         self, artifact_id: str, view_id: str | None = None
@@ -1011,160 +1043,174 @@ class ReplicaRepository(BaseRepository):
     ) -> list[Replica]:
         """Find replicas matching the given filters."""
         cursor = self.get_cursor()
+        try:
+            # Build dynamic query joining with replica_counters
+            query = self._replica_select_sql("LEFT JOIN") + " WHERE 1=1"
+            params: list = []
 
-        # Build dynamic query joining with replica_counters
-        query = self._replica_select_sql("LEFT JOIN") + " WHERE 1=1"
-        params: list = []
+            if artifact_id is not None:
+                query += " AND mr.artifact_id = ?"
+                params.append(artifact_id)
 
-        if artifact_id is not None:
-            query += " AND mr.artifact_id = ?"
-            params.append(artifact_id)
+            if view_id is not None:
+                query += " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
+                params.append(view_id)
 
-        if view_id is not None:
-            query += " AND COALESCE(mr.view_id, '') = COALESCE(?, '')"
-            params.append(view_id)
+            if node_id is not None:
+                query += " AND mr.node_id = ?"
+                params.append(node_id)
 
-        if node_id is not None:
-            query += " AND mr.node_id = ?"
-            params.append(node_id)
+            if node_address is not None:
+                query += " AND mr.node_address = ?"
+                params.append(node_address)
 
-        if node_address is not None:
-            query += " AND mr.node_address = ?"
-            params.append(node_address)
+            if node_port is not None:
+                query += " AND mr.node_port = ?"
+                params.append(node_port)
 
-        if node_port is not None:
-            query += " AND mr.node_port = ?"
-            params.append(node_port)
+            if memory_type is not None:
+                query += " AND mr.memory_type = ?"
+                params.append(memory_type.value)
 
-        if memory_type is not None:
-            query += " AND mr.memory_type = ?"
-            params.append(memory_type.value)
+            if device_id is not None:
+                query += " AND mr.device_id = ?"
+                params.append(device_id)
 
-        if device_id is not None:
-            query += " AND mr.device_id = ?"
-            params.append(device_id)
-
-        result = cursor.execute(query, params)
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        replicas = [self._row_to_model(row, columns) for row in rows]
-        return replicas
+            result = cursor.execute(query, params)
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            replicas = [self._row_to_model(row, columns) for row in rows]
+            return replicas
+        finally:
+            cursor.close()
 
     def mark_unavailable_by_worker(self, worker_id: str) -> int:
         """Mark all replicas for a worker as unavailable."""
         cursor = self.get_cursor()
+        try:
+            # First count how many replicas will be affected
+            count_result = cursor.execute(
+                """
+                SELECT COUNT(*) FROM artifact_replicas
+                WHERE worker_id = ? AND is_available = TRUE
+                """,
+                [worker_id],
+            ).fetchone()
 
-        # First count how many replicas will be affected
-        count_result = cursor.execute(
-            """
-            SELECT COUNT(*) FROM artifact_replicas
-            WHERE worker_id = ? AND is_available = TRUE
-            """,
-            [worker_id],
-        ).fetchone()
+            affected_count = count_result[0] if count_result else 0
 
-        affected_count = count_result[0] if count_result else 0
+            # Update the replicas
+            cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET is_available = FALSE
+                WHERE worker_id = ?
+                """,
+                [worker_id],
+            )
 
-        # Update the replicas
-        cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET is_available = FALSE
-            WHERE worker_id = ?
-            """,
-            [worker_id],
-        )
-
-        return affected_count
+            return affected_count
+        finally:
+            cursor.close()
 
     # ========== High Availability Methods ==========
 
     def list_all_replicas(self) -> list[Replica]:
         """List all replicas in the database."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                self._replica_select_sql("LEFT JOIN") + " ORDER BY mr.created_at DESC"
+            )
 
-        result = cursor.execute(
-            self._replica_select_sql("LEFT JOIN") + " ORDER BY mr.created_at DESC"
-        )
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        return [self._row_to_model(row, columns) for row in rows]
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            return [self._row_to_model(row, columns) for row in rows]
+        finally:
+            cursor.close()
 
     def mark_as_stale(self, replica_id: UUID) -> bool:
         """Mark a replica as stale (for recovery purposes)."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET updated_at = TIMESTAMP '1970-01-01 00:00:00',
+                    is_available = FALSE
+                WHERE replica_id = ?
+                RETURNING replica_id
+                """,
+                [str(replica_id)],
+            )
 
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET updated_at = TIMESTAMP '1970-01-01 00:00:00',
-                is_available = FALSE
-            WHERE replica_id = ?
-            RETURNING replica_id
-            """,
-            [str(replica_id)],
-        )
-
-        updated = result.fetchone() is not None
-        if updated:
-            logger.debug(f"Marked replica {replica_id} as stale")
-        return updated
+            updated = result.fetchone() is not None
+            if updated:
+                logger.debug(f"Marked replica {replica_id} as stale")
+            return updated
+        finally:
+            cursor.close()
 
     def mark_unavailable(self, replica_id: UUID) -> bool:
         """Mark a replica as unavailable."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET is_available = FALSE,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE replica_id = ?
+                RETURNING replica_id
+                """,
+                [str(replica_id)],
+            )
 
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET is_available = FALSE,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE replica_id = ?
-            RETURNING replica_id
-            """,
-            [str(replica_id)],
-        )
-
-        updated = result.fetchone() is not None
-        if updated:
-            logger.debug(f"Marked replica {replica_id} as unavailable")
-        return updated
+            updated = result.fetchone() is not None
+            if updated:
+                logger.debug(f"Marked replica {replica_id} as unavailable")
+            return updated
+        finally:
+            cursor.close()
 
     def find_orphaned_replicas(self) -> list[Replica]:
         """Find replicas that reference non-existent workers."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                self._replica_select_sql("LEFT JOIN")
+                + " LEFT JOIN workers w ON mr.worker_id = w.worker_id"
+                + " WHERE mr.worker_id IS NOT NULL AND w.worker_id IS NULL"
+            )
 
-        result = cursor.execute(
-            self._replica_select_sql("LEFT JOIN")
-            + " LEFT JOIN workers w ON mr.worker_id = w.worker_id"
-            + " WHERE mr.worker_id IS NOT NULL AND w.worker_id IS NULL"
-        )
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        orphaned = [self._row_to_model(row, columns) for row in rows]
-        if orphaned:
-            logger.warning(f"Found {len(orphaned)} orphaned replicas")
-        return orphaned
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            orphaned = [self._row_to_model(row, columns) for row in rows]
+            if orphaned:
+                logger.warning(f"Found {len(orphaned)} orphaned replicas")
+            return orphaned
+        finally:
+            cursor.close()
 
     def get_replicas_by_worker(self, worker_id: str) -> list[Replica]:
         """Get all replicas belonging to a specific worker."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                self._replica_select_sql("LEFT JOIN")
+                + " WHERE mr.worker_id = ? ORDER BY mr.created_at DESC",
+                [worker_id],
+            )
 
-        result = cursor.execute(
-            self._replica_select_sql("LEFT JOIN")
-            + " WHERE mr.worker_id = ? ORDER BY mr.created_at DESC",
-            [worker_id],
-        )
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        return [self._row_to_model(row, columns) for row in rows]
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            return [self._row_to_model(row, columns) for row in rows]
+        finally:
+            cursor.close()
 
     def get_replicas_by_worker_atomic(self, worker_id: str, cursor) -> list[Replica]:
         """Get replicas for a worker using an existing transaction cursor."""
@@ -1181,37 +1227,43 @@ class ReplicaRepository(BaseRepository):
     def update_worker_id(self, replica_id: UUID, new_worker_id: str) -> bool:
         """Update the worker_id for a replica."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET worker_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE replica_id = ?
+                RETURNING replica_id
+                """,
+                [new_worker_id, str(replica_id)],
+            )
 
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET worker_id = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE replica_id = ?
-            RETURNING replica_id
-            """,
-            [new_worker_id, str(replica_id)],
-        )
-
-        updated = result.fetchone() is not None
-        if updated:
-            logger.debug(f"Updated replica {replica_id} worker_id to {new_worker_id}")
-        return updated
+            updated = result.fetchone() is not None
+            if updated:
+                logger.debug(
+                    f"Updated replica {replica_id} worker_id to {new_worker_id}"
+                )
+            return updated
+        finally:
+            cursor.close()
 
     def get_stale_replicas(self, recovery_time: int) -> list[Replica]:
         """Get replicas that haven't been updated since recovery started."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                self._replica_select_sql("LEFT JOIN")
+                + " WHERE EXTRACT(epoch FROM mr.updated_at) < ? ORDER BY mr.updated_at DESC",
+                [recovery_time],
+            )
 
-        result = cursor.execute(
-            self._replica_select_sql("LEFT JOIN")
-            + " WHERE EXTRACT(epoch FROM mr.updated_at) < ? ORDER BY mr.updated_at DESC",
-            [recovery_time],
-        )
-
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        return [self._row_to_model(row, columns) for row in rows]
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            return [self._row_to_model(row, columns) for row in rows]
+        finally:
+            cursor.close()
 
     def cleanup_stale_replicas(self, recovery_time: int) -> int:
         """
@@ -1221,22 +1273,24 @@ class ReplicaRepository(BaseRepository):
             Number of replicas cleaned up
         """
         cursor = self.get_cursor()
+        try:
+            # Mark stale replicas as unavailable instead of deleting
+            result = cursor.execute(
+                """
+                UPDATE artifact_replicas
+                SET is_available = FALSE
+                WHERE EXTRACT(epoch FROM updated_at) < ?
+                RETURNING replica_id
+                """,
+                [recovery_time],
+            )
 
-        # Mark stale replicas as unavailable instead of deleting
-        result = cursor.execute(
-            """
-            UPDATE artifact_replicas
-            SET is_available = FALSE
-            WHERE EXTRACT(epoch FROM updated_at) < ?
-            RETURNING replica_id
-            """,
-            [recovery_time],
-        )
-
-        cleaned_up_count = len(result.fetchall())
-        if cleaned_up_count > 0:
-            logger.info(f"Marked {cleaned_up_count} stale replicas as unavailable")
-        return cleaned_up_count
+            cleaned_up_count = len(result.fetchall())
+            if cleaned_up_count > 0:
+                logger.info(f"Marked {cleaned_up_count} stale replicas as unavailable")
+            return cleaned_up_count
+        finally:
+            cursor.close()
 
     def _row_to_model(self, row: tuple, columns: Sequence[str]) -> Replica:
         """Convert a database row to Replica object using column metadata."""
@@ -1335,11 +1389,14 @@ class ReplicaRepository(BaseRepository):
     def find_by_disk_path(self, disk_path: str) -> list[Replica]:
         """Find all replicas registered under a given disk path (legacy flow)."""
         cursor = self.get_cursor()
-        result = cursor.execute(
-            self._replica_select_sql("LEFT JOIN") + " WHERE mr.disk_path = ?",
-            [disk_path],
-        )
-        assert result.description is not None
-        columns = [desc[0] for desc in result.description]
-        rows = result.fetchall()
-        return [self._row_to_model(row, columns) for row in rows]
+        try:
+            result = cursor.execute(
+                self._replica_select_sql("LEFT JOIN") + " WHERE mr.disk_path = ?",
+                [disk_path],
+            )
+            assert result.description is not None
+            columns = [desc[0] for desc in result.description]
+            rows = result.fetchall()
+            return [self._row_to_model(row, columns) for row in rows]
+        finally:
+            cursor.close()

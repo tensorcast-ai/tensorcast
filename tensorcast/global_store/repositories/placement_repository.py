@@ -1,11 +1,15 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Repositories for placement plans and persistence status."""
 
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterable
+from contextlib import contextmanager
+
+from duckdb import DuckDBPyConnection
 
 from tensorcast.global_store.models import (
     PersistenceStatus,
@@ -17,6 +21,15 @@ from tensorcast.global_store.repositories.base import BaseRepository
 
 class ArtifactPlacementRepository(BaseRepository):
     """Persistence helpers for placement plans."""
+
+    def __init__(self, connection: DuckDBPyConnection):
+        super().__init__(connection)
+        self._write_lock = threading.RLock()
+
+    @contextmanager
+    def transaction(self):
+        with self._write_lock, super().transaction() as cursor:
+            yield cursor
 
     def upsert_plan(
         self, plan: PlacementPlan, *, summary_json: str | None = None
@@ -154,6 +167,15 @@ class ArtifactPlacementRepository(BaseRepository):
 class ArtifactPersistenceStatusRepository(BaseRepository):
     """Persistence task status storage."""
 
+    def __init__(self, connection: DuckDBPyConnection):
+        super().__init__(connection)
+        self._write_lock = threading.RLock()
+
+    @contextmanager
+    def transaction(self):
+        with self._write_lock, super().transaction() as cursor:
+            yield cursor
+
     def upsert(self, status: PersistenceStatus) -> PersistenceStatus:
         with self.transaction() as cursor:
             cursor.execute(
@@ -180,42 +202,18 @@ class ArtifactPersistenceStatusRepository(BaseRepository):
 
     def get_by_task_id(self, task_id: str) -> PersistenceStatus | None:
         cursor = self.get_cursor()
-        row = cursor.execute(
-            """
-            SELECT task_id, plan_id, artifact_id, state, progress, last_error, degraded_reason
-            FROM artifact_persistence_status
-            WHERE task_id = ?
-            """,
-            [task_id],
-        ).fetchone()
-        if row is None:
-            return None
-        return PersistenceStatus(
-            task_id=row[0],
-            plan_id=row[1],
-            artifact_id=row[2],
-            state=row[3],
-            progress=row[4],
-            last_error=row[5],
-            degraded_reason=row[6],
-        )
-
-    def get_by_artifact(
-        self, artifact_id: str, *, state: str | None = None
-    ) -> list[PersistenceStatus]:
-        cursor = self.get_cursor()
-        query = """
-            SELECT task_id, plan_id, artifact_id, state, progress, last_error, degraded_reason
-            FROM artifact_persistence_status
-            WHERE artifact_id = ?
-        """
-        params: list[object] = [artifact_id]
-        if state:
-            query += " AND state = ?"
-            params.append(state)
-        rows = cursor.execute(query, params).fetchall()
-        return [
-            PersistenceStatus(
+        try:
+            row = cursor.execute(
+                """
+                SELECT task_id, plan_id, artifact_id, state, progress, last_error, degraded_reason
+                FROM artifact_persistence_status
+                WHERE task_id = ?
+                """,
+                [task_id],
+            ).fetchone()
+            if row is None:
+                return None
+            return PersistenceStatus(
                 task_id=row[0],
                 plan_id=row[1],
                 artifact_id=row[2],
@@ -224,5 +222,35 @@ class ArtifactPersistenceStatusRepository(BaseRepository):
                 last_error=row[5],
                 degraded_reason=row[6],
             )
-            for row in rows
-        ]
+        finally:
+            cursor.close()
+
+    def get_by_artifact(
+        self, artifact_id: str, *, state: str | None = None
+    ) -> list[PersistenceStatus]:
+        cursor = self.get_cursor()
+        try:
+            query = """
+                SELECT task_id, plan_id, artifact_id, state, progress, last_error, degraded_reason
+                FROM artifact_persistence_status
+                WHERE artifact_id = ?
+            """
+            params: list[object] = [artifact_id]
+            if state:
+                query += " AND state = ?"
+                params.append(state)
+            rows = cursor.execute(query, params).fetchall()
+            return [
+                PersistenceStatus(
+                    task_id=row[0],
+                    plan_id=row[1],
+                    artifact_id=row[2],
+                    state=row[3],
+                    progress=row[4],
+                    last_error=row[5],
+                    degraded_reason=row[6],
+                )
+                for row in rows
+            ]
+        finally:
+            cursor.close()

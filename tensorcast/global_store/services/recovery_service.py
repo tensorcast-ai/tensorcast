@@ -17,6 +17,7 @@ from tensorcast.global_store.exceptions import (
 from tensorcast.global_store.metrics import (
     inc_control_plane_conflict,
     inc_reconcile_result,
+    inc_reconcile_retry_later,
     observe_state_sync,
 )
 from tensorcast.global_store.models import (
@@ -216,6 +217,10 @@ class RecoveryService:
         int,
     ]:
         """Typed worker reconcile entrypoint for V2 control plane."""
+        control_worker_key = self.worker_service.resolve_control_worker_key(
+            worker_id=worker_id,
+            daemon_id=daemon_id,
+        )
 
         def _is_transient_tx_conflict(exc: Exception) -> bool:
             message = str(exc).lower()
@@ -244,24 +249,82 @@ class RecoveryService:
                     return self._reconcile_worker_state_internal(
                         worker_id=worker_id,
                         daemon_id=daemon_id,
+                        worker_key=control_worker_key,
                         generation=generation,
                         request_seq=request_seq,
                         inventory=inventory,
                         request_kind=request_kind,
                     )
                 except Exception as exc:  # noqa: BLE001
-                    if (
-                        not _is_transient_tx_conflict(exc)
-                        or attempt == max_attempts - 1
-                    ):
+                    if not _is_transient_tx_conflict(exc):
                         raise
+                    if attempt == max_attempts - 1:
+                        current_version = 0
+                        current_checksum = ""
+                        try:
+                            with self.worker_repository.transaction() as cursor:
+                                current_version = (
+                                    self.worker_repository.ensure_state_version(
+                                        worker_id, cursor
+                                    )
+                                )
+                                current_checksum = (
+                                    self.worker_repository.get_state_checksum(
+                                        worker_id, cursor
+                                    )
+                                )
+                        except Exception:  # noqa: BLE001
+                            logger.warning(
+                                "Failed to snapshot worker reconcile state after "
+                                "reconcile conflict exhaustion worker_id=%s",
+                                worker_id,
+                            )
+
+                        logger.warning(
+                            "Reconcile transaction conflict exhausted retries; "
+                            "returning RETRY_LATER worker_id=%s daemon_id=%s "
+                            "worker_key=%s "
+                            "generation=%s request_seq=%s request_kind=%s "
+                            "inventory_size=%s",
+                            worker_id,
+                            daemon_id,
+                            control_worker_key,
+                            int(generation),
+                            int(request_seq),
+                            int(request_kind),
+                            len(inventory),
+                        )
+                        inc_control_plane_conflict(
+                            scope="reconcile_tx_conflict_exhausted"
+                        )
+                        inc_reconcile_retry_later(reason="tx_conflict_exhausted")
+                        inc_reconcile_result(
+                            result_kind=global_store_pb2.ReconcileResultKind.Name(
+                                global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER
+                            )
+                        )
+                        return (
+                            global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER,
+                            int(current_version),
+                            current_checksum,
+                            [],
+                            [],
+                            500,
+                        )
                     backoff_s = min(0.2, 0.01 * (2**attempt))
                     logger.warning(
                         "Transient reconcile transaction conflict for worker %s "
-                        "(attempt %s/%s): %s",
+                        "(attempt %s/%s) daemon_id=%s worker_key=%s generation=%s request_seq=%s "
+                        "request_kind=%s inventory_size=%s: %s",
                         worker_id,
                         attempt + 1,
                         max_attempts,
+                        daemon_id,
+                        control_worker_key,
+                        int(generation),
+                        int(request_seq),
+                        int(request_kind),
+                        len(inventory),
                         exc,
                     )
                     time.sleep(backoff_s)
@@ -269,7 +332,7 @@ class RecoveryService:
 
         if self._control_reducer is not None:
             return self._control_reducer.submit(
-                worker_key=worker_id,
+                worker_key=control_worker_key,
                 kind="reconcile",
                 operation=_run_reconcile_with_retry,
             )
@@ -280,6 +343,7 @@ class RecoveryService:
         *,
         worker_id: str,
         daemon_id: str,
+        worker_key: str,
         generation: int,
         request_seq: int,
         inventory: list[common_pb2.ReplicaInfo],
@@ -367,7 +431,22 @@ class RecoveryService:
 
                 if (
                     generation == persisted_generation
-                    and request_seq <= persisted_request_seq
+                    and request_seq == persisted_request_seq
+                ):
+                    observe_state_sync(time.time() - _start, success=True)
+                    _record_result(global_store_pb2.RECONCILE_RESULT_KIND_NOOP)
+                    return (
+                        global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
+                        current_version,
+                        current_checksum,
+                        [],
+                        [],
+                        0,
+                    )
+
+                if (
+                    generation == persisted_generation
+                    and request_seq < persisted_request_seq
                 ):
                     inc_control_plane_conflict(scope="reconcile_request_stale")
                     observe_state_sync(time.time() - _start, success=True)
@@ -402,6 +481,7 @@ class RecoveryService:
 
                 if request_seq > persisted_request_seq + 1:
                     inc_control_plane_conflict(scope="reconcile_request_gap")
+                    inc_reconcile_retry_later(reason="request_seq_gap")
                     observe_state_sync(time.time() - _start, success=True)
                     _record_result(global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER)
                     return (
@@ -422,6 +502,37 @@ class RecoveryService:
                 state_changes = self._compute_state_changes(
                     inventory, global_replicas, force_full_sync
                 )
+                if state_changes:
+                    adds = 0
+                    removes = 0
+                    updates = 0
+                    for change in state_changes:
+                        if (
+                            change.type
+                            == global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA
+                        ):
+                            adds += 1
+                        elif (
+                            change.type
+                            == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA
+                        ):
+                            removes += 1
+                        elif (
+                            change.type
+                            == global_store_pb2.StateChange.CHANGE_TYPE_UPDATE_REPLICA
+                        ):
+                            updates += 1
+                    logger.info(
+                        "Reconcile applying changes worker_id=%s daemon_id=%s worker_key=%s generation=%s request_seq=%s adds=%s removes=%s updates=%s",
+                        worker_id,
+                        daemon_id,
+                        worker_key,
+                        int(generation),
+                        int(request_seq),
+                        adds,
+                        removes,
+                        updates,
+                    )
 
                 if state_changes:
                     self._apply_state_changes(worker_id, state_changes, cursor)
@@ -724,6 +835,12 @@ class RecoveryService:
                         f"Missing replica_id for removal (artifact_id={change.replica_info.ref.artifact_id})"
                     )
                 replica_id = UUID(replica_id_value)
+                logger.info(
+                    "Reconcile removing replica worker_id=%s replica_id=%s artifact_id=%s",
+                    worker_id,
+                    replica_id,
+                    change.replica_info.ref.artifact_id,
+                )
                 deleted = self.replica_repository.delete_atomic(replica_id, cursor)
                 if not deleted:
                     raise NotFoundError(f"Replica {replica_id} not found")
@@ -843,9 +960,7 @@ class RecoveryService:
             return checksum
 
         replicas = self.replica_repository.get_replicas_by_worker(worker_id)
-        checksum = self._compute_state_checksum(replicas)
-        self.worker_repository.update_state_checksum(worker_id, checksum)
-        return checksum
+        return self._compute_state_checksum(replicas)
 
     def get_obsolete_artifacts(
         self, worker_id: str, registered_artifact_ids: list[str] | tuple[str, ...]

@@ -20,12 +20,15 @@ class ClusterInfoRepository(BaseRepository):
 
     def get_cluster_id(self) -> str | None:
         cursor = self.get_cursor()
-        row = cursor.execute(
-            "SELECT cluster_id FROM cluster_info WHERE singleton_id = 1"
-        ).fetchone()
-        if not row:
-            return None
-        return row[0]
+        try:
+            row = cursor.execute(
+                "SELECT cluster_id FROM cluster_info WHERE singleton_id = 1"
+            ).fetchone()
+            if not row:
+                return None
+            return row[0]
+        finally:
+            cursor.close()
 
     def get_or_create_cluster_id(self) -> str:
         now = datetime.now(timezone.utc)

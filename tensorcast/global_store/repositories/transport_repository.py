@@ -19,41 +19,46 @@ class TransportRepository(BaseRepository):
     def find_by_id(self, transport_id: UUID) -> Optional[Transport]:
         """Find a transport by ID."""
         cursor = self.get_cursor()
-        result = cursor.execute(
-            "SELECT * FROM artifact_transports WHERE transport_id = ?",
-            [str(transport_id)],
-        ).fetchone()
+        try:
+            result = cursor.execute(
+                "SELECT * FROM artifact_transports WHERE transport_id = ?",
+                [str(transport_id)],
+            ).fetchone()
 
-        if result:
-            return self._row_to_model(result)
-        return None
+            if result:
+                return self._row_to_model(result)
+            return None
+        finally:
+            cursor.close()
 
     def create(self, transport: Transport) -> Transport:
         """Create a new transport record."""
         cursor = self.get_cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO artifact_transports (
-                transport_id, replica_id, artifact_id, disk_path,
-                source_node_id, source_address, source_port,
-                status
+        try:
+            cursor.execute(
+                """
+                INSERT INTO artifact_transports (
+                    transport_id, replica_id, artifact_id, disk_path,
+                    source_node_id, source_address, source_port,
+                    status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    str(transport.transport_id),
+                    str(transport.replica_id),
+                    transport.artifact_id,
+                    transport.disk_path,
+                    transport.source_node_id,
+                    transport.source_address,
+                    transport.source_port,
+                    "in_progress",
+                ],
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                str(transport.transport_id),
-                str(transport.replica_id),
-                transport.artifact_id,
-                transport.disk_path,
-                transport.source_node_id,
-                transport.source_address,
-                transport.source_port,
-                "in_progress",
-            ],
-        )
 
-        return transport
+            return transport
+        finally:
+            cursor.close()
 
     def create_with_cursor(self, transport: Transport, cursor) -> Transport:
         """Create a new transport record using an existing cursor."""
@@ -83,97 +88,108 @@ class TransportRepository(BaseRepository):
     def delete(self, transport_id: UUID) -> bool:
         """Delete a transport record."""
         cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                DELETE FROM artifact_transports
+                WHERE transport_id = ?
+                RETURNING transport_id
+                """,
+                [str(transport_id)],
+            )
 
-        result = cursor.execute(
-            """
-            DELETE FROM artifact_transports
-            WHERE transport_id = ?
-            RETURNING transport_id
-            """,
-            [str(transport_id)],
-        )
-
-        return result.fetchone() is not None
+            return result.fetchone() is not None
+        finally:
+            cursor.close()
 
     def update_status(self, transport_id: UUID, status: str, completed_at=None) -> bool:
         """Update transport status and optionally set completed_at."""
         cursor = self.get_cursor()
+        try:
+            if completed_at:
+                result = cursor.execute(
+                    """
+                    UPDATE artifact_transports
+                    SET status = ?, completed_at = ?
+                    WHERE transport_id = ?
+                    RETURNING transport_id
+                    """,
+                    [status, completed_at, str(transport_id)],
+                )
+            else:
+                result = cursor.execute(
+                    """
+                    UPDATE artifact_transports
+                    SET status = ?
+                    WHERE transport_id = ?
+                    RETURNING transport_id
+                    """,
+                    [status, str(transport_id)],
+                )
 
-        if completed_at:
-            result = cursor.execute(
-                """
-                UPDATE artifact_transports
-                SET status = ?, completed_at = ?
-                WHERE transport_id = ?
-                RETURNING transport_id
-                """,
-                [status, completed_at, str(transport_id)],
-            )
-        else:
-            result = cursor.execute(
-                """
-                UPDATE artifact_transports
-                SET status = ?
-                WHERE transport_id = ?
-                RETURNING transport_id
-                """,
-                [status, str(transport_id)],
-            )
-
-        return result.fetchone() is not None
+            return result.fetchone() is not None
+        finally:
+            cursor.close()
 
     def list_with_filters(
         self, status: Optional[str] = None, limit: int = 50, offset: int = 0
     ) -> list[Transport]:
         """List transports with optional filters and pagination."""
         cursor = self.get_cursor()
+        try:
+            query = "SELECT * FROM artifact_transports"
+            params = []
 
-        query = "SELECT * FROM artifact_transports"
-        params = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
 
-        if status:
-            query += " WHERE status = ?"
-            params.append(status)
+            query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+            params.extend([str(limit), str(offset)])
 
-        query += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        params.extend([str(limit), str(offset)])
-
-        rows = cursor.execute(query, params).fetchall()
-        return [self._row_to_model(row) for row in rows]
+            rows = cursor.execute(query, params).fetchall()
+            return [self._row_to_model(row) for row in rows]
+        finally:
+            cursor.close()
 
     def get_oldest_in_progress_age_ms(self, replica_id: UUID) -> int | None:
         """Return age (ms) of oldest in-progress transport for replica_id."""
         cursor = self.get_cursor()
-        row = cursor.execute(
-            """
-            SELECT MIN(created_at) FROM artifact_transports
-            WHERE replica_id = ? AND status = 'in_progress'
-            """,
-            [str(replica_id)],
-        ).fetchone()
-        if row is None or row[0] is None:
-            return None
-        created_at = row[0]
-        now = (
-            datetime.now(tz=created_at.tzinfo)
-            if created_at.tzinfo is not None
-            else datetime.now()
-        )
-        return int((now - created_at).total_seconds() * 1000)
+        try:
+            row = cursor.execute(
+                """
+                SELECT MIN(created_at) FROM artifact_transports
+                WHERE replica_id = ? AND status = 'in_progress'
+                """,
+                [str(replica_id)],
+            ).fetchone()
+            if row is None or row[0] is None:
+                return None
+            created_at = row[0]
+            now = (
+                datetime.now(tz=created_at.tzinfo)
+                if created_at.tzinfo is not None
+                else datetime.now()
+            )
+            return int((now - created_at).total_seconds() * 1000)
+        finally:
+            cursor.close()
 
     def count_with_filters(self, status: Optional[str] = None) -> int:
         """Count transports with optional filters."""
         cursor = self.get_cursor()
+        try:
+            query = "SELECT COUNT(*) FROM artifact_transports"
+            params = []
 
-        query = "SELECT COUNT(*) FROM artifact_transports"
-        params = []
+            if status:
+                query += " WHERE status = ?"
+                params.append(status)
 
-        if status:
-            query += " WHERE status = ?"
-            params.append(status)
-
-        result = cursor.execute(query, params).fetchone()
-        return result[0] if result else 0
+            result = cursor.execute(query, params).fetchone()
+            return result[0] if result else 0
+        finally:
+            cursor.close()
 
     def _row_to_model(self, row: tuple[Any, ...]) -> Transport:
         """Convert a database row returned by DuckDB into a ``Transport`` object.

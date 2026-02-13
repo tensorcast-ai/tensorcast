@@ -14,7 +14,19 @@ from google.protobuf import timestamp_pb2
 from tensorcast.global_store import metrics as gs_metrics
 from tensorcast.global_store.exceptions import ValidationError
 from tensorcast.global_store.models import Worker
+from tensorcast.global_store.repositories.base import (
+    bind_tx_context,
+    is_transient_tx_conflict,
+)
+from tensorcast.global_store.repositories.idempotency_repository import (
+    IdempotencyRepository,
+)
 from tensorcast.global_store.repositories.worker_repository import WorkerRepository
+from tensorcast.global_store.rpc.idempotency import (
+    begin_idempotent_operation,
+    decode_stored_grpc_status,
+    encode_stored_grpc_status,
+)
 from tensorcast.global_store.services.recovery_service import RecoveryService
 from tensorcast.global_store.services.worker_service import WorkerService
 from tensorcast.observability.otel import set_span_attributes
@@ -29,6 +41,7 @@ class WorkerRpcHandler:
         *,
         worker_service: WorkerService,
         worker_repository: WorkerRepository,
+        idempotency_repository: IdempotencyRepository,
         recovery_service: RecoveryService,
         default_heartbeat_interval_ms: int,
         determine_worker_status: Callable[[Worker], global_store_pb2.ConnectionStatus],
@@ -36,10 +49,46 @@ class WorkerRpcHandler:
     ) -> None:
         self._worker_service = worker_service
         self._worker_repository = worker_repository
+        self._idempotency_repository = idempotency_repository
         self._recovery_service = recovery_service
         self._default_heartbeat_interval_ms = int(default_heartbeat_interval_ms)
         self._determine_worker_status = determine_worker_status
         self._logger = logger
+
+    @staticmethod
+    def _apply_grpc_status(
+        *,
+        context: grpc.ServicerContext,
+        code: grpc.StatusCode | None,
+        details: str,
+    ) -> None:
+        if code is None or code == grpc.StatusCode.OK:
+            return
+        context.set_code(code)
+        context.set_details(details)
+
+    @staticmethod
+    def _client_request_id(
+        request: global_store_pb2.UnregisterWorkerRequest,
+    ) -> str:
+        if not request.HasField("client_request_id"):
+            return ""
+        return request.client_request_id.strip()
+
+    @staticmethod
+    def _replay_unregister_response(
+        *,
+        context: grpc.ServicerContext,
+        record_response_status: str,
+        record_response_proto: bytes,
+    ) -> global_store_pb2.UnregisterWorkerResponse:
+        response = global_store_pb2.UnregisterWorkerResponse()
+        response.ParseFromString(record_response_proto)
+        code, details = decode_stored_grpc_status(record_response_status)
+        if code != grpc.StatusCode.OK:
+            context.set_code(code)
+            context.set_details(details)
+        return response
 
     def register_worker(
         self,
@@ -114,6 +163,17 @@ class WorkerRpcHandler:
                         status=global_store_pb2.Status.STATUS_ERROR
                     )
 
+                with bind_tx_context(
+                    source="worker_rpc_handler",
+                    intent_kind="ensure_state_version_after_recovery_register",
+                    worker_id=registered.worker_id,
+                    daemon_id=(registered.daemon_id or ""),
+                ):
+                    expected_state_version = (
+                        self._recovery_service.ensure_worker_state_version(
+                            registered.worker_id
+                        )
+                    )
                 self._logger.info(
                     "Worker registered: worker_id=%s daemon_id=%s node_id=%s addr=%s:%d p2p=%d mem_total=%d mem_avail=%d is_recovery=%s prev_worker_id=%s state_sync_required=%s expected_state_version=%d",
                     registered.worker_id,
@@ -127,24 +187,17 @@ class WorkerRpcHandler:
                     True,
                     (previous_worker_id or ""),
                     bool(state_sync_required),
-                    int(
-                        self._recovery_service.ensure_worker_state_version(
-                            registered.worker_id
-                        )
-                    ),
+                    int(expected_state_version),
                 )
                 reconcile_generation, _ = self._worker_repository.get_reconcile_cursor(
                     registered.worker_id
                 )
-
                 return global_store_pb2.RegisterWorkerResponse(
                     status=global_store_pb2.Status.STATUS_OK,
                     worker_id=registered.worker_id,
                     heartbeat_interval_ms=self._default_heartbeat_interval_ms,
                     state_sync_required=state_sync_required,
-                    expected_state_version=self._recovery_service.ensure_worker_state_version(
-                        registered.worker_id
-                    ),
+                    expected_state_version=expected_state_version,
                     reconcile_generation=int(reconcile_generation),
                 )
 
@@ -169,9 +222,17 @@ class WorkerRpcHandler:
                 )
 
             registered = self._worker_service.register_worker(worker)
-            expected_state_version = self._recovery_service.ensure_worker_state_version(
-                registered.worker_id
-            )
+            with bind_tx_context(
+                source="worker_rpc_handler",
+                intent_kind="ensure_state_version_after_register",
+                worker_id=registered.worker_id,
+                daemon_id=(registered.daemon_id or ""),
+            ):
+                expected_state_version = (
+                    self._recovery_service.ensure_worker_state_version(
+                        registered.worker_id
+                    )
+                )
             reconcile_generation, _ = self._worker_repository.get_reconcile_cursor(
                 registered.worker_id
             )
@@ -268,7 +329,13 @@ class WorkerRpcHandler:
         context: grpc.ServicerContext,
     ) -> global_store_pb2.WorkerHeartbeatResponse:
         """Handle enhanced heartbeat with state synchronization."""
+        daemon_id = (request.daemon_id or "").strip()
+        control_worker_key = f"worker:{request.worker_id}"
         try:
+            control_worker_key = self._worker_service.resolve_control_worker_key(
+                worker_id=request.worker_id,
+                daemon_id=daemon_id or None,
+            )
             capability_flags: int | None = None
             if request.HasField("capability_flags"):
                 capability_flags = int(request.capability_flags)
@@ -277,6 +344,7 @@ class WorkerRpcHandler:
                 mem_pool_available_size=request.mem_pool_available_size,
                 accepting_new_requests=request.accepting_new_requests,
                 capability_flags=capability_flags,
+                daemon_id=daemon_id or None,
             )
 
             if not success:
@@ -284,9 +352,15 @@ class WorkerRpcHandler:
                     status=global_store_pb2.Status.STATUS_NOT_FOUND
                 )
 
-            current_version = self._recovery_service.ensure_worker_state_version(
-                request.worker_id
-            )
+            with bind_tx_context(
+                source="worker_rpc_handler",
+                intent_kind="ensure_state_version_after_heartbeat",
+                worker_id=request.worker_id,
+                daemon_id=daemon_id,
+            ):
+                current_version = self._recovery_service.ensure_worker_state_version(
+                    request.worker_id
+                )
             state_sync_required = request.state_version < current_version
 
             if request.state_checksum:
@@ -324,9 +398,29 @@ class WorkerRpcHandler:
             )
 
         except Exception as exc:  # noqa: BLE001
+            if is_transient_tx_conflict(exc):
+                gs_metrics.inc_control_plane_conflict(
+                    scope="worker_heartbeat_tx_conflict"
+                )
+                context.set_code(grpc.StatusCode.ABORTED)
+                context.set_details(f"WorkerHeartbeat transaction conflict: {exc}")
+                self._logger.warning(
+                    "WorkerHeartbeat transaction conflict worker_id=%s daemon_id=%s worker_key=%s state_version=%s error=%s",
+                    request.worker_id,
+                    daemon_id,
+                    control_worker_key,
+                    int(request.state_version),
+                    exc,
+                )
+                return global_store_pb2.WorkerHeartbeatResponse(
+                    status=global_store_pb2.Status.STATUS_ERROR
+                )
             self._logger.exception(
-                "Error handling enhanced heartbeat for worker %s",
+                "Error handling enhanced heartbeat worker_id=%s daemon_id=%s state_version=%s registered_artifacts=%s",
                 request.worker_id,
+                (request.daemon_id or "").strip(),
+                int(request.state_version),
+                len(request.registered_artifact_ids),
             )
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(exc))
@@ -340,7 +434,62 @@ class WorkerRpcHandler:
         context: grpc.ServicerContext,
     ) -> global_store_pb2.UnregisterWorkerResponse:
         """Unregister a worker."""
+        response = global_store_pb2.UnregisterWorkerResponse(
+            status=global_store_pb2.Status.STATUS_ERROR
+        )
+        grpc_code: grpc.StatusCode | None = None
+        grpc_details = ""
+        should_finalize_idempotency = False
+        client_request_id = self._client_request_id(request)
+        operation_kind = "unregister_worker"
         try:
+            if client_request_id:
+                idempotency_result = begin_idempotent_operation(
+                    idempotency_repository=self._idempotency_repository,
+                    operation_kind=operation_kind,
+                    client_request_id=client_request_id,
+                    request_payload=request.SerializeToString(deterministic=True),
+                )
+                if idempotency_result.payload_mismatch:
+                    grpc_code = grpc.StatusCode.FAILED_PRECONDITION
+                    grpc_details = (
+                        "client_request_id already used with a different payload"
+                    )
+                    self._apply_grpc_status(
+                        context=context,
+                        code=grpc_code,
+                        details=grpc_details,
+                    )
+                    return response
+                if idempotency_result.timed_out_waiting_for_replay:
+                    grpc_code = grpc.StatusCode.ABORTED
+                    grpc_details = (
+                        "duplicate request is still in progress for client_request_id"
+                    )
+                    self._apply_grpc_status(
+                        context=context,
+                        code=grpc_code,
+                        details=grpc_details,
+                    )
+                    return response
+                if not idempotency_result.should_execute:
+                    replay_record = idempotency_result.replay_record
+                    if replay_record is None:
+                        grpc_code = grpc.StatusCode.INTERNAL
+                        grpc_details = "idempotency replay record is missing"
+                        self._apply_grpc_status(
+                            context=context,
+                            code=grpc_code,
+                            details=grpc_details,
+                        )
+                        return response
+                    return self._replay_unregister_response(
+                        context=context,
+                        record_response_status=replay_record.response_status,
+                        record_response_proto=replay_record.response_proto,
+                    )
+                should_finalize_idempotency = True
+
             worker_before = None
             try:
                 worker_before = self._worker_repository.find_by_id(
@@ -379,15 +528,55 @@ class WorkerRpcHandler:
                     request.worker_id,
                 )
 
-            return global_store_pb2.UnregisterWorkerResponse(status=status)
+            response = global_store_pb2.UnregisterWorkerResponse(status=status)
+            return response
 
         except Exception as exc:  # noqa: BLE001
+            if is_transient_tx_conflict(exc):
+                gs_metrics.inc_control_plane_conflict(
+                    scope="unregister_worker_tx_conflict"
+                )
+                grpc_code = grpc.StatusCode.ABORTED
+                grpc_details = f"UnregisterWorker transaction conflict: {exc}"
+                self._logger.error(
+                    "Control-plane conflict operation_kind=%s worker_id=%s artifact_id=%s client_request_id=%s error=%s",
+                    operation_kind,
+                    request.worker_id,
+                    "",
+                    client_request_id,
+                    exc,
+                )
+                self._apply_grpc_status(
+                    context=context,
+                    code=grpc_code,
+                    details=grpc_details,
+                )
+                return response
             self._logger.exception("Error unregistering worker")
-            context.set_code(grpc.StatusCode.INTERNAL)
-            context.set_details(str(exc))
-            return global_store_pb2.UnregisterWorkerResponse(
-                status=global_store_pb2.Status.STATUS_ERROR
+            grpc_code = grpc.StatusCode.INTERNAL
+            grpc_details = str(exc)
+            self._apply_grpc_status(
+                context=context,
+                code=grpc_code,
+                details=grpc_details,
             )
+            return response
+        finally:
+            if should_finalize_idempotency and client_request_id:
+                try:
+                    self._idempotency_repository.finalize_operation(
+                        client_request_id=client_request_id,
+                        response_status=encode_stored_grpc_status(
+                            grpc_code,
+                            grpc_details,
+                        ),
+                        response_proto=response.SerializeToString(),
+                    )
+                except Exception:  # noqa: BLE001
+                    self._logger.exception(
+                        "Failed to finalize idempotency record for UnregisterWorker client_request_id=%s",
+                        client_request_id,
+                    )
 
     def list_active_workers(
         self,
