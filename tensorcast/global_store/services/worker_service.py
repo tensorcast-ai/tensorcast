@@ -3,7 +3,6 @@
 """Service for worker operations."""
 
 import uuid
-from contextlib import suppress
 
 from tensorcast.global_store.config import get_config
 from tensorcast.global_store.exceptions import ValidationError
@@ -41,6 +40,32 @@ class WorkerService:
     def _generate_worker_id(node_id: str) -> str:
         # UUID-based to avoid time-collision and cross-host clashes
         return f"worker_{node_id}_{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _daemon_worker_key(daemon_id: str) -> str:
+        return f"daemon:{daemon_id.strip()}"
+
+    def resolve_control_worker_key(
+        self,
+        *,
+        worker_id: str,
+        daemon_id: str | None = None,
+    ) -> str:
+        """Resolve a reducer key to stable daemon identity when available."""
+        normalized_daemon_id = (daemon_id or "").strip()
+        if normalized_daemon_id:
+            return self._daemon_worker_key(normalized_daemon_id)
+
+        existing = self.worker_repository.find_by_id(worker_id, include_inactive=True)
+        if existing and existing.daemon_id.strip():
+            return self._daemon_worker_key(existing.daemon_id)
+
+        logger.warning(
+            "resolve_control_worker_key fallback worker_id=%s daemon_id=%s reason=no_daemon_identity",
+            worker_id,
+            normalized_daemon_id,
+        )
+        return f"worker:{worker_id}"
 
     def _submit_control_intent(self, *, worker_key: str, kind: str, operation):
         if self._control_reducer is None:
@@ -136,7 +161,7 @@ class WorkerService:
             return self.worker_repository.create(worker)
 
         return self._submit_control_intent(
-            worker_key=f"daemon:{daemon_id}",
+            worker_key=self._daemon_worker_key(daemon_id),
             kind="register",
             operation=_register,
         )
@@ -165,6 +190,7 @@ class WorkerService:
         mem_pool_available_size: int,
         accepting_new_requests: bool,
         capability_flags: int | None = None,
+        daemon_id: str | None = None,
     ) -> bool:
         """
         Process worker heartbeat.
@@ -173,31 +199,30 @@ class WorkerService:
             worker_id: ID of the worker
             mem_pool_available_size: Available memory pool size
             accepting_new_requests: Whether accepting new requests
+            daemon_id: Optional daemon identity for stable reducer lane selection
 
         Returns:
             True if successful, False if worker not found
         """
 
         def _heartbeat() -> bool:
-            existing = self.worker_repository.find_by_id(worker_id)
-            if not existing:
-                logger.warning(f"Worker {worker_id} not found for heartbeat")
-                return False
-            if capability_flags is not None and int(capability_flags) != int(
-                existing.capability_flags
-            ):
-                with suppress(Exception):
-                    self.worker_repository.update_capability_flags(
-                        worker_id, int(capability_flags)
-                    )
-            return self.worker_repository.update_heartbeat(
+            success = self.worker_repository.update_heartbeat(
                 worker_id=worker_id,
                 mem_pool_available_size=mem_pool_available_size,
                 accepting_new_requests=accepting_new_requests,
+                capability_flags=(
+                    int(capability_flags) if capability_flags is not None else None
+                ),
             )
+            if not success:
+                logger.warning(f"Worker {worker_id} not found for heartbeat")
+            return success
 
         return self._submit_control_intent(
-            worker_key=worker_id,
+            worker_key=self.resolve_control_worker_key(
+                worker_id=worker_id,
+                daemon_id=daemon_id,
+            ),
             kind="heartbeat",
             operation=_heartbeat,
         )
@@ -226,7 +251,7 @@ class WorkerService:
             return success
 
         return self._submit_control_intent(
-            worker_key=worker_id,
+            worker_key=self.resolve_control_worker_key(worker_id=worker_id),
             kind="unregister",
             operation=_unregister,
         )
@@ -251,20 +276,42 @@ class WorkerService:
             List of cleaned up worker IDs
         """
 
-        def _cleanup() -> list[str]:
-            deleted = self.worker_repository.mark_inactive_by_timeout(
-                self.config.heartbeat_timeout_ms / 1000
-            )
-            for worker_id, node_id in deleted:
-                self.replica_repository.mark_unavailable_by_worker(worker_id)
-                logger.info(f"Marked inactive worker {worker_id} on {node_id}")
-            return [worker_id for worker_id, _ in deleted]
+        timeout_seconds = self.config.heartbeat_timeout_ms / 1000
+        stale_workers = self.worker_repository.list_timeout_candidates(timeout_seconds)
+        cleaned_worker_ids: list[str] = []
 
-        return self._submit_control_intent(
-            worker_key="__maintenance_workers__",
-            kind="maintenance",
-            operation=_cleanup,
-        )
+        for worker_id, node_id, daemon_id in stale_workers:
+            worker_key = self.resolve_control_worker_key(
+                worker_id=worker_id,
+                daemon_id=daemon_id,
+            )
+
+            def _cleanup_single(
+                target_worker_id: str = worker_id,
+                target_node_id: str = node_id,
+            ) -> str | None:
+                inactive_row = self.worker_repository.mark_inactive_if_timed_out(
+                    target_worker_id, timeout_seconds
+                )
+                if inactive_row is None:
+                    return None
+                self.replica_repository.mark_unavailable_by_worker(target_worker_id)
+                logger.info(
+                    "Marked inactive worker %s on %s",
+                    target_worker_id,
+                    target_node_id,
+                )
+                return target_worker_id
+
+            cleaned = self._submit_control_intent(
+                worker_key=worker_key,
+                kind="maintenance",
+                operation=_cleanup_single,
+            )
+            if cleaned is not None:
+                cleaned_worker_ids.append(str(cleaned))
+
+        return cleaned_worker_ids
 
     def flush_heartbeats(self) -> None:
         """Legacy compatibility no-op: heartbeats are reducer-owned and immediate."""

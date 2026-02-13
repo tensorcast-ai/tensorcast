@@ -13,15 +13,17 @@ absl::StatusOr<std::string> ReplicaRegistrationHelper::register_local_replica(
     const DeviceKey& device,
     common::memory::MemoryLocation location,
     uint64_t size_bytes,
-    std::optional<std::string_view> view_id) {
-  auto reg_or = gs_client->register_replica(
+    std::optional<std::string_view> view_id,
+    std::optional<std::string_view> client_request_id) {
+  auto reg_or = gs_client->register_replica_idempotent(
       artifact_id,
       worker_id,
       device,
       location,
       size_bytes,
       /*max_concurrency=*/1,
-      view_id);
+      view_id,
+      client_request_id);
 
   if (!reg_or.ok()) {
     LOG(WARNING) << "Failed to register replica replica with Global Store: " << reg_or.status();

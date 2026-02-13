@@ -30,43 +30,49 @@ class KeyMappingRepository(BaseRepository):
         Enforces uniqueness of key; last write wins for hints.
         """
         cursor = self.get_cursor()
-        cursor.execute(
-            """
-            INSERT INTO key_mappings (
-              key, artifact_id, replica_uuid, daemon_address, ttl_seconds, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, now(), now())
-            ON CONFLICT (key) DO UPDATE SET
-              artifact_id = EXCLUDED.artifact_id,
-              replica_uuid = EXCLUDED.replica_uuid,
-              daemon_address = EXCLUDED.daemon_address,
-              ttl_seconds = EXCLUDED.ttl_seconds,
-              updated_at = now()
-            """,
-            [key, artifact_id, replica_uuid, daemon_address, ttl_seconds],
-        )
+        try:
+            cursor.execute(
+                """
+                INSERT INTO key_mappings (
+                  key, artifact_id, replica_uuid, daemon_address, ttl_seconds, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, now(), now())
+                ON CONFLICT (key) DO UPDATE SET
+                  artifact_id = EXCLUDED.artifact_id,
+                  replica_uuid = EXCLUDED.replica_uuid,
+                  daemon_address = EXCLUDED.daemon_address,
+                  ttl_seconds = EXCLUDED.ttl_seconds,
+                  updated_at = now()
+                """,
+                [key, artifact_id, replica_uuid, daemon_address, ttl_seconds],
+            )
+        finally:
+            cursor.close()
 
     def get(self, key: str) -> Optional[dict[str, Any]]:
         cursor = self.get_cursor()
-        row = cursor.execute(
-            """
-            SELECT key, artifact_id, replica_uuid, daemon_address, ttl_seconds, generation, kind, created_at, updated_at
-            FROM key_mappings WHERE key = ?
-            """,
-            [key],
-        ).fetchone()
-        if not row:
-            return None
-        return {
-            "key": row[0],
-            "artifact_id": row[1],
-            "replica_uuid": row[2],
-            "daemon_address": row[3],
-            "ttl_seconds": row[4],
-            "generation": row[5],
-            "kind": row[6],
-            "created_at": row[7],
-            "updated_at": row[8],
-        }
+        try:
+            row = cursor.execute(
+                """
+                SELECT key, artifact_id, replica_uuid, daemon_address, ttl_seconds, generation, kind, created_at, updated_at
+                FROM key_mappings WHERE key = ?
+                """,
+                [key],
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                "key": row[0],
+                "artifact_id": row[1],
+                "replica_uuid": row[2],
+                "daemon_address": row[3],
+                "ttl_seconds": row[4],
+                "generation": row[5],
+                "kind": row[6],
+                "created_at": row[7],
+                "updated_at": row[8],
+            }
+        finally:
+            cursor.close()
 
     def swap(
         self,

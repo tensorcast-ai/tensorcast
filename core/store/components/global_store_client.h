@@ -333,6 +333,14 @@ class IGlobalStoreClient {
 
   virtual absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) = 0;
 
+  virtual absl::Status unregister_worker_idempotent(
+      std::string_view worker_id,
+      bool is_graceful_shutdown = true,
+      std::optional<std::string_view> client_request_id = std::nullopt) {
+    (void)client_request_id;
+    return unregister_worker(worker_id, is_graceful_shutdown);
+  }
+
   virtual absl::StatusOr<std::string> register_replica(
       std::string_view artifact_id,
       std::string_view worker_id,
@@ -341,6 +349,19 @@ class IGlobalStoreClient {
       uint64_t memory_size,
       uint32_t max_concurrency = 1,
       std::optional<std::string_view> view_id = std::nullopt) = 0;
+
+  virtual absl::StatusOr<std::string> register_replica_idempotent(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      common::memory::MemoryLocation location,
+      uint64_t memory_size,
+      uint32_t max_concurrency = 1,
+      std::optional<std::string_view> view_id = std::nullopt,
+      std::optional<std::string_view> client_request_id = std::nullopt) {
+    (void)client_request_id;
+    return register_replica(artifact_id, worker_id, device, location, memory_size, max_concurrency, view_id);
+  }
 
   virtual absl::Status record_view_residency(
       std::string_view canonical_artifact_id,
@@ -363,6 +384,40 @@ class IGlobalStoreClient {
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
       const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) = 0;
+
+  virtual absl::StatusOr<std::string> register_memory_replica_idempotent(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      uint64_t memory_size,
+      std::string_view tensor_index_key,
+      const std::vector<std::string>& remote_memory_keys,
+      const std::vector<uint64_t>& buffer_sizes,
+      const std::optional<std::string>& tensor_index_data = std::nullopt,
+      std::string_view encoding = "json",
+      std::string_view schema_version = "v3",
+      uint32_t max_concurrency = 1,
+      const std::optional<std::string>& verification_json = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
+      std::optional<std::string_view> client_request_id = std::nullopt) {
+    (void)client_request_id;
+    return register_memory_replica(
+        artifact_id,
+        worker_id,
+        device,
+        memory_size,
+        tensor_index_key,
+        remote_memory_keys,
+        buffer_sizes,
+        tensor_index_data,
+        encoding,
+        schema_version,
+        max_concurrency,
+        verification_json,
+        view_id,
+        descriptor);
+  }
 
   virtual absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) = 0;
 
@@ -591,6 +646,10 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t capability_flags = 0) override;
 
   absl::Status unregister_worker(std::string_view worker_id, bool is_graceful_shutdown = true) override;
+  absl::Status unregister_worker_idempotent(
+      std::string_view worker_id,
+      bool is_graceful_shutdown = true,
+      std::optional<std::string_view> client_request_id = std::nullopt) override;
 
   // Replica management
   absl::StatusOr<std::string> register_replica(
@@ -601,6 +660,15 @@ class GlobalStoreClient : public IGlobalStoreClient {
       uint64_t memory_size,
       uint32_t max_concurrency = 1,
       std::optional<std::string_view> view_id = std::nullopt) override;
+  absl::StatusOr<std::string> register_replica_idempotent(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      common::memory::MemoryLocation location,
+      uint64_t memory_size,
+      uint32_t max_concurrency = 1,
+      std::optional<std::string_view> view_id = std::nullopt,
+      std::optional<std::string_view> client_request_id = std::nullopt) override;
 
   // Record metadata for a view replica while keeping canonical routing unchanged.
   // This is a placeholder that will be backed by a dedicated Global Store RPC.
@@ -626,6 +694,22 @@ class GlobalStoreClient : public IGlobalStoreClient {
       const std::optional<std::string>& verification_json = std::nullopt,
       std::optional<std::string_view> view_id = std::nullopt,
       const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt) override;
+  absl::StatusOr<std::string> register_memory_replica_idempotent(
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      const DeviceKey& device,
+      uint64_t memory_size,
+      std::string_view tensor_index_key,
+      const std::vector<std::string>& remote_memory_keys,
+      const std::vector<uint64_t>& buffer_sizes,
+      const std::optional<std::string>& tensor_index_data = std::nullopt,
+      std::string_view encoding = "json",
+      std::string_view schema_version = "v3",
+      uint32_t max_concurrency = 1,
+      const std::optional<std::string>& verification_json = std::nullopt,
+      std::optional<std::string_view> view_id = std::nullopt,
+      const std::optional<common::v1::ArtifactDescriptor>& descriptor = std::nullopt,
+      std::optional<std::string_view> client_request_id = std::nullopt) override;
 
   absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override;
 
@@ -787,6 +871,7 @@ class GlobalStoreClient : public IGlobalStoreClient {
       common::memory::MemoryLocation location,
       uint64_t memory_size,
       std::optional<std::string_view> view_id = std::nullopt);
+  static std::string build_client_request_id(std::string_view operation_kind, std::string_view canonical_payload);
   static RemoteReplicaInfo convert_from_proto_memory_info(const common::v1::MemoryInfo& info);
 
   const GlobalStoreClientConfig config_;

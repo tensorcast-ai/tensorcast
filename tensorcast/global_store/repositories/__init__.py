@@ -9,6 +9,7 @@ from .assembly_layout_binding_repository import AssemblyLayoutBindingRepository
 from .assembly_runtime_policy_repository import AssemblyRuntimePolicyRepository
 from .chunk_directory_repository import ChunkDirectoryRepository
 from .cluster_info_repository import ClusterInfoRepository
+from .idempotency_repository import IdempotencyRepository
 from .instance_repository import InstanceRepository
 from .layout_spec_repository import LayoutSpecRepository
 from .leaf_repository import LeafRepository
@@ -33,6 +34,7 @@ __all__ = [
     "AssemblyLayoutBindingRepository",
     "AssemblyRuntimePolicyRepository",
     "InstanceRepository",
+    "IdempotencyRepository",
     "MemoryTierSnapshotRepository",
     "MemoryTierLeaseRepository",
     "ChunkDirectoryRepository",

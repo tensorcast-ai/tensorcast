@@ -157,6 +157,13 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     hb_expected_state_version_ = expected_ver;
   }
 
+  void set_heartbeat_rpc_failure(grpc::StatusCode code, std::string message, int fail_count = -1) {
+    absl::MutexLock l(&mu_);
+    hb_failure_code_ = code;
+    hb_failure_message_ = std::move(message);
+    hb_failure_remaining_ = fail_count < 0 ? -1 : std::max(0, fail_count);
+  }
+
   void set_sync_remove_ids(std::vector<std::string> ids) {
     std::vector<RemoveSpec> specs;
     specs.reserve(ids.size());
@@ -232,9 +239,19 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     return last_registered_daemon_id_;
   }
 
+  uint32_t register_requests() const {
+    absl::MutexLock l(&mu_);
+    return register_requests_;
+  }
+
   uint32_t reconcile_requests() const {
     absl::MutexLock l(&mu_);
     return reconcile_requests_;
+  }
+
+  std::vector<uint64_t> reconcile_request_sequences() const {
+    absl::MutexLock l(&mu_);
+    return reconcile_request_sequences_;
   }
 
   ::grpc::Status HealthCheck(
@@ -252,6 +269,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     {
       absl::MutexLock l(&mu_);
       last_registered_daemon_id_ = req->daemon_id();
+      ++register_requests_;
     }
     resp->set_status(global_store::STATUS_OK);
     resp->set_worker_id("worker-1");
@@ -267,14 +285,26 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
       const global_store::WorkerHeartbeatRequest* req,
       global_store::WorkerHeartbeatResponse* resp) override {
     (void)req;
+    grpc::StatusCode failure_code = grpc::StatusCode::OK;
+    std::string failure_message;
     bool state_sync_required = false;
     uint64_t expected_state_version = 0;
     std::vector<std::string> obsolete_ids;
     {
       absl::MutexLock l(&mu_);
+      if (hb_failure_code_ != grpc::StatusCode::OK && hb_failure_remaining_ != 0) {
+        failure_code = hb_failure_code_;
+        failure_message = hb_failure_message_;
+        if (hb_failure_remaining_ > 0) {
+          --hb_failure_remaining_;
+        }
+      }
       state_sync_required = hb_state_sync_required_;
       expected_state_version = hb_expected_state_version_;
       obsolete_ids = hb_obsolete_ids_;
+    }
+    if (failure_code != grpc::StatusCode::OK) {
+      return ::grpc::Status(failure_code, failure_message);
     }
     resp->set_status(global_store::STATUS_OK);
     resp->set_state_sync_required(state_sync_required);
@@ -296,6 +326,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
     {
       absl::MutexLock l(&mu_);
       ++reconcile_requests_;
+      reconcile_request_sequences_.push_back(req->request_seq());
       if (sync_should_fail_) {
         return ::grpc::Status(::grpc::StatusCode::UNAVAILABLE, "forced reconcile transport failure");
       }
@@ -502,13 +533,18 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
   std::vector<std::string> hb_obsolete_ids_ ABSL_GUARDED_BY(mu_);
   bool hb_state_sync_required_ ABSL_GUARDED_BY(mu_){false};
   uint64_t hb_expected_state_version_ ABSL_GUARDED_BY(mu_){0};
+  grpc::StatusCode hb_failure_code_ ABSL_GUARDED_BY(mu_){grpc::StatusCode::OK};
+  std::string hb_failure_message_ ABSL_GUARDED_BY(mu_);
+  int hb_failure_remaining_ ABSL_GUARDED_BY(mu_){0};
   std::vector<RemoveSpec> sync_remove_specs_ ABSL_GUARDED_BY(mu_);
   bool sync_should_fail_ ABSL_GUARDED_BY(mu_){false};
   global_store::ReconcileResultKind reconcile_result_kind_ ABSL_GUARDED_BY(mu_){
       global_store::RECONCILE_RESULT_KIND_APPLIED};
   uint32_t retry_after_ms_ ABSL_GUARDED_BY(mu_){0};
   int retry_later_remaining_ ABSL_GUARDED_BY(mu_){0};
+  uint32_t register_requests_ ABSL_GUARDED_BY(mu_){0};
   uint32_t reconcile_requests_ ABSL_GUARDED_BY(mu_){0};
+  std::vector<uint64_t> reconcile_request_sequences_ ABSL_GUARDED_BY(mu_);
   std::vector<commonpb::ReplicaInfo> expected_replicas_ ABSL_GUARDED_BY(mu_);
   uint32_t total_chunk_updates_ ABSL_GUARDED_BY(mu_){0};
   std::string last_registered_daemon_id_ ABSL_GUARDED_BY(mu_);
@@ -1141,6 +1177,266 @@ TEST_CASE("WorkerLifecycleManager retries on RETRY_LATER and eventually applies 
   REQUIRE(kept);
   REQUIRE(removed);
   REQUIRE(test_server.service->reconcile_requests() >= 3);
+  const auto reconcile_sequences = test_server.service->reconcile_request_sequences();
+  REQUIRE(reconcile_sequences.size() >= 3);
+  REQUIRE(reconcile_sequences[0] == 1);
+  REQUIRE(reconcile_sequences[1] == 1);
+  REQUIRE(reconcile_sequences[2] == 1);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager suppresses re-registration on heartbeat conflicts", "[daemon][ha][retry]") {
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_hb_conflict";
+  fs::create_directories(temp_root);
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_rpc_failure(
+      grpc::StatusCode::ABORTED,
+      "WorkerHeartbeat transaction conflict: TransactionContext Error: Conflict on tuple deletion!",
+      /*fail_count=*/8);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+  wopts.heartbeat_rpc_timeout_ms = 50;
+  wopts.heartbeat_rpc_max_retries = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  for (int i = 0; i < 80; ++i) {
+    if (test_server.service->register_requests() > 1) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  REQUIRE(test_server.service->register_requests() == 1);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager keeps request_seq stable on transport failures", "[daemon][ha][retry]") {
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_transport_retry";
+  fs::create_directories(temp_root);
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_sync_should_fail(true);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+  wopts.state_sync_rpc_timeout_ms = 50;
+  wopts.state_sync_rpc_max_retries = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  for (int i = 0; i < 300; ++i) {
+    if (test_server.service->reconcile_requests() >= 3) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+
+  const auto reconcile_sequences = test_server.service->reconcile_request_sequences();
+  REQUIRE(reconcile_sequences.size() >= 3);
+  REQUIRE(reconcile_sequences[0] == 1);
+  REQUIRE(reconcile_sequences[1] == 1);
+  REQUIRE(reconcile_sequences[2] == 1);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager bounds re-registration under repeated identity failures", "[daemon][ha][retry]") {
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_hb_not_found";
+  fs::create_directories(temp_root);
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_rpc_failure(
+      grpc::StatusCode::NOT_FOUND,
+      "WorkerHeartbeat failed: worker not found",
+      /*fail_count=*/-1);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+  wopts.heartbeat_rpc_timeout_ms = 50;
+  wopts.heartbeat_rpc_max_retries = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  for (int i = 0; i < 200; ++i) {
+    if (test_server.service->register_requests() >= 2) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+  const auto register_requests = test_server.service->register_requests();
+  REQUIRE(register_requests >= 2);
+  REQUIRE(register_requests <= 7);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager backs off reconcile retries on transport failures", "[daemon][ha][retry]") {
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_transport_backoff";
+  fs::create_directories(temp_root);
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_sync_should_fail(true);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+  wopts.state_sync_rpc_timeout_ms = 50;
+  wopts.state_sync_rpc_max_retries = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1800));
+  const auto reconcile_requests = test_server.service->reconcile_requests();
+  REQUIRE(reconcile_requests >= 2);
+  REQUIRE(reconcile_requests <= 8);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE(
+    "WorkerLifecycleManager tracks outage mode and suppresses duplicate reconcile enqueue",
+    "[daemon][ha][retry][metrics]") {
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_outage_metrics";
+  fs::create_directories(temp_root);
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_sync_should_fail(true);
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/1);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 30;
+  wopts.chunk_sync_interval_ms = 0;
+  wopts.state_sync_rpc_timeout_ms = 50;
+  wopts.state_sync_rpc_max_retries = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+
+  bool outage_observed = false;
+  bool suppress_observed = false;
+  for (int i = 0; i < 200; ++i) {
+    outage_observed = outage_observed || wlm.state_sync_outage_mode_active();
+    suppress_observed = suppress_observed || wlm.state_sync_enqueue_suppressed() > 0;
+    if (outage_observed && suppress_observed) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(outage_observed);
+  REQUIRE(suppress_observed);
+
+  test_server.service->set_sync_should_fail(false);
+  const auto baseline_sync_success = wlm.sync_success();
+  bool recovered = false;
+  for (int i = 0; i < 200; ++i) {
+    if (wlm.sync_success() > baseline_sync_success && !wlm.state_sync_outage_mode_active()) {
+      recovered = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(recovered);
+  REQUIRE(wlm.last_reconnect_latency_ms() >= 0);
 
   wlm.stop();
   test_server.server->Shutdown();

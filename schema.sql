@@ -234,6 +234,19 @@ CREATE TABLE IF NOT EXISTS artifact_indices (
 CREATE INDEX IF NOT EXISTS idx_artifact_indices_created_at ON artifact_indices(created_at);
 CREATE INDEX IF NOT EXISTS idx_artifact_indices_size ON artifact_indices(size_bytes);
 
+-- Control-plane idempotency records (RegisterReplica / UnregisterWorker)
+CREATE TABLE IF NOT EXISTS control_plane_idempotency (
+    client_request_id TEXT PRIMARY KEY,
+    operation_kind TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    response_status TEXT NOT NULL,
+    response_proto BLOB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_control_plane_idempotency_created_at
+    ON control_plane_idempotency(created_at);
+
 -- In-flight artifact transports
 CREATE TABLE IF NOT EXISTS artifact_transports (
     transport_id UUID PRIMARY KEY,

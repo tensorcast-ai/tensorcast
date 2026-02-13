@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -118,6 +119,7 @@ class WorkerLifecycleManager {
   void queue_obsolete_replicas(std::vector<std::string> obsolete);
   void perform_state_sync(uint64_t epoch);
   void retire_thread(std::thread* thread);
+  absl::Status unregister_worker_single_flight(std::string_view worker_id, bool is_graceful_shutdown);
   store::components::RpcOptions build_rpc_options(int timeout_ms, std::optional<int32_t> max_retries) const;
   store::components::StateSyncToken next_state_sync_token();
   void mark_state_sync_progress();
@@ -149,6 +151,8 @@ class WorkerLifecycleManager {
   // explicit shutdown path and destructor). When true, subsequent calls to
   // stop() are no-ops.
   std::atomic<bool> stop_called_{false};
+  // Ensure worker unregister is sent at most once for this lifecycle manager.
+  std::atomic<bool> unregister_worker_submitted_{false};
   std::mutex stop_mu_;
   std::condition_variable stop_cv_;
   std::thread hb_thread_;
@@ -179,6 +183,12 @@ class WorkerLifecycleManager {
   std::atomic<uint64_t> state_sync_epoch_{0};
   std::atomic<uint64_t> state_sync_requests_{0};
   std::atomic<uint64_t> state_sync_request_id_{0};
+  std::atomic<uint64_t> state_sync_enqueue_suppressed_{0};
+  std::atomic<uint32_t> state_sync_consecutive_failures_{0};
+  std::atomic<int64_t> state_sync_next_retry_ns_{0};
+  std::atomic<bool> state_sync_outage_mode_active_{false};
+  std::atomic<int64_t> state_sync_outage_enter_ns_{0};
+  std::atomic<int64_t> last_reconnect_latency_ms_{0};
   std::atomic<int64_t> state_sync_last_progress_ns_{0};
   std::atomic<bool> state_sync_restart_pending_{false};
   std::mutex state_sync_mu_;
@@ -242,6 +252,18 @@ class WorkerLifecycleManager {
 
   bool sync_alive() const {
     return sync_alive_.load();
+  }
+
+  uint64_t state_sync_enqueue_suppressed() const {
+    return state_sync_enqueue_suppressed_.load();
+  }
+
+  bool state_sync_outage_mode_active() const {
+    return state_sync_outage_mode_active_.load();
+  }
+
+  int64_t last_reconnect_latency_ms() const {
+    return last_reconnect_latency_ms_.load();
   }
 };
 

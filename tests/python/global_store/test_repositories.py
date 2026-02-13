@@ -6,12 +6,38 @@ from datetime import datetime, timezone
 
 import pytest
 
+from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
 from tensorcast.global_store.repositories import ArtifactDiskLocationRepository
+from tensorcast.global_store.repositories.base import BaseRepository
 
 
 class TestRepositories:
     """Test repository layer."""
+
+    def test_base_repository_transaction_keeps_primary_error_on_rollback_noop(self):
+        class _FailingCursor:
+            def execute(self, sql: str):
+                if sql == "COMMIT":
+                    raise RuntimeError("commit_conflict")
+                if sql == "ROLLBACK":
+                    raise RuntimeError(
+                        "cannot rollback - no transaction is active"
+                    )
+                return self
+
+            def close(self):
+                return None
+
+        class _FailingConnection:
+            def cursor(self):
+                return _FailingCursor()
+
+        repo = BaseRepository(_FailingConnection())  # type: ignore[arg-type]
+        with pytest.raises(DatabaseError) as exc, repo.transaction():
+            pass
+        assert "commit_conflict" in str(exc.value)
+        assert "UnboundLocalError" not in str(exc.value)
 
     def test_worker_repository_crud(self, repositories):
         """Test Worker CRUD operations."""

@@ -8,6 +8,7 @@ from importlib import resources
 import duckdb
 from duckdb import DuckDBPyConnection
 
+from tensorcast.global_store.repositories.base import db_execution_lock
 from tensorcast.logger import init_logger
 
 logger = init_logger(__name__)
@@ -80,14 +81,15 @@ def _resolve_schema_path() -> str:
 def init_db(db: DuckDBPyConnection) -> None:
     sql_file_path = _resolve_schema_path()
     statements = parse_sql_file(sql_file_path)
-    for statement in statements:
-        if statement.strip():  # 只执行非空语句
-            try:
-                db.execute(statement)
-                logger.debug(f"Executed SQL: {statement[:50]}...")
-            except Exception:
-                logger.exception("Failed to execute SQL statement: %s", statement)
-                raise
+    with db_execution_lock():
+        for statement in statements:
+            if statement.strip():  # 只执行非空语句
+                try:
+                    db.execute(statement)
+                    logger.debug(f"Executed SQL: {statement[:50]}...")
+                except Exception:
+                    logger.exception("Failed to execute SQL statement: %s", statement)
+                    raise
 
 
 def optimize_db(db: DuckDBPyConnection) -> None:
@@ -96,7 +98,12 @@ def optimize_db(db: DuckDBPyConnection) -> None:
     Currently targets `replica_counters`, which receives frequent updates.
     """
     try:
-        db.execute("VACUUM replica_counters;")
+        with db_execution_lock():
+            cursor = db.cursor()
+            try:
+                cursor.execute("VACUUM replica_counters;")
+            finally:
+                cursor.close()
         # Note: DuckDB doesn't support OPTIMIZE command like PostgreSQL
         # VACUUM already performs optimization for DuckDB
         logger.debug("Database maintenance (VACUUM) finished for replica_counters")

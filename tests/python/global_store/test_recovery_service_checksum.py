@@ -2,6 +2,7 @@
 
 from tensorcast.global_store.config import GlobalStoreConfig
 from tensorcast.global_store.config.settings import get_config, set_config
+from tensorcast.global_store.exceptions import DatabaseError
 from tensorcast.global_store.models import MemoryType, Replica, Worker
 from tensorcast.global_store.services.recovery_service import RecoveryService
 from tensorcast.global_store.services.worker_service import WorkerService
@@ -305,7 +306,7 @@ def test_availability_drift_triggers_update(repositories):
     assert new_checksum == expected_checksum
 
 
-def test_stale_reconcile_request_is_ignored(repositories):
+def test_reconcile_replay_is_idempotent_and_stale_lower_seq_is_ignored(repositories):
     recovery = _make_recovery_service(repositories)
     worker_id = "worker-stale"
     repositories["worker"].create_or_update(
@@ -333,6 +334,29 @@ def test_stale_reconcile_request_is_ignored(repositories):
         global_store_pb2.RECONCILE_RESULT_KIND_APPLIED,
         global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
     )
+
+    second = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
+    )
+    assert second[0] in (
+        global_store_pb2.RECONCILE_RESULT_KIND_APPLIED,
+        global_store_pb2.RECONCILE_RESULT_KIND_NOOP,
+    )
+
+    replay = _reconcile(
+        recovery=recovery,
+        worker_id=worker_id,
+        generation=1,
+        request_seq=2,
+        inventory=[],
+        request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_DELTA,
+    )
+    assert replay[0] == global_store_pb2.RECONCILE_RESULT_KIND_NOOP
 
     stale = _reconcile(
         recovery=recovery,
@@ -423,3 +447,55 @@ def test_endpoint_drift_triggers_update(repositories):
         ]
     )
     assert new_checksum == expected_checksum
+
+
+def test_transient_reconcile_conflict_exhausted_returns_retry_later(
+    repositories,
+    monkeypatch,
+):
+    recovery = _make_recovery_service(repositories)
+    worker_id = "worker-conflict-retry-later"
+
+    repositories["worker"].create_or_update(
+        Worker(
+            worker_id=worker_id,
+            daemon_id="daemon-conflict-retry-later",
+            node_id="node-conflict-retry-later",
+            node_address="10.0.0.40",
+            grpc_port=50051,
+            p2p_port=65090,
+            mem_pool_total_size=2048,
+            mem_pool_available_size=2048,
+        )
+    )
+
+    def _always_conflict(**kwargs):
+        del kwargs
+        raise DatabaseError(
+            "Transaction failed: TransactionContext Error: Conflict on tuple deletion!"
+        )
+
+    monkeypatch.setattr(
+        recovery,
+        "_reconcile_worker_state_internal",
+        _always_conflict,
+    )
+
+    result_kind, version, checksum, state_changes, expected_replicas, retry_after_ms = (
+        _reconcile(
+            recovery=recovery,
+            worker_id=worker_id,
+            generation=1,
+            request_seq=1,
+            inventory=[],
+            request_kind=global_store_pb2.RECONCILE_REQUEST_KIND_SNAPSHOT,
+            daemon_id="daemon-conflict-retry-later",
+        )
+    )
+
+    assert result_kind == global_store_pb2.RECONCILE_RESULT_KIND_RETRY_LATER
+    assert version >= 1
+    assert isinstance(checksum, str)
+    assert state_changes == []
+    assert expected_replicas == []
+    assert retry_after_ms == 500

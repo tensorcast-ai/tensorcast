@@ -71,6 +71,10 @@ from tensorcast.global_store.repositories.artifact_index_repository import (
     ArtifactIndexRepository,
 )
 from tensorcast.global_store.repositories.artifact_repository import ArtifactRepository
+from tensorcast.global_store.repositories.base import db_execution_lock
+from tensorcast.global_store.repositories.idempotency_repository import (
+    IdempotencyRepository,
+)
 from tensorcast.global_store.repositories.key_mapping_repository import (
     KeyMappingRepository,
 )
@@ -210,6 +214,7 @@ class GlobalStoreServicer(
         self.artifact_indices = ArtifactIndexRepository(self.connection)
         self.transport_repository = TransportRepository(self.connection)
         self.worker_repository = WorkerRepository(self.connection)
+        self.idempotency_repository = IdempotencyRepository(self.connection)
         self.instance_repository = InstanceRepository(self.connection)
         self.chunk_directory_repository = ChunkDirectoryRepository(self.connection)
         self.view_repository = ViewRepository(self.connection)
@@ -363,8 +368,12 @@ class GlobalStoreServicer(
             self.connection = duckdb.connect(str(db_path))
 
         # Initialize database schema
-        cursor = self.connection.cursor()
-        init_db(cursor)
+        with db_execution_lock():
+            cursor = self.connection.cursor()
+            try:
+                init_db(cursor)
+            finally:
+                cursor.close()
 
         self._init_repositories()
         self._init_catalog_handlers()
@@ -395,6 +404,7 @@ class GlobalStoreServicer(
             artifact_service=self.artifact_service,
             artifact_repository=self.artifacts_repo,
             artifact_index_repository=self.artifact_indices,
+            idempotency_repository=self.idempotency_repository,
             memory_info_to_replica_artifact_id=self._memory_info_to_replica_artifact_id,
             index_bytes_to_multibase_sha256=index_bytes_to_multibase_sha256,
             hex_sha256_to_multibase=hex_sha256_to_multibase,
@@ -460,6 +470,7 @@ class GlobalStoreServicer(
         self.worker_rpc_handler = WorkerRpcHandler(
             worker_service=self.worker_service,
             worker_repository=self.worker_repository,
+            idempotency_repository=self.idempotency_repository,
             recovery_service=self.recovery_service,
             default_heartbeat_interval_ms=self.config.default_heartbeat_interval_ms,
             determine_worker_status=self._determine_worker_status,
@@ -793,8 +804,6 @@ class GlobalStoreServicer(
         slate while keeping the same DuckDB connection and background worker
         threads alive.
         """
-        cursor = self.connection.cursor()
-
         # Order matters due to foreign-key constraints (replica_counters ➜ artifact_replicas)
         tables = [
             "artifact_transports",  # Depends on artifact_replicas via replica_id FK
@@ -808,11 +817,18 @@ class GlobalStoreServicer(
             "workers",
             "instances",
         ]
-        for table in tables:
+        with db_execution_lock():
+            cursor = self.connection.cursor()
             try:
-                cursor.execute(f"DELETE FROM {table}")
-            except Exception:  # noqa: BLE001 – best-effort cleanup for tests
-                logger.exception(f"Failed to truncate table {table} during reset_state")
+                for table in tables:
+                    try:
+                        cursor.execute(f"DELETE FROM {table}")
+                    except Exception:  # noqa: BLE001 – best-effort cleanup for tests
+                        logger.exception(
+                            f"Failed to truncate table {table} during reset_state"
+                        )
+            finally:
+                cursor.close()
 
         # Reset Prometheus gauges that might retain state across tests
         try:

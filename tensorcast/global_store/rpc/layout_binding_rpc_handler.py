@@ -18,6 +18,7 @@ from tensorcast.global_store.repositories.artifact_repository import ArtifactRep
 from tensorcast.global_store.repositories.assembly_layout_binding_repository import (
     AssemblyLayoutBindingRepository,
 )
+from tensorcast.global_store.repositories.base import db_execution_lock
 from tensorcast.global_store.repositories.layout_spec_repository import (
     LayoutSpecRepository,
 )
@@ -94,15 +95,20 @@ class LayoutBindingRpcHandler:
             )
 
     def _assembly_has_any_cross_view_overlap(self, *, assembly_id: str) -> bool:
-        rows = self._connection.execute(
-            """
-            SELECT view_id, range_offset, range_length
-            FROM view_coverage_ranges
-            WHERE artifact_id = ?
-            ORDER BY range_offset ASC
-            """,
-            [assembly_id],
-        ).fetchall()
+        with db_execution_lock():
+            cursor = self._connection.cursor()
+            try:
+                rows = cursor.execute(
+                    """
+                    SELECT view_id, range_offset, range_length
+                    FROM view_coverage_ranges
+                    WHERE artifact_id = ?
+                    ORDER BY range_offset ASC
+                    """,
+                    [assembly_id],
+                ).fetchall()
+            finally:
+                cursor.close()
         max_end = -1
         max_view: str | None = None
         for row in rows:
@@ -144,21 +150,26 @@ class LayoutBindingRpcHandler:
             if expected_version == 0 and (
                 not artifact_row or not artifact_row.get("index_multihash")
             ):
-                self._connection.execute(
-                    """
-                    INSERT INTO artifacts (
-                        artifact_id,
-                        index_multihash,
-                        data_multihash,
-                        schema_version,
-                        encoding,
-                        hash_params_json,
-                        id_kind
-                    ) VALUES (?, ?, NULL, 'v3', 'json', NULL, 'CGID')
-                    ON CONFLICT (artifact_id) DO NOTHING
-                    """,
-                    [assembly_id, str(layout_row.get("index_multihash"))],
-                )
+                with db_execution_lock():
+                    cursor = self._connection.cursor()
+                    try:
+                        cursor.execute(
+                            """
+                            INSERT INTO artifacts (
+                                artifact_id,
+                                index_multihash,
+                                data_multihash,
+                                schema_version,
+                                encoding,
+                                hash_params_json,
+                                id_kind
+                            ) VALUES (?, ?, NULL, 'v3', 'json', NULL, 'CGID')
+                            ON CONFLICT (artifact_id) DO NOTHING
+                            """,
+                            [assembly_id, str(layout_row.get("index_multihash"))],
+                        )
+                    finally:
+                        cursor.close()
                 artifact_row = self._artifact_repository.get(assembly_id)
             if not artifact_row or not artifact_row.get("index_multihash"):
                 raise ValidationError("canonical index not recorded for assembly_id")

@@ -14,9 +14,11 @@ from dataclasses import dataclass, field
 from typing import TypeVar
 
 from tensorcast.global_store.metrics import (
+    inc_worker_control_reducer_intent,
     observe_worker_control_reducer_queue_latency,
     set_worker_control_reducer_queue_depth,
 )
+from tensorcast.global_store.repositories.base import bind_tx_context
 from tensorcast.global_store.services.worker_control_intents import WorkerControlIntent
 
 T = TypeVar("T")
@@ -123,17 +125,46 @@ class WorkerControlReducer:
                 ):
                     pending.operation = operation
                     pending.futures.append(future)
+                    inc_worker_control_reducer_intent(
+                        shard=shard.shard_id,
+                        kind=kind,
+                        result="coalesced",
+                    )
+                    self._logger.debug(
+                        "Worker control reducer heartbeat coalesced worker_key=%s shard=%s queue_depth=%s",
+                        worker_key,
+                        shard.shard_id,
+                        shard.queue.qsize(),
+                    )
                     return future.result(timeout=timeout_s)
                 shard.pending_heartbeats[worker_key] = intent
         try:
             shard.queue.put_nowait(intent)
+            queue_depth = shard.queue.qsize()
             set_worker_control_reducer_queue_depth(
-                shard=shard.shard_id, depth=shard.queue.qsize()
+                shard=shard.shard_id, depth=queue_depth
+            )
+            inc_worker_control_reducer_intent(
+                shard=shard.shard_id,
+                kind=kind,
+                result="submitted",
             )
         except queue.Full as exc:
             if kind == "heartbeat":
                 with shard.lock:
                     shard.pending_heartbeats.pop(worker_key, None)
+            inc_worker_control_reducer_intent(
+                shard=shard.shard_id,
+                kind=kind,
+                result="overloaded",
+            )
+            self._logger.warning(
+                "Worker control reducer queue full worker_key=%s kind=%s shard=%s queue_depth=%s",
+                worker_key,
+                kind,
+                shard.shard_id,
+                shard.queue.qsize(),
+            )
             raise ReducerOverloadedError(
                 f"worker control reducer shard={shard.shard_id} queue is full"
             ) from exc
@@ -155,18 +186,37 @@ class WorkerControlReducer:
             wait_s = max(0.0, time.monotonic() - intent.enqueued_at_s)
             observe_worker_control_reducer_queue_latency(wait_seconds=wait_s)
             try:
-                result = intent.operation()
+                with bind_tx_context(
+                    source="worker_control_reducer",
+                    intent_kind=intent.kind,
+                    worker_key=intent.worker_key,
+                    reducer_shard=shard.shard_id,
+                ):
+                    result = intent.operation()
+                inc_worker_control_reducer_intent(
+                    shard=shard.shard_id,
+                    kind=intent.kind,
+                    result="succeeded",
+                )
                 for future in intent.futures:
                     if not future.done():
                         future.set_result(result)
             except Exception as exc:  # noqa: BLE001
+                inc_worker_control_reducer_intent(
+                    shard=shard.shard_id,
+                    kind=intent.kind,
+                    result="failed",
+                )
                 for future in intent.futures:
                     if not future.done():
                         future.set_exception(exc)
                 self._logger.exception(
-                    "Worker control reducer intent failed kind=%s worker_key=%s",
+                    "Worker control reducer intent failed kind=%s worker_key=%s shard=%s queue_depth=%s wait_seconds=%.6f",
                     intent.kind,
                     intent.worker_key,
+                    shard.shard_id,
+                    shard.queue.qsize(),
+                    wait_s,
                 )
             finally:
                 if intent.kind == "heartbeat":

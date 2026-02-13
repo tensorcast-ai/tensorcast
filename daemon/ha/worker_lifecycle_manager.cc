@@ -24,6 +24,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/ascii.h"
 #include "absl/strings/str_format.h"
 #include "absl/strings/string_view.h"
 #include "absl/time/clock.h"
@@ -166,6 +167,128 @@ opentelemetry::metrics::Counter<uint64_t>* sync_failure_counter() {
   static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
   static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_sync_failure_total");
   return ctr.get();
+}
+
+opentelemetry::metrics::Counter<uint64_t>* reconcile_enqueue_suppressed_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateUInt64Counter("tc_daemon_ha_reconcile_enqueue_suppressed_total");
+  return ctr.get();
+}
+
+opentelemetry::metrics::UpDownCounter<int64_t>* outage_mode_active_counter() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto ctr = meter->CreateInt64UpDownCounter("tc_daemon_ha_outage_mode_active");
+  return ctr.get();
+}
+
+opentelemetry::metrics::Histogram<double>* reconnect_latency_histogram_ms() {
+  static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+  static auto hist = meter->CreateDoubleHistogram("tc_daemon_ha_reconnect_latency_ms");
+  return hist.get();
+}
+
+enum class HeartbeatFailureClass {
+  kConflict,
+  kIdentity,
+  kConnectivity,
+  kOther,
+};
+
+const char* heartbeat_failure_class_to_cstr(HeartbeatFailureClass klass) {
+  switch (klass) {
+    case HeartbeatFailureClass::kConflict:
+      return "conflict";
+    case HeartbeatFailureClass::kIdentity:
+      return "identity";
+    case HeartbeatFailureClass::kConnectivity:
+      return "connectivity";
+    case HeartbeatFailureClass::kOther:
+    default:
+      return "other";
+  }
+}
+
+bool message_contains_marker(absl::string_view message, std::initializer_list<absl::string_view> markers) {
+  const std::string lowered = absl::AsciiStrToLower(message);
+  return std::any_of(markers.begin(), markers.end(), [&](absl::string_view marker) {
+    return lowered.find(marker) != std::string::npos;
+  });
+}
+
+HeartbeatFailureClass classify_heartbeat_failure(const absl::Status& status) {
+  if (absl::IsAborted(status) ||
+      message_contains_marker(
+          status.message(),
+          {"write-write conflict", "conflict on tuple deletion", "conflict on update", "serialization"})) {
+    return HeartbeatFailureClass::kConflict;
+  }
+  if (absl::IsNotFound(status) || absl::IsFailedPrecondition(status) ||
+      message_contains_marker(status.message(), {"status_not_found", "worker not found"})) {
+    return HeartbeatFailureClass::kIdentity;
+  }
+  if (absl::IsUnavailable(status) || absl::IsDeadlineExceeded(status) || absl::IsCancelled(status) ||
+      absl::IsResourceExhausted(status)) {
+    return HeartbeatFailureClass::kConnectivity;
+  }
+  return HeartbeatFailureClass::kOther;
+}
+
+std::chrono::milliseconds bounded_backoff(
+    uint32_t failure_count,
+    std::chrono::milliseconds base,
+    std::chrono::milliseconds max_backoff) {
+  if (failure_count == 0) {
+    return base;
+  }
+  const uint32_t shift = std::min<uint32_t>(failure_count - 1, 8);
+  const auto multiplier = static_cast<int64_t>(1ULL << shift);
+  const auto candidate = std::chrono::milliseconds(base.count() * multiplier);
+  return std::min(candidate, max_backoff);
+}
+
+enum class StateSyncFailureClass {
+  kConflict,
+  kConnectivity,
+  kOther,
+};
+
+const char* state_sync_failure_class_to_cstr(StateSyncFailureClass klass) {
+  switch (klass) {
+    case StateSyncFailureClass::kConflict:
+      return "conflict";
+    case StateSyncFailureClass::kConnectivity:
+      return "connectivity";
+    case StateSyncFailureClass::kOther:
+    default:
+      return "other";
+  }
+}
+
+StateSyncFailureClass classify_state_sync_failure(const absl::Status& status) {
+  if (absl::IsAborted(status) ||
+      message_contains_marker(
+          status.message(),
+          {"write-write conflict", "conflict on tuple deletion", "conflict on update", "serialization"})) {
+    return StateSyncFailureClass::kConflict;
+  }
+  if (absl::IsUnavailable(status) || absl::IsDeadlineExceeded(status) || absl::IsCancelled(status) ||
+      absl::IsResourceExhausted(status) ||
+      message_contains_marker(status.message(), {"connection refused", "failed to connect to all addresses"})) {
+    return StateSyncFailureClass::kConnectivity;
+  }
+  return StateSyncFailureClass::kOther;
+}
+
+std::chrono::milliseconds state_sync_failure_backoff(StateSyncFailureClass failure_class, uint32_t failure_count) {
+  switch (failure_class) {
+    case StateSyncFailureClass::kConnectivity:
+      return bounded_backoff(failure_count, 500ms, 30s);
+    case StateSyncFailureClass::kConflict:
+      return bounded_backoff(failure_count, 100ms, 3s);
+    case StateSyncFailureClass::kOther:
+    default:
+      return bounded_backoff(failure_count, 200ms, 10s);
+  }
 }
 
 bool is_loopback_or_unspecified(absl::string_view addr) {
@@ -411,6 +534,12 @@ absl::Status WorkerLifecycleManager::start() {
   const uint64_t epoch_seed = static_cast<uint64_t>(absl::ToUnixNanos(absl::Now()));
   state_sync_epoch_.store(epoch_seed);
   state_sync_request_id_.store(0);
+  state_sync_enqueue_suppressed_.store(0);
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
+  state_sync_outage_mode_active_.store(false);
+  state_sync_outage_enter_ns_.store(0);
+  last_reconnect_latency_ms_.store(0);
   state_sync_last_progress_ns_.store(0);
   state_sync_restart_pending_.store(false);
 
@@ -478,6 +607,12 @@ void WorkerLifecycleManager::stop() {
     return;
   }
   stop_.store(true);
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+  }
+  state_sync_outage_enter_ns_.store(0);
   stop_cv_.notify_all();
   state_sync_cv_.notify_all();
   sync_success_cv_.notify_all();
@@ -521,7 +656,7 @@ void WorkerLifecycleManager::stop() {
   }
   if (!worker_id_snapshot.empty()) {
     const std::string id = worker_id_snapshot;
-    auto st = global_store_->unregister_worker(id, /*is_graceful_shutdown=*/true);
+    auto st = unregister_worker_single_flight(id, /*is_graceful_shutdown=*/true);
     if (!st.ok()) {
       LOG(WARNING) << "GlobalStore unregister_worker failed: " << st;
     } else {
@@ -531,6 +666,19 @@ void WorkerLifecycleManager::stop() {
       worker_id_.clear();
     }
   }
+}
+
+absl::Status WorkerLifecycleManager::unregister_worker_single_flight(
+    std::string_view worker_id,
+    bool is_graceful_shutdown) {
+  bool expected = false;
+  if (!unregister_worker_submitted_.compare_exchange_strong(expected, true)) {
+    VLOG(1) << "Skipping duplicate GlobalStore unregister_worker for worker_id=" << worker_id;
+    return absl::OkStatus();
+  }
+
+  std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+  return global_store_->unregister_worker_idempotent(worker_id, is_graceful_shutdown);
 }
 
 bool WorkerLifecycleManager::wait_for_stop(std::chrono::milliseconds interval) {
@@ -554,7 +702,7 @@ store::components::RpcOptions WorkerLifecycleManager::build_rpc_options(
 store::components::StateSyncToken WorkerLifecycleManager::next_state_sync_token() {
   return store::components::StateSyncToken{
       .generation = reconcile_generation_.load(),
-      .request_seq = state_sync_request_id_.fetch_add(1) + 1,
+      .request_seq = state_sync_request_id_.load() + 1,
   };
 }
 
@@ -579,7 +727,14 @@ std::optional<std::chrono::milliseconds> WorkerLifecycleManager::state_sync_stal
 }
 
 void WorkerLifecycleManager::request_state_sync() {
-  state_sync_requests_.fetch_add(1);
+  uint64_t expected = 0;
+  if (!state_sync_requests_.compare_exchange_strong(expected, 1)) {
+    state_sync_enqueue_suppressed_.fetch_add(1);
+    if (auto* counter = reconcile_enqueue_suppressed_counter()) {
+      counter->Add(1);
+    }
+    return;
+  }
   state_sync_cv_.notify_all();
 }
 
@@ -617,6 +772,9 @@ void WorkerLifecycleManager::heartbeat_loop() {
   hb_alive_.store(true);
   const uint64_t epoch = hb_epoch_.load();
   const auto interval = std::chrono::milliseconds(opts_.heartbeat_interval_ms);
+  uint32_t consecutive_heartbeat_failures = 0;
+  uint32_t consecutive_reregister_failures = 0;
+  auto next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
   try {
     while (!stop_.load() && hb_epoch_.load() == epoch) {
       // Prepare enhanced heartbeat fields
@@ -668,22 +826,57 @@ void WorkerLifecycleManager::heartbeat_loop() {
       if (stop_.load() || hb_epoch_.load() != epoch) {
         break;
       }
+      auto loop_delay = interval;
       if (!hb_or.ok()) {
-        LOG(WARNING) << "Enhanced heartbeat failed: " << hb_or.status().message();
+        const absl::Status hb_status = hb_or.status();
+        ++consecutive_heartbeat_failures;
+        const HeartbeatFailureClass failure_class = classify_heartbeat_failure(hb_status);
+        const auto heartbeat_backoff = bounded_backoff(consecutive_heartbeat_failures, std::max(interval, 100ms), 5s);
+        loop_delay = std::max(loop_delay, heartbeat_backoff);
+        LOG(WARNING) << "Enhanced heartbeat failed: " << hb_status
+                     << " class=" << heartbeat_failure_class_to_cstr(failure_class)
+                     << " consecutive_failures=" << consecutive_heartbeat_failures
+                     << " backoff_ms=" << loop_delay.count();
         hb_failure_.fetch_add(1);
         if (auto* counter = hb_failure_counter()) {
           counter->Add(1);
         }
-        // If connection is healthy but server rejected (e.g., NOT_FOUND after GS restart),
-        // perform recovery-aware re-registration to preserve identity.
-        if (global_store_->is_connected()) {
-          auto st_re = reregister_worker(/*preserve_identity=*/true);
-          if (!st_re.ok()) {
-            LOG(WARNING) << "Re-registration attempt failed: " << st_re;
+        // Re-registration is reserved for identity-loss failures (e.g., worker row
+        // missing after control-plane restart). Conflict/connectivity classes stay
+        // on backoff-only path to prevent re-registration storms.
+        if (failure_class == HeartbeatFailureClass::kIdentity && global_store_->is_connected()) {
+          const auto now = std::chrono::steady_clock::now();
+          if (now >= next_reregister_attempt_at) {
+            auto st_re = reregister_worker(/*preserve_identity=*/true);
+            if (!st_re.ok()) {
+              ++consecutive_reregister_failures;
+              const auto reregister_backoff = bounded_backoff(consecutive_reregister_failures, 200ms, 10s);
+              next_reregister_attempt_at = now + reregister_backoff;
+              loop_delay = std::max(loop_delay, reregister_backoff);
+              LOG(WARNING) << "Re-registration attempt failed: " << st_re
+                           << " consecutive_reregister_failures=" << consecutive_reregister_failures
+                           << " next_reregister_backoff_ms=" << reregister_backoff.count();
+            } else {
+              consecutive_reregister_failures = 0;
+              next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
+            }
+          } else {
+            const auto until_next =
+                std::chrono::duration_cast<std::chrono::milliseconds>(next_reregister_attempt_at - now);
+            if (until_next.count() > 0) {
+              loop_delay = std::max(loop_delay, until_next);
+              VLOG(1) << "Skipping re-registration due to cooldown for worker_id=" << worker_id
+                      << " wait_ms=" << until_next.count();
+            }
           }
+        } else if (failure_class == HeartbeatFailureClass::kConflict) {
+          VLOG(1) << "Suppressing re-registration for conflict-class heartbeat failure";
         }
       } else {
         const auto& hb = *hb_or;
+        consecutive_heartbeat_failures = 0;
+        consecutive_reregister_failures = 0;
+        next_reregister_attempt_at = std::chrono::steady_clock::time_point::min();
         hb_success_.fetch_add(1);
         if (auto* counter = hb_success_counter()) {
           counter->Add(1);
@@ -706,7 +899,7 @@ void WorkerLifecycleManager::heartbeat_loop() {
           request_state_sync();
         }
       }
-      if (wait_for_stop(interval)) {
+      if (wait_for_stop(loop_delay)) {
         break;
       }
       if (hb_epoch_.load() != epoch) {
@@ -820,6 +1013,25 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   state_sync_inflight_.store(true);
   absl::Cleanup inflight_guard([this]() { state_sync_inflight_.store(false); });
   mark_state_sync_progress();
+  const int64_t next_retry_ns = state_sync_next_retry_ns_.load();
+  if (next_retry_ns > 0) {
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (now_ns < next_retry_ns) {
+      const auto wait_duration =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::nanoseconds(next_retry_ns - now_ns));
+      if (wait_duration.count() > 0) {
+        VLOG(1) << "State sync retry backoff active; delaying reconcile for " << wait_duration.count() << "ms";
+        if (wait_for_stop(wait_duration)) {
+          return;
+        }
+        if (stop_.load() || state_sync_epoch_.load() != epoch) {
+          return;
+        }
+      }
+    }
+  }
   const auto inventory = engine_->get_ha_inventory();
   std::string worker_id;
   std::string node_address;
@@ -937,21 +1149,44 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   }
 
   absl::StatusOr<store::components::StateSyncResult> sync_or;
+  const auto sync_token = next_state_sync_token();
   {
-    std::lock_guard<std::mutex> lock(worker_control_plane_rpc_mu_);
+    std::scoped_lock lock(worker_control_plane_rpc_mu_);
     sync_or = global_store_->reconcile_worker_state(
         worker_id,
         daemon_id_,
         inventory_proto,
         /*snapshot_request=*/true,
-        next_state_sync_token(),
+        sync_token,
         build_rpc_options(opts_.state_sync_rpc_timeout_ms, opts_.state_sync_rpc_max_retries));
   }
   if (stop_.load() || state_sync_epoch_.load() != epoch) {
     return;
   }
   if (!sync_or.ok()) {
-    VLOG(1) << "ReconcileWorkerState returned: " << sync_or.status();
+    const absl::Status sync_status = sync_or.status();
+    const StateSyncFailureClass failure_class = classify_state_sync_failure(sync_status);
+    const int64_t now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    if (failure_class == StateSyncFailureClass::kConnectivity) {
+      bool expected_outage = false;
+      if (state_sync_outage_mode_active_.compare_exchange_strong(expected_outage, true)) {
+        state_sync_outage_enter_ns_.store(now_ns);
+        if (auto* gauge = outage_mode_active_counter()) {
+          gauge->Add(1);
+        }
+      }
+    }
+    const uint32_t consecutive_failures = state_sync_consecutive_failures_.fetch_add(1) + 1;
+    const auto retry_delay = state_sync_failure_backoff(failure_class, consecutive_failures);
+    const int64_t retry_not_before_ns =
+        now_ns + std::chrono::duration_cast<std::chrono::nanoseconds>(retry_delay).count();
+    state_sync_next_retry_ns_.store(retry_not_before_ns);
+    LOG(WARNING) << "ReconcileWorkerState returned: " << sync_status
+                 << " class=" << state_sync_failure_class_to_cstr(failure_class)
+                 << " consecutive_failures=" << consecutive_failures
+                 << " next_retry_backoff_ms=" << retry_delay.count();
     sync_failure_.fetch_add(1);
     if (auto* counter = sync_failure_counter()) {
       counter->Add(1);
@@ -959,6 +1194,25 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     request_state_sync();
     return;
   }
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+    const int64_t outage_enter_ns = state_sync_outage_enter_ns_.exchange(0);
+    if (outage_enter_ns > 0) {
+      const int64_t now_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      const int64_t latency_ns = std::max<int64_t>(0, now_ns - outage_enter_ns);
+      const int64_t latency_ms = latency_ns / 1000000;
+      last_reconnect_latency_ms_.store(latency_ms);
+      if (auto* hist = reconnect_latency_histogram_ms()) {
+        hist->Record(static_cast<double>(latency_ms), opentelemetry::context::Context{});
+      }
+    }
+  }
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
   mark_state_sync_progress();
 
   auto record_sync_success = [this, epoch, &sync_or](int64_t last_sync_success) {
@@ -976,6 +1230,18 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
       counter->Add(1);
     }
     last_sync_ts_s_.store(last_sync_success);
+  };
+
+  auto ack_state_sync_token = [this, sync_token]() {
+    if (sync_token.request_seq == 0) {
+      return;
+    }
+    const uint64_t expected_previous = sync_token.request_seq - 1;
+    uint64_t observed_previous = expected_previous;
+    if (!state_sync_request_id_.compare_exchange_strong(observed_previous, sync_token.request_seq)) {
+      VLOG(1) << "Skipping reconcile request_seq ack due to concurrent cursor update: expected_prev="
+              << expected_previous << " observed_prev=" << observed_previous << " ack_seq=" << sync_token.request_seq;
+    }
   };
 
   auto apply_state_changes = [this, &inventory, &sync_or]() {
@@ -1093,6 +1359,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
   switch (sync_or->result_kind) {
     case store::components::ReconcileResultKind::kApplied:
     case store::components::ReconcileResultKind::kNoop: {
+      ack_state_sync_token();
       record_sync_success(reconcile_ts_s);
       if (stop_.load() || state_sync_epoch_.load() != epoch) {
         return;
@@ -1102,11 +1369,13 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     }
     case store::components::ReconcileResultKind::kIgnoredStale:
       VLOG(1) << "ReconcileWorkerState returned IGNORED_STALE for worker_id=" << worker_id;
+      ack_state_sync_token();
       record_sync_success(reconcile_ts_s);
       return;
     case store::components::ReconcileResultKind::kRebaseRequired:
       VLOG(1) << "ReconcileWorkerState requested REBASE for worker_id=" << worker_id
               << " expected_replicas=" << sync_or->expected_replicas.size();
+      ack_state_sync_token();
       record_sync_success(reconcile_ts_s);
       if (stop_.load() || state_sync_epoch_.load() != epoch) {
         return;
@@ -1187,6 +1456,16 @@ absl::Status WorkerLifecycleManager::reregister_worker(bool preserve_identity) {
     last_sync_success_ts_ = 0;
   }
   state_sync_request_id_.store(0);
+  state_sync_enqueue_suppressed_.store(0);
+  state_sync_consecutive_failures_.store(0);
+  state_sync_next_retry_ns_.store(0);
+  if (state_sync_outage_mode_active_.exchange(false)) {
+    if (auto* gauge = outage_mode_active_counter()) {
+      gauge->Add(-1);
+    }
+  }
+  state_sync_outage_enter_ns_.store(0);
+  last_reconnect_latency_ms_.store(0);
   ports_.identity_store.set_registered(new_worker_id, node_id_);
   engine_->set_worker_identity(new_worker_id, node_id_, node_addr, grpc_port, opts_.p2p_port);
   // Bootstrap reconcile once after re-registration.
