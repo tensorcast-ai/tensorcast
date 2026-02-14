@@ -39,11 +39,23 @@ tensorcast::store::StoreEngineOptions make_engine_opts(const std::filesystem::pa
 
 class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
+  void set_mapping(std::string key, std::string artifact_id, uint64_t generation, uint32_t ttl_seconds) {
+    tensorcast::store::components::KeyMapping mapping;
+    mapping.artifact_id = std::move(artifact_id);
+    mapping.generation = generation;
+    mapping.cache_ttl_seconds = ttl_seconds;
+    mappings_[std::move(key)] = std::move(mapping);
+  }
+
   bool is_connected() const override {
-    return true;
+    return connected;
   }
 
   absl::StatusOr<tensorcast::store::components::KeyMapping> resolve_key_mapping(std::string_view key) override {
+    if (!connected) {
+      return absl::UnavailableError("disconnected");
+    }
+    ++resolve_calls;
     auto it = mappings_.find(std::string(key));
     if (it == mappings_.end()) {
       return absl::NotFoundError("key not found");
@@ -65,6 +77,8 @@ class KeyMappingGlobalStoreClient final : public tensorcast::store::testing::Glo
     return absl::OkStatus();
   }
 
+  bool connected{true};
+  int resolve_calls{0};
   std::string last_key;
   std::string last_artifact_id;
 
@@ -105,4 +119,99 @@ TEST_CASE("PublishReplicaKey upserts key mapping", "[daemon][key-mapping]") {
   REQUIRE(resp.ok());
   REQUIRE(gs_client->last_key == "key-1");
   REQUIRE(gs_client->last_artifact_id == "mi2:test");
+}
+
+TEST_CASE("ResolveKeyMapping serves daemon-local cache when Global Store is unavailable", "[daemon][key-mapping]") {
+  const auto root = test_root();
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto storage_root = root / "storage_root";
+  std::filesystem::create_directories(storage_root);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
+  auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::PublishReplicaKeyRequest publish_req;
+  publish_req.set_key("key-cache-1");
+  publish_req.mutable_artifact_descriptor()->set_artifact_id("mi2:test-cache");
+  grpc::ServerContext publish_ctx;
+  tensorcast::daemon::v2::PublishReplicaKeyResponse publish_resp;
+  auto publish_status = svc.PublishReplicaKey(&publish_ctx, &publish_req, &publish_resp);
+  REQUIRE(publish_status.ok());
+  REQUIRE(publish_resp.ok());
+
+  tensorcast::daemon::v2::ResolveKeyMappingRequest resolve_req;
+  resolve_req.set_key("key-cache-1");
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::v2::ResolveKeyMappingResponse resolve_resp;
+  auto resolve_status = svc.ResolveKeyMapping(&resolve_ctx, &resolve_req, &resolve_resp);
+  REQUIRE(resolve_status.ok());
+  REQUIRE(resolve_resp.artifact_id() == "mi2:test-cache");
+  const int resolve_calls_before_disconnect = gs_client->resolve_calls;
+
+  gs_client->connected = false;
+  grpc::ServerContext resolve_cached_ctx;
+  tensorcast::daemon::v2::ResolveKeyMappingResponse resolve_cached_resp;
+  auto resolve_cached_status = svc.ResolveKeyMapping(&resolve_cached_ctx, &resolve_req, &resolve_cached_resp);
+  REQUIRE(resolve_cached_status.ok());
+  REQUIRE(resolve_cached_resp.artifact_id() == "mi2:test-cache");
+  REQUIRE(gs_client->resolve_calls == resolve_calls_before_disconnect);
+}
+
+TEST_CASE("ResolveKeyMapping cache keeps newer generation on stale local mutation", "[daemon][key-mapping]") {
+  const auto root = test_root();
+  std::filesystem::remove_all(root);
+  std::filesystem::create_directories(root);
+
+  const auto storage_root = root / "storage_root";
+  std::filesystem::create_directories(storage_root);
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_engine_opts(storage_root));
+  auto gs_client = std::make_shared<KeyMappingGlobalStoreClient>();
+  gs_client->set_mapping("key-gen-guard", "mi2:new", /*generation=*/10, /*ttl_seconds=*/30);
+  engine->set_global_store_client_for_testing(gs_client);
+
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or = tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+  auto& svc = harness->service();
+
+  tensorcast::daemon::v2::ResolveKeyMappingRequest resolve_req;
+  resolve_req.set_key("key-gen-guard");
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::v2::ResolveKeyMappingResponse resolve_resp;
+  auto resolve_status = svc.ResolveKeyMapping(&resolve_ctx, &resolve_req, &resolve_resp);
+  REQUIRE(resolve_status.ok());
+  REQUIRE(resolve_resp.artifact_id() == "mi2:new");
+  REQUIRE(resolve_resp.generation() == 10);
+
+  tensorcast::daemon::v2::PublishReplicaKeyRequest publish_req;
+  publish_req.set_key("key-gen-guard");
+  publish_req.mutable_artifact_descriptor()->set_artifact_id("mi2:stale");
+  grpc::ServerContext publish_ctx;
+  tensorcast::daemon::v2::PublishReplicaKeyResponse publish_resp;
+  auto publish_status = svc.PublishReplicaKey(&publish_ctx, &publish_req, &publish_resp);
+  REQUIRE(publish_status.ok());
+  REQUIRE(publish_resp.ok());
+
+  gs_client->connected = false;
+  grpc::ServerContext resolve_cached_ctx;
+  tensorcast::daemon::v2::ResolveKeyMappingResponse resolve_cached_resp;
+  auto resolve_cached_status = svc.ResolveKeyMapping(&resolve_cached_ctx, &resolve_req, &resolve_cached_resp);
+  REQUIRE(resolve_cached_status.ok());
+  REQUIRE(resolve_cached_resp.artifact_id() == "mi2:new");
+  REQUIRE(resolve_cached_resp.generation() == 10);
 }

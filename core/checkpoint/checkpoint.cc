@@ -452,7 +452,11 @@ at::ScalarType string_to_scalar_type(const std::string& dtype_str) {
       {"torch.uint8", torch::kUInt8},
       {"torch.int8", torch::kInt8},
       {"torch.bfloat16", torch::kBFloat16},
-      {"torch.float8_e4m3fn", torch::kFloat8_e4m3fn}};
+      {"torch.float8_e4m3fn", torch::kFloat8_e4m3fn},
+      {"torch.float8_e5m2", torch::kFloat8_e5m2},
+      {"torch.float8_e4m3fnuz", torch::kFloat8_e4m3fnuz},
+      {"torch.float8_e5m2fnuz", torch::kFloat8_e5m2fnuz},
+      {"torch.float8_e8m0fnu", torch::kFloat8_e8m0fnu}};
 
   auto it = kDTypeMap.find(dtype_str);
   if (it != kDTypeMap.end()) {

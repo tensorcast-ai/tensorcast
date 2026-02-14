@@ -17,12 +17,12 @@
 #include "daemon/service/controllers/replica_materialization_service.h"
 #include "daemon/service/controllers/target_materialization_service.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
-#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -43,7 +43,7 @@ class MaterializationController {
     LipManager& lip_manager;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
-    LocalDiskImportCatalog& disk_imports;
+    ArtifactSourceRegistry& disk_imports;
     ShutdownSignal& shutdown_signal;
     common::AsyncRuntime& async_runtime;
     WorkerIdentityStore& identity;
@@ -84,10 +84,15 @@ class MaterializationController {
       const v2::PublishTargetReplicaRequest& req,
       v2::PublishTargetReplicaResponse& resp);
 
-  grpc::Status resolve_artifact_from_disk(
+  grpc::Status import_artifact_from_path(
       RpcContext& rctx,
-      const v2::ResolveArtifactFromDiskRequest& req,
-      v2::ResolveArtifactFromDiskResponse& resp);
+      const v2::ImportArtifactFromPathRequest& req,
+      v2::ImportArtifactFromPathResponse& resp);
+
+  grpc::Status import_artifact_from_path_stream(
+      RpcContext& rctx,
+      const v2::ImportArtifactFromPathRequest& req,
+      grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>& writer);
 
   grpc::Status get_artifact_index_by_id(
       RpcContext& rctx,

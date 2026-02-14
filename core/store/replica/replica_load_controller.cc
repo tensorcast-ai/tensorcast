@@ -319,6 +319,7 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
   absl::MutexLock lock(&mutex_);
 
   std::string loc_str = location_to_string(location);
+  const int device_ordinal = replica_key_.device.ordinal;
   auto sc_or = get_state_cond_locked(location);
   if (!sc_or.ok()) {
     return absl::InvalidArgumentError(
@@ -348,7 +349,7 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
 
   MemoryState current_state = *state_ptr;
   VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Requesting release for " << loc_str
-          << " (current state: " << state_to_string(current_state) << ")";
+          << " (device=" << device_ordinal << ", current state: " << state_to_string(current_state) << ")";
 
   if (current_state <= MemoryState::UNALLOCATED) {
     VLOG(2) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Memory for " << loc_str
@@ -359,8 +360,8 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
   if (current_state == MemoryState::LOADING) {
     // When a concurrent load is in-flight we refuse to tear down resources.
     // Callers should retry once the load completes.
-    VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Release requested for " << loc_str
-            << " while LOADING. Returning FailedPrecondition without releasing.";
+    LOG(INFO) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Release requested for " << loc_str
+              << " while LOADING (device=" << device_ordinal << "). Returning FailedPrecondition without releasing.";
     return absl::FailedPreconditionError(
         absl::Substitute(
             "ReplicaLoadController($0): Cannot release $1 memory while a load is in progress.",
@@ -397,7 +398,7 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
   }
 
   VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Finished release process for " << loc_str
-          << ". Final state: " << state_to_string(*state_ptr);
+          << " (device=" << device_ordinal << "). Final state: " << state_to_string(*state_ptr);
   return absl::OkStatus();
 }
 
@@ -566,7 +567,8 @@ absl::Status ReplicaLoadController::set_state_locked(MemoryLocation location, Me
 void ReplicaLoadController::log_state_change(MemoryLocation loc, MemoryState old_state, MemoryState new_state) const {
   // Assumes mutex is held
   VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): " << location_to_string(loc)
-          << " state changing from " << state_to_string(old_state) << " to " << state_to_string(new_state);
+          << " state changing from " << state_to_string(old_state) << " to " << state_to_string(new_state)
+          << " (device=" << replica_key_.device.ordinal << ")";
 }
 
 folly::SemiFuture<absl::Status> ReplicaLoadController::copy_data_async(
@@ -652,6 +654,7 @@ absl::Status ReplicaLoadController::wait_for_state(
   absl::MutexLock lock(&mutex_);
 
   std::string loc_str = location_to_string(location);
+  const int device_ordinal = replica_key_.device.ordinal;
   auto state_cond_or = get_state_cond_locked(location);
   if (!state_cond_or.ok()) {
     return absl::InvalidArgumentError(
@@ -675,8 +678,8 @@ absl::Status ReplicaLoadController::wait_for_state(
   };
 
   VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Waiting for " << loc_str << " to reach state "
-          << state_to_string(target_state) << " (current: " << state_to_string(*state_ptr) << ", timeout: " << timeout
-          << ")";
+          << state_to_string(target_state) << " (device=" << device_ordinal
+          << ", current: " << state_to_string(*state_ptr) << ", timeout: " << timeout << ")";
 
   absl::Time deadline = (timeout == absl::InfiniteDuration()) ? absl::InfiniteFuture() : absl::Now() + timeout;
 
@@ -689,7 +692,7 @@ absl::Status ReplicaLoadController::wait_for_state(
               << state_to_string(*state_ptr);
     } else {
       VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful. " << loc_str
-              << " already in target state " << state_to_string(target_state);
+              << " already in target state " << state_to_string(target_state) << " (device=" << device_ordinal << ")";
     }
     return absl::OkStatus();
   }
@@ -698,8 +701,8 @@ absl::Status ReplicaLoadController::wait_for_state(
     if (absl::Now() >= deadline) {
       if (!observed_target() && *state_ptr != MemoryState::FAILED) {
         LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Timeout waiting for " << loc_str
-                     << " to reach state " << state_to_string(target_state)
-                     << ". Current state: " << state_to_string(*state_ptr);
+                     << " to reach state " << state_to_string(target_state) << " (device=" << device_ordinal
+                     << "). Current state: " << state_to_string(*state_ptr);
         return absl::DeadlineExceededError(
             absl::Substitute("Timeout waiting for $0 state $1", loc_str, state_to_string(target_state)));
       }
@@ -717,13 +720,14 @@ absl::Status ReplicaLoadController::wait_for_state(
               << state_to_string(*state_ptr);
     } else {
       VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait successful. " << loc_str
-              << " reached target state " << state_to_string(target_state);
+              << " reached target state " << state_to_string(target_state) << " (device=" << device_ordinal << ")";
     }
     return absl::OkStatus();
   }
   if (*state_ptr == MemoryState::FAILED) {
     LOG(ERROR) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait completed because " << loc_str
-               << " reached FAILED state while waiting for " << state_to_string(target_state);
+               << " reached FAILED state while waiting for " << state_to_string(target_state)
+               << " (device=" << device_ordinal << ")";
     // Provide richer context if a failure reason was recorded
     std::string reason;
     {
@@ -736,7 +740,7 @@ absl::Status ReplicaLoadController::wait_for_state(
     return absl::FailedPreconditionError(absl::Substitute("$0 operation failed", loc_str));
   }
   LOG(ERROR) << "ReplicaLoadController(" << replica_key_.artifact_id << "): Wait loop exited with unexpected state "
-             << state_to_string(*state_ptr) << " for " << loc_str;
+             << state_to_string(*state_ptr) << " for " << loc_str << " (device=" << device_ordinal << ")";
   return absl::InternalError("Unexpected state after wait loop.");
 }
 

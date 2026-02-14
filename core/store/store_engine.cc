@@ -522,6 +522,10 @@ int StoreEngine::unload_replica(const ReplicaKey& key) {
   return replica_runtime_->unload_replica(key);
 }
 
+absl::Status StoreEngine::retire_replica_status(const ReplicaKey& key) {
+  return replica_runtime_->retire_replica_status(key);
+}
+
 MemoryState StoreEngine::get_replica_state(const ReplicaKey& key, DeviceType memory_type) const {
   return replica_runtime_->get_replica_state(key, memory_type);
 }

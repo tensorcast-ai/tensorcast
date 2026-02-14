@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
@@ -152,6 +153,95 @@ struct DrainedLeaseResolution {
   std::optional<std::string> view_id;
 };
 
+bool matches_view_id(
+    const std::optional<std::string>& requested_view_id,
+    const std::optional<std::string>& key_view_id) {
+  if (requested_view_id.has_value()) {
+    if (requested_view_id->empty()) {
+      return !key_view_id.has_value() || key_view_id->empty();
+    }
+    return key_view_id.has_value() && *key_view_id == *requested_view_id;
+  }
+  return !key_view_id.has_value() || key_view_id->empty();
+}
+
+bool matches_requested_device(const std::optional<int32_t>& requested_device_id, const store::DeviceKey& device) {
+  if (!requested_device_id.has_value()) {
+    return true;
+  }
+  if (*requested_device_id < 0) {
+    return device.type == DeviceType::CPU;
+  }
+  return device.type == DeviceType::GPU && device.ordinal == *requested_device_id;
+}
+
+std::vector<store::loading::ReplicaKey> resolve_retire_replica_keys(
+    store::StoreEngine* engine,
+    std::string_view artifact_id,
+    const std::optional<std::string>& view_id,
+    const std::optional<int32_t>& requested_device_id,
+    const std::optional<ArtifactDeviceKey>& drained_key) {
+  absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> keys;
+  for (const auto& info : engine->get_all_replicas_info()) {
+    if (info.artifact_id != artifact_id) {
+      continue;
+    }
+    if (!matches_view_id(view_id, info.key.view_id)) {
+      continue;
+    }
+    if (!matches_requested_device(requested_device_id, info.key.device)) {
+      continue;
+    }
+    keys.insert(info.key);
+  }
+
+  std::vector<store::loading::ReplicaKey> out;
+  out.reserve(keys.size() + 1);
+  for (const auto& key : keys) {
+    out.push_back(key);
+  }
+  if (!out.empty()) {
+    return out;
+  }
+
+  std::optional<store::DeviceKey> fallback_device;
+  if (requested_device_id.has_value()) {
+    const DeviceType type = *requested_device_id < 0 ? DeviceType::CPU : DeviceType::GPU;
+    fallback_device = store::DeviceKey{.type = type, .ordinal = *requested_device_id, .uuid = ""};
+  } else if (drained_key.has_value()) {
+    const DeviceType type = drained_key->device_id < 0 ? DeviceType::CPU : DeviceType::GPU;
+    fallback_device = store::DeviceKey{.type = type, .ordinal = drained_key->device_id, .uuid = ""};
+  }
+  if (fallback_device.has_value()) {
+    out.push_back(
+        store::loading::ReplicaKey{
+            .artifact_id = std::string(artifact_id),
+            .view_id = view_id,
+            .device = *fallback_device,
+            .replica = 0,
+        });
+  }
+  return out;
+}
+
+void retire_local_replicas(
+    store::StoreEngine* engine,
+    std::string_view artifact_id,
+    const std::optional<std::string>& view_id,
+    const std::optional<int32_t>& requested_device_id,
+    const std::optional<ArtifactDeviceKey>& drained_key,
+    v2::DeregisterArtifactResponse* resp) {
+  const std::vector<store::loading::ReplicaKey> replica_keys =
+      resolve_retire_replica_keys(engine, artifact_id, view_id, requested_device_id, drained_key);
+  for (const auto& replica_key : replica_keys) {
+    absl::Status st = engine->retire_replica_status(replica_key);
+    if (!st.ok() && !absl::IsNotFound(st)) {
+      artifact_retire::append_deregister_message(
+          resp, absl::StrCat("local retire failed for device_id=", replica_key.device.ordinal, ": ", st.message()));
+    }
+  }
+}
+
 absl::StatusOr<DrainedLeaseResolution> drain_lease_for_deregister(
     LipManager* lip_manager,
     store::components::IGlobalStoreClient* global_store_client,
@@ -280,6 +370,7 @@ StoreDaemonServiceImpl::StoreDaemonServiceImpl(Deps deps, Options opts)
       replica_session_controller_(&deps.replica_session_controller),
       lease_controller_(&deps.lease_controller),
       shutdown_signal_(&deps.shutdown_signal),
+      source_registry_(deps.source_registry),
       opts_(std::move(opts)) {}
 
 Status StoreDaemonServiceImpl::ClearMem(
@@ -402,40 +493,77 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   }
   const std::string artifact_id = req->artifact_id();
   const bool keep_shared_disk_copy = req->has_keep_shared_disk_copy() ? req->keep_shared_disk_copy() : false;
-
-  auto drained_or = drain_lease_for_deregister(lip_manager_, global_store_client_.get(), *req);
-  if (!drained_or.ok()) {
-    return to_grpc_status(drained_or.status());
+  auto view_id_or = parse_view_id(req->byte_space());
+  if (!view_id_or.ok()) {
+    return to_grpc_status(view_id_or.status());
   }
-  DrainedLeaseResolution drained = std::move(*drained_or);
-  const ArtifactDeviceKey& key = drained.key;
-  const LipLeaseEntry& lease = drained.lease;
-  const auto& drain = drained.drain;
-  const std::optional<std::string>& view_id = drained.view_id;
+  std::optional<std::string> view_id = *view_id_or;
+  std::optional<int32_t> requested_device_id;
+  if (req->has_device_id()) {
+    requested_device_id = req->device_id();
+  }
+
+  std::optional<ArtifactDeviceKey> drained_key;
+  std::optional<LipLeaseEntry> drained_lease;
+  artifact_retire::DrainOutcome drain{.drained = true, .replica_id = std::nullopt};
+  auto drained_or = drain_lease_for_deregister(lip_manager_, global_store_client_.get(), *req);
+  if (drained_or.ok()) {
+    DrainedLeaseResolution drained = std::move(*drained_or);
+    drained_key = std::move(drained.key);
+    drained_lease = std::move(drained.lease);
+    drain = std::move(drained.drain);
+    view_id = std::move(drained.view_id);
+  } else if (!absl::IsNotFound(drained_or.status())) {
+    return to_grpc_status(drained_or.status());
+  } else {
+    artifact_retire::append_deregister_message(resp, "no active lease found; proceeding with stateless retire");
+  }
 
   resp->set_drained(drain.drained);
   resp->set_removed(true);
 
   if ((!drain.replica_id.has_value() || drain.replica_id->empty()) && !view_id.has_value()) {
-    absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, key.device_id);
-    if (!gs_st.ok()) {
-      resp->set_message(absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+    if (drained_key.has_value()) {
+      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, drained_key->device_id);
+      if (!gs_st.ok() && !absl::IsNotFound(gs_st)) {
+        artifact_retire::append_deregister_message(
+            resp, absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+      }
+    } else if (requested_device_id.has_value()) {
+      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, *requested_device_id);
+      if (!gs_st.ok() && !absl::IsNotFound(gs_st)) {
+        artifact_retire::append_deregister_message(
+            resp, absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+      }
     }
   }
 
   absl::flat_hash_set<std::string> unique_regions;
-  for (const auto& s : lease.storages) {
-    if (s.has_region()) {
-      unique_regions.insert(s.region_id);
+  if (drained_lease.has_value()) {
+    for (const auto& s : drained_lease->storages) {
+      if (s.has_region()) {
+        unique_regions.insert(s.region_id);
+      }
     }
   }
   for (const auto& rid : unique_regions) {
     resp->add_released_region_ids(rid);
   }
 
+  retire_local_replicas(engine_, artifact_id, view_id, requested_device_id, drained_key, resp);
+
   if (!keep_shared_disk_copy && !view_id.has_value()) {
     artifact_retire::purge_managed_shared_disk_artifact(
         global_store_client_.get(), artifact_id, opts_.storage_path, resp);
+  }
+
+  // Keep version keys append-only, but retire local disk-import fallback for this artifact
+  // so old versions cannot be re-materialized through daemon-local source paths.
+  if (source_registry_ != nullptr) {
+    const bool erased = source_registry_->erase_binding(artifact_id);
+    if (!erased) {
+      VLOG(1) << "DeregisterArtifact: no local disk import entry for artifact_id=" << artifact_id;
+    }
   }
 
   rctx.mark_success();

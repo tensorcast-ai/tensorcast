@@ -62,7 +62,8 @@ service StoreDaemonService {
   // ========== Key-based materialization and publish ==========
   // See docs/architecture/api/materialization-flow.md for semantics.
   rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
-  rpc ResolveArtifactFromDisk(ResolveArtifactFromDiskRequest) returns (ResolveArtifactFromDiskResponse) {}
+  rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
+  rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
   rpc WaitReplicaStatus(WaitReplicaStatusRequest) returns (WaitReplicaStatusResponse) {}
   rpc ReleaseReplica(ReleaseReplicaRequest) returns (ReleaseReplicaResponse) {}
@@ -1059,16 +1060,56 @@ message MaterializeByKeyResponse {
   uint64 generation = 11;
 }
 
-message ResolveArtifactFromDiskRequest {
-  string disk_path = 1;
+message ImportArtifactFromPathRequest {
+  string path = 1;
   bool verify_checksums = 2;
 }
 
-message ResolveArtifactFromDiskResponse {
+enum ImportArtifactState {
+  IMPORT_ARTIFACT_STATE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_STATE_READY = 1;
+}
+
+message ImportArtifactFromPathResponse {
   string artifact_id = 1;
-  string disk_path = 2;
-  bytes canonical_index_bytes = 3;
-  uint64 generation = 4;
+  bytes canonical_index_bytes = 2;
+  uint64 generation = 3;
+  ImportArtifactState import_state = 4;
+}
+
+enum ImportArtifactPhase {
+  IMPORT_ARTIFACT_PHASE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_PHASE_PREPARE = 1;
+  IMPORT_ARTIFACT_PHASE_SCAN_SOURCE = 2;
+  IMPORT_ARTIFACT_PHASE_READ_HEADERS = 3;
+  IMPORT_ARTIFACT_PHASE_BUILD_CANONICAL_INDEX = 4;
+  IMPORT_ARTIFACT_PHASE_HASH_DATA = 5;
+  IMPORT_ARTIFACT_PHASE_WRITE_REGISTRY = 6;
+  IMPORT_ARTIFACT_PHASE_DONE = 7;
+  IMPORT_ARTIFACT_PHASE_ERROR = 8;
+}
+
+enum ImportArtifactErrorCode {
+  IMPORT_ARTIFACT_ERROR_CODE_UNSPECIFIED = 0;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_NOT_FOUND = 1;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_PERMISSION_DENIED = 2;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_FORMAT_INVALID = 3;
+  IMPORT_ARTIFACT_ERROR_CODE_SOURCE_MUTATED = 4;
+  IMPORT_ARTIFACT_ERROR_CODE_REGISTRY_IO_FAILURE = 5;
+  IMPORT_ARTIFACT_ERROR_CODE_POLICY_DENIED_NON_LOCAL_PEER = 6;
+}
+
+message ImportArtifactFromPathStreamEvent {
+  uint64 seq = 1;
+  ImportArtifactPhase phase = 2;
+  uint64 processed_bytes = 3;
+  uint64 total_bytes = 4;
+  double percent = 5;
+  bool done = 6;
+  bool error = 7;
+  ImportArtifactErrorCode error_code = 8;
+  string message = 9;
+  ImportArtifactFromPathResponse result = 10;
 }
 
 message QueryReplicaStatusResponse {

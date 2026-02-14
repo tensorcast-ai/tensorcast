@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/materialization/runtime/pipeline/verification_stage.h"
 
@@ -19,6 +19,10 @@
 namespace tensorcast::store::materialization::runtime::pipeline {
 
 namespace {
+
+bool source_mutation_allowed(const IngestionContext& ctx) {
+  return ctx.hints.source_mutation_policy != loading::SourceMutationPolicy::kReadOnly;
+}
 
 void maybe_compute_view_hash(IngestionContext& ctx) {
   if (!ctx.resolved_view_plan.has_value() || ctx.resolved_view_plan->is_identity) {
@@ -104,6 +108,9 @@ absl::Status verify_descriptor_consistency(const IngestionContext& ctx) {
 }
 
 absl::Status ensure_descriptor_for_safetensors(IngestionContext& ctx) {
+  if (!source_mutation_allowed(ctx)) {
+    return absl::OkStatus();
+  }
   if (!ctx.disk.is_safetensors) {
     return absl::OkStatus();
   }
@@ -132,6 +139,9 @@ absl::Status ensure_descriptor_for_safetensors(IngestionContext& ctx) {
 }
 
 absl::Status handle_variant_verification(IngestionContext& ctx) {
+  if (!source_mutation_allowed(ctx)) {
+    return absl::OkStatus();
+  }
   if (!ctx.hints.variant.has_value()) {
     return absl::OkStatus();
   }
@@ -167,6 +177,9 @@ absl::Status handle_variant_verification(IngestionContext& ctx) {
 }
 
 absl::Status handle_canonical_verification(IngestionContext& ctx) {
+  if (!source_mutation_allowed(ctx)) {
+    return absl::OkStatus();
+  }
   if (ctx.hints.variant.has_value()) {
     return absl::OkStatus();
   }

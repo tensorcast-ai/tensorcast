@@ -68,9 +68,9 @@ graph TD
 - **Runtime wiring**: `RuntimeEnv` boots a `RuntimeContext` that owns the device manager, pinned buffer pool, communication manager, metrics collector, Global Store client, and ingestion event hub. The gRPC surface stays thin; lifecycle/telemetry is driven by the runtime modules rather than ad‑hoc engine wiring.
 - **Ingestion pipeline**: `IngestionRuntime` delegates to `MaterializationFacade`, which runs the staged `IngestionPipeline` (SourceAdapter → MetadataStage → AllocationStage → VerificationStage → HandleStage). MetadataStage rebuilds or fetches canonical indices (from disk or Global Store for variants), plans views, and enforces descriptor schema v3. AllocationStage handles eviction and retries for P2P GPU loads; VerificationStage enforces `verification_json` key‑point checks and optional full digests, and computes view hashes when configured.
 - **P2P orchestration**: `MaterializationService` invokes `MaterializeOrchestrator` for `AUTO` mode. The orchestrator:
-  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first requires a daemon‑resolved disk path (managed disk location); `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
+  - Respects `SourcePolicy` (`SourcePreference` plus allow‑flags). Disk‑first uses daemon-resolved disk source bindings (managed shared-disk or local import); `PREFER_P2P` requires a canonical `artifact_id`, and allow flags gate P2P/disk fallback.
   - Tries view-aware transports first (`request_view_transport`) and falls back to canonical transport when unsupported.
-  - Completes the granted transport even on failure, then falls back to disk when `hints.disk_path` is present (daemon-resolved).
+  - Completes the granted transport even on failure, then falls back to disk when a daemon-resolved disk source is available.
   - Builds `P2PSource` with remote `verification_json` and memory registration info so VerificationStage can validate the transfer.
 - **Auto-publish**: Every ingestion run mints a `publish_context_id`; completion events flow through the ingestion event hub into `MetadataGateway`, which registers replicas (and variant residency) with the Global Store. Explicit registration calls from the orchestrator reuse the same context so `MetadataGateway` dedupes double-publishes cleanly.
 - **Documentation**: [Store Daemon Architecture](../../daemon/README.md)
@@ -87,11 +87,10 @@ graph TD
   exposes metadata (`tensor_names`, `describe`) and selective tensor fetch; it
   surfaces `FAILED_PRECONDITION` if used after `Store.close()`.
 - **Disk-backed Handles**: `tensorcast.from_disk(path)` routes through the
-  daemon (`ResolveArtifactFromDisk`) so disk paths stay daemon-owned. The RPC
-  enforces whitelist entries, validates descriptor multihashes when requested
-  (`verify_checksums=true`), returns canonical index bytes + generation, and
-  seeds the SDK cache with the resolved metadata for reuse across
-  materialization, views, and unloads.
+  daemon import RPCs (`ImportArtifactFromPath` /
+  `ImportArtifactFromPathStream`). Import is reference-only registration (no
+  source writes), returns `artifact_id` + canonical index bytes + generation,
+  and seeds the SDK cache for reuse across materialization, views, and unloads.
 - **Metadata Cache**: A process-wide `ArtifactCache` stores canonical indices
   (default TTL 600s, max 1000 entries) to avoid repeated daemon lookups.
   Tunables: `TENSORCAST_STORE_INDEX_CACHE_TTL_SECONDS`,

@@ -20,7 +20,7 @@ MaterializationController::MaterializationController(Dep d)
       disk_artifact_service_(
           DiskArtifactService::Dep{
               .engine = d.engine,
-              .disk_imports = d.disk_imports,
+              .source_registry = d.disk_imports,
               .shutdown_signal = d.shutdown_signal,
               .storage_path = d.storage_path,
           }),
@@ -103,11 +103,18 @@ grpc::Status MaterializationController::publish_target_replica(
   return target_materialization_service_.publish_target_replica(rctx, req, resp);
 }
 
-grpc::Status MaterializationController::resolve_artifact_from_disk(
+grpc::Status MaterializationController::import_artifact_from_path(
     RpcContext& rctx,
-    const v2::ResolveArtifactFromDiskRequest& req,
-    v2::ResolveArtifactFromDiskResponse& resp) {
-  return disk_artifact_service_.resolve_artifact_from_disk(rctx, req, resp);
+    const v2::ImportArtifactFromPathRequest& req,
+    v2::ImportArtifactFromPathResponse& resp) {
+  return disk_artifact_service_.import_artifact_from_path(rctx, req, resp);
+}
+
+grpc::Status MaterializationController::import_artifact_from_path_stream(
+    RpcContext& rctx,
+    const v2::ImportArtifactFromPathRequest& req,
+    grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>& writer) {
+  return disk_artifact_service_.import_artifact_from_path_stream(rctx, req, writer);
 }
 
 grpc::Status MaterializationController::get_artifact_index_by_id(

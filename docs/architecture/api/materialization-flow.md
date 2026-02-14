@@ -30,7 +30,7 @@ Related docs:
   `docs/architecture/artifact-views-and-retrieval.md` and `docs/architecture/api/region-backed.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
   into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
-- **Materialization**: Resolving an artifact reference (artifact_id/key/disk path)
+- **Materialization**: Resolving an artifact reference (`artifact_id`/`key`)
   into GPU-visible tensors plus descriptors and canonical index bytes.
 - **Handle lease (lease_token)**: An opaque daemon capability returned alongside the exported handle (CUDA IPC or CPU
   memfd). The SDK binds it to returned tensor lifetimes and releases it over the local handle plane.
@@ -41,10 +41,12 @@ Related docs:
 
 The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/store_daemon.proto`):
 
-- `MaterializeReplica`: by `artifact_id` and/or disk fallback path. Supports views.
+- `MaterializeReplica`: by `artifact_id`. Supports views.
 - `MaterializeByKey`: resolves key mapping in Global Store, then materializes.
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
-- `ResolveArtifactFromDisk`: validates disk path and returns canonical index.
+- `ImportArtifactFromPath` / `ImportArtifactFromPathStream`: explicit local-only
+  disk import that returns `artifact_id` + canonical index metadata for
+  reference-only registration.
 - `ConfirmReplica` / `WaitReplicaVerification`: readiness + verification waits.
 - `GetServerConfig`: advertises `local_handle_socket_path` and `cpu_shared_memory_enabled` for lease-aware imports. When the socket path is unset in config, the daemon auto-selects
   `<daemon_state_dir>/local_handle.sock` for same-pod/local SDKs (daemon_state_dir defaults to
@@ -88,20 +90,21 @@ Key controller behavior lives in `daemon/service/controllers/materialization_con
 allow flags) so local-only requests are enforced server-side:
 
 - `prefer=auto` -> `SourcePreference=AUTO`, `allow_p2p=true`, `allow_disk=true`.
-- `prefer=local` -> `allow_p2p=false`, `allow_disk=false` unless an explicit disk path is provided.
+- `prefer=local` -> `allow_p2p=false`, `allow_disk=false`.
 - `prefer=p2p` -> `SourcePreference=PREFER_P2P` (requires `artifact_id`).
-- `prefer=disk` -> `SourcePreference=PREFER_DISK` (requires disk path or key mapping).
+- `prefer=disk` -> `SourcePreference=PREFER_DISK` (daemon resolves disk source
+  from managed/shared-disk bindings or local import registry).
 - `allow_p2p=False` disables P2P but still allows local replica reuse; disk is allowed unless `prefer=local`.
 
 See `tensorcast/api/store/materialization.py` for the exact decision logic.
 
 ### Daemon control path (MaterializeReplica / MaterializeByKey)
 
-1. **Validate inputs**: require `artifact_id` or disk path; `prefer_p2p` requires
-   `artifact_id`; device UUID/ID must be valid.
-2. **Normalize disk path**: relative disk paths are normalized under `storage_path` and
-   rejected if they escape the configured root. Absolute disk paths are accepted as-is.
-   When `server.storage_path` is empty, only absolute disk paths are accepted.
+1. **Validate inputs**: require `artifact_id` (or `key` for `MaterializeByKey`);
+   `prefer_p2p` requires `artifact_id`; device UUID/ID must be valid.
+2. **Resolve disk source internally**: when disk is allowed, the daemon chooses a
+   managed shared-disk path or local-import source binding by `artifact_id`, and
+   validates source fingerprints for local-import bindings before read.
 3. **Disk descriptor checks**:
    - If `verify_checksums=true`, `artifact_descriptor.json` is required and
      validated against the computed index multihash.
@@ -117,8 +120,7 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Same-device LIP is denied and falls back to the engine path.
 5. **Engine path**:
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
-     disk_path resolved by the daemon from managed disk locations, source policy
-     allow flags, variant/view info).
+     typed disk-source selection, source policy allow flags, variant/view info).
    - Determine materialize mode:
      - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
      - Otherwise -> `AUTO`.
@@ -157,8 +159,9 @@ Materialization ingestion uses a structured pipeline in
    - Load asynchronously and wait for LOADED state (with pinned timeout).
    - GPU loads may retry after eviction.
 3. **VerificationStage**
-   - Disk: compute full digest when requested or forced (e.g., safetensors),
-     verify descriptor multihashes, emit `verification.json`.
+   - Disk: compute full digest when requested or forced (e.g., safetensors) and
+     verify descriptor multihashes. For reference-only imported sources, source
+     mutation policy is read-only (no descriptor/index/verification writes).
    - P2P: validate `verification_json` key points when provided.
    - Compute view data hash when applicable.
 4. **HandleStage**

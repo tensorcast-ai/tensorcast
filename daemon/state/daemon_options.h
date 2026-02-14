@@ -47,6 +47,8 @@ struct DaemonOptions {
 
   // Shared storage root for disk paths (required).
   std::filesystem::path storage_path;
+  // Import metadata root under daemon runtime topology.
+  std::filesystem::path import_root;
 
   // Stable daemon identity for control-plane actions (derived from DaemonConfig.daemon_id).
   std::string daemon_id;

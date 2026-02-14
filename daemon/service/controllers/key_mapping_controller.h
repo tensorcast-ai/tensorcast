@@ -4,6 +4,14 @@
 
 #pragma once
 
+#include <chrono>
+#include <optional>
+#include <string>
+#include <string_view>
+
+#include "absl/base/thread_annotations.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/synchronization/mutex.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
 #include "daemon/state/shutdown_signal.h"
@@ -36,7 +44,23 @@ class KeyMappingController {
       v2::SwapKeyMappingResponse& resp);
 
  private:
+  struct LocalCacheEntry {
+    store::components::KeyMapping mapping;
+    std::chrono::steady_clock::time_point expires_at{};
+  };
+
+  static constexpr uint32_t kLocalMutationCacheTtlSeconds = 30;
+
+  [[nodiscard]] std::optional<store::components::KeyMapping> lookup_local_cache(std::string_view key) const;
+  void update_local_cache(
+      std::string_view key,
+      const store::components::KeyMapping& mapping,
+      std::optional<uint32_t> ttl_override_seconds = std::nullopt);
+  void erase_local_cache(std::string_view key);
+
   Dep d_;
+  mutable absl::Mutex local_cache_mu_;
+  mutable absl::flat_hash_map<std::string, LocalCacheEntry> local_cache_ ABSL_GUARDED_BY(local_cache_mu_);
 };
 
 } // namespace tensorcast::daemon

@@ -26,7 +26,7 @@ This document explains High Availability (HA) as implemented in code: startup re
 - Protocol buffers
   - Enhanced heartbeat and sync: `proto/tensorcast/global_store/v1/global_store.proto`
 
-Materialization HA invariant: v2 descriptor streaming in the daemon uses UMA view plans when a view is requested and always routes disk fallbacks through `DiskFallbackHint` (including `verify_checksums`). SDKs never read disk directly for retrieval, so selective tensor loads and disk-sourced replicas share the same daemon-managed buffer layout.
+Materialization HA invariant: v2 descriptor streaming in the daemon uses UMA view plans when a view is requested and routes disk fallback through daemon-owned source bindings (managed shared-disk or local import). SDKs never read disk directly for retrieval, so selective tensor loads and disk-sourced replicas share the same daemon-managed buffer layout.
 
 ## Registration & Identity
 
@@ -114,7 +114,7 @@ All Global Store RPCs use bounded retries with exponential backoff and jitter (`
 
 - **Client SDK visibility**
   - Requests served from a healthy local replica succeed even during Global Store outages.
-  - Missing replicas with no disk hints return `FailedPrecondition` when the Global Store is unreachable; P2P failures surface the transport error unless disk fallback succeeds.
+  - Missing replicas with no daemon-resolved disk source return `FailedPrecondition` when the Global Store is unreachable; P2P failures surface the transport error unless disk fallback succeeds.
   - After a daemon restart or reconnection, the first successful sync re-enables normal routing; clients see transient failures only during the gap.
 
 ### HA Event Timeline (heartbeat, re-registration, sync)

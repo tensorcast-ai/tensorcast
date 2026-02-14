@@ -1,4 +1,4 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 """Process management helpers: fate sharing, spawn, kill, and binary discovery.
 
@@ -146,9 +146,18 @@ def build_daemon_process_env(
     ld_paths = _discover_daemon_library_paths()
     if ld_paths:
         existing = env.get("LD_LIBRARY_PATH", "")
-        ld_entries = [str(p) for p in ld_paths if str(p)]
-        if existing:
-            ld_entries.append(existing)
+        existing_entries = [entry for entry in existing.split(":") if entry]
+        discovered_entries = [str(p) for p in ld_paths if str(p)]
+        # Keep caller-provided LD_LIBRARY_PATH entries first for expected precedence.
+        ld_entries = existing_entries + discovered_entries
+        deduped_entries: list[str] = []
+        seen: set[str] = set()
+        for entry in ld_entries:
+            if entry in seen:
+                continue
+            deduped_entries.append(entry)
+            seen.add(entry)
+        ld_entries = deduped_entries
         env["LD_LIBRARY_PATH"] = ":".join(ld_entries)
 
     return env

@@ -108,7 +108,7 @@ struct MappedFixture {
   tensorcast::daemon::BackgroundScheduler scheduler;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
-  tensorcast::daemon::LocalDiskImportCatalog disk_imports;
+  tensorcast::daemon::ArtifactSourceRegistry disk_imports;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;

@@ -134,6 +134,31 @@ def _load_shared_objects_in_subprocess(
     return [str(item) for item in decoded]
 
 
+def test_build_daemon_process_env_keeps_user_ld_library_path_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user_prefix = "/data/cuda/compat:/usr/local/lib"
+    monkeypatch.setattr(
+        "tensorcast.cli_utils.proc._discover_daemon_library_paths",
+        lambda: (
+            Path("/data/cuda/compat"),
+            Path("/tensorcast/lib"),
+            Path("/torch/lib"),
+        ),
+    )
+
+    env = build_daemon_process_env({"LD_LIBRARY_PATH": user_prefix})
+    ld_library_path = env.get("LD_LIBRARY_PATH")
+    assert ld_library_path is not None
+
+    entries = [entry for entry in ld_library_path.split(":") if entry]
+    assert entries[0] == "/data/cuda/compat"
+    assert entries[1] == "/usr/local/lib"
+    assert "/tensorcast/lib" in entries
+    assert "/torch/lib" in entries
+    assert entries.count("/data/cuda/compat") == 1
+
+
 @pytest.mark.integration
 def test_daemon_library_environment_loads_required_shared_objects() -> None:
     env = build_daemon_process_env(os.environ)

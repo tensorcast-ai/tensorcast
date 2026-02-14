@@ -7,7 +7,7 @@ import concurrent.futures
 import json
 import threading
 import time
-from dataclasses import dataclass, replace, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Callable, Sequence, cast
 
@@ -69,7 +69,9 @@ class FakeDaemonCtl:
         self.disk_artifacts: dict[str, str] = {}
 
     def get_server_config(self) -> ServerConfig:
-        return ServerConfig(tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18)
+        return ServerConfig(
+            tx_slice_bytes=4096, mem_pool_size=1 << 20, artifact_chunk_bytes=1 << 18
+        )
 
     def resolve_key_mapping(self, key: str) -> daemon_ctl.KeyMappingResolution:
         self.resolve_calls.append(key)
@@ -80,23 +82,44 @@ class FakeDaemonCtl:
             cache_ttl_seconds=int(self.cache_ttl_seconds),
         )
 
-    def resolve_artifact_from_disk_v2(
-        self, *, disk_path: str, verify_checksums: bool = True
-    ):
-        self.resolve_disk_calls.append((disk_path, bool(verify_checksums)))
-        artifact_id = self.disk_artifacts.get(disk_path, disk_path)
+    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+        self.resolve_disk_calls.append((path, bool(verify_checksums)))
+        artifact_id = self.disk_artifacts.get(path, path)
 
         class _Resp:
             pass
 
         resp = _Resp()
         resp.artifact_id = artifact_id or ""
-        resp.disk_path = disk_path
-        resp.canonical_index_bytes = json.dumps({}, separators=(",", ":")).encode("utf-8")
+        resp.canonical_index_bytes = json.dumps({}, separators=(",", ":")).encode(
+            "utf-8"
+        )
         resp.generation = 0
         return resp
 
-    def keep_alive_registered_artifact(self, registration_id: str, ttl_ms: int, epoch: int) -> bool:  # noqa: D401
+    def import_artifact_from_path_stream_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ):
+        resp = self.import_artifact_from_path_v2(
+            path=path,
+            verify_checksums=verify_checksums,
+        )
+        final_resp = store_daemon_pb2.ImportArtifactFromPathResponse(
+            artifact_id=resp.artifact_id,
+            canonical_index_bytes=resp.canonical_index_bytes,
+            generation=resp.generation,
+        )
+        event = store_daemon_pb2.ImportArtifactFromPathStreamEvent(
+            seq=1,
+            phase=store_daemon_pb2.IMPORT_ARTIFACT_PHASE_DONE,
+            done=True,
+        )
+        event.result.CopyFrom(final_resp)
+        yield event
+
+    def keep_alive_registered_artifact(
+        self, registration_id: str, ttl_ms: int, epoch: int
+    ) -> bool:  # noqa: D401
         self.keepalive_calls.append((registration_id, ttl_ms, epoch))
         return True
 
@@ -161,7 +184,9 @@ class FakeEnvironment:
                 )
             )
             offset += size_bytes
-        canonical = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        canonical = json.dumps(index, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
         canonical_index_bytes = canonical
         self.client.index_by_id[artifact_id] = canonical_index_bytes
 
@@ -200,10 +225,16 @@ class FakeEnvironment:
             )
             offset += size_bytes
         normalized_client_id = (
-            client_artifact_id.strip() if client_artifact_id and client_artifact_id.strip() else None
+            client_artifact_id.strip()
+            if client_artifact_id and client_artifact_id.strip()
+            else None
         )
         artifact_id = normalized_client_id or f"mi2:test:{plan.value}:{offset}"
-        id_kind = ArtifactIdKind.CGID if artifact_id.startswith("cgid:") else ArtifactIdKind.MI2
+        id_kind = (
+            ArtifactIdKind.CGID
+            if artifact_id.startswith("cgid:")
+            else ArtifactIdKind.MI2
+        )
         descriptor = ArtifactDescriptor(
             artifact_id=artifact_id,
             index_multihash="hash-index",
@@ -213,7 +244,9 @@ class FakeEnvironment:
             total_size=offset,
             id_kind=id_kind,
         )
-        index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        index_bytes = json.dumps(index, separators=(",", ":"), sort_keys=True).encode(
+            "utf-8"
+        )
         device = 0 if device_id is None else int(device_id)
         build_ns = SimpleNamespace(
             device_id=device,
@@ -262,7 +295,9 @@ class FakeEnvironment:
             on_begin(handle)
         self.futures.append(handle)
         self.register_started.set()
-        while self.block_registration and (cancel_event is None or not cancel_event.is_set()):
+        while self.block_registration and (
+            cancel_event is None or not cancel_event.is_set()
+        ):
             time.sleep(0.01)
         if cancel_event is not None and cancel_event.is_set():
             raise concurrent.futures.CancelledError
@@ -293,7 +328,17 @@ class FakeEnvironment:
         verify_checksums: bool = True,
         **_: Any,
     ) -> MaterializationPayload:
-        del daemon_address, device_id, options, view, view_id, placement, canonical_index_hint, tensor_names, verify_checksums
+        del (
+            daemon_address,
+            device_id,
+            options,
+            view,
+            view_id,
+            placement,
+            canonical_index_hint,
+            tensor_names,
+            verify_checksums,
+        )
         if artifact_id is not None and artifact_id in self.materialized_by_id:
             resolved = self.materialized_by_id[artifact_id]
         elif key is not None:
@@ -322,7 +367,10 @@ class FakeEnvironment:
         )
         if use_disk:
             disk_path_value = f"/managed/{resolved.artifact_id}"
-            if resolved.disk_path != disk_path_value or resolved.source != resolved_source:
+            if (
+                resolved.disk_path != disk_path_value
+                or resolved.source != resolved_source
+            ):
                 resolved = replace(
                     resolved, disk_path=disk_path_value, source=resolved_source
                 )
@@ -414,14 +462,19 @@ def test_store_put_and_register_sync(store_env: tuple[Store, FakeEnvironment]) -
     tensor = torch.arange(4, dtype=torch.float32, device=device)
     put_result = store.put({"weights": tensor})
     assert put_result.replica.plan is PlanType.DRAM_STABLE
-    assert put_result.canonical_index.total_size_bytes == tensor.element_size() * tensor.nelement()
+    assert (
+        put_result.canonical_index.total_size_bytes
+        == tensor.element_size() * tensor.nelement()
+    )
 
     reg_result = store.register({"weights": tensor})
     assert reg_result.replica.plan is PlanType.VRAM_LEASED
     assert reg_result.canonical_index.entries[0].name == "weights"
 
 
-def test_store_put_async_cancel_triggers_abort(store_env: tuple[Store, FakeEnvironment]) -> None:
+def test_store_put_async_cancel_triggers_abort(
+    store_env: tuple[Store, FakeEnvironment],
+) -> None:
     store, env = store_env
     env.block_registration = True
     env.register_started.clear()
@@ -505,7 +558,9 @@ def test_artifact_tensor_dict_into_unloads_on_validation_error(
         device_id: int,
         required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
+        raise ArtifactError(
+            "bad layout", status_code="FAILED_PRECONDITION", retryable=False
+        )
 
     monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
@@ -518,7 +573,7 @@ def test_artifact_tensor_dict_into_unloads_on_validation_error(
 
 
 def test_artifact_tensor_dict_into_enforces_device(
-    store_env: tuple[Store, FakeEnvironment]
+    store_env: tuple[Store, FakeEnvironment],
 ) -> None:
     store, env = store_env
     state = {"bias": torch.arange(3, dtype=torch.float32)}
@@ -535,7 +590,9 @@ def test_artifact_tensor_dict_async_releases_replica(
 ) -> None:
     store, env = store_env
     artifact_id = "artifact-cancel"
-    env.add_materialized(artifact_id, {"w": torch.ones(2, dtype=torch.float32)}, replica_uuid="rep-100")
+    env.add_materialized(
+        artifact_id, {"w": torch.ones(2, dtype=torch.float32)}, replica_uuid="rep-100"
+    )
 
     artifact = store.artifact(artifact_id=artifact_id)
     result = asyncio.get_event_loop().run_until_complete(
@@ -588,7 +645,9 @@ def test_artifact_tensor_into_unloads_on_validation_error(
         device_id: int,
         required_names: Sequence[str] | None = None,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        raise ArtifactError("bad layout", status_code="FAILED_PRECONDITION", retryable=False)
+        raise ArtifactError(
+            "bad layout", status_code="FAILED_PRECONDITION", retryable=False
+        )
 
     monkeypatch.setattr(materialization_mod, "validate_targets", failing_validate)
 
@@ -608,7 +667,16 @@ def test_store_get_prefers_disk_when_available(
     tensor = torch.zeros(1, dtype=torch.float32)
     size_bytes = int(tensor.element_size() * tensor.numel())
     canonical_index_bytes = json.dumps(
-        {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        {
+            "t": [
+                0,
+                size_bytes,
+                [1],
+                [1],
+                str(tensor.dtype),
+                int(tensor.storage_offset()),
+            ]
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     env.client.index_by_id["disk-artifact"] = canonical_index_bytes
@@ -671,7 +739,10 @@ def test_store_get_prefers_disk_when_available(
         fallback="disk",
     )
     result = artifact.tensor_dict(device=torch.device("cuda", 0))
-    assert disk_called["preference"] == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+    assert (
+        disk_called["preference"]
+        == store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_PREFER_DISK
+    )
     assert disk_called["allow_disk"] is True
     assert "t" in result
 
@@ -685,7 +756,16 @@ def test_artifact_tensor_dict_wait_for_shared_disk_ms_passthrough(
     tensor = torch.zeros(1, dtype=torch.float32)
     size_bytes = int(tensor.element_size() * tensor.numel())
     canonical_index_bytes = json.dumps(
-        {"t": [0, size_bytes, [1], [1], str(tensor.dtype), int(tensor.storage_offset())]},
+        {
+            "t": [
+                0,
+                size_bytes,
+                [1],
+                [1],
+                str(tensor.dtype),
+                int(tensor.storage_offset()),
+            ]
+        },
         separators=(",", ":"),
     ).encode("utf-8")
     env.client.index_by_id["disk-wait-artifact"] = canonical_index_bytes
@@ -761,7 +841,9 @@ def test_store_key_resolution_cache_reuses_mapping(
     client.resolves[key] = artifact_id_value
 
     tensor = torch.ones(2, dtype=torch.float32)
-    env.add_materialized(artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache")
+    env.add_materialized(
+        artifact_id_value, {"weight": tensor}, replica_uuid="rep-cache"
+    )
 
     monkeypatch.setattr(store_mod, "get_daemon_client", lambda endpoint: client)
     store = store_mod.Store(
@@ -769,7 +851,9 @@ def test_store_key_resolution_cache_reuses_mapping(
         materialize_fn=env.fake_materialize,
     )
 
-    fallback = FallbackOptions(prefer_disk=True, allow_p2p=False, verify_checksums=False)
+    fallback = FallbackOptions(
+        prefer_disk=True, allow_p2p=False, verify_checksums=False
+    )
 
     # Warm the key mapping cache so key resolution is cached.
     store._runtime.resolve_key_mapping_cached(key=key)
@@ -888,9 +972,7 @@ def test_put_async_function_delegates_to_session(
     session = DummyStore()
     monkeypatch.setattr(store_mod, "store", lambda: session)
     payload = {"w": tensor}
-    result = store_mod.put_async(
-        payload, key="demo", device=torch.device("cuda", 0)
-    )
+    result = store_mod.put_async(payload, key="demo", device=torch.device("cuda", 0))
 
     assert result is session.future
     assert session.calls[0][0] is payload
@@ -944,11 +1026,13 @@ def test_from_disk_function_delegates_to_session(
             *,
             key: str | None = None,
             verify_checksums: bool = True,
+            show_progress: bool | None = None,
         ):
             self.kwargs = {
                 "path": path,
                 "key": key,
                 "verify_checksums": verify_checksums,
+                "show_progress": show_progress,
             }
             return self.result
 
@@ -968,7 +1052,11 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class DummyStore:
         def __init__(
-            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
+            self,
+            daemon_endpoint: str,
+            *,
+            opts: store_mod.StoreOptions | None = None,
+            runtime=None,
         ) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
@@ -979,7 +1067,11 @@ def test_store_singleton_reuse(monkeypatch: pytest.MonkeyPatch) -> None:
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
-    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
+    monkeypatch.setattr(
+        store_mod,
+        "get_daemon_client",
+        lambda address="fake://daemon": FakeDaemonCtl(resolves={}),
+    )
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()
@@ -1003,13 +1095,19 @@ def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) ->
 
     class DummyStore:
         def __init__(
-            self, daemon_endpoint: str, *, opts: store_mod.StoreOptions | None = None, runtime=None
+            self,
+            daemon_endpoint: str,
+            *,
+            opts: store_mod.StoreOptions | None = None,
+            runtime=None,
         ) -> None:
             del runtime
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
             self.closed = False
-            self.register_calls: list[tuple[dict[str, torch.Tensor], dict[str, object]]] = []
+            self.register_calls: list[
+                tuple[dict[str, torch.Tensor], dict[str, object]]
+            ] = []
             created.append(self)
 
         def register(
@@ -1042,7 +1140,9 @@ def test_module_helpers_replace_closed_store(monkeypatch: pytest.MonkeyPatch) ->
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
     monkeypatch.setattr(
-        store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={})
+        store_mod,
+        "get_daemon_client",
+        lambda address="fake://daemon": FakeDaemonCtl(resolves={}),
     )
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
@@ -1072,7 +1172,13 @@ def test_store_force_recreate_and_option_refresh(
     daemon_ctl._CLIENT_ADDRESS = None
 
     class DummyStore:
-        def __init__(self, daemon_endpoint: str, *, opts: StoreOptions | None = None, runtime=None) -> None:
+        def __init__(
+            self,
+            daemon_endpoint: str,
+            *,
+            opts: StoreOptions | None = None,
+            runtime=None,
+        ) -> None:
             self.daemon_endpoint = daemon_endpoint
             self.opts = opts
             self.closed = False
@@ -1085,7 +1191,11 @@ def test_store_force_recreate_and_option_refresh(
 
     runtime_handle = SimpleNamespace(address="fake://daemon")
     monkeypatch.setattr(store_mod, "require_runtime", lambda: runtime_handle)
-    monkeypatch.setattr(store_mod, "get_daemon_client", lambda address="fake://daemon": FakeDaemonCtl(resolves={}))
+    monkeypatch.setattr(
+        store_mod,
+        "get_daemon_client",
+        lambda address="fake://daemon": FakeDaemonCtl(resolves={}),
+    )
     monkeypatch.setattr(store_mod, "Store", DummyStore)
 
     store_mod.shutdown_process_store()
@@ -1097,7 +1207,9 @@ def test_store_force_recreate_and_option_refresh(
     with pytest.raises(RuntimeError):
         store_mod.store(opts=mismatch_opts)
 
-    refreshed = cast(DummyStore, store_mod.store(opts=mismatch_opts, force_recreate=True))
+    refreshed = cast(
+        DummyStore, store_mod.store(opts=mismatch_opts, force_recreate=True)
+    )
 
     assert created == [first, refreshed]
     assert first.closed

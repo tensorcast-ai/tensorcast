@@ -347,6 +347,8 @@ class WeightPublisher:
         to_keep = ordered[:keep]
         to_drop = ordered[keep:]
         for _, artifact_id in to_drop:
+            # Retention policy intentionally keeps key mappings append-only.
+            # keep_last only controls replica/shared-disk residency.
             try:
                 tensorcast.deregister_artifact(
                     artifact_id,
@@ -395,7 +397,9 @@ class WeightPublisher:
         ]
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    def _wait_for_key_mapping(self, *, artifact_key: str, expected_artifact_id: str) -> None:
+    def _wait_for_key_mapping(
+        self, *, artifact_key: str, expected_artifact_id: str
+    ) -> None:
         """Ensure key mapping is visible and points to the expected artifact.
 
         Tensorcast's daemon publish is best-effort and will keep an existing key

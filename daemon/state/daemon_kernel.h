@@ -12,6 +12,7 @@
 #include "core/common/capability_token.h"
 #include "core/store/device_registry.h"
 #include "core/store/store_engine.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/background_scheduler.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
@@ -19,7 +20,6 @@
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_bridge.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/persistence_manager.h"
 #include "daemon/state/placement_lease_tokens.h"
 #include "daemon/state/ref_tracker.h"
@@ -95,8 +95,8 @@ class DaemonKernel {
     return *lip_bridge_;
   }
 
-  [[nodiscard]] LocalDiskImportCatalog& disk_import_catalog() {
-    return disk_import_catalog_;
+  [[nodiscard]] ArtifactSourceRegistry& source_registry() {
+    return source_registry_;
   }
 
   [[nodiscard]] RegistrationManager& registration_manager() const {
@@ -184,7 +184,7 @@ class DaemonKernel {
   std::unique_ptr<SessionsService> sessions_svc_;
   std::unique_ptr<LipBridge> lip_bridge_;
   std::unique_ptr<PersistenceManager> persistence_mgr_;
-  LocalDiskImportCatalog disk_import_catalog_;
+  ArtifactSourceRegistry source_registry_;
 
   DeviceResolver devices_;
   ShutdownSignal shutdown_signal_;

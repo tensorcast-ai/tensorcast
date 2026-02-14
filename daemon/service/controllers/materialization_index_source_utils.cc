@@ -13,13 +13,11 @@
 #include <utility>
 #include <vector>
 
-#include "absl/log/log.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_cat.h"
 #include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
-#include "daemon/util/atomic_file_utils.h"
 #include "nlohmann/json.hpp"
 
 namespace tensorcast::daemon::materialization_index_source {
@@ -136,51 +134,6 @@ absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_d
     }
   }
   return absl::OkStatus();
-}
-
-void maybe_backfill_tensor_index(const std::filesystem::path& artifact_dir, std::string_view canonical_index_json) {
-  if (canonical_index_json.empty()) {
-    return;
-  }
-  std::error_code ec;
-  const auto json_path = artifact_dir / "tensor_index.json";
-  const auto cbor_path = artifact_dir / "tensor_index.cbor";
-  const bool has_json = std::filesystem::exists(json_path, ec);
-  if (ec) {
-    LOG(WARNING) << "Failed to stat tensor_index.json at " << json_path.string() << ": " << ec.message();
-    return;
-  }
-  const bool has_cbor = std::filesystem::exists(cbor_path, ec);
-  if (ec) {
-    LOG(WARNING) << "Failed to stat tensor_index.cbor at " << cbor_path.string() << ": " << ec.message();
-    return;
-  }
-  if (has_json && has_cbor) {
-    return;
-  }
-
-  if (!has_json) {
-    auto write_status = atomic_file_utils::write_file_atomically(json_path, canonical_index_json);
-    if (!write_status.ok()) {
-      LOG(WARNING) << "Failed to write tensor_index.json at " << json_path.string() << ": " << write_status;
-      return;
-    }
-  }
-
-  if (!has_cbor) {
-    try {
-      nlohmann::json j = nlohmann::json::parse(canonical_index_json, nullptr, true);
-      const std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(j);
-      const std::string cbor_payload(reinterpret_cast<const char*>(cbor.data()), cbor.size());
-      auto write_status = atomic_file_utils::write_file_atomically(cbor_path, cbor_payload);
-      if (!write_status.ok()) {
-        LOG(WARNING) << "Failed to write tensor_index.cbor at " << cbor_path.string() << ": " << write_status;
-        return;
-      }
-    } catch (const std::exception& ex) {
-      LOG(WARNING) << "Failed to backfill tensor_index.cbor at " << cbor_path.string() << ": " << ex.what();
-    }
-  }
 }
 
 absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(

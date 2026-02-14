@@ -14,9 +14,9 @@
 #include "absl/status/statusor.h"
 #include "core/store/components/global_store_client.h"
 #include "core/store/materialization/contracts/loading_spec.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lip_bridge.h"
-#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -46,7 +46,7 @@ struct ArtifactResolution {
   std::optional<std::string> bound_artifact_id;
   bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
-  std::optional<LocalDiskImportCatalog::Entry> local_import;
+  std::optional<ArtifactSourceRegistry::Entry> local_import;
   std::optional<store::loading::DiskSource> disk_source;
 };
 
@@ -69,7 +69,7 @@ absl::StatusOr<std::filesystem::path> wait_for_local_managed_disk_path(
 
 absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
-    LocalDiskImportCatalog* disk_imports,
+    ArtifactSourceRegistry* source_registry,
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,

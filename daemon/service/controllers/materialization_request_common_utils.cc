@@ -28,8 +28,8 @@ namespace tensorcast::daemon::materialization_request_common {
 
 namespace {
 
+using materialization_disk_resolve::record_disk_import_outcome;
 using materialization_disk_resolve::record_disk_path_denied;
-using materialization_disk_resolve::record_disk_resolution_outcome;
 using materialization_replica_handle::attach_cuda_lease_for_replica_key;
 using materialization_replica_handle::register_session_and_refs;
 
@@ -76,29 +76,29 @@ std::optional<std::filesystem::path> resolve_managed_disk_path(
     std::string_view artifact_id,
     bool allow_disk) {
   if (!allow_disk) {
-    record_disk_resolution_outcome("disabled");
+    record_disk_import_outcome("disabled");
     return std::nullopt;
   }
   if (artifact_id.empty()) {
-    record_disk_resolution_outcome("missing_artifact_id");
+    record_disk_import_outcome("missing_artifact_id");
     return std::nullopt;
   }
   if (client == nullptr) {
-    record_disk_resolution_outcome("no_client");
+    record_disk_import_outcome("no_client");
     return std::nullopt;
   }
   if (storage_root.empty()) {
-    record_disk_resolution_outcome("no_storage_root");
+    record_disk_import_outcome("no_storage_root");
     return std::nullopt;
   }
   auto cluster_or = client->get_cluster_id();
   if (!cluster_or.ok() || cluster_or->empty()) {
-    record_disk_resolution_outcome("cluster_id_missing");
+    record_disk_import_outcome("cluster_id_missing");
     return std::nullopt;
   }
   auto locations_or = client->list_artifact_disk_locations(artifact_id);
   if (!locations_or.ok()) {
-    record_disk_resolution_outcome("not_found");
+    record_disk_import_outcome("not_found");
     return std::nullopt;
   }
   const std::string& cluster_id = *cluster_or;
@@ -116,17 +116,17 @@ std::optional<std::filesystem::path> resolve_managed_disk_path(
     }
   }
   if (!selected.has_value()) {
-    record_disk_resolution_outcome("cluster_mismatch");
+    record_disk_import_outcome("cluster_mismatch");
     return std::nullopt;
   }
   auto normalized_or = normalize_disk_path(selected->relative_path, storage_root);
   if (!normalized_or.ok()) {
     record_disk_path_denied();
-    record_disk_resolution_outcome("invalid_path");
+    record_disk_import_outcome("invalid_path");
     LOG(WARNING) << "managed disk path rejected for artifact_id=" << artifact_id << ": " << normalized_or.status();
     return std::nullopt;
   }
-  record_disk_resolution_outcome("ok");
+  record_disk_import_outcome("ok");
   return *normalized_or;
 }
 
@@ -255,7 +255,7 @@ absl::StatusOr<LeaseContext> validate_and_compute_lease_context(
 
 absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
     const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
-    LocalDiskImportCatalog* disk_imports,
+    ArtifactSourceRegistry* source_registry,
     const std::filesystem::path& storage_path,
     std::string artifact_id,
     bool allow_disk,
@@ -278,16 +278,47 @@ absl::StatusOr<ArtifactResolution> resolve_artifact_and_disk_source(
   resolution.gs_connected = global_store_client && global_store_client->is_connected();
   resolution.normalized_disk_path =
       resolve_managed_disk_path(global_store_client.get(), storage_path, resolution.resolved_artifact_id, allow_disk);
+  if (resolution.normalized_disk_path.has_value() && source_registry != nullptr) {
+    source_registry->upsert_binding(
+        resolution.resolved_artifact_id,
+        ArtifactSourceRegistry::Entry{
+            .source_kind = ArtifactSourceRegistry::SourceKind::kManagedSharedDisk,
+            .canonical_source_path = resolution.normalized_disk_path->string(),
+            .source_disk_path = resolution.normalized_disk_path->string(),
+            .created_at = absl::Now(),
+            .updated_at = absl::Now(),
+        });
+  }
   // Managed shared-disk remains preferred. If unavailable, local imports can still provide
   // a deterministic disk source even when Global Store is connected.
   if (!resolution.normalized_disk_path.has_value() && allow_disk && allow_local_import_fallback &&
-      disk_imports != nullptr) {
-    auto entry = disk_imports->lookup_import(resolution.resolved_artifact_id);
+      source_registry != nullptr) {
+    auto entry = source_registry->lookup_binding(resolution.resolved_artifact_id);
     if (entry.has_value()) {
       if (!loopback_peer) {
         return absl::PermissionDeniedError("standalone disk materialization is local-only (loopback/UDS)");
       }
-      resolution.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
+      if (entry->source_kind != ArtifactSourceRegistry::SourceKind::kLocalImport) {
+        return absl::FailedPreconditionError(
+            "SOURCE_MUTATED: unexpected source binding type for local import fallback");
+      }
+      materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
+      expected_fingerprints.reserve(entry->file_fingerprints.size());
+      for (const auto& [relative_path, fp] : entry->file_fingerprints) {
+        expected_fingerprints.insert_or_assign(
+            relative_path,
+            materialization_disk_resolve::SourceFileFingerprint{
+                .inode = fp.inode,
+                .size = fp.size,
+                .mtime_ns = fp.mtime_ns,
+            });
+      }
+      auto fingerprint_status = materialization_disk_resolve::validate_source_fingerprints(
+          std::filesystem::path(entry->canonical_source_path), expected_fingerprints);
+      if (!fingerprint_status.ok()) {
+        return fingerprint_status;
+      }
+      resolution.normalized_disk_path = std::filesystem::path(entry->canonical_source_path);
       resolution.local_import = std::move(entry);
     }
   }

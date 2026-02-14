@@ -8,11 +8,11 @@
 #include "core/store/components/global_store_client.h"
 #include "core/store/store_engine.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/daemon_options.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/handle_lease_registry.h"
 #include "daemon/state/lip_bridge.h"
-#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/ref_tracker.h"
 #include "daemon/state/session_lifecycle.h"
 #include "daemon/state/sessions_service.h"
@@ -29,7 +29,7 @@ class ReplicaMaterializationService {
     SessionsService& sessions;
     LipBridge& lip;
     DeviceResolver& devices;
-    LocalDiskImportCatalog& disk_imports;
+    ArtifactSourceRegistry& disk_imports;
     ShutdownSignal& shutdown_signal;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;
     SessionLifecycleManager* lifecycle{nullptr};

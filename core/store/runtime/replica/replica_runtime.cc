@@ -65,6 +65,67 @@ uint64_t compute_bytes_for_chunks(
   return total;
 }
 
+struct ResolvedUmaReplica {
+  loading::ReplicaKey registry_key;
+  loading::ReplicaKey uma_key;
+  std::shared_ptr<replica::Replica> replica;
+};
+
+std::optional<loading::ReplicaKey> resolve_uma_key_for_replica(
+    const loading::ReplicaKey& requested_key,
+    const std::shared_ptr<replica::Replica>& replica_instance) {
+  auto uma = replica_instance->get_memory_manager().memory_authority();
+  if (!uma) {
+    return std::nullopt;
+  }
+  const loading::ReplicaKey normalized_requested = normalize_replica_key(requested_key);
+  if (uma->has_allocation(normalized_requested)) {
+    return normalized_requested;
+  }
+  const loading::ReplicaKey physical_key = normalize_replica_key(replica_instance->replica_key());
+  if (uma->has_allocation(physical_key)) {
+    return physical_key;
+  }
+  return std::nullopt;
+}
+
+absl::StatusOr<ResolvedUmaReplica> resolve_replica_and_uma_key(
+    const components::ReplicaRegistry& registry,
+    const loading::ReplicaKey& requested_key) {
+  const loading::ReplicaKey normalized_requested = normalize_replica_key(requested_key);
+  auto replica_or = registry.find(normalized_requested);
+  if (replica_or.ok()) {
+    auto uma_key = resolve_uma_key_for_replica(normalized_requested, *replica_or);
+    if (!uma_key.has_value()) {
+      return absl::NotFoundError("Replica not found in unified memory");
+    }
+    return ResolvedUmaReplica{
+        .registry_key = normalized_requested,
+        .uma_key = *uma_key,
+        .replica = *replica_or,
+    };
+  }
+
+  const auto candidates = registry.find_by_device(normalize_device_key(normalized_requested.device));
+  for (const auto& candidate_key : candidates) {
+    auto candidate_or = registry.find(candidate_key);
+    if (!candidate_or.ok()) {
+      continue;
+    }
+    auto uma = candidate_or.value()->get_memory_manager().memory_authority();
+    if (uma == nullptr || !uma->has_allocation(normalized_requested)) {
+      continue;
+    }
+    return ResolvedUmaReplica{
+        .registry_key = candidate_key,
+        .uma_key = normalized_requested,
+        .replica = *candidate_or,
+    };
+  }
+
+  return absl::NotFoundError("Replica not found");
+}
+
 } // namespace
 
 ReplicaRuntime::ReplicaRuntime(gsl::not_null<RuntimeContext*> context)
@@ -428,6 +489,60 @@ int ReplicaRuntime::unload_replica(const loading::ReplicaKey& key) const {
   return -1;
 }
 
+absl::Status ReplicaRuntime::retire_replica_status(const loading::ReplicaKey& key) {
+  const auto normalized_key = normalize_replica_key(key);
+  auto removed = registry().erase(normalized_key);
+  if (!removed.has_value()) {
+    return absl::NotFoundError(
+        std::format(
+            "ReplicaRuntime::retire_replica: artifact={} device={} not found in registry",
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal));
+  }
+
+  auto [removed_key, replica] = std::move(*removed);
+  const loading::ReplicaKey canonical_key = normalize_replica_key(removed_key);
+  size_t replica_size = 0;
+  if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
+    replica_size = *size_or;
+  }
+
+  bool emitted_evicted = false;
+  std::vector<absl::Status> release_errors;
+  auto release_location = [&](common::memory::MemoryLocation location) {
+    absl::Status st = replica->release_memory(location);
+    if (st.ok()) {
+      if (!emitted_evicted) {
+        publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
+        emitted_evicted = true;
+      }
+      return;
+    }
+    if (absl::IsNotFound(st)) {
+      return;
+    }
+    release_errors.push_back(st);
+  };
+  release_location(common::memory::MemoryLocation::CPU);
+  release_location(common::memory::MemoryLocation::GPU);
+
+  {
+    absl::MutexLock lock(&publish_state_mu_);
+    publish_states_.erase(canonical_key);
+  }
+  clear_transport_state(canonical_key);
+  clear_replica_global_id(canonical_key);
+  if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+    stable_cache->on_replica_evicted(canonical_key, "deregister");
+  }
+  metrics().update_all_metrics(*pinned_pool(), registry(), device_manager());
+
+  if (!release_errors.empty()) {
+    return release_errors.front();
+  }
+  return absl::OkStatus();
+}
+
 replica::MemoryState ReplicaRuntime::get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const {
   auto replica_or = registry().find(normalize_replica_key(key));
   if (!replica_or.ok()) {
@@ -563,31 +678,29 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::ExportRegistration> ReplicaRunti
     common::memory::MemoryLocation location,
     absl::Span<const uint32_t> chunks,
     bool on) const {
-  const auto normalized_key = normalize_replica_key(key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  return uma->set_exported(normalized_key, location, chunks, on);
+  return uma->set_exported(resolved_or->uma_key, location, chunks, on);
 }
 
 absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acquire_replica_stable_lease(
     const loading::ReplicaKey& key,
     absl::Span<const uint32_t> chunks) const {
-  const auto normalized_key = normalize_replica_key(key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  auto lease_or = uma->acquire_stable_lease(normalized_key, chunks);
+  auto lease_or = uma->acquire_stable_lease(resolved_or->uma_key, chunks);
   if (lease_or.ok() || !absl::IsResourceExhausted(lease_or.status())) {
     return lease_or;
   }
@@ -595,7 +708,7 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acq
   if (!stable_cache) {
     return lease_or;
   }
-  auto layout_or = uma->get_layout(normalized_key);
+  auto layout_or = uma->get_layout(resolved_or->uma_key);
   if (!layout_or.ok()) {
     return lease_or;
   }
@@ -603,31 +716,27 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> ReplicaRuntime::acq
   if (required_bytes == 0) {
     return lease_or;
   }
-  const absl::Status evict_status = stable_cache->preempt_for_export(required_bytes, normalized_key);
+  const absl::Status evict_status = stable_cache->preempt_for_export(required_bytes, resolved_or->registry_key);
   if (!evict_status.ok()) {
-    LOG(WARNING) << "stable_cache.preempt_for_export failed: key=" << normalized_key << " bytes=" << required_bytes
-                 << " status=" << evict_status;
+    LOG(WARNING) << "stable_cache.preempt_for_export failed: key=" << resolved_or->registry_key
+                 << " bytes=" << required_bytes << " status=" << evict_status;
     return lease_or;
   }
-  return uma->acquire_stable_lease(normalized_key, chunks);
+  return uma->acquire_stable_lease(resolved_or->uma_key, chunks);
 }
 
 absl::Status ReplicaRuntime::release_replica_stable_lease(
     const replica::UnifiedMemoryAuthority::StableLease& lease) const {
-  const auto normalized_key = normalize_replica_key(lease.key);
-  auto replica_or = registry().find(normalized_key);
-  if (!replica_or.ok()) {
-    return absl::NotFoundError("Replica not found");
+  auto resolved_or = resolve_replica_and_uma_key(registry(), lease.key);
+  if (!resolved_or.ok()) {
+    return resolved_or.status();
   }
-  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  auto uma = resolved_or->replica->get_memory_manager().memory_authority();
   if (!uma) {
     return absl::FailedPreconditionError("UMA is unavailable for replica");
   }
-  if (normalized_key == lease.key) {
-    return uma->release_stable_lease(lease);
-  }
   auto adjusted = lease;
-  adjusted.key = normalized_key;
+  adjusted.key = resolved_or->uma_key;
   return uma->release_stable_lease(adjusted);
 }
 

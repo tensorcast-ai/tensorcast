@@ -72,6 +72,7 @@ struct TestHarness {
     deps.artifact_chunk_bytes = kChunkBytes;
     deps.pinned_memory_timeout = std::chrono::milliseconds{0};
     deps.num_threads = 2;
+    deps.run_auto_handles_disk_fallback = run_auto_handles_disk_fallback;
     deps.run_auto = run_auto;
     deps.ingest_from_disk = ingest_from_disk;
     return deps;
@@ -80,6 +81,7 @@ struct TestHarness {
   ReplicaRegistry registry;
   std::shared_ptr<tensorcast::common::memory::PinnedBufferPool> memory_pool;
   std::shared_ptr<tensorcast::common::AsyncRuntime> async_runtime;
+  bool run_auto_handles_disk_fallback = false;
   std::function<absl::StatusOr<ReplicaHandle>(const MaterializationRequest&)> run_auto;
   std::function<absl::StatusOr<
       ReplicaHandle>(const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&)>
@@ -96,6 +98,26 @@ std::shared_ptr<tensorcast::store::replica::Replica> MakeCpuReplica(
       .artifact_identifier = artifact_id,
       .device_type = DeviceType::CPU,
       .local_device_id = -1,
+      .pinned_buffer_pool = pool,
+      .async_runtime = async_runtime,
+      .artifact_chunk_bytes = kChunkBytes,
+      .expected_artifact_size = 16};
+  auto replica_or = tensorcast::store::replica::Replica::create(cfg);
+  REQUIRE(replica_or.ok());
+  return std::shared_ptr<tensorcast::store::replica::Replica>(std::move(replica_or.value()));
+}
+
+std::shared_ptr<tensorcast::store::replica::Replica> MakeGpuReplicaWithCpuSource(
+    const std::string& artifact_id,
+    int device_id,
+    gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>> pool,
+    gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>> async_runtime) {
+  InlineBufferSource src{.data = nullptr, .size_bytes = 16};
+  tensorcast::store::replica::ReplicaConfig cfg{
+      .source = src,
+      .artifact_identifier = artifact_id,
+      .device_type = DeviceType::GPU,
+      .local_device_id = device_id,
       .pinned_buffer_pool = pool,
       .async_runtime = async_runtime,
       .artifact_chunk_bytes = kChunkBytes,
@@ -210,4 +232,172 @@ TEST_CASE("MaterializationService AUTO uses injected orchestrator", "[materializ
   auto failing = failing_service.execute(request_or.value());
   REQUIRE_FALSE(failing.ok());
   REQUIRE(failing.status().code() == absl::StatusCode::kAborted);
+}
+
+TEST_CASE(
+    "MaterializationService AUTO skips second disk fallback when callback owns fallback",
+    "[materialization_service]") {
+  TestHarness harness;
+  harness.run_auto_handles_disk_fallback = true;
+  harness.run_auto = [](const MaterializationRequest&) {
+    return absl::PermissionDeniedError("callback disk fallback already failed");
+  };
+
+  bool disk_invoked = false;
+  harness.ingest_from_disk = [&](const std::string&,
+                                 const DiskSource&,
+                                 const ReplicaTarget&,
+                                 const MaterializeHints&) -> absl::StatusOr<ReplicaHandle> {
+    disk_invoked = true;
+    return absl::UnimplementedError("unexpected");
+  };
+
+  DeviceManager device_manager;
+  MaterializeHints hints = MakeHints("cgid:artifact-auto-owned-fallback");
+  DiskSource disk_source{.path = std::filesystem::path("/tmp/model"), .expected_size = std::nullopt};
+  auto request_or =
+      MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::AUTO, hints, device_manager, disk_source);
+  REQUIRE(request_or.ok());
+
+  MaterializationService service(harness.BuildDeps());
+  auto result = service.execute(request_or.value());
+  REQUIRE_FALSE(result.ok());
+  REQUIRE(result.status().code() == absl::StatusCode::kPermissionDenied);
+  REQUIRE_FALSE(disk_invoked);
+}
+
+TEST_CASE(
+    "MaterializationService AUTO falls back to disk when callback does not own fallback",
+    "[materialization_service]") {
+  TestHarness harness;
+  harness.run_auto = [](const MaterializationRequest&) { return absl::UnavailableError("orchestrator unavailable"); };
+
+  DeviceManager device_manager;
+  MaterializeHints hints = MakeHints("cgid:artifact-auto-fallback-to-disk");
+  DiskSource disk_source{.path = std::filesystem::path("/tmp/model"), .expected_size = std::nullopt};
+  auto request_or =
+      MaterializationRequest::Create(MakeCpuKey(), MaterializeMode::AUTO, hints, device_manager, disk_source);
+  REQUIRE(request_or.ok());
+  const auto request = request_or.value();
+
+  bool disk_invoked = false;
+  harness.ingest_from_disk = [&](const std::string& artifact,
+                                 const DiskSource& source,
+                                 const ReplicaTarget& target,
+                                 const MaterializeHints&) -> absl::StatusOr<ReplicaHandle> {
+    disk_invoked = true;
+    REQUIRE(artifact == request.canonical_artifact_id());
+    REQUIRE(source.path == "/tmp/model");
+    REQUIRE(target.location.type == tensorcast::common::memory::MemoryLocation::CPU);
+    return MakeStubHandle(request.replica_key());
+  };
+
+  MaterializationService service(harness.BuildDeps());
+  auto result = service.execute(request);
+  REQUIRE(result.ok());
+  REQUIRE(disk_invoked);
+}
+
+TEST_CASE("MaterializationService AUTO falls back when reuse fails immediately", "[materialization_service]") {
+  TestHarness harness;
+  DeviceManager device_manager;
+  device_manager.set_num_gpus_for_testing(1);
+
+  MaterializeHints hints = MakeHints("cgid:artifact-reuse-fallback");
+  auto request_or = MaterializationRequest::Create(MakeGpuKey(0), MaterializeMode::AUTO, hints, device_manager);
+  REQUIRE(request_or.ok());
+  const auto request = request_or.value();
+
+  auto existing = MakeGpuReplicaWithCpuSource(
+      request.canonical_artifact_id(),
+      /*device_id=*/0,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{harness.memory_pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.async_runtime});
+  auto emplace_status = harness.registry.emplace(request.replica_key(), gsl::not_null{existing});
+  REQUIRE(emplace_status.ok());
+
+  bool run_auto_invoked = false;
+  auto fallback_key = ReplicaKey{
+      .artifact_id = "cgid:artifact-reuse-fallback:auto",
+      .view_id = std::nullopt,
+      .device = MakeGpuKey(0),
+      .replica = 0,
+  };
+  harness.run_auto = [&](const MaterializationRequest&) -> absl::StatusOr<ReplicaHandle> {
+    run_auto_invoked = true;
+    return MakeStubHandle(fallback_key);
+  };
+  harness.ingest_from_disk = [](const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&) {
+    return absl::UnimplementedError("ingest not used");
+  };
+
+  MaterializationService service(harness.BuildDeps());
+  auto result = service.execute(request);
+  REQUIRE(result.ok());
+  REQUIRE(run_auto_invoked);
+  REQUIRE(result->replica_key.artifact_id == fallback_key.artifact_id);
+}
+
+TEST_CASE(
+    "MaterializationService AUTO repairs existing GPU replica from local CPU source",
+    "[materialization_service]") {
+  TestHarness harness;
+  harness.run_auto = nullptr;
+  harness.ingest_from_disk = [](const std::string&, const DiskSource&, const ReplicaTarget&, const MaterializeHints&) {
+    return absl::UnimplementedError("ingest not used");
+  };
+
+  DeviceManager device_manager;
+  device_manager.set_num_gpus_for_testing(1);
+  MaterializeHints hints = MakeHints("cgid:artifact-local-heal");
+  auto request_or = MaterializationRequest::Create(MakeGpuKey(0), MaterializeMode::AUTO, hints, device_manager);
+  REQUIRE(request_or.ok());
+  const auto request = request_or.value();
+
+  auto cpu_replica = MakeCpuReplica(
+      request.canonical_artifact_id(),
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{harness.memory_pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.async_runtime});
+  const absl::Status cpu_alloc_status =
+      cpu_replica->get_memory_manager().allocate_memory(tensorcast::common::memory::MemoryLocation::CPU);
+  REQUIRE(cpu_alloc_status.ok());
+  const absl::Status cpu_mark_status = cpu_replica->mark_loaded(tensorcast::common::memory::MemoryLocation::CPU);
+  REQUIRE(cpu_mark_status.ok());
+  cpu_replica->set_ready_signal(tensorcast::common::memory::MemoryLocation::CPU, absl::OkStatus());
+  const auto cpu_ptrs = cpu_replica->get_data_pointer(tensorcast::common::memory::MemoryLocation::CPU);
+  REQUIRE_FALSE(cpu_ptrs.empty());
+  REQUIRE(cpu_ptrs[0] != nullptr);
+  ReplicaKey cpu_key{
+      .artifact_id = request.canonical_artifact_id(),
+      .view_id = request.requested_view_id(),
+      .device = MakeCpuKey(),
+      .replica = 0,
+  };
+  auto cpu_emplace = harness.registry.emplace(cpu_key, gsl::not_null{cpu_replica});
+  REQUIRE(cpu_emplace.ok());
+
+  auto existing_gpu = MakeGpuReplicaWithCpuSource(
+      request.canonical_artifact_id(),
+      /*device_id=*/0,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{harness.memory_pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{harness.async_runtime});
+  auto gpu_emplace = harness.registry.emplace(request.replica_key(), gsl::not_null{existing_gpu});
+  REQUIRE(gpu_emplace.ok());
+  const absl::Status alloc_status =
+      existing_gpu->get_memory_manager().allocate_memory(tensorcast::common::memory::MemoryLocation::GPU);
+  REQUIRE(alloc_status.ok());
+  existing_gpu->set_ready_signal(
+      tensorcast::common::memory::MemoryLocation::GPU, absl::FailedPreconditionError("stale failed ready signal"));
+
+  MaterializationService service(harness.BuildDeps());
+  auto result = service.execute(request);
+  REQUIRE(result.ok());
+  const absl::Status ready_status = result->wait_ready(std::chrono::milliseconds(0));
+  REQUIRE(ready_status.ok());
+
+  auto repaired_or = harness.registry.find(request.replica_key());
+  REQUIRE(repaired_or.ok());
+  REQUIRE(
+      repaired_or.value()->get_memory_state(tensorcast::common::memory::MemoryLocation::GPU) ==
+      tensorcast::store::replica::MemoryState::LOADED);
 }

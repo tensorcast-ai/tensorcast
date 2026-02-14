@@ -5,7 +5,6 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import threading
-import time
 from contextlib import contextmanager
 from typing import Callable
 
@@ -14,7 +13,6 @@ import torch
 
 from tensorcast.api._materialize import MaterializationPayload, TensorPayloadDescriptor
 from tensorcast.api.store.cache import ArtifactCache, ArtifactCacheEntry
-from tensorcast.api.store.common import canonical_index_from_bytes
 from tensorcast.api.store.materialization import MaterializationPipeline
 from tensorcast.api.store.retry import build_retry_policies
 from tensorcast.api.store.types import (
@@ -37,9 +35,7 @@ def _force_cuda(monkeypatch):
 def _patch_validate_targets(monkeypatch):
     from tensorcast.api.store import materialization as mat_mod
 
-    def _pair(
-        *, canonical_index, target, source, device_id, required_names=None
-    ):
+    def _pair(*, canonical_index, target, source, device_id, required_names=None):
         pairs: list[tuple[torch.Tensor, torch.Tensor]] = []
         names = (
             required_names
@@ -97,20 +93,37 @@ class _FakeClient:
         del artifact_id
         return b"{}"
 
-    def resolve_artifact_from_disk_v2(
-        self, *, disk_path: str, verify_checksums: bool = True
-    ):
-        self.resolve_calls.append((disk_path, bool(verify_checksums)))
+    def import_artifact_from_path_v2(self, *, path: str, verify_checksums: bool = True):
+        self.resolve_calls.append((path, bool(verify_checksums)))
 
         class _Resp:
             pass
 
         resp = _Resp()
         resp.artifact_id = "aid"
-        resp.disk_path = disk_path
         resp.canonical_index_bytes = json.dumps({}).encode("utf-8")
         resp.generation = 0
         return resp
+
+    def import_artifact_from_path_stream_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ):
+        resp = self.import_artifact_from_path_v2(
+            path=path,
+            verify_checksums=verify_checksums,
+        )
+        final_resp = store_daemon_pb2.ImportArtifactFromPathResponse(
+            artifact_id=resp.artifact_id,
+            canonical_index_bytes=resp.canonical_index_bytes,
+            generation=resp.generation,
+        )
+        event = store_daemon_pb2.ImportArtifactFromPathStreamEvent(
+            seq=1,
+            phase=store_daemon_pb2.IMPORT_ARTIFACT_PHASE_DONE,
+            done=True,
+        )
+        event.result.CopyFrom(final_resp)
+        yield event
 
 
 class _RuntimeStub:
@@ -231,7 +244,9 @@ def test_get_selective_tensors():
 
     def fake_materialize(**kwargs):
         captured["called"] = True
-        return _make_payload({"foo": torch.ones(1), "bar": torch.zeros(1)}, replica_uuid="p1")
+        return _make_payload(
+            {"foo": torch.ones(1), "bar": torch.zeros(1)}, replica_uuid="p1"
+        )
 
     pipeline.set_materialize_fn(fake_materialize)
     result = pipeline.get(artifact_id="aid", tensor_names=["bar"])
@@ -261,9 +276,7 @@ def test_get_into_async_cancel_releases(monkeypatch):
 
     pipeline.set_materialize_fn(fake_materialize)
     target = {"a": torch.empty(1), "b": torch.empty(1)}
-    fut = pipeline.get_into_async(
-        target, artifact_id="aid", tensor_names=["a", "b"]
-    )
+    fut = pipeline.get_into_async(target, artifact_id="aid", tensor_names=["a", "b"])
 
     cancelled = fut.cancel()
     gate.set()

@@ -102,7 +102,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .lip_manager = kernel->lip_manager(),
       .devices = kernel->device_resolver(),
       .regions = kernel->region_registry(),
-      .disk_imports = kernel->disk_import_catalog(),
+      .disk_imports = kernel->source_registry(),
       .shutdown_signal = kernel->shutdown_signal(),
       .async_runtime = *async_runtime,
       .identity = kernel->worker_identity_store(),
@@ -186,6 +186,7 @@ absl::StatusOr<std::unique_ptr<DaemonServiceHarness>> DaemonServiceHarness::crea
       .replica_session_controller = *replica_session_controller,
       .lease_controller = *lease_controller,
       .shutdown_signal = kernel->shutdown_signal(),
+      .source_registry = &kernel->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = options.allow_high_card_attrs,

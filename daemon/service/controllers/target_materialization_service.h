@@ -10,10 +10,10 @@
 #include "core/store/store_engine.h"
 #include "daemon/service/controllers/target_publish_service.h"
 #include "daemon/service/rpc_context.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/device_resolver.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
-#include "daemon/state/local_disk_import_catalog.h"
 #include "daemon/state/shutdown_signal.h"
 #include "daemon/state/target_write_registry.h"
 #include "daemon/state/worker_identity_store.h"
@@ -28,7 +28,7 @@ class TargetMaterializationService {
     LipManager& lip_manager;
     DeviceResolver& devices;
     IpcRegionRegistry& regions;
-    LocalDiskImportCatalog& disk_imports;
+    ArtifactSourceRegistry& disk_imports;
     ShutdownSignal& shutdown_signal;
     WorkerIdentityStore& identity;
     std::shared_ptr<store::components::IGlobalStoreClient> global_store_client;

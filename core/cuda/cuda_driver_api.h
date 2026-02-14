@@ -27,6 +27,7 @@ namespace tensorcast::cuda {
   X(cuModuleGetFunction)                 \
   X(cuLaunchKernel)                      \
   X(cuModuleUnload)                      \
+  X(cuCtxGetCurrent)                     \
   X(cuGetErrorName)                      \
   X(cuGetErrorString)
 

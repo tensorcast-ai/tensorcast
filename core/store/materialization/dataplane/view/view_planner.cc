@@ -110,6 +110,8 @@ absl::StatusOr<uint64_t> dtype_element_size(std::string_view dtype) {
   static const absl::flat_hash_map<std::string_view, uint64_t> kSizeMap = {
       {"torch.float16", 2},
       {"torch.bfloat16", 2},
+      {"torch.float8_e4m3fn", 1},
+      {"torch.float8_e5m2", 1},
       {"torch.float32", 4},
       {"torch.float64", 8},
       {"torch.int8", 1},

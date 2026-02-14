@@ -8,9 +8,8 @@ TensorCast is a high-performance distributed artifact storage and loading system
 
 ## Command Execution
 
-- When running any Python script or module, you MUST use `uv run <script>`.
 - Never invoke `python`, `python3`, or `python -m` directly; this applies to ad-hoc scripts, tooling helpers, tests, `setup.py`, and all other Python entry points.
-- You must use `uv run pytest tests/python/xxxx` to run python tests
+- You must use `pytest tests/python/xxxx` to run python tests
 - You must use `bazel test //core/component:xxx_test` to run cxx tests
 - These policies keep virtualenv isolation consistent; violating them can break the build and introduce environment skew.
 
@@ -20,6 +19,7 @@ TensorCast is a high-performance distributed artifact storage and loading system
 - `startup.init(mode="connect")` resolves the daemon address from an explicit parameter or the current local session (`runtime.status()` / service manager); it errors if no session is found or the daemon is unreachable.
 - `startup.init(mode="create")` launches a local daemon via `runtime.start(...)` using a daemon config path selected in order: explicit `daemon_config_path` → `$TENSORCAST_DAEMON_CONFIG` → `examples/config/store_daemon_config.yaml` (repo or packaged wheel).
 - If the chosen config enables HA or disk operations, the daemon must have `daemon_id` set (for Global Store registration) and `server.storage_path` set (for disk materialization). Missing values cause startup to exit early with clear errors.
+- **Hard rule (required)**: Python SDK code MUST NOT connect to Global Store directly (no direct gRPC channel/stub, no Global Store endpoint usage). SDK key-mapping, artifact metadata, and control-path operations MUST go through the Store Daemon APIs only.
 
 ## Architecture Overview
 
@@ -124,7 +124,7 @@ Note: When writing documentation, you may use Mermaid diagrams to illustrate flo
 #  BUILD_EXTENSION means cxx files in tensorcast/csrc and the output is tensorcast._C
 # Always should run this command when you modify any cxx files and
 # you want to test the changes in the python code.
-BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+BUILD_CORE=1 BUILD_EXTENSION=1 python -vvv setup.py build_ext
 
 # Build and run tests
 # Tests are now colocated with their implementation
@@ -162,10 +162,10 @@ Backend selection is **runtime**, via `TENSORCAST_CUDA_BACKEND`:
 
 ```bash
 # Build Python extension (single binary supports real/fake at runtime)
-BUILD_CORE=1 BUILD_EXTENSION=1 uv run -vvv setup.py build_ext
+BUILD_CORE=1 BUILD_EXTENSION=1 python setup.py build_ext
 
 # Run Python tests with fake CUDA backend
-TENSORCAST_CUDA_BACKEND=fake uv run pytest tests/python/...
+TENSORCAST_CUDA_BACKEND=fake pytest tests/python/...
 
 # Run C++ tests with fake CUDA backend
 # Select fake explicitly via test env:
@@ -181,18 +181,18 @@ bazel test //daemon:grpc_service_impl_registration_test
 #### C++ Code Formatting
 ```bash
 # It's not necessary to add other arguments to the command, just run it directly
-uv run clang-tidy ./core/xxx.cc
+clang-tidy ./core/xxx.cc
 ```
 
 #### Python Code Quality
 ```bash
 # Run Python linting (After you write code, run this command to check if your code is correct)
-uv run ruff check .
-uv run ruff format .
+ruff check .
+ruff format .
 
 # Type checking
-uv run pyright ./tensorcast
-uv run mypy ./tensorcast
+pyright ./tensorcast
+mypy ./tensorcast
 ```
 
 ### Protocol Buffer Code Generation
@@ -373,11 +373,11 @@ if (fd < 0) {
 
 ### Python Guidelines
 - **Python Environment**: MUST use `source .venv/bin/activate` to activate the virtual environment before running any python scripts (including pytest tests)
-- **Package Management**: `uv` (MUST)
-- **Testing**: `pytest` in `tests/python/`; run with `uv run pytest tests/python/...`
+- **Package Management**: `uv` (MUST) NOT use `pip`. Use `uv pip install <package>` to install packages.
+- **Testing**: `pytest` in `tests/python/`; run with `pytest tests/python/...`
 - **Type Checking & Linting**: `mypy` and `ruff`
-  - `uv run mypy ./tensorcast`
-  - `uv run ruff check .` and `uv run ruff format .`
+  - `mypy ./tensorcast`
+  - `ruff check .` and `ruff format .`
 - **Data Modeling**: Prefer Pydantic models over raw dictionaries for validation
 
 #### Python Naming Conventions

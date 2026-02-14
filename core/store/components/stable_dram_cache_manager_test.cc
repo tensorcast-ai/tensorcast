@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "core/store/components/stable_dram_cache_manager.h"
 
@@ -480,4 +480,88 @@ TEST_CASE("StableDramCacheManager spill evicts when shared disk is available", "
   REQUIRE(admit2->admitted);
   REQUIRE(replica1->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
   REQUIRE(replica2->get_memory_state(MemoryLocation::CPU) == MemoryState::LOADED);
+}
+
+TEST_CASE("StableDramCacheManager admits logical alias key for physical UMA replica", "[stable_cache]") {
+  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "mem_reg:alias",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey physical_key = replica->replica_key();
+
+  ReplicaKey logical_key = physical_key;
+  logical_key.artifact_id = "cgid:alias";
+  REQUIRE(registry.emplace(logical_key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  StableDramCacheManager::AdmissionRequest request;
+  request.key = logical_key;
+  request.replica = replica;
+  request.size_bytes = kChunkBytes;
+  request.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit = cache.admit(request);
+  REQUIRE(admit.ok());
+  REQUIRE(admit->admitted);
+  REQUIRE(cache.bytes_used() > 0);
+
+  REQUIRE_FALSE(cache.is_evictable(logical_key, absl::Now() + absl::Hours(1)));
+
+  cache.on_replica_evicted(physical_key, "alias_test");
+  REQUIRE(cache.bytes_used() == 0);
+}
+
+TEST_CASE("StableDramCacheManager evicts alias entry when LRU key is physical", "[stable_cache]") {
+  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "mem_reg:evict-alias",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey physical_key = replica->replica_key();
+
+  ReplicaKey logical_key = physical_key;
+  logical_key.artifact_id = "cgid:evict-alias";
+  REQUIRE(registry.emplace(physical_key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+  REQUIRE(registry.emplace(logical_key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  // Make physical alias the canonical LRU identity chosen by registry de-dup.
+  auto touch_or = registry.find(physical_key);
+  REQUIRE(touch_or.ok());
+
+  StableDramCacheManager::AdmissionRequest request;
+  request.key = logical_key;
+  request.replica = replica;
+  request.size_bytes = kChunkBytes;
+  request.policy = MakePolicy(StableRetentionPolicy::kBestEffort, StableOverflowPolicy::kEvict);
+  auto admit = cache.admit(request);
+  REQUIRE(admit.ok());
+  REQUIRE(admit->admitted);
+
+  auto evict_status = cache.preempt_for_export(kChunkBytes, logical_key);
+  REQUIRE(evict_status.ok());
+  REQUIRE(cache.bytes_used() == 0);
+  REQUIRE(replica->get_memory_state(MemoryLocation::CPU) == MemoryState::UNALLOCATED);
 }

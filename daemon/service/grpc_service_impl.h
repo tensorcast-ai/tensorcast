@@ -15,6 +15,7 @@
 #include "daemon/service/controllers/replica_session_controller.h"
 #include "daemon/service/controllers/status_controller.h"
 #include "daemon/service/controllers/transport_controller.h"
+#include "daemon/state/artifact_source_registry.h"
 #include "daemon/state/ipc_region_registry.h"
 #include "daemon/state/lip_manager.h"
 #include "daemon/state/session_lifecycle.h"
@@ -47,6 +48,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
     ReplicaSessionController& replica_session_controller;
     LeaseController& lease_controller;
     ShutdownSignal& shutdown_signal;
+    ArtifactSourceRegistry* source_registry{nullptr};
   };
 
   StoreDaemonServiceImpl(Deps deps, Options opts);
@@ -161,10 +163,15 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::MaterializeByKeyRequest* req,
       v2::MaterializeByKeyResponse* resp) override;
 
-  grpc::Status ResolveArtifactFromDisk(
+  grpc::Status ImportArtifactFromPath(
       grpc::ServerContext* ctx,
-      const v2::ResolveArtifactFromDiskRequest* req,
-      v2::ResolveArtifactFromDiskResponse* resp) override;
+      const v2::ImportArtifactFromPathRequest* req,
+      v2::ImportArtifactFromPathResponse* resp) override;
+
+  grpc::Status ImportArtifactFromPathStream(
+      grpc::ServerContext* ctx,
+      const v2::ImportArtifactFromPathRequest* req,
+      grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>* writer) override;
 
   grpc::Status QueryReplicaStatus(
       grpc::ServerContext* ctx,
@@ -290,6 +297,7 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
   ReplicaSessionController* replica_session_controller_;
   LeaseController* lease_controller_;
   ShutdownSignal* shutdown_signal_;
+  ArtifactSourceRegistry* source_registry_{nullptr};
   Options opts_;
 };
 
