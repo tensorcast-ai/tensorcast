@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <queue>
+#include <string_view>
 #include <vector>
 
 #include "absl/base/thread_annotations.h"
@@ -48,10 +49,12 @@ class StreamingPinnedBuffer {
   /**
    * @brief Initialize the buffer pool by allocating chunks from the memory pool.
    * @param timeout Optional timeout for allocation (default: no timeout)
+   * @param request_context Optional call-site context emitted in pinned-pool wait logs
    * @return Status indicating success or failure
    */
-  absl::Status initialize(const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero())
-      ABSL_LOCKS_EXCLUDED(mutex_);
+  absl::Status initialize(
+      const std::chrono::milliseconds& timeout = std::chrono::milliseconds::zero(),
+      std::string_view request_context = {}) ABSL_LOCKS_EXCLUDED(mutex_);
 
   /**
    * @brief Release all chunks back to the memory pool.

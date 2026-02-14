@@ -39,10 +39,14 @@ std::string canonical_index_sample() {
 }
 
 // Helper to write a simple safetensors file with header-only (no payload required for index building).
-void create_safetensors_file(const fs::path& path, const std::string& tensor_name, uint64_t size_bytes) {
+void create_safetensors_file(
+    const fs::path& path,
+    const std::string& tensor_name,
+    uint64_t size_bytes,
+    const std::string& dtype = "U8") {
   // Basic safetensors layout: [header_size (u64 little-endian)][header_json][payload...]
   const std::string header_json =
-      nlohmann::json({{tensor_name, {{"dtype", "U8"}, {"shape", {size_bytes}}, {"data_offsets", {0, size_bytes}}}}})
+      nlohmann::json({{tensor_name, {{"dtype", dtype}, {"shape", {size_bytes}}, {"data_offsets", {0, size_bytes}}}}})
           .dump();
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   REQUIRE(out.is_open());
@@ -145,6 +149,41 @@ TEST_CASE("IndexReader prefers tensor_index.json over safetensors headers", "[in
   nlohmann::json parsed = nlohmann::json::parse(info.canonical_index_json);
   CHECK(parsed.contains("from_index"));
   CHECK_FALSE(parsed.contains("from_safetensors"));
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("IndexReader supports float8 safetensors dtypes", "[index_reader][safetensors]") {
+  fs::path dir = make_temp_dir("index_reader_float8_dtype");
+  create_safetensors_file(dir / "e4m3.safetensors", "e4m3", /*size_bytes=*/16, /*dtype=*/"F8_E4M3");
+  create_safetensors_file(dir / "e5m2.safetensors", "e5m2", /*size_bytes=*/16, /*dtype=*/"F8_E5M2");
+
+  std::vector<fs::path> files{dir / "e4m3.safetensors", dir / "e5m2.safetensors"};
+  auto info_or = build_from_safetensors(files, std::nullopt);
+
+  REQUIRE(info_or.ok());
+  REQUIRE(info_or->source_index_json.has_value());
+  const auto source = nlohmann::json::parse(*info_or->source_index_json);
+  CHECK(source.at("e4m3")[4].get<std::string>() == "torch.float8_e4m3fn");
+  CHECK(source.at("e5m2")[4].get<std::string>() == "torch.float8_e5m2");
+
+  fs::remove_all(dir);
+}
+
+TEST_CASE("IndexReader reports unsupported safetensors dtype details", "[index_reader][safetensors]") {
+  fs::path dir = make_temp_dir("index_reader_unsupported_dtype");
+  create_safetensors_file(dir / "weights.safetensors", "weights", /*size_bytes=*/16, /*dtype=*/"F8_UNKNOWN");
+
+  std::vector<fs::path> files{dir / "weights.safetensors"};
+  auto info_or = build_from_safetensors(files, std::nullopt);
+
+  REQUIRE_FALSE(info_or.ok());
+  const std::string message = std::string(info_or.status().message());
+  CHECK(message.find("Unsupported safetensors dtype") != std::string::npos);
+  CHECK(message.find("F8_UNKNOWN") != std::string::npos);
+  CHECK(message.find("weights") != std::string::npos);
+  CHECK(message.find("weights.safetensors") != std::string::npos);
+  CHECK(message.find("Supported dtype tokens") != std::string::npos);
 
   fs::remove_all(dir);
 }

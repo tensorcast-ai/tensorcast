@@ -333,7 +333,22 @@ bool StableDramCacheManager::is_evictable(const loading::ReplicaKey& key, absl::
   if (!uma) {
     return false;
   }
-  const auto snapshot = uma->snapshot_cpu_chunks(key);
+  loading::ReplicaKey uma_key = key;
+  if (entry.has_value() && entry->stable_lease.has_value()) {
+    uma_key = entry->stable_lease->key;
+  } else {
+    const loading::ReplicaKey physical_key = replica->replica_key();
+    if (physical_key.device.type == DeviceType::CPU) {
+      uma_key = physical_key;
+    }
+  }
+  auto snapshot = uma->snapshot_cpu_chunks(uma_key);
+  if (snapshot.empty() && uma_key != key) {
+    snapshot = uma->snapshot_cpu_chunks(key);
+  }
+  if (snapshot.empty()) {
+    return false;
+  }
   const bool tracked = entry.has_value();
   for (const auto& rec : snapshot) {
     if (rec.pin_refcnt > 0) {
@@ -361,12 +376,22 @@ absl::Status StableDramCacheManager::preempt_for_export(uint64_t required_bytes,
 void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, absl::string_view reason) {
   CacheEntry entry;
   bool found = false;
+  loading::ReplicaKey entry_key = key;
   {
     absl::MutexLock lock(&mu_);
     auto it = entries_.find(key);
     if (it == entries_.end()) {
-      return;
+      for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
+        if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
+          it = scan;
+          break;
+        }
+      }
+      if (it == entries_.end()) {
+        return;
+      }
     }
+    entry_key = it->first;
     entry = it->second;
     entries_.erase(it);
     found = true;
@@ -375,13 +400,13 @@ void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, 
     return;
   }
 
-  auto replica_or = registry_->find(key);
+  auto replica_or = registry_->find(entry_key);
   if (replica_or.ok()) {
     auto uma = replica_or.value()->get_memory_manager().memory_authority();
     if (uma && entry.stable_lease.has_value()) {
       absl::Status st = uma->release_stable_lease(*entry.stable_lease);
       if (!st.ok()) {
-        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << key.artifact_id << " status=" << st;
+        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << entry_key.artifact_id << " status=" << st;
       }
     }
   }
@@ -393,7 +418,7 @@ void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, 
       absl::Now() >= *entry.retention_deadline) {
     record_ttl_expiration();
   }
-  LOG(INFO) << "stable_cache.evicted artifact_id=" << key.artifact_id << " size_bytes=" << entry.size_bytes
+  LOG(INFO) << "stable_cache.evicted artifact_id=" << entry_key.artifact_id << " size_bytes=" << entry.size_bytes
             << " reason=" << std::string(reason);
 }
 
@@ -409,7 +434,18 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> StableDramCacheMana
   if (!uma) {
     return absl::FailedPreconditionError("stable cache admission requires UMA authority");
   }
-  auto layout_or = uma->get_layout(key);
+  loading::ReplicaKey uma_key = key;
+  auto layout_or = uma->get_layout(uma_key);
+  if (!layout_or.ok() && absl::IsNotFound(layout_or.status())) {
+    const loading::ReplicaKey physical_key = replica->replica_key();
+    if (physical_key != key) {
+      auto fallback_layout_or = uma->get_layout(physical_key);
+      if (fallback_layout_or.ok()) {
+        uma_key = physical_key;
+        layout_or = std::move(fallback_layout_or);
+      }
+    }
+  }
   if (!layout_or.ok()) {
     return layout_or.status();
   }
@@ -426,7 +462,7 @@ absl::StatusOr<replica::UnifiedMemoryAuthority::StableLease> StableDramCacheMana
   for (uint32_t idx = 0; idx < chunk_count; ++idx) {
     chunk_ids.push_back(idx);
   }
-  return uma->acquire_stable_lease(key, absl::MakeSpan(chunk_ids));
+  return uma->acquire_stable_lease(uma_key, absl::MakeSpan(chunk_ids));
 }
 
 absl::Status StableDramCacheManager::evict_for_bytes(
@@ -452,12 +488,22 @@ absl::Status StableDramCacheManager::evict_for_bytes(
       continue;
     }
     CacheEntry entry;
+    loading::ReplicaKey entry_key = key;
     {
       absl::MutexLock lock(&mu_);
       auto it = entries_.find(key);
       if (it == entries_.end()) {
-        continue;
+        for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
+          if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
+            it = scan;
+            break;
+          }
+        }
+        if (it == entries_.end()) {
+          continue;
+        }
       }
+      entry_key = it->first;
       entry = it->second;
     }
     if (!is_entry_evictable(entry, now, mode)) {
@@ -467,7 +513,7 @@ absl::Status StableDramCacheManager::evict_for_bytes(
       continue;
     }
 
-    auto replica_or = registry_->find(key);
+    auto replica_or = registry_->find(entry_key);
     if (!replica_or.ok()) {
       continue;
     }
@@ -476,19 +522,19 @@ absl::Status StableDramCacheManager::evict_for_bytes(
     if (entry.stable_lease.has_value() && uma) {
       absl::Status st = uma->release_stable_lease(*entry.stable_lease);
       if (!st.ok()) {
-        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << key.artifact_id << " status=" << st;
+        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << entry_key.artifact_id << " status=" << st;
         continue;
       }
     }
     absl::Status release_status = replica->release_memory(common::memory::MemoryLocation::CPU);
     if (!release_status.ok()) {
-      LOG(WARNING) << "stable_cache.release_memory_failed artifact_id=" << key.artifact_id
+      LOG(WARNING) << "stable_cache.release_memory_failed artifact_id=" << entry_key.artifact_id
                    << " status=" << release_status;
     }
 
     {
       absl::MutexLock lock(&mu_);
-      entries_.erase(key);
+      entries_.erase(entry_key);
     }
     bytes_used_.fetch_sub(entry.stable_bytes);
     record_bytes_delta(-static_cast<int64_t>(entry.stable_bytes));
@@ -498,7 +544,7 @@ absl::Status StableDramCacheManager::evict_for_bytes(
       record_ttl_expiration();
     }
     freed += entry.stable_bytes;
-    LOG(INFO) << "stable_cache.evicted artifact_id=" << key.artifact_id << " size_bytes=" << entry.size_bytes
+    LOG(INFO) << "stable_cache.evicted artifact_id=" << entry_key.artifact_id << " size_bytes=" << entry.size_bytes
               << " reason=" << std::string(reason);
     if (freed >= required_bytes) {
       return absl::OkStatus();

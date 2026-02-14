@@ -33,8 +33,6 @@ struct TargetLayoutSpan {
 
 absl::Status ensure_tensor_index_present(const std::filesystem::path& artifact_dir);
 
-void maybe_backfill_tensor_index(const std::filesystem::path& artifact_dir, std::string_view canonical_index_json);
-
 absl::StatusOr<std::string> load_canonical_index_with_disk_fallback(
     store::StoreEngine& engine,
     std::string_view resolved_artifact_id,

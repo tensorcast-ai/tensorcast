@@ -1475,7 +1475,8 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica_idempoten
   }
 
   auto* mem_info = request.mutable_mem_info();
-  if (auto fill_st = fill_memory_info(mem_info, device, MemoryLocation::GPU, memory_size, view_id); !fill_st.ok()) {
+  const auto memory_location = (device.type == DeviceType::CPU) ? MemoryLocation::CPU : MemoryLocation::GPU;
+  if (auto fill_st = fill_memory_info(mem_info, device, memory_location, memory_size, view_id); !fill_st.ok()) {
     return fill_st;
   }
   // If server supports memory replica fields, populate them via extension fields in MemoryInfo

@@ -31,25 +31,24 @@ managing clients manually.
   `key` so cloning (`with_fallback`) and serialization (`to_dict`/`from_dict`)
   continue to work.
 - `tensorcast.from_disk(path)` / `Store.from_disk(path)` resolve disk-backed
-  artifacts via the daemon `ResolveArtifactFromDisk` RPC. The daemon validates
-  descriptor multihashes when `verify_checksums=True` (when a descriptor is
-  present), returns canonical `canonical_index_bytes` + `generation`, and seeds
-  the `ArtifactCache` with the resolved metadata. This API is an explicit
-  **import/registration** step: it does **not** inject disk fallback hints into
-  later materializations. For safetensors directories, the daemon prefers
-  `tensor_index.(json|cbor)` when present; otherwise it builds canonical
-  metadata directly from `.safetensors` headers. When checksums are verified
-  and the daemon can write to the directory, it will backfill
-  `tensor_index.(json|cbor)` for faster subsequent metadata reads.
-  Set `verify_checksums=False` on `from_disk(...)` to allow descriptor-free
-  local development; checksum validation (and descriptor requirements) remain
-  the default in production.
+  artifacts via daemon `ImportArtifactFromPath` / `ImportArtifactFromPathStream`.
+  The daemon returns `artifact_id`, `canonical_index_bytes`, `generation`, and
+  `import_state=READY`, and the SDK seeds `ArtifactCache` with this metadata.
+  Import is **reference-only registration**: no payload copy/link/reflink, and
+  no source-directory mutation (no descriptor/index/verification backfill).
+  Stream events are the canonical progress contract (`phase`, bytes, `percent`,
+  terminal `done`, machine-readable `error_code`).
+  Set `verify_checksums=False` on `from_disk(...)` to relax descriptor mismatch
+  checks for local development.
 - Handles are tied to the originating `Store` lifecycle. After `Store.close()`
   (or `release()` on the handle), materialization raises
   `ArtifactError(status_code="FAILED_PRECONDITION")` while cached metadata
   remains readable for debugging.
 - `with_fallback(...)` clones a handle with different fallback hints; eager
   `get*` APIs remain unchanged.
+
+Design and execution details: `../../../docs/designs/0077-unified-reference-only-disk-import.md`,
+`../../../docs/plans/0077-unified-reference-only-disk-import.md`.
 
 ## View Composition
 
@@ -202,7 +201,7 @@ Use `allow_p2p` / `allow_disk` to gate sources explicitly. Compatibility flags
   cached indices consistent.
 - Key→artifact-id lookups are cached with TTL (see
   `TENSORCAST_STORE_KEY_CACHE_TTL_SECONDS`) to avoid repeated resolver RPCs.
-- Disk resolution (`ResolveArtifactFromDisk`) seeds the cache with
+- Disk resolution (`ImportArtifactFromPath`) seeds the cache with
   `canonical_index_bytes` and `generation` so repeated `from_disk` calls avoid
   extra daemon RPCs and preserve generation metadata.
 - Metadata hydration (`_ensure_metadata`) applies `_set_metadata` while holding

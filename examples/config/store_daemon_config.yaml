@@ -118,13 +118,26 @@ pinned_memory:
   # Deadline for pinned slice acquisition under pressure.
   allocation_timeout: 30s
   classes:
+    # engine: StoreEngine data-plane pinned pool.
+    # Used by engine-owned StreamingPinnedBuffer for disk/P2P ingest and local CPU->GPU copy pipelines.
+    # slice_bytes is the engine transfer slice size (tx_slice_bytes) and should divide engine.artifact_chunk_bytes.
+    # Effective capacity in slices = pool_bytes / slice_bytes.
+    # Startup guardrail (GPU hosts): capacity_slices must cover
+    # engine.streaming_buffer_chunks * detected_gpu_count.
     - name: engine
-      slice_bytes: 256MB
+      slice_bytes: 64MB
       pool_bytes: 8GB
+    # comm_gpu: Communicator GPU staging pinned pool.
+    # Used by communicator staging windows on GPU transport paths (TCP/RDMA staging).
+    # slice_bytes controls per-staging GPU chunk size for communicator data movement.
+    # Startup validates this class can satisfy communicator stager concurrency requirements.
     - name: comm_gpu
       slice_bytes: 16MB
       pool_bytes: 8GB
       rdma_preregister: true
+    # comm_cpu: Communicator CPU staging pinned pool.
+    # Used by communicator CPU-side staging/bounce buffers (including CPU tensor transfer paths).
+    # Typically smaller than comm_gpu; startup validates at least stager baseline coverage.
     - name: comm_cpu
       slice_bytes: 4MB
       pool_bytes: 1GB

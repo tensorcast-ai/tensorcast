@@ -1,12 +1,29 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "replica_registry.h"
 
 #include <algorithm>
 
+#include "absl/container/flat_hash_set.h"
 #include "core/store/replica/memory_state.h"
 
 namespace tensorcast::store::components {
+
+void ReplicaRegistry::rebuild_indices_locked() {
+  by_instance_.clear();
+  by_artifact_.clear();
+  by_device_.clear();
+
+  by_instance_.reserve(entries_.size());
+  by_artifact_.reserve(entries_.size());
+  by_device_.reserve(entries_.size());
+  for (size_t idx = 0; idx < entries_.size(); ++idx) {
+    const auto& entry = entries_[idx];
+    by_instance_.insert_or_assign(entry.key, idx);
+    by_artifact_[entry.key.artifact_id].push_back(idx);
+    by_device_[entry.key.device].push_back(idx);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // New ReplicaKey-based API implementation
@@ -82,10 +99,22 @@ std::vector<loading::ReplicaKey> ReplicaRegistry::get_lru_instances() const {
     std::chrono::time_point<std::chrono::system_clock> ts;
   };
 
-  std::vector<TimedKey> tmp;
-  tmp.reserve(entries_.size());
+  // De-duplicate aliases that point to the same replica instance. Use the
+  // most recent access timestamp among aliases so hot replicas are not evicted
+  // due to stale alias keys.
+  absl::flat_hash_map<const replica::Replica*, TimedKey> dedup;
+  dedup.reserve(entries_.size());
   for (const auto& e : entries_) {
-    tmp.push_back(TimedKey{.key = e.key, .ts = e.last_access});
+    const auto* replica_ptr = e.replica.get();
+    auto it = dedup.find(replica_ptr);
+    if (it == dedup.end() || e.last_access > it->second.ts) {
+      dedup[replica_ptr] = TimedKey{.key = e.key, .ts = e.last_access};
+    }
+  }
+  std::vector<TimedKey> tmp;
+  tmp.reserve(dedup.size());
+  for (const auto& [_, timed_key] : dedup) {
+    tmp.push_back(timed_key);
   }
 
   std::ranges::sort(tmp, [](const TimedKey& a, const TimedKey& b) { return a.ts < b.ts; });
@@ -96,6 +125,30 @@ std::vector<loading::ReplicaKey> ReplicaRegistry::get_lru_instances() const {
     ordered.push_back(tk.key);
   }
   return ordered;
+}
+
+// -----------------------------------------------------------------------------
+
+std::optional<std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>> ReplicaRegistry::erase(
+    const loading::ReplicaKey& key) {
+  absl::MutexLock lock(&mutex_);
+  auto it = by_instance_.find(key);
+  if (it == by_instance_.end()) {
+    return std::nullopt;
+  }
+
+  const size_t idx = it->second;
+  Entry removed_entry{
+      .key = entries_[idx].key,
+      .replica = std::move(entries_[idx].replica),
+      .last_access = entries_[idx].last_access,
+  };
+  entries_.erase(entries_.begin() + idx);
+  rebuild_indices_locked();
+  return std::pair<loading::ReplicaKey, std::shared_ptr<replica::Replica>>{
+      std::move(removed_entry.key),
+      std::move(removed_entry.replica),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -127,7 +180,13 @@ size_t ReplicaRegistry::size() const {
 size_t ReplicaRegistry::get_replica_count_by_location(common::memory::MemoryLocation location) const {
   absl::MutexLock lock(&mutex_);
   size_t count = 0;
+  absl::flat_hash_set<const replica::Replica*> seen;
+  seen.reserve(entries_.size());
   for (const auto& entry : entries_) {
+    const auto* replica_ptr = entry.replica.get();
+    if (!seen.insert(replica_ptr).second) {
+      continue;
+    }
     if (entry.replica->get_memory_state(location) == replica::MemoryState::LOADED) {
       ++count;
     }
@@ -138,7 +197,13 @@ size_t ReplicaRegistry::get_replica_count_by_location(common::memory::MemoryLoca
 uint64_t ReplicaRegistry::get_total_replica_size() const {
   absl::MutexLock lock(&mutex_);
   uint64_t total = 0;
+  absl::flat_hash_set<const replica::Replica*> seen;
+  seen.reserve(entries_.size());
   for (const auto& entry : entries_) {
+    const auto* replica_ptr = entry.replica.get();
+    if (!seen.insert(replica_ptr).second) {
+      continue;
+    }
     auto size_or = entry.replica->get_artifact_size();
     if (size_or.ok()) {
       total += *size_or;

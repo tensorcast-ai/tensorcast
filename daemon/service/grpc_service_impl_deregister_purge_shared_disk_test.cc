@@ -194,3 +194,131 @@ TEST_CASE(
   }
   REQUIRE_FALSE(deleted);
 }
+
+TEST_CASE(
+    "DeregisterArtifact without active lease still retires local disk fallback and purges managed disk",
+    "[daemon][deregister][disk]") {
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto storage_root = test_tmpdir() / "purge_no_active_lease";
+  std::filesystem::remove_all(storage_root);
+  std::filesystem::create_directories(storage_root);
+
+  const std::string artifact_id = "mi2:indexhash:datahash3";
+  const auto artifact_rel =
+      std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "mi2_indexhash_datahash3";
+  const auto artifact_dir = storage_root / artifact_rel;
+  std::filesystem::remove_all(artifact_dir);
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data_0", 64));
+
+  tensorcast::store::components::ArtifactDiskLocation loc;
+  loc.artifact_id = artifact_id;
+  loc.cluster_id = gs_client->cluster_id;
+  loc.relative_path = artifact_rel.string();
+  loc.kind = tensorcast::global_store::v1::DISK_LOCATION_KIND_MANAGED;
+  gs_client->disk_locations.push_back(std::move(loc));
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts(storage_root));
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+
+  tensorcast::daemon::v2::DeregisterArtifactRequest req;
+  req.set_artifact_id(artifact_id);
+  req.set_wait_for_drain(false);
+  req.set_device_id(0);
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::DeregisterArtifactResponse resp;
+  const auto st = harness->service().DeregisterArtifact(&ctx, &req, &resp);
+  INFO("grpc status=" << st.error_code() << " msg=" << st.error_message());
+  REQUIRE(st.ok());
+  REQUIRE(resp.removed());
+  REQUIRE(resp.drained());
+  REQUIRE(resp.message().find("no active lease found") != std::string::npos);
+
+  REQUIRE_FALSE(std::filesystem::exists(artifact_dir));
+
+  bool tombstoned = false;
+  for (const auto& entry : gs_client->disk_locations) {
+    if (entry.artifact_id == artifact_id && entry.relative_path == artifact_rel.string()) {
+      tombstoned = entry.is_deleted;
+      break;
+    }
+  }
+  REQUIRE(tombstoned);
+}
+
+TEST_CASE(
+    "DeregisterArtifact retires loaded local import replica and prevents rematerialization",
+    "[daemon][deregister][disk][local_import]") {
+  auto gs_client = std::make_shared<tensorcast::store::testing::RecordingGlobalStoreClient>();
+  const auto storage_root = test_tmpdir() / "retire_loaded_local_import";
+  std::filesystem::remove_all(storage_root);
+  std::filesystem::create_directories(storage_root);
+
+  const auto artifact_dir = storage_root / "imports" / "v00001";
+  std::filesystem::create_directories(artifact_dir);
+  REQUIRE(tensorcast::testing::create_dummy_file(artifact_dir / "tensor.data", 64));
+  REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
+
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts(storage_root));
+  engine->set_global_store_client_for_testing(gs_client);
+  tensorcast::daemon::DaemonOptions daemon_opts;
+  daemon_opts.storage_path = storage_root;
+  auto harness_or =
+      tensorcast::daemon::DaemonServiceHarness::create(engine, daemon_opts, /*async_runtime=*/nullptr, gs_client);
+  REQUIRE(harness_or.ok());
+  auto harness = std::move(*harness_or);
+  REQUIRE(harness->start().ok());
+
+  tensorcast::daemon::v2::ImportArtifactFromPathRequest resolve_req;
+  resolve_req.set_path(artifact_dir.string());
+  resolve_req.set_verify_checksums(true);
+  grpc::ServerContext resolve_ctx;
+  tensorcast::daemon::v2::ImportArtifactFromPathResponse resolve_resp;
+  auto resolve_st = harness->service().ImportArtifactFromPath(&resolve_ctx, &resolve_req, &resolve_resp);
+  INFO("resolve status=" << resolve_st.error_code() << " msg=" << resolve_st.error_message());
+  REQUIRE(resolve_st.ok());
+  REQUIRE(resolve_resp.artifact_id().starts_with("mi2:"));
+  REQUIRE(harness->kernel().source_registry().lookup_binding(resolve_resp.artifact_id()).has_value());
+
+  tensorcast::daemon::v2::MaterializeReplicaRequest materialize_req;
+  materialize_req.set_artifact_id(resolve_resp.artifact_id());
+  materialize_req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
+  materialize_req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
+  grpc::ServerContext materialize_ctx;
+  tensorcast::daemon::v2::MaterializeReplicaResponse materialize_resp;
+  auto materialize_st = harness->service().MaterializeReplica(&materialize_ctx, &materialize_req, &materialize_resp);
+  INFO("materialize status=" << materialize_st.error_code() << " msg=" << materialize_st.error_message());
+  REQUIRE(materialize_st.ok());
+  REQUIRE(materialize_resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+
+  tensorcast::daemon::v2::DeregisterArtifactRequest deregister_req;
+  deregister_req.set_artifact_id(resolve_resp.artifact_id());
+  deregister_req.set_wait_for_drain(false);
+  grpc::ServerContext deregister_ctx;
+  tensorcast::daemon::v2::DeregisterArtifactResponse deregister_resp;
+  auto deregister_st = harness->service().DeregisterArtifact(&deregister_ctx, &deregister_req, &deregister_resp);
+  INFO("deregister status=" << deregister_st.error_code() << " msg=" << deregister_st.error_message());
+  REQUIRE(deregister_st.ok());
+  REQUIRE(deregister_resp.removed());
+  REQUIRE_FALSE(harness->kernel().source_registry().lookup_binding(resolve_resp.artifact_id()).has_value());
+
+  grpc::ServerContext materialize_again_ctx;
+  tensorcast::daemon::v2::MaterializeReplicaResponse materialize_again_resp;
+  auto materialize_again_st =
+      harness->service().MaterializeReplica(&materialize_again_ctx, &materialize_req, &materialize_again_resp);
+  INFO(
+      "materialize_again status=" << materialize_again_st.error_code()
+                                  << " msg=" << materialize_again_st.error_message());
+  REQUIRE_FALSE(materialize_again_st.ok());
+  const bool expected_status = materialize_again_st.error_code() == grpc::StatusCode::NOT_FOUND ||
+      materialize_again_st.error_code() == grpc::StatusCode::FAILED_PRECONDITION ||
+      materialize_again_st.error_code() == grpc::StatusCode::UNAVAILABLE;
+  REQUIRE(expected_status);
+}

@@ -241,7 +241,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   std::optional<std::string> fallback_artifact_id = std::move(artifact_resolution.fallback_artifact_id);
   const bool gs_connected = artifact_resolution.gs_connected;
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
-  std::optional<LocalDiskImportCatalog::Entry> local_import = std::move(artifact_resolution.local_import);
+  std::optional<ArtifactSourceRegistry::Entry> local_import = std::move(artifact_resolution.local_import);
   std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
   span->SetAttribute("tc.store.gs_connected", gs_connected);
   span->SetAttribute("tc.store.local_import_fallback", local_import.has_value());
@@ -523,6 +523,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
+  if (disk_source.has_value()) {
+    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
   hints.export_policy = to_hint_export_policy(req.export_policy());
   if (has_artifact)
     hints.artifact_id = resolved_artifact_id;
@@ -655,6 +658,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
           hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
           hints.allow_p2p = false;
           hints.allow_disk = true;
+          hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
 
           std::optional<uint64_t> expected_size;
           if (hints.disk_metadata.has_value() && hints.disk_metadata->logical_total_size.has_value()) {
@@ -826,6 +830,85 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
     return to_grpc_status(mapping_or.status());
   }
   const auto& mapping = *mapping_or;
+
+  // Engine path device resolution (also used for local short-circuit checks).
+  store::DeviceKey dev;
+  if (cpu_target) {
+    dev = d_.devices.From(v2::DeviceType::DEVICE_TYPE_CPU, /*uuid=*/"", /*ordinal_hint=*/std::nullopt);
+  } else {
+    if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
+      return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
+    }
+    dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
+  }
+
+  std::string resolved_artifact_id = mapping.artifact_id;
+  store::loading::MaterializeHints hints;
+  if (req.pinned_allocation_timeout_ms() > 0) {
+    hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
+  }
+  hints.artifact_id = resolved_artifact_id;
+  hints.source_preference = to_hint_preference(effective_policy.preference);
+  hints.allow_p2p = effective_policy.allow_p2p;
+  hints.allow_disk = effective_policy.allow_disk;
+
+  auto finalize_materialized = [&](const store::loading::ReplicaHandle& handle, std::string_view used_disk_path) {
+    auto bind_status = bind_materialized_handle(
+        d_.engine,
+        d_.sessions,
+        d_.refs,
+        d_.lifecycle,
+        d_.handle_leases,
+        handle,
+        req.replica_uuid(),
+        effective_pid,
+        loopback_peer,
+        cpu_target,
+        "engine by-key",
+        *resp.mutable_mem_handle());
+    if (!bind_status.ok()) {
+      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+      return to_grpc_status(bind_status);
+    }
+    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
+    resp.set_artifact_id(resolved_artifact_id);
+    resp.set_used_disk_path(std::string(used_disk_path));
+    resp.set_source(to_proto_source(handle.source));
+    span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
+    return finalize_response();
+  };
+
+  // Local-first short-circuit: if local CPU/GPU residency is already available,
+  // try a no-remote/no-disk materialization before querying Global Store.
+  store::loading::ReplicaKey cpu_lookup{
+      .artifact_id = resolved_artifact_id,
+      .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
+      .replica = 0,
+  };
+  const bool local_cpu_loaded =
+      d_.engine.get_replica_state(cpu_lookup, DeviceType::CPU) == store::replica::MemoryState::LOADED;
+  bool local_gpu_loaded = false;
+  if (!cpu_target) {
+    store::loading::ReplicaKey gpu_lookup{
+        .artifact_id = resolved_artifact_id,
+        .device = dev,
+        .replica = 0,
+    };
+    local_gpu_loaded = d_.engine.get_replica_state(gpu_lookup, DeviceType::GPU) == store::replica::MemoryState::LOADED;
+  }
+  if (local_cpu_loaded || local_gpu_loaded) {
+    auto local_hints = hints;
+    local_hints.allow_p2p = false;
+    local_hints.allow_disk = false;
+    auto local_result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, local_hints);
+    if (local_result.ok()) {
+      span->SetAttribute("tc.store.local_short_circuit", true);
+      span->SetAttribute("tc.store.gs_connected", false);
+      return finalize_materialized(*local_result, /*used_disk_path=*/"");
+    }
+    VLOG(1) << "Local short-circuit miss for key=" << req.key() << ": " << local_result.status();
+  }
+
   auto artifact_resolution_or = resolve_artifact_and_disk_source(
       d_.global_store_client,
       /*disk_imports=*/nullptr,
@@ -839,7 +922,8 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
     return to_grpc_status(artifact_resolution_or.status());
   }
   auto artifact_resolution = std::move(*artifact_resolution_or);
-  std::string resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
+  resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
+  hints.artifact_id = resolved_artifact_id;
   std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
   if (bound_artifact_id.has_value()) {
     span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
@@ -847,6 +931,9 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
   span->SetAttribute("tc.artifact.id", resolved_artifact_id);
   std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
   std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
+  if (disk_source.has_value()) {
+    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
   std::string used_disk_path = normalized_disk_path.has_value() ? normalized_disk_path->string() : std::string();
   span->SetAttribute("tc.store.gs_connected", artifact_resolution.gs_connected);
 
@@ -879,25 +966,6 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
   }
 
   // Engine path
-  store::DeviceKey dev;
-  if (cpu_target) {
-    dev = d_.devices.From(v2::DeviceType::DEVICE_TYPE_CPU, /*uuid=*/"", /*ordinal_hint=*/std::nullopt);
-  } else {
-    // Validate device_id
-    if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
-      return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
-    }
-    dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
-  }
-  store::loading::MaterializeHints hints;
-  if (req.pinned_allocation_timeout_ms() > 0) {
-    hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
-  }
-  hints.artifact_id = resolved_artifact_id;
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
-  hints.allow_disk = effective_policy.allow_disk;
-
   auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
   if (!result.ok()) {
     auto retry_or = retry_materialize_from_shared_disk(
@@ -917,6 +985,7 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
           hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
           hints.allow_p2p = false;
           hints.allow_disk = true;
+          hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
           return store::loading::DiskSource{
               .path = ready_disk_path,
               .expected_size = std::nullopt,
@@ -932,30 +1001,7 @@ grpc::Status ReplicaMaterializationService::materialize_by_key(
     resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
     return to_grpc_status(result.status());
   }
-  const auto& handle = *result;
-  auto bind_status = bind_materialized_handle(
-      d_.engine,
-      d_.sessions,
-      d_.refs,
-      d_.lifecycle,
-      d_.handle_leases,
-      handle,
-      req.replica_uuid(),
-      effective_pid,
-      loopback_peer,
-      cpu_target,
-      "engine by-key",
-      *resp.mutable_mem_handle());
-  if (!bind_status.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(bind_status);
-  }
-  resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-  resp.set_artifact_id(resolved_artifact_id);
-  resp.set_used_disk_path(used_disk_path);
-  resp.set_source(to_proto_source(handle.source));
-  span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-  return finalize_response();
+  return finalize_materialized(*result, used_disk_path);
 }
 
 } // namespace tensorcast::daemon

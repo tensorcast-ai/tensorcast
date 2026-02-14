@@ -153,10 +153,16 @@ PinnedBufferPool::~PinnedBufferPool() {
   }
 }
 
-int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const std::chrono::milliseconds& timeout) {
+int PinnedBufferPool::allocate(
+    size_t size,
+    std::vector<char*>& buffers,
+    const std::chrono::milliseconds& timeout,
+    std::string_view request_context) {
+  const std::string_view context = request_context.empty() ? std::string_view("<unspecified>") : request_context;
   if (size == 0) {
     LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
-               << " allocate: size is zero";
+               << " allocate: size is zero"
+               << " request_context=" << context;
     return -1;
   }
 
@@ -186,9 +192,10 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
       if (now >= next_log) {
         const auto waited_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - wait_start).count();
         LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
-                     << " allocate still waiting: waited_ms=" << waited_ms << " need_slices=" << num_buffers_needed
+                     << " allocate still waiting: request_context=" << context << " waited_ms=" << waited_ms
+                     << " requested_bytes=" << size << " need_slices=" << num_buffers_needed
                      << " free_slices=" << free_list_.size() << " total_slices=" << pool_.size()
-                     << " waiters=" << waiters_;
+                     << " in_use_slices=" << (pool_.size() - free_list_.size()) << " waiters=" << waiters_;
         next_log = now + std::chrono::seconds(5);
       }
       const auto wake_deadline = std::min(end_time, now + std::chrono::seconds(1));
@@ -202,9 +209,10 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
       const auto waited_ms =
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - wait_start).count();
       LOG(WARNING) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
-                   << " allocate timed out: waited_ms=" << waited_ms << " timeout_ms=" << timeout.count()
+                   << " allocate timed out: request_context=" << context << " waited_ms=" << waited_ms
+                   << " timeout_ms=" << timeout.count() << " requested_bytes=" << size
                    << " need_slices=" << num_buffers_needed << " free_slices=" << free_list_.size()
-                   << " total_slices=" << pool_.size();
+                   << " total_slices=" << pool_.size() << " in_use_slices=" << (pool_.size() - free_list_.size());
       return num_buffers_needed - free_list_.size();
     }
 
@@ -223,8 +231,9 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
     if (num_buffers_needed > static_cast<int>(free_list_.size())) {
       ++budget_exhausted_total_;
       LOG(ERROR) << "PinnedBufferPool" << (name_.empty() ? "" : absl::StrCat("[name=", name_, "]"))
-                 << " out of memory: need_slices=" << num_buffers_needed << " free_slices=" << free_list_.size()
-                 << " total_slices=" << pool_.size();
+                 << " out of memory: request_context=" << context << " requested_bytes=" << size
+                 << " need_slices=" << num_buffers_needed << " free_slices=" << free_list_.size()
+                 << " total_slices=" << pool_.size() << " in_use_slices=" << (pool_.size() - free_list_.size());
       return num_buffers_needed - free_list_.size();
     }
 
@@ -239,7 +248,7 @@ int PinnedBufferPool::allocate(size_t size, std::vector<char*>& buffers, const s
 
   VLOG(1) << "PinnedBufferPool Allocate " << buffers.size() << " buffers"
           << " free buffers " << free_list_.size() << " total buffers " << pool_.size()
-          << (timeout.count() > 0 ? " (with timeout)" : "");
+          << " request_context=" << context << (timeout.count() > 0 ? " (with timeout)" : "");
 
   return 0; // Success
 }

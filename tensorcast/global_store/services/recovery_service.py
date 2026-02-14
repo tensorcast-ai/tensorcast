@@ -823,12 +823,35 @@ class RecoveryService:
         for change in state_changes:
             if change.type == global_store_pb2.StateChange.CHANGE_TYPE_ADD_REPLICA:
                 # Register new replica
+                mem_info = change.replica_info.memory_info
+                view_id = (
+                    mem_info.byte_space.id
+                    if mem_info.HasField("byte_space")
+                    and mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+                    else ""
+                )
+                logger.info(
+                    "Reconcile adding replica worker_id=%s artifact_id=%s view_id=%s memory_type=%s device_id=%s node_id=%s",
+                    worker_id,
+                    change.replica_info.ref.artifact_id,
+                    view_id,
+                    common_pb2.MemoryType.Name(mem_info.memory_type),
+                    int(mem_info.device_id),
+                    mem_info.node_id,
+                )
                 replica = self._convert_proto_to_replica(change.replica_info, worker_id)
                 self.replica_repository.create_or_update_atomic(replica, cursor)
                 logger.debug(f"Added replica: {replica.artifact_id}")
 
             elif change.type == global_store_pb2.StateChange.CHANGE_TYPE_REMOVE_REPLICA:
                 # Remove replica
+                mem_info = change.replica_info.memory_info
+                view_id = (
+                    mem_info.byte_space.id
+                    if mem_info.HasField("byte_space")
+                    and mem_info.byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+                    else ""
+                )
                 replica_id_value = change.replica_info.ref.replica_id
                 if not replica_id_value:
                     raise ValueError(
@@ -836,10 +859,14 @@ class RecoveryService:
                     )
                 replica_id = UUID(replica_id_value)
                 logger.info(
-                    "Reconcile removing replica worker_id=%s replica_id=%s artifact_id=%s",
+                    "Reconcile removing replica worker_id=%s replica_id=%s artifact_id=%s view_id=%s memory_type=%s device_id=%s node_id=%s",
                     worker_id,
                     replica_id,
                     change.replica_info.ref.artifact_id,
+                    view_id,
+                    common_pb2.MemoryType.Name(mem_info.memory_type),
+                    int(mem_info.device_id),
+                    mem_info.node_id,
                 )
                 deleted = self.replica_repository.delete_atomic(replica_id, cursor)
                 if not deleted:

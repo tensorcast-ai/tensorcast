@@ -108,6 +108,42 @@ absl::Status retry_gpu_load_with_eviction(
   return absl::OkStatus();
 }
 
+absl::Status retry_if_stale_ready_signal(
+    IngestionContext& ctx,
+    common::memory::MemoryLocation target_location,
+    std::optional<int> gpu_device,
+    folly::SemiFuture<absl::Status>* load_sf) {
+  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  if (!ctx.load_signal || !ctx.load_signal->is_ready()) {
+    return absl::OkStatus();
+  }
+
+  const absl::Status ready_status = std::move(ctx.load_signal->subscribe()).get();
+  if (ready_status.ok()) {
+    return absl::OkStatus();
+  }
+  if (!absl::IsFailedPrecondition(ready_status) && !absl::IsNotFound(ready_status)) {
+    return ready_status;
+  }
+
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::GPU);
+    const auto cpu_state = ctx.replica->get_memory_state(common::memory::MemoryLocation::CPU);
+    if (gpu_state == replica::MemoryState::ALLOCATED && cpu_state != replica::MemoryState::LOADED) {
+      LOG(WARNING) << "Detected stale GPU ready signal with no loaded CPU source; forcing GPU reload";
+    }
+  }
+
+  absl::Status release_status = ctx.replica->release_memory(target_location);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    return release_status;
+  }
+
+  *load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, std::move(gpu_device));
+  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  return absl::OkStatus();
+}
+
 } // namespace
 
 absl::Status AllocationStage::allocate(IngestionContext& ctx) {
@@ -125,7 +161,10 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
   auto target_location = ctx.target_location;
   std::optional<int> gpu_device = ctx.target_is_gpu ? std::optional<int>(ctx.target_device_id) : std::nullopt;
   auto load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
-  ctx.load_signal = ctx.replica->ready_signal_for(target_location);
+  auto stale_retry_status = retry_if_stale_ready_signal(ctx, target_location, gpu_device, &load_sf);
+  if (!stale_retry_status.ok()) {
+    return stale_retry_status;
+  }
 
   if (ctx.source_type == SourceType::kP2P) {
     absl::Status status = std::move(load_sf).get();
@@ -135,8 +174,12 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
         auto evict_status = ctx.replica_runtime->try_evict_memory_for_replica(ctx.p2p.source.size_bytes);
         if (evict_status.ok()) {
           load_sf = ctx.replica->ensure_loaded_async(target_location, ctx.num_threads, gpu_device);
-          ctx.load_signal = ctx.replica->ready_signal_for(target_location);
-          status = std::move(load_sf).get();
+          stale_retry_status = retry_if_stale_ready_signal(ctx, target_location, gpu_device, &load_sf);
+          if (!stale_retry_status.ok()) {
+            status = stale_retry_status;
+          } else {
+            status = std::move(load_sf).get();
+          }
         }
       }
       if (!status.ok()) {

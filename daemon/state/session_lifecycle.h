@@ -18,6 +18,7 @@
 
 #include "absl/base/thread_annotations.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/synchronization/mutex.h"
@@ -247,6 +248,13 @@ class SessionLifecycleManager {
   // best-effort and runs off-lock. It only targets daemon-owned memory: we
   // consult the engine state and skip when no GPU residency is present.
   void maybe_unload_daemon_replica_(const ReplicaSubject& subj);
+
+  // Retry unload attempts that previously failed while references were already
+  // drained (for example, unload raced with an in-flight LOADING transition).
+  void retry_pending_gpu_unloads_();
+
+  // GPU subjects that should be retried by sweep_once().
+  absl::flat_hash_set<ReplicaSubject, store::loading::ReplicaKeyHash> pending_gpu_unloads_ ABSL_GUARDED_BY(mu_);
 };
 
 class SessionLifecycleTask final {

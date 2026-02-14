@@ -46,12 +46,20 @@ Status StoreDaemonServiceImpl::MaterializeByKey(
   return materialization_controller_->materialize_by_key(rctx, *req, *resp);
 }
 
-Status StoreDaemonServiceImpl::ResolveArtifactFromDisk(
+Status StoreDaemonServiceImpl::ImportArtifactFromPath(
     grpc::ServerContext* ctx,
-    const v2::ResolveArtifactFromDiskRequest* req,
-    v2::ResolveArtifactFromDiskResponse* resp) {
-  RpcContext rctx{"ResolveArtifactFromDisk", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->resolve_artifact_from_disk(rctx, *req, *resp);
+    const v2::ImportArtifactFromPathRequest* req,
+    v2::ImportArtifactFromPathResponse* resp) {
+  RpcContext rctx{"ImportArtifactFromPath", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->import_artifact_from_path(rctx, *req, *resp);
+}
+
+Status StoreDaemonServiceImpl::ImportArtifactFromPathStream(
+    grpc::ServerContext* ctx,
+    const v2::ImportArtifactFromPathRequest* req,
+    grpc::ServerWriter<v2::ImportArtifactFromPathStreamEvent>* writer) {
+  RpcContext rctx{"ImportArtifactFromPathStream", *ctx, opts_.allow_high_card_attrs};
+  return materialization_controller_->import_artifact_from_path_stream(rctx, *req, *writer);
 }
 
 Status StoreDaemonServiceImpl::QueryReplicaStatus(

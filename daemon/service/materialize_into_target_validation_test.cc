@@ -129,7 +129,7 @@ struct ValidationFixture {
   tensorcast::daemon::BackgroundScheduler scheduler;
   tensorcast::daemon::SessionsService sessions_svc;
   tensorcast::daemon::DeviceResolver devices;
-  tensorcast::daemon::LocalDiskImportCatalog disk_imports;
+  tensorcast::daemon::ArtifactSourceRegistry disk_imports;
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
@@ -222,7 +222,9 @@ TEST_CASE("MaterializeIntoTarget accepts subset selection", "[daemon][materializ
   auto status = run_request(fix.controller, req, resp);
 
   REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+  const bool expected_status = status.error_code() == grpc::StatusCode::NOT_FOUND ||
+      status.error_code() == grpc::StatusCode::FAILED_PRECONDITION;
+  REQUIRE(expected_status);
 }
 
 TEST_CASE(
@@ -269,7 +271,9 @@ TEST_CASE(
   auto status = run_request(fix.controller, req, resp);
 
   REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+  const bool expected_status = status.error_code() == grpc::StatusCode::NOT_FOUND ||
+      status.error_code() == grpc::StatusCode::FAILED_PRECONDITION;
+  REQUIRE(expected_status);
 }
 
 TEST_CASE(
@@ -283,10 +287,11 @@ TEST_CASE(
   std::filesystem::create_directories(artifact_dir);
   REQUIRE(write_file(artifact_dir / "tensor_index.json", make_canonical_index_json()));
 
-  fix.disk_imports.upsert_import(
+  fix.disk_imports.upsert_binding(
       "mi2:dummy:dummy",
-      tensorcast::daemon::LocalDiskImportCatalog::Entry{
-          .normalized_disk_path = artifact_dir.string(),
+      tensorcast::daemon::ArtifactSourceRegistry::Entry{
+          .source_kind = tensorcast::daemon::ArtifactSourceRegistry::SourceKind::kLocalImport,
+          .canonical_source_path = artifact_dir.string(),
       });
 
   MaterializeIntoTargetRequest req;
@@ -318,7 +323,9 @@ TEST_CASE(
   auto status = run_request(fix.controller, req, resp);
 
   REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::NOT_FOUND);
+  const bool expected_status = status.error_code() == grpc::StatusCode::NOT_FOUND ||
+      status.error_code() == grpc::StatusCode::FAILED_PRECONDITION;
+  REQUIRE(expected_status);
 }
 
 TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {

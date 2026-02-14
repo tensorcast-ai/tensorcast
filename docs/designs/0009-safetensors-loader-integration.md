@@ -86,7 +86,7 @@ Non‑Goals / Constraints
 - Python (`tensorcast/api/_indices.py`) calls into the C++ binding (`build_canonical_index_from_safetensors(...)`) and decodes the canonical JSON to produce:
   - TensorMetaIndex: `(shape, stride, torch_dtype, storage_offset)`
   - TensorDataIndex: `(offset, size)`
-- Dtype mapping covers `F16/F32/F64/BF16`, `I8/I16/I32/I64`, `U8`, and `BOOL` (mapped to `torch.uint8`). Sub‑byte dtypes are rejected.
+- Dtype mapping covers `F16/F32/F64/BF16`, `F8_E4M3/F8_E5M2`, `I8/I16/I32/I64`, `U8`, and `BOOL` (mapped to `torch.uint8`). Sub‑byte dtypes (for example 4-bit formats) are rejected.
 - Duplicate tensor keys across files are rejected (strict mode by default). `__metadata__` is ignored for tensor indices.
 
 ## Invariants

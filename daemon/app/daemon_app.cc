@@ -5,7 +5,11 @@
 #include <filesystem>
 #include <utility>
 
+#include <fcntl.h>
+#include <unistd.h>
+
 #include "absl/log/log.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/time.h"
 #include "daemon/ha/worker_lifecycle_ports.h"
@@ -24,6 +28,86 @@ absl::StatusOr<std::filesystem::path> normalize_storage_root(const std::filesyst
     canonical = storage_root.lexically_normal();
   }
   return canonical;
+}
+
+absl::Status fsync_directory(const std::filesystem::path& dir_path) {
+  int dir_fd = ::open(dir_path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dir_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open directory failed: ", dir_path.string()));
+  }
+  if (::fsync(dir_fd) != 0) {
+    const int err = errno;
+    ::close(dir_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync directory failed: ", dir_path.string()));
+  }
+  if (::close(dir_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close directory failed: ", dir_path.string()));
+  }
+  return absl::OkStatus();
+}
+
+absl::Status ensure_import_root_ready(const std::filesystem::path& import_root) {
+  std::error_code ec;
+  std::filesystem::create_directories(import_root, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("create import root failed: ", import_root.string()));
+  }
+  std::filesystem::permissions(
+      import_root, std::filesystem::perms::owner_all, std::filesystem::perm_options::replace, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("set import root permissions failed: ", import_root.string()));
+  }
+
+  const auto probe_tmp = import_root / ".import_root_probe.tmp";
+  const auto probe_path = import_root / ".import_root_probe";
+  constexpr std::string_view kProbePayload = "tensorcast-import-root-probe";
+  int probe_fd = ::open(probe_tmp.c_str(), O_CREAT | O_WRONLY | O_TRUNC | O_CLOEXEC, 0600);
+  if (probe_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open probe file failed: ", probe_tmp.string()));
+  }
+  if (::write(probe_fd, kProbePayload.data(), kProbePayload.size()) < 0) {
+    const int err = errno;
+    ::close(probe_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("write probe file failed: ", probe_tmp.string()));
+  }
+  if (::fsync(probe_fd) != 0) {
+    const int err = errno;
+    ::close(probe_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync probe file failed: ", probe_tmp.string()));
+  }
+  if (::close(probe_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close probe file failed: ", probe_tmp.string()));
+  }
+  if (::rename(probe_tmp.c_str(), probe_path.c_str()) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("rename probe file failed: ", probe_path.string()));
+  }
+  auto dir_sync_status = fsync_directory(import_root);
+  if (!dir_sync_status.ok()) {
+    return dir_sync_status;
+  }
+  std::filesystem::remove(probe_path, ec);
+  if (ec) {
+    return absl::ErrnoToStatus(ec.value(), absl::StrCat("remove probe file failed: ", probe_path.string()));
+  }
+  dir_sync_status = fsync_directory(import_root);
+  if (!dir_sync_status.ok()) {
+    return dir_sync_status;
+  }
+
+  const auto db_path = import_root / "artifact_source_registry.db";
+  int db_fd = ::open(db_path.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+  if (db_fd < 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("open registry db file failed: ", db_path.string()));
+  }
+  if (::fsync(db_fd) != 0) {
+    const int err = errno;
+    ::close(db_fd);
+    return absl::ErrnoToStatus(err, absl::StrCat("fsync registry db file failed: ", db_path.string()));
+  }
+  if (::close(db_fd) != 0) {
+    return absl::ErrnoToStatus(errno, absl::StrCat("close registry db file failed: ", db_path.string()));
+  }
+  return fsync_directory(import_root);
 }
 
 } // namespace
@@ -55,6 +139,19 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
     return storage_root_or.status();
   }
   options.daemon_options.storage_path = std::move(*storage_root_or);
+  if (options.daemon_options.import_root.empty()) {
+    options.daemon_options.import_root = options.daemon_options.storage_path / ".tensorcast_import";
+  }
+  auto import_root_or = normalize_storage_root(options.daemon_options.import_root);
+  if (!import_root_or.ok()) {
+    return import_root_or.status();
+  }
+  options.daemon_options.import_root = std::move(*import_root_or);
+  auto import_root_status = ensure_import_root_ready(options.daemon_options.import_root);
+  if (!import_root_status.ok()) {
+    return absl::FailedPreconditionError(absl::StrCat("IMPORT_ROOT_UNAVAILABLE: ", import_root_status.message()));
+  }
+  LOG(INFO) << "Import metadata root initialized at " << options.daemon_options.import_root.string();
 
   auto app = std::unique_ptr<DaemonApp>(new DaemonApp(std::move(options)));
   app->kernel_ =
@@ -75,7 +172,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .lip_manager = app->kernel_->lip_manager(),
       .devices = app->kernel_->device_resolver(),
       .regions = app->kernel_->region_registry(),
-      .disk_imports = app->kernel_->disk_import_catalog(),
+      .disk_imports = app->kernel_->source_registry(),
       .shutdown_signal = app->kernel_->shutdown_signal(),
       .async_runtime = app->kernel_->async_runtime(),
       .identity = app->kernel_->worker_identity_store(),
@@ -163,6 +260,7 @@ absl::StatusOr<std::unique_ptr<DaemonApp>> DaemonApp::create(Options options) {
       .replica_session_controller = *app->replica_session_controller_,
       .lease_controller = *app->lease_controller_,
       .shutdown_signal = app->kernel_->shutdown_signal(),
+      .source_registry = &app->kernel_->source_registry(),
   };
   StoreDaemonServiceImpl::Options svc_opts{
       .allow_high_card_attrs = app->options_.daemon_options.allow_high_card_attrs,

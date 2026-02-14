@@ -23,6 +23,7 @@
 #include "core/common/selection_identity.h"
 #include "core/store/materialization/contracts/loading_spec.h"
 #include "core/store/materialization/dataplane/metadata/canonical_index.h"
+#include "daemon/service/controllers/materialization_disk_resolve_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
@@ -191,7 +192,7 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     std::string_view peer,
     std::string_view rpc_name,
     const std::shared_ptr<store::components::IGlobalStoreClient>& global_store_client,
-    LocalDiskImportCatalog& disk_imports,
+    ArtifactSourceRegistry& disk_imports,
     const std::filesystem::path& storage_path) {
   TargetMaterializationCommonContext context;
   context.effective_policy =
@@ -235,9 +236,27 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
   context.normalized_disk_path = resolve_managed_disk_path(
       global_store_client.get(), storage_path, context.resolved_artifact_id, context.effective_policy.allow_disk);
   if (!context.normalized_disk_path.has_value() && context.effective_policy.allow_disk) {
-    auto entry = disk_imports.lookup_import(context.resolved_artifact_id);
+    auto entry = disk_imports.lookup_binding(context.resolved_artifact_id);
     if (entry.has_value()) {
-      context.normalized_disk_path = std::filesystem::path(entry->normalized_disk_path);
+      if (entry->source_kind == ArtifactSourceRegistry::SourceKind::kLocalImport) {
+        materialization_disk_resolve::SourceFingerprintMap expected_fingerprints;
+        expected_fingerprints.reserve(entry->file_fingerprints.size());
+        for (const auto& [relative_path, fp] : entry->file_fingerprints) {
+          expected_fingerprints.insert_or_assign(
+              relative_path,
+              materialization_disk_resolve::SourceFileFingerprint{
+                  .inode = fp.inode,
+                  .size = fp.size,
+                  .mtime_ns = fp.mtime_ns,
+              });
+        }
+        auto fingerprint_status = materialization_disk_resolve::validate_source_fingerprints(
+            std::filesystem::path(entry->canonical_source_path), expected_fingerprints);
+        if (!fingerprint_status.ok()) {
+          return fingerprint_status;
+        }
+      }
+      context.normalized_disk_path = std::filesystem::path(entry->canonical_source_path);
     }
   }
   if (!req.has_target_layout()) {
@@ -468,6 +487,9 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
+  if (disk_source.has_value()) {
+    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
 
   if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
     store::loading::VariantIdentity variant;
@@ -781,6 +803,9 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   hints.allow_p2p = effective_policy.allow_p2p;
   hints.allow_disk = effective_policy.allow_disk;
   hints.verify = store::loading::MaterializeHints::Verify::NONE;
+  if (disk_source.has_value()) {
+    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
+  }
 
   if (view_plan.has_value()) {
     if (view_plan->transform.requires_materialization) {

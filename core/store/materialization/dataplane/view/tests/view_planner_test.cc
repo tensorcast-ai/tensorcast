@@ -288,3 +288,34 @@ TEST_CASE("ViewPlanner emits scatter plan for inner-dimension narrow", "[view_pl
   CHECK(stride[1] == 1);
   CHECK(entry[5].get<uint64_t>() == 0);
 }
+
+TEST_CASE("ViewPlanner supports float8 element sizing for byte ranges", "[view_planner]") {
+  nlohmann::json index = nlohmann::json::object();
+  index["fp8"] = tensor_entry(
+      /*offset=*/0,
+      /*size=*/8,
+      /*shape=*/{8},
+      /*stride=*/{1},
+      /*dtype=*/"torch.float8_e4m3fn",
+      /*storage_offset=*/0);
+  const std::string canonical = index.dump();
+
+  ViewSpec spec;
+  TensorViewOps ops;
+  ops.ops.push_back(ViewOp::Narrow(NarrowOp{.dim = 0, .start = 2, .length = 3}));
+  spec.tensors.emplace("fp8", ops);
+
+  auto plan_or = ViewPlanner::compute_view_plan(canonical, spec);
+  REQUIRE(plan_or.ok());
+  const auto& plan = *plan_or;
+
+  REQUIRE(plan.selection.map.segments.size() == 1);
+  const auto& range = plan.selection.map.segments.front();
+  CHECK(range.src_offset == 2);
+  CHECK(range.dst_offset == 0);
+  CHECK(range.length == 3);
+  CHECK(plan.view_size_bytes == 3);
+
+  const auto view_json = nlohmann::json::parse(plan.view_index_json);
+  CHECK(view_json.at("fp8")[4].get<std::string>() == "torch.float8_e4m3fn");
+}

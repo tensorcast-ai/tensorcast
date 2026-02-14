@@ -179,8 +179,99 @@ When `keep_last > 0`, the publisher records `(version, artifact_id)` in
 `history_path` and calls `tensorcast.deregister_artifact(...)` for versions
 older than the most recent `keep_last`.
 
+Retention semantics are intentionally:
+
+- **Version keys are append-only**: old key mappings are kept.
+- **Replica/disk residency is bounded**: old versions are deregistered from
+  daemon/GS residency and managed shared-disk copies are purged.
+- Result: old keys can still resolve, but old versions are expected to become
+  non-materializable.
+
 Guidelines:
 - Always keep a rollback window (for example, `keep_last=2` or `keep_last=3`).
 - Only GC older versions after you have positive evidence that all target
   inference replicas have applied the new version (Stepcast mode provides an
   optional ack via `/weight_version`).
+
+## End-to-End Harness (Single Host + Distributed)
+
+A dedicated E2E harness is available at:
+
+- `tensorcast/tools/weight_publisher_e2e.py`
+
+It models two independent roles:
+
+- `publisher`: continuously publishes new weight versions through
+  `WeightPublisher.publish_from_disk(...)`.
+- `receiver`: continuously receives and validates versioned weights by key.
+
+### Single-host scenario (local)
+
+Run both roles concurrently in one process:
+
+```bash
+uv run -m tensorcast.tools.weight_publisher_e2e single-host \
+  --init-mode auto \
+  --global-store-mode start \
+  --allow-gs-fallback \
+  --start-version 1 \
+  --num-versions 3 \
+  --keep-last 2 \
+  --publish-interval-s 2 \
+  --receiver-timeout-s 120
+```
+
+This validates all required behaviors in one run:
+
+- publisher keeps updating versions (`v1 -> v2 -> v3`)
+- receiver keeps receiving and validating each version
+- retention window check: with `keep_last=2`, after publishing `v3`, `v1`
+  key mapping remains but `v1` must be non-materializable, while `v2`/`v3`
+  remain materializable
+
+The harness writes a summary JSON (by default under `/tmp/tensorcast_weight_publisher_e2e/<run-id>/`).
+
+### Distributed scenario (with Global Store)
+
+Use two nodes (or two daemons) connected to the same Global Store:
+
+1. Start Global Store.
+2. Start daemon on node A (publisher side), connect it to the Global Store.
+3. Start daemon on node B (receiver side), connect it to the same Global Store.
+4. Run `publisher` role on node A.
+5. Run `receiver` role on node B.
+
+Example:
+
+```bash
+# Node A (publisher)
+uv run -m tensorcast.tools.weight_publisher_e2e publisher \
+  --init-mode connect \
+  --connect-address <NODE_A_DAEMON_ADDR> \
+  --model-name wp-e2e-dist \
+  --start-version 1 \
+  --num-versions 3 \
+  --keep-last 2 \
+  --publish-interval-s 3 \
+  --receiver-timeout-s 180
+```
+
+```bash
+# Node B (receiver)
+uv run -m tensorcast.tools.weight_publisher_e2e receiver \
+  --init-mode connect \
+  --connect-address <NODE_B_DAEMON_ADDR> \
+  --model-name wp-e2e-dist \
+  --start-version 1 \
+  --num-versions 3 \
+  --receiver-timeout-s 180 \
+  --fallback-prefer p2p
+```
+
+Distributed checklist:
+
+- Use the same `model_name`, `start_version`, and `num_versions` on both roles.
+- Keep publisher and receiver running concurrently so receiver can observe each update.
+- For retention validation, inspect publisher summary: with `keep_last=2` and
+  `v1..v3`, `v1` should remain key-resolvable but become non-materializable,
+  while `v2`/`v3` remain materializable.

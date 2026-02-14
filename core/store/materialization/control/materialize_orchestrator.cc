@@ -218,7 +218,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   } else {
     // Not found or GS unavailable → fall back to disk
-    LOG(INFO) << "request_replica_transport failed: " << transport_or.status() << "; falling back to disk"
+    const char* route_name = view_id.has_value() ? "request_view_transport" : "request_replica_transport";
+    LOG(INFO) << route_name << " failed: " << transport_or.status() << "; falling back to disk"
               << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "");
     if (!has_disk_source || !allow_disk) {
       return transport_or.status();

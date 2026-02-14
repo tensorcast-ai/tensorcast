@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import sys
 import threading
 import time
 import weakref
@@ -147,6 +148,122 @@ def _parse_artifact_ref(
             "and then reference the artifact by id or key."
         )
     return None, ref_value
+
+
+def _should_show_from_disk_progress(show_progress: bool | None) -> bool:
+    if show_progress is not None:
+        return bool(show_progress)
+    with contextlib.suppress(Exception):
+        return bool(sys.stderr.isatty())
+    return False
+
+
+_IMPORT_STREAM_ERROR_STATUS: dict[int, str] = {
+    int(store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_NOT_FOUND): "NOT_FOUND",
+    int(
+        store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_PERMISSION_DENIED
+    ): "PERMISSION_DENIED",
+    int(
+        store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_FORMAT_INVALID
+    ): "INVALID_ARGUMENT",
+    int(
+        store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_MUTATED
+    ): "FAILED_PRECONDITION",
+    int(store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_REGISTRY_IO_FAILURE): "UNAVAILABLE",
+    int(
+        store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_POLICY_DENIED_NON_LOCAL_PEER
+    ): "PERMISSION_DENIED",
+}
+
+
+def _stream_error_from_import_event(
+    event: store_daemon_pb2.ImportArtifactFromPathStreamEvent,
+) -> ArtifactError:
+    message = (
+        str(getattr(event, "message", "") or "")
+        or "ImportArtifactFromPathStream reported an error"
+    )
+    status_code = _IMPORT_STREAM_ERROR_STATUS.get(
+        int(getattr(event, "error_code", 0) or 0), "INTERNAL"
+    )
+    return ArtifactError(
+        message,
+        status_code=status_code,
+        retryable=(status_code == "UNAVAILABLE"),
+    )
+
+
+def _consume_import_artifact_stream_with_tqdm(
+    stream,
+    *,
+    disk_path: str,
+) -> store_daemon_pb2.ImportArtifactFromPathResponse:
+    from tqdm.auto import tqdm
+
+    desc = f"resolve:{os.path.basename(disk_path) or disk_path}"
+    bar = tqdm(total=None, unit="B", unit_scale=True, unit_divisor=1024, desc=desc)
+    final_response: store_daemon_pb2.ImportArtifactFromPathResponse | None = None
+    try:
+        for event in stream:
+            total_bytes = int(getattr(event, "total_bytes", 0) or 0)
+            processed_bytes = int(getattr(event, "processed_bytes", 0) or 0)
+            if total_bytes > 0 and bar.total != total_bytes:
+                bar.total = total_bytes
+            if processed_bytes > bar.n:
+                bar.update(processed_bytes - bar.n)
+
+            message = str(getattr(event, "message", "") or "")
+            if message:
+                bar.set_postfix_str(message, refresh=False)
+
+            if bool(getattr(event, "done", False)):
+                if total_bytes > 0 and bar.n < total_bytes:
+                    bar.update(total_bytes - bar.n)
+                if bool(getattr(event, "error", False)):
+                    raise _stream_error_from_import_event(event)
+                if not event.HasField("result"):
+                    raise ArtifactError(
+                        "ImportArtifactFromPathStream done event missing result",
+                        status_code="DATA_LOSS",
+                        retryable=False,
+                    )
+                final_response = event.result
+                break
+    finally:
+        bar.close()
+
+    if final_response is None:
+        raise ArtifactError(
+            "ImportArtifactFromPathStream ended without terminal result",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return final_response
+
+
+def _consume_import_artifact_stream(
+    stream,
+) -> store_daemon_pb2.ImportArtifactFromPathResponse:
+    final_response: store_daemon_pb2.ImportArtifactFromPathResponse | None = None
+    for event in stream:
+        if bool(getattr(event, "done", False)):
+            if bool(getattr(event, "error", False)):
+                raise _stream_error_from_import_event(event)
+            if not event.HasField("result"):
+                raise ArtifactError(
+                    "ImportArtifactFromPathStream done event missing result",
+                    status_code="DATA_LOSS",
+                    retryable=False,
+                )
+            final_response = event.result
+            break
+    if final_response is None:
+        raise ArtifactError(
+            "ImportArtifactFromPathStream ended without terminal result",
+            status_code="DATA_LOSS",
+            retryable=False,
+        )
+    return final_response
 
 
 class Store:
@@ -623,26 +740,35 @@ class Store:
         *,
         key: str | None = None,
         verify_checksums: bool = True,
+        show_progress: bool | None = None,
     ) -> Artifact:
         disk_path = os.fspath(path)
         if not disk_path:
             raise ValueError("path is required")
         client = self._runtime.ensure_client()
-        response = client.resolve_artifact_from_disk_v2(
-            disk_path=disk_path,
+        use_progress = _should_show_from_disk_progress(show_progress)
+        stream = client.import_artifact_from_path_stream_v2(
+            path=disk_path,
             verify_checksums=bool(verify_checksums),
         )
+        if use_progress:
+            response = _consume_import_artifact_stream_with_tqdm(
+                stream,
+                disk_path=disk_path,
+            )
+        else:
+            response = _consume_import_artifact_stream(stream)
         artifact_id = response.artifact_id or ""
         if not artifact_id:
             raise ArtifactError(
-                "ResolveArtifactFromDisk returned empty artifact_id",
+                "ImportArtifactFromPath returned empty artifact_id",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
         canonical_index_bytes = bytes(response.canonical_index_bytes)
         if not canonical_index_bytes:
             raise ArtifactError(
-                "ResolveArtifactFromDisk returned empty canonical index bytes",
+                "ImportArtifactFromPath returned empty canonical index bytes",
                 status_code="DATA_LOSS",
                 retryable=False,
             )
@@ -1131,9 +1257,18 @@ async def artifact_async(
 
 
 def from_disk(
-    path: str, *, key: str | None = None, verify_checksums: bool = True
+    path: str,
+    *,
+    key: str | None = None,
+    verify_checksums: bool = True,
+    show_progress: bool | None = None,
 ) -> Artifact:
-    return _coerce_store().from_disk(path, key=key, verify_checksums=verify_checksums)
+    return _coerce_store().from_disk(
+        path,
+        key=key,
+        verify_checksums=verify_checksums,
+        show_progress=show_progress,
+    )
 
 
 __all__ = [

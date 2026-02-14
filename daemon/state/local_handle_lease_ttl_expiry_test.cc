@@ -157,11 +157,11 @@ TEST_CASE("Handle lease TTL expiry invalidates LocalHandle tokens", "[daemon][lo
   REQUIRE(harness->start().ok());
   auto& svc = harness->service();
 
-  tensorcast::daemon::v2::ResolveArtifactFromDiskRequest resolve_req;
-  resolve_req.set_disk_path(artifact_dir.string());
+  tensorcast::daemon::v2::ImportArtifactFromPathRequest resolve_req;
+  resolve_req.set_path(artifact_dir.string());
   grpc::ServerContext resolve_ctx;
-  tensorcast::daemon::v2::ResolveArtifactFromDiskResponse resolve_resp;
-  REQUIRE(svc.ResolveArtifactFromDisk(&resolve_ctx, &resolve_req, &resolve_resp).ok());
+  tensorcast::daemon::v2::ImportArtifactFromPathResponse resolve_resp;
+  REQUIRE(svc.ImportArtifactFromPath(&resolve_ctx, &resolve_req, &resolve_resp).ok());
   REQUIRE_FALSE(resolve_resp.artifact_id().empty());
   const std::string artifact_id = resolve_resp.artifact_id();
 

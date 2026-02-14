@@ -44,6 +44,7 @@ void SessionLifecycleManager::sweep_once() {
     sweep_pid_liveness();
   }
   expire_due(absl::Now());
+  retry_pending_gpu_unloads_();
 }
 
 void SessionLifecycleManager::set_eviction_notify(std::function<void(const ReplicaSubject&)> fn) {
@@ -601,6 +602,7 @@ size_t SessionLifecycleManager::placement_pin_count_for(const store::loading::Re
 void SessionLifecycleManager::inc_use_(const ReplicaSubject& s) {
   auto& c = counters_[s];
   ++c.use_count;
+  pending_gpu_unloads_.erase(s);
 }
 
 void SessionLifecycleManager::dec_use_(const ReplicaSubject& s) {
@@ -612,6 +614,26 @@ void SessionLifecycleManager::dec_use_(const ReplicaSubject& s) {
 void SessionLifecycleManager::inc_pin_(const ReplicaSubject& s) {
   auto& c = counters_[s];
   ++c.placement_pins;
+  pending_gpu_unloads_.erase(s);
+}
+
+void SessionLifecycleManager::retry_pending_gpu_unloads_() {
+  std::vector<ReplicaSubject> pending;
+  {
+    absl::MutexLock lock(&mu_);
+    if (pending_gpu_unloads_.empty()) {
+      return;
+    }
+    pending.reserve(pending_gpu_unloads_.size());
+    for (const auto& subj : pending_gpu_unloads_) {
+      pending.push_back(subj);
+    }
+  }
+
+  VLOG(1) << "SessionLifecycle: retrying pending GPU unloads count=" << pending.size();
+  for (const auto& subj : pending) {
+    maybe_unload_daemon_replica_(subj);
+  }
 }
 
 void SessionLifecycleManager::dec_pin_(const ReplicaSubject& s) {
@@ -785,23 +807,46 @@ void SessionLifecycleManager::maybe_unload_daemon_replica_(const ReplicaSubject&
       uses = it->second.use_count;
       pins = it->second.placement_pins;
     }
+    if (uses != 0 || pins != 0) {
+      pending_gpu_unloads_.erase(subj);
+      return;
+    }
   }
-  if (uses != 0 || pins != 0)
-    return;
   // Check residency; only unload if GPU memory is present.
   auto state = engine_->get_replica_state(subj, DeviceType::GPU);
   if (state <= store::replica::MemoryState::UNALLOCATED) {
+    absl::MutexLock lock(&mu_);
+    pending_gpu_unloads_.erase(subj);
     return; // not allocated/loaded on GPU
   }
-  int rc = engine_->unload_replica(subj);
-  if (rc != 0) {
-    LOG(WARNING) << "maybe_unload_daemon_replica: unload_replica rc=" << rc << " key=" << subj;
-    try {
-      static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
-      static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
-      ctr->Add(1.0);
-    } catch (...) {
-    }
+
+  LOG(INFO) << "SessionLifecycle: attempting daemon replica unload key=" << subj << " uses=" << uses << " pins=" << pins
+            << " gpu_state=" << store::replica::state_to_string(state);
+  const absl::Status unload_status = engine_->unload_replica_status(subj);
+  if (unload_status.ok() || absl::IsNotFound(unload_status)) {
+    absl::MutexLock lock(&mu_);
+    pending_gpu_unloads_.erase(subj);
+    return;
+  }
+
+  bool inserted_pending_retry = false;
+  {
+    absl::MutexLock lock(&mu_);
+    inserted_pending_retry = pending_gpu_unloads_.insert(subj).second;
+  }
+  notify_schedule_if_earlier_(absl::Now() + absl::Seconds(1));
+
+  if (inserted_pending_retry) {
+    LOG(WARNING) << "SessionLifecycle: unload failed; queued retry for key=" << subj << " status=" << unload_status;
+  } else {
+    VLOG(1) << "SessionLifecycle: unload retry still failing for key=" << subj << " status=" << unload_status;
+  }
+
+  try {
+    static auto meter = opentelemetry::metrics::Provider::GetMeterProvider()->GetMeter("tensorcast.daemon", "1.0.0");
+    static auto ctr = meter->CreateDoubleCounter("tc_unload_failed_total");
+    ctr->Add(1.0);
+  } catch (...) {
   }
 }
 

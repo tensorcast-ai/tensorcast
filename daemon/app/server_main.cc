@@ -585,6 +585,37 @@ int main(int argc, char** argv) {
     streaming_buffer_chunks = 16;
   }
 
+  int detected_gpu_count = 0;
+  const absl::Status gpu_count_status = cuda::get_device_count(&detected_gpu_count);
+  if (!gpu_count_status.ok()) {
+    LOG(ERROR) << "INVALID_ARGUMENT: failed to query CUDA device count for pinned_memory sizing: " << gpu_count_status;
+    return 2;
+  }
+  if (detected_gpu_count < 0) {
+    LOG(ERROR) << "INTERNAL: cuda::get_device_count returned a negative value: " << detected_gpu_count;
+    return 2;
+  }
+  if (detected_gpu_count > 0) {
+    const uint64_t required_engine_slices =
+        static_cast<uint64_t>(streaming_buffer_chunks) * static_cast<uint64_t>(detected_gpu_count);
+    const uint64_t capacity_engine_slices = engine_pool->capacity_slices();
+    if (capacity_engine_slices < required_engine_slices) {
+      LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=engine] cannot cover GPU concurrency: "
+                 << "capacity_slices=" << capacity_engine_slices << " required_slices=" << required_engine_slices
+                 << " (detected_gpu_count=" << detected_gpu_count
+                 << " streaming_buffer_chunks=" << streaming_buffer_chunks
+                 << " slice_bytes=" << engine_pool->slice_bytes()
+                 << "). Increase pinned_memory.classes[name=engine].pool_bytes "
+                 << "or lower engine.streaming_buffer_chunks.";
+      return 2;
+    }
+    LOG(INFO) << "Engine pinned pool startup check passed: capacity_slices=" << capacity_engine_slices
+              << " required_slices=" << required_engine_slices << " (detected_gpu_count=" << detected_gpu_count
+              << ", streaming_buffer_chunks=" << streaming_buffer_chunks << ")";
+  } else {
+    LOG(WARNING) << "No CUDA devices detected at startup; skipping engine pinned concurrency coverage check";
+  }
+
   // Fail fast on communicator pinned sizing before starting communicator threads.
   const int buffers_per_flow = cfg.communicator().stager().buffers_per_flow();
   if (buffers_per_flow <= 0) {
@@ -903,6 +934,12 @@ int main(int argc, char** argv) {
     return 1;
   }
   daemon_opts.daemon_id = cfg.daemon_id();
+  auto daemon_runtime_dir_or = discover_daemon_runtime_dir(daemon_opts.daemon_id);
+  if (!daemon_runtime_dir_or.ok()) {
+    LOG(ERROR) << "Failed to resolve daemon runtime dir for import root: " << daemon_runtime_dir_or.status();
+    return 1;
+  }
+  daemon_opts.import_root = *daemon_runtime_dir_or / "import";
 
   if (cfg.has_capability_tokens() && cfg.capability_tokens().has_active()) {
     const auto& active = cfg.capability_tokens().active();

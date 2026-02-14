@@ -44,3 +44,24 @@ def test_build_indices_from_safetensors_single_and_multi(tmp_path: Path):
     # Canonical offsets are coalesced by sorted tensor names (t then u), not file order.
     assert data2["t"] == (0, 256)
     assert data2["u"] == (256, 16)
+
+
+def test_build_indices_from_safetensors_float8(tmp_path: Path):
+    if not hasattr(torch, "float8_e4m3fn") or not hasattr(torch, "float8_e5m2"):
+        return
+
+    storage_root = tmp_path / "models"
+    storage_root.mkdir(parents=True, exist_ok=True)
+    artifact_dir = storage_root / "st_float8"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+
+    e4m3 = torch.zeros(8, dtype=torch.float8_e4m3fn)
+    e5m2 = torch.ones(8, dtype=torch.float8_e5m2)
+    st_save({"fp8_e4m3": e4m3, "fp8_e5m2": e5m2}, str(artifact_dir / "weights.safetensors"))
+
+    meta_idx, data_idx = build_indices_from_safetensors(artifact_dir)
+
+    assert meta_idx["fp8_e4m3"][2] == "torch.float8_e4m3fn"
+    assert meta_idx["fp8_e5m2"][2] == "torch.float8_e5m2"
+    assert data_idx["fp8_e4m3"] == (0, 8)
+    assert data_idx["fp8_e5m2"] == (8, 8)

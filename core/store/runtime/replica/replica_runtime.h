@@ -65,6 +65,7 @@ class ReplicaRuntime {
   int wait_replica_ready(const loading::ReplicaKey& key) const;
   absl::Status unload_replica_status(const loading::ReplicaKey& key) const;
   int unload_replica(const loading::ReplicaKey& key) const;
+  absl::Status retire_replica_status(const loading::ReplicaKey& key);
   replica::MemoryState get_replica_state(const loading::ReplicaKey& key, DeviceType memory_type) const;
   absl::StatusOr<uint64_t> get_replica_gpu_ptr(const loading::ReplicaKey& key) const;
   absl::StatusOr<uint64_t> get_replica_size(const loading::ReplicaKey& key) const;

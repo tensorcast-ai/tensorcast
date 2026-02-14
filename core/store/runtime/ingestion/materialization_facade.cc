@@ -79,6 +79,101 @@ absl::Status stale_local_route_status(std::string_view artifact_id) {
       absl::StrCat("Global Store route stale for artifact_id=", artifact_id, "; retry or provide disk source"));
 }
 
+loading::ReplicaHandle build_local_replica_handle(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    common::memory::MemoryLocation target_location) {
+  loading::ReplicaHandle handle;
+  handle.replica_key = key;
+  handle.ready_signal = replica->ready_signal_for(target_location);
+  handle.cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
+  handle.gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
+  handle.source = loading::MaterializationSource::kLocalReplica;
+  return handle;
+}
+
+absl::Status validate_existing_replica_for_reuse(
+    const std::shared_ptr<replica::Replica>& replica,
+    common::memory::MemoryLocation target_location) {
+  if (target_location == common::memory::MemoryLocation::GPU) {
+    const auto gpu_state = replica->get_memory_state(common::memory::MemoryLocation::GPU);
+    const auto cpu_state = replica->get_memory_state(common::memory::MemoryLocation::CPU);
+    if (gpu_state == replica::MemoryState::ALLOCATED && cpu_state != replica::MemoryState::LOADED) {
+      return absl::NotFoundError("reuse replica has no loaded CPU source; rebuilding");
+    }
+  }
+
+  auto ready_signal = replica->ready_signal_for(target_location);
+  if (ready_signal && ready_signal->is_ready()) {
+    const absl::Status ready_status = std::move(ready_signal->subscribe()).get();
+    if (!ready_status.ok()) {
+      if (absl::IsFailedPrecondition(ready_status) || absl::IsNotFound(ready_status)) {
+        return absl::NotFoundError(ready_status.message());
+      }
+      return ready_status;
+    }
+  }
+  return absl::OkStatus();
+}
+
+absl::Status load_assembled_ranges_into_replica(
+    const std::shared_ptr<replica::Replica>& replica,
+    const loader::ByteRangeMap& map,
+    std::vector<std::shared_ptr<loader::SeekableSource>> piece_sources,
+    const StoreEngineOptions::ByteMappingConfig& byte_mapping_config,
+    common::memory::MemoryLocation target_location,
+    int concurrency,
+    const std::optional<loader::ViewPlan>& target_view_plan,
+    loading::TransformPlacement transform_placement,
+    int target_device_id) {
+  absl::Status release_status = replica->release_memory(target_location);
+  if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+    return release_status;
+  }
+
+  loader::ByteRangeCompiler compiler(byte_mapping_config, "assembly");
+  auto program_or = compiler.Compile(map);
+  if (!program_or.ok()) {
+    return program_or.status();
+  }
+
+  loader::ByteRangeMappedSource::Options map_opts{
+      .path = "assembly",
+      .enable_direct_write_at = byte_mapping_config.enable_direct_write_at,
+  };
+  auto source_or =
+      loader::ByteRangeMappedSource::Create(map, *program_or, std::move(piece_sources), std::move(map_opts));
+  if (!source_or.ok()) {
+    return source_or.status();
+  }
+
+  std::unique_ptr<loader::SeekableSource> source = std::move(*source_or);
+  auto load_future = replica->get_memory_manager().load_async_from_source(
+      std::move(source), target_location, concurrency, std::nullopt, std::function<absl::Status()>{});
+  absl::Status load_status = std::move(load_future).get();
+  if (!load_status.ok()) {
+    return load_status;
+  }
+
+  if (target_view_plan.has_value() && !target_view_plan->is_identity &&
+      target_view_plan->transform.requires_materialization &&
+      transform_placement == loading::TransformPlacement::kServer) {
+    auto ptrs = replica->get_data_pointer(target_location);
+    if (ptrs.empty() || ptrs[0] == nullptr) {
+      return absl::FailedPreconditionError("assembly view transform requires loaded memory");
+    }
+    const int dev = target_location == common::memory::MemoryLocation::GPU ? target_device_id : -1;
+    absl::Status transform_status =
+        loader::execute_transform(target_view_plan->transform, target_location, ptrs[0], dev);
+    if (!transform_status.ok()) {
+      return absl::DataLossError(absl::StrCat("assembly view transform failed: ", transform_status.message()));
+    }
+  }
+
+  replica->set_ready_signal(target_location, absl::OkStatus());
+  return absl::OkStatus();
+}
+
 absl::StatusOr<std::pair<std::string, std::string>> parse_mi2_multihashes(std::string_view artifact_id) {
   constexpr std::string_view kPrefix = common::kMi2Prefix;
   if (!artifact_id.starts_with(kPrefix)) {
@@ -677,6 +772,7 @@ MaterializationFacade::MaterializationFacade(Config config)
   deps.num_threads = config_.num_threads;
   deps.byte_mapping_config = config_.options->byte_mapping;
   deps.view_hash_computer = config_.runtime_context->view_hash_computer();
+  deps.run_auto_handles_disk_fallback = true;
   deps.ingest_from_disk = [this](
                               const std::string& artifact_identifier,
                               const loading::DiskSource& source,
@@ -2091,18 +2187,32 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
   key.view_id = std::string(view_id);
   key.device = target_device;
   key.replica = 0;
+  const int concurrency = std::max(1, config_.num_threads);
 
   auto existing_or = replica_registry.find(key);
   if (existing_or.ok()) {
     const auto& existing = existing_or.value();
-    auto ready = existing->ready_signal_for(common::memory::MemoryLocation::GPU);
-    loading::ReplicaHandle handle;
-    handle.replica_key = key;
-    handle.ready_signal = ready;
-    handle.cpu_state = existing->get_memory_state(common::memory::MemoryLocation::CPU);
-    handle.gpu_state = existing->get_memory_state(common::memory::MemoryLocation::GPU);
-    handle.source = loading::MaterializationSource::kLocalReplica;
-    return handle;
+    absl::Status reuse_status = validate_existing_replica_for_reuse(existing, common::memory::MemoryLocation::GPU);
+    if (reuse_status.ok()) {
+      return build_local_replica_handle(key, existing, common::memory::MemoryLocation::GPU);
+    }
+    if (!absl::IsNotFound(reuse_status)) {
+      return reuse_status;
+    }
+    absl::Status rebuild_status = load_assembled_ranges_into_replica(
+        existing,
+        assembly_plan.map,
+        std::move(piece_sources),
+        config_.options->byte_mapping,
+        common::memory::MemoryLocation::GPU,
+        concurrency,
+        target_view_plan,
+        placement,
+        target_device.ordinal);
+    if (!rebuild_status.ok()) {
+      return rebuild_status;
+    }
+    return build_local_replica_handle(key, existing, common::memory::MemoryLocation::GPU);
   }
   if (!absl::IsNotFound(existing_or.status())) {
     return existing_or.status();
@@ -2134,46 +2244,19 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
   }
   auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "assembly");
-  auto program_or = compiler.Compile(assembly_plan.map);
-  if (!program_or.ok()) {
-    return program_or.status();
-  }
-  loader::ByteRangeMappedSource::Options map_opts{
-      .path = "assembly",
-      .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-  };
-  auto source_or = loader::ByteRangeMappedSource::Create(
-      assembly_plan.map, *program_or, std::move(piece_sources), std::move(map_opts));
-  if (!source_or.ok()) {
-    return source_or.status();
-  }
-  std::unique_ptr<loader::SeekableSource> source = std::move(*source_or);
-  const int concurrency = std::max(1, config_.num_threads);
-  auto load_future = replica->get_memory_manager().load_async_from_source(
-      std::move(source),
+  absl::Status load_status = load_assembled_ranges_into_replica(
+      replica,
+      assembly_plan.map,
+      std::move(piece_sources),
+      config_.options->byte_mapping,
       common::memory::MemoryLocation::GPU,
       concurrency,
-      std::nullopt,
-      std::function<absl::Status()>{});
-  absl::Status load_status = std::move(load_future).get();
+      target_view_plan,
+      cfg.transform_placement,
+      target_device.ordinal);
   if (!load_status.ok()) {
     return load_status;
   }
-  if (!target_view_plan.is_identity && target_view_plan.transform.requires_materialization &&
-      cfg.transform_placement == loading::TransformPlacement::kServer) {
-    auto ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
-    if (ptrs.empty() || ptrs[0] == nullptr) {
-      return absl::FailedPreconditionError("assembly view transform requires loaded memory");
-    }
-    const int dev = target_device.ordinal;
-    absl::Status transform_status =
-        loader::execute_transform(target_view_plan.transform, common::memory::MemoryLocation::GPU, ptrs[0], dev);
-    if (!transform_status.ok()) {
-      return absl::DataLossError(absl::StrCat("assembly view transform failed: ", transform_status.message()));
-    }
-  }
-  replica->set_ready_signal(common::memory::MemoryLocation::GPU, absl::OkStatus());
 
   absl::Status emplace_status = replica_registry.emplace(key, gsl::not_null{replica});
   if (absl::IsAlreadyExists(emplace_status)) {
@@ -2182,13 +2265,11 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_f
       return existing.status();
     }
     const auto& reuse = existing.value();
-    loading::ReplicaHandle handle;
-    handle.replica_key = key;
-    handle.ready_signal = reuse->ready_signal_for(common::memory::MemoryLocation::GPU);
-    handle.cpu_state = reuse->get_memory_state(common::memory::MemoryLocation::CPU);
-    handle.gpu_state = reuse->get_memory_state(common::memory::MemoryLocation::GPU);
-    handle.source = loading::MaterializationSource::kLocalReplica;
-    return handle;
+    absl::Status reuse_status = validate_existing_replica_for_reuse(reuse, common::memory::MemoryLocation::GPU);
+    if (!reuse_status.ok()) {
+      return reuse_status;
+    }
+    return build_local_replica_handle(key, reuse, common::memory::MemoryLocation::GPU);
   }
   if (!emplace_status.ok()) {
     return emplace_status;
@@ -2481,18 +2562,36 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   key.view_id = request.requested_view_id();
   key.device = request.target_device();
   key.replica = 0;
+  const loading::TransformPlacement transform_placement =
+      request.hints().variant ? request.hints().variant->placement : loading::TransformPlacement::kServer;
+  const int concurrency = request.hints().pipeline_concurrency > 0
+      ? static_cast<int>(request.hints().pipeline_concurrency)
+      : std::max(1, config_.num_threads);
 
   auto existing_or = replica_registry.find(key);
   if (existing_or.ok()) {
     const auto& existing = existing_or.value();
-    auto ready = existing->ready_signal_for(request.target_location());
-    loading::ReplicaHandle handle;
-    handle.replica_key = key;
-    handle.ready_signal = ready;
-    handle.cpu_state = existing->get_memory_state(common::memory::MemoryLocation::CPU);
-    handle.gpu_state = existing->get_memory_state(common::memory::MemoryLocation::GPU);
-    handle.source = loading::MaterializationSource::kLocalReplica;
-    return handle;
+    absl::Status reuse_status = validate_existing_replica_for_reuse(existing, request.target_location());
+    if (reuse_status.ok()) {
+      return build_local_replica_handle(key, existing, request.target_location());
+    }
+    if (!absl::IsNotFound(reuse_status)) {
+      return reuse_status;
+    }
+    absl::Status rebuild_status = load_assembled_ranges_into_replica(
+        existing,
+        plan.map,
+        std::move(piece_sources),
+        config_.options->byte_mapping,
+        request.target_location(),
+        concurrency,
+        target_view_plan,
+        transform_placement,
+        request.target_device().ordinal);
+    if (!rebuild_status.ok()) {
+      return rebuild_status;
+    }
+    return build_local_replica_handle(key, existing, request.target_location());
   }
   if (!absl::IsNotFound(existing_or.status())) {
     return existing_or.status();
@@ -2516,8 +2615,7 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   cfg.pinned_memory_timeout = config_.pinned_memory_timeout;
   cfg.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
   cfg.view_id = request.requested_view_id();
-  cfg.transform_placement =
-      request.hints().variant ? request.hints().variant->placement : loading::TransformPlacement::kServer;
+  cfg.transform_placement = transform_placement;
 
   auto replica_or = replica::Replica::create(cfg);
   if (!replica_or.ok()) {
@@ -2525,46 +2623,19 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
   }
   auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
 
-  loader::ByteRangeCompiler compiler(config_.options->byte_mapping, "assembly");
-  auto program_or = compiler.Compile(plan.map);
-  if (!program_or.ok()) {
-    return program_or.status();
-  }
-  loader::ByteRangeMappedSource::Options map_opts{
-      .path = "assembly",
-      .enable_direct_write_at = config_.options->byte_mapping.enable_direct_write_at,
-  };
-  auto source_or =
-      loader::ByteRangeMappedSource::Create(plan.map, *program_or, std::move(piece_sources), std::move(map_opts));
-  if (!source_or.ok()) {
-    return source_or.status();
-  }
-  std::unique_ptr<loader::SeekableSource> source = std::move(*source_or);
-  const int concurrency = request.hints().pipeline_concurrency > 0
-      ? static_cast<int>(request.hints().pipeline_concurrency)
-      : std::max(1, config_.num_threads);
-  auto load_future = replica->get_memory_manager().load_async_from_source(
-      std::move(source), request.target_location(), concurrency, std::nullopt, std::function<absl::Status()>{});
-  absl::Status load_status = std::move(load_future).get();
+  absl::Status load_status = load_assembled_ranges_into_replica(
+      replica,
+      plan.map,
+      std::move(piece_sources),
+      config_.options->byte_mapping,
+      request.target_location(),
+      concurrency,
+      target_view_plan,
+      cfg.transform_placement,
+      request.target_device().ordinal);
   if (!load_status.ok()) {
     return load_status;
   }
-  if (target_view_plan.has_value() && !target_view_plan->is_identity &&
-      target_view_plan->transform.requires_materialization &&
-      cfg.transform_placement == loading::TransformPlacement::kServer) {
-    auto ptrs = replica->get_data_pointer(request.target_location());
-    if (ptrs.empty() || ptrs[0] == nullptr) {
-      return absl::FailedPreconditionError("assembly view transform requires loaded memory");
-    }
-    const int dev =
-        request.target_location() == common::memory::MemoryLocation::GPU ? request.target_device().ordinal : -1;
-    absl::Status transform_status =
-        loader::execute_transform(target_view_plan->transform, request.target_location(), ptrs[0], dev);
-    if (!transform_status.ok()) {
-      return absl::DataLossError(absl::StrCat("assembly view transform failed: ", transform_status.message()));
-    }
-  }
-  replica->set_ready_signal(request.target_location(), absl::OkStatus());
 
   absl::Status emplace_status = replica_registry.emplace(key, gsl::not_null{replica});
   if (absl::IsAlreadyExists(emplace_status)) {
@@ -2573,13 +2644,11 @@ absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::assemble_from_piec
       return existing_or.status();
     }
     const auto& existing = existing_or.value();
-    loading::ReplicaHandle handle;
-    handle.replica_key = key;
-    handle.ready_signal = existing->ready_signal_for(request.target_location());
-    handle.cpu_state = existing->get_memory_state(common::memory::MemoryLocation::CPU);
-    handle.gpu_state = existing->get_memory_state(common::memory::MemoryLocation::GPU);
-    handle.source = loading::MaterializationSource::kLocalReplica;
-    return handle;
+    absl::Status reuse_status = validate_existing_replica_for_reuse(existing, request.target_location());
+    if (!reuse_status.ok()) {
+      return reuse_status;
+    }
+    return build_local_replica_handle(key, existing, request.target_location());
   }
   if (!emplace_status.ok()) {
     return emplace_status;

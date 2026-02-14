@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import timezone
+from functools import lru_cache
 from threading import RLock
 from typing import (
     TYPE_CHECKING,
@@ -105,6 +106,72 @@ def _grpc_message(err: grpc.RpcError, *, fallback: str) -> str:
     return details if details else fallback
 
 
+def _parse_env_float(name: str, default: float, *, min_value: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default=%s", name, raw, default)
+        return default
+    if value < min_value:
+        logger.warning(
+            "Invalid %s=%r; expected >= %s, using default=%s",
+            name,
+            raw,
+            min_value,
+            default,
+        )
+        return default
+    return value
+
+
+def _parse_env_int(name: str, default: int, *, min_value: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r; using default=%s", name, raw, default)
+        return default
+    if value < min_value:
+        logger.warning(
+            "Invalid %s=%r; expected >= %s, using default=%s",
+            name,
+            raw,
+            min_value,
+            default,
+        )
+        return default
+    return value
+
+
+@lru_cache(maxsize=1)
+def _import_artifact_from_path_timeout_seconds() -> float | None:
+    # ImportArtifactFromPath can scan and hash very large directories.
+    timeout_s = _parse_env_float(
+        "TENSORCAST_IMPORT_ARTIFACT_TIMEOUT_SECONDS",
+        default=600.0,
+        min_value=0.0,
+    )
+    # 0 means "no RPC deadline" (timeout=None in grpc Python API).
+    if timeout_s == 0.0:
+        return None
+    return timeout_s
+
+
+@lru_cache(maxsize=1)
+def _import_artifact_from_path_retries() -> int:
+    # Avoid re-running expensive disk scans by default.
+    return _parse_env_int(
+        "TENSORCAST_IMPORT_ARTIFACT_RETRIES",
+        default=0,
+        min_value=0,
+    )
+
+
 def _inc_channel_refresh(server_address: str) -> int:
     global _METRIC_CHANNEL_REFRESHES
     with _METRICS_LOCK:
@@ -140,6 +207,43 @@ def _inc_rpc_retry(
         cur,
     )
     return cur
+
+
+def _raise_import_artifact_from_path_rpc_error(
+    server_address: str, err: grpc.RpcError
+) -> NoReturn:
+    code = err.code()
+    if code == grpc.StatusCode.UNAVAILABLE:
+        _raise_grpc_error(
+            RuntimeError(
+                f"Local StoreDaemon ({server_address}) is not available. Msg: {err.details()}"
+            ),
+            cause=err,
+        )
+    if code == grpc.StatusCode.INVALID_ARGUMENT:
+        _raise_grpc_error(
+            ValueError(_grpc_message(err, fallback="invalid argument")),
+            cause=err,
+        )
+    if code == grpc.StatusCode.NOT_FOUND:
+        _raise_grpc_error(
+            FileNotFoundError(
+                _grpc_message(err, fallback="artifact not found on disk")
+            ),
+            cause=err,
+        )
+    if code == grpc.StatusCode.PERMISSION_DENIED:
+        _raise_grpc_error(
+            PermissionError(_grpc_message(err, fallback="import path not permitted")),
+            cause=err,
+        )
+    _raise_grpc_error(
+        RuntimeError(
+            "ImportArtifactFromPathV2 RPC failed: "
+            f"{_grpc_message(err, fallback='rpc failed')}"
+        ),
+        cause=err,
+    )
 
 
 def get_host_pid() -> int:
@@ -495,7 +599,10 @@ class DaemonCtl:
             )
             if not success:
                 raise RuntimeError(
-                    f"Failed to confirm artifact loading for {artifact_id}"
+                    "Failed to confirm artifact loading: "
+                    f"artifact_id={artifact_id}, "
+                    f"replica_uuid={replica_uuid}, "
+                    f"disk_path={response.disk_path or ''}"
                 )
 
         if return_response:
@@ -1157,7 +1264,10 @@ class DaemonCtl:
             )
             if not success:
                 raise RuntimeError(
-                    f"Failed to confirm artifact loading for {artifact_id}"
+                    "Failed to confirm artifact loading: "
+                    f"artifact_id={artifact_id}, "
+                    f"replica_uuid={replica_uuid}, "
+                    f"disk_path={response.disk_path or ''}"
                 )
         if return_response:
             return response
@@ -1370,7 +1480,12 @@ class DaemonCtl:
                 target_device_type=target_device_type,
             )
             if not success:
-                raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
+                raise RuntimeError(
+                    "Failed to confirm artifact loading: "
+                    f"key={key}, "
+                    f"replica_uuid={replica_uuid}, "
+                    f"disk_path={used_disk_path}"
+                )
 
         assert response.mem_handle is not None
         if return_response:
@@ -1381,59 +1496,54 @@ class DaemonCtl:
             )
         return (handle_bytes, used_disk_path, artifact_id)
 
-    def resolve_artifact_from_disk_v2(
-        self, *, disk_path: str, verify_checksums: bool = True
-    ) -> store_daemon_pb2.ResolveArtifactFromDiskResponse:
-        if not disk_path:
-            raise ValueError("disk_path is required")
-        with self._client_span("Client/ResolveArtifactFromDiskV2") as span:
-            request = store_daemon_pb2.ResolveArtifactFromDiskRequest(
-                disk_path=disk_path, verify_checksums=bool(verify_checksums)
+    def import_artifact_from_path_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ) -> store_daemon_pb2.ImportArtifactFromPathResponse:
+        if not path:
+            raise ValueError("path is required")
+        with self._client_span("Client/ImportArtifactFromPathV2") as span:
+            request = store_daemon_pb2.ImportArtifactFromPathRequest(
+                path=path, verify_checksums=bool(verify_checksums)
             )
             try:
                 return self._unary_call(
-                    self.stub_v2.ResolveArtifactFromDisk,
+                    self.stub_v2.ImportArtifactFromPath,
                     request,
-                    timeout=15.0,
+                    timeout=_import_artifact_from_path_timeout_seconds(),
                     span=span,
-                    retries=1,
+                    retries=_import_artifact_from_path_retries(),
                 )
             except grpc.RpcError as e:  # noqa: BLE001
                 span.record_exception(e)
-                code = e.code()
-                if code == grpc.StatusCode.UNAVAILABLE:
-                    _raise_grpc_error(
-                        RuntimeError(
-                            f"Local StoreDaemon ({self.server_address}) is not available."
-                        ),
-                        cause=e,
+                _raise_import_artifact_from_path_rpc_error(self.server_address, e)
+
+    def import_artifact_from_path_stream_v2(
+        self, *, path: str, verify_checksums: bool = True
+    ) -> Iterator[store_daemon_pb2.ImportArtifactFromPathStreamEvent]:
+        if not path:
+            raise ValueError("path is required")
+        request = store_daemon_pb2.ImportArtifactFromPathRequest(
+            path=path,
+            verify_checksums=bool(verify_checksums),
+        )
+        timeout_s = _import_artifact_from_path_timeout_seconds()
+
+        def _event_iter() -> Iterator[
+            store_daemon_pb2.ImportArtifactFromPathStreamEvent
+        ]:
+            with self._client_span("Client/ImportArtifactFromPathStreamV2") as span:
+                try:
+                    stream = self.stub_v2.ImportArtifactFromPathStream(
+                        request,
+                        timeout=timeout_s,
                     )
-                if code == grpc.StatusCode.INVALID_ARGUMENT:
-                    _raise_grpc_error(
-                        ValueError(_grpc_message(e, fallback="invalid argument")),
-                        cause=e,
-                    )
-                if code == grpc.StatusCode.NOT_FOUND:
-                    _raise_grpc_error(
-                        FileNotFoundError(
-                            _grpc_message(e, fallback="artifact not found on disk")
-                        ),
-                        cause=e,
-                    )
-                if code == grpc.StatusCode.PERMISSION_DENIED:
-                    _raise_grpc_error(
-                        PermissionError(
-                            _grpc_message(e, fallback="disk_path not permitted")
-                        ),
-                        cause=e,
-                    )
-                _raise_grpc_error(
-                    RuntimeError(
-                        "ResolveArtifactFromDiskV2 RPC failed: "
-                        f"{_grpc_message(e, fallback='rpc failed')}"
-                    ),
-                    cause=e,
-                )
+                    for event in stream:
+                        yield event
+                except grpc.RpcError as e:  # noqa: BLE001
+                    span.record_exception(e)
+                    _raise_import_artifact_from_path_rpc_error(self.server_address, e)
+
+        return _event_iter()
 
     def materialize_by_key(
         self,
@@ -1525,7 +1635,12 @@ class DaemonCtl:
         ):
             success = self.confirm_replica_loaded(used_disk_path, replica_uuid)
             if not success:
-                raise RuntimeError(f"Failed to confirm artifact loading for key={key}")
+                raise RuntimeError(
+                    "Failed to confirm artifact loading: "
+                    f"key={key}, "
+                    f"replica_uuid={replica_uuid}, "
+                    f"disk_path={used_disk_path}"
+                )
 
         assert response.mem_handle is not None
         if return_response:
@@ -1539,6 +1654,8 @@ class DaemonCtl:
         *,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
     ) -> bool:
+        confirm_timeout_s = 30.0
+        confirm_retries = 5
         with self._client_span("Client/ConfirmReplica") as span:
             request = store_daemon_pb2.ConfirmReplicaRequest(
                 disk_path=disk_path,
@@ -1549,20 +1666,33 @@ class DaemonCtl:
                 _ = self._unary_call(
                     self.stub.ConfirmReplica,
                     request,
-                    timeout=10.0,
+                    timeout=confirm_timeout_s,
                     span=span,
-                    retries=1,
+                    retries=confirm_retries,
                 )
-                logger.info("Artifact loaded")
+                logger.info(
+                    "ConfirmReplica succeeded: replica_uuid=%s, disk_path=%s",
+                    replica_uuid,
+                    disk_path,
+                )
                 return True
             except grpc.RpcError as e:
                 span.record_exception(e)
-                if e.code() == grpc.StatusCode.CANCELLED:
-                    logger.error("Artifact not loaded")
-                    return False
-                else:
-                    logger.error(f"Error: {e}")
-                    return False
+                code = e.code()
+                code_name = code.name if code is not None else "UNKNOWN"
+                logger.error(
+                    "ConfirmReplica failed: code=%s, details=%s, replica_uuid=%s, "
+                    "disk_path=%s, target_device_type=%s, timeout_s=%.1f, retries=%d, daemon=%s",
+                    code_name,
+                    _grpc_details(e),
+                    replica_uuid,
+                    disk_path,
+                    int(target_device_type),
+                    confirm_timeout_s,
+                    confirm_retries,
+                    self.server_address,
+                )
+                return False
 
     def get_server_config(self) -> ServerConfig:
         with self._client_span("Client/GetServerConfig") as span:

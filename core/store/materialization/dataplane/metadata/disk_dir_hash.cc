@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -19,6 +21,31 @@
 
 namespace tensorcast::store::loader {
 namespace {
+
+constexpr uint64_t kHashLeafChunkBytes = 4ULL * 1024ULL * 1024ULL;
+
+uint64_t saturated_mul_u64(uint64_t a, uint64_t b) {
+  if (a == 0 || b == 0) {
+    return 0;
+  }
+  if (a > (std::numeric_limits<uint64_t>::max() / b)) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return a * b;
+}
+
+std::function<void(uint64_t hashed_leaf_count, uint64_t total_hash_leaves)> to_leaf_progress_callback(
+    uint64_t total_size,
+    std::function<void(uint64_t processed_bytes, uint64_t total_bytes)> progress_cb) {
+  if (!progress_cb || total_size == 0) {
+    return {};
+  }
+  return [total_size, cb = std::move(progress_cb)](uint64_t hashed_leaf_count, uint64_t /*total_hash_leaves*/) {
+    const uint64_t processed_bytes =
+        std::min<uint64_t>(total_size, saturated_mul_u64(hashed_leaf_count, kHashLeafChunkBytes));
+    cb(processed_bytes, total_size);
+  };
+}
 
 absl::StatusOr<std::optional<uint64_t>> maybe_read_logical_total_size(const std::filesystem::path& index_path) {
   namespace fs = std::filesystem;
@@ -72,7 +99,9 @@ std::optional<uint64_t> parse_partition_index(std::string_view name) {
 
 } // namespace
 
-absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::string& artifact_dir) {
+absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(
+    const std::string& artifact_dir,
+    std::function<void(uint64_t processed_bytes, uint64_t total_bytes)> progress_cb) {
   namespace fs = std::filesystem;
   fs::path dir(artifact_dir);
   const fs::path index_path = dir / "tensor_index.json";
@@ -117,7 +146,14 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
     opts.total_size = logical_total_size.value_or(fallback_total);
     opts.io_batch_bytes = 128 * 1024 * 1024;
     FilePartitionSource src(std::move(opts));
-    return compute_data_multihash_from_seekable_source(src, opts.total_size);
+    if (progress_cb) {
+      progress_cb(0, opts.total_size);
+    }
+    return compute_data_multihash_from_seekable_source(
+        src,
+        opts.total_size,
+        static_cast<size_t>(kHashLeafChunkBytes),
+        to_leaf_progress_callback(opts.total_size, std::move(progress_cb)));
   }
 
   std::vector<fs::path> safetensors_files;
@@ -137,7 +173,14 @@ absl::StatusOr<std::string> compute_data_multihash_from_disk_dir(const std::stri
       return absl::FailedPreconditionError("tensor_index.json total size exceeds safetensors payload bytes");
     }
     const uint64_t effective_total_size = logical_total_size.value_or(source_total_size);
-    return compute_data_multihash_from_seekable_source(source, effective_total_size);
+    if (progress_cb) {
+      progress_cb(0, effective_total_size);
+    }
+    return compute_data_multihash_from_seekable_source(
+        source,
+        effective_total_size,
+        static_cast<size_t>(kHashLeafChunkBytes),
+        to_leaf_progress_callback(effective_total_size, std::move(progress_cb)));
   }
 
   return absl::NotFoundError("No tensor.data partitions or .safetensors files found");

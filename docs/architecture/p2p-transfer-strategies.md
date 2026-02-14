@@ -93,8 +93,8 @@ Notes:
 ### Materialization control flow
 
 - `MaterializationService` tries in-order: reuse existing replica, local CPU to GPU copy, then P2P in AUTO mode (`core/store/runtime/ingestion/materialization_service.cc`).
-- `MaterializeOrchestrator::run` requests a transport, rejects stale local routes, builds a `P2PSource`, and falls back to disk when `hints.disk_path` is present (resolved by the daemon from managed disk locations) (`core/store/materialization/control/materialize_orchestrator.cc`).
-- The orchestrator always calls `complete_replica_transport` on success or failure; once `hints.disk_path` is available, disk fallback does not require additional Global Store calls.
+- `MaterializeOrchestrator::run` requests a transport, rejects stale local routes, builds a `P2PSource`, and falls back to disk when the daemon resolves a disk source binding (managed shared-disk or local import) (`core/store/materialization/control/materialize_orchestrator.cc`).
+- The orchestrator always calls `complete_replica_transport` on success or failure; once a disk source is resolved, disk fallback does not require additional Global Store calls.
 
 ### Entry points used by the daemon
 
@@ -193,7 +193,7 @@ Notes:
 
 ## Failure handling and fallbacks
 
-- `MaterializeOrchestrator` always calls `complete_replica_transport`. On P2P failure, it falls back to disk if `hints.disk_path` is set (daemon-resolved).
+- `MaterializeOrchestrator` always calls `complete_replica_transport`. On P2P failure, it falls back to disk when a daemon-resolved disk source is available.
 - `P2PLoader` fallback is per-read: `MuxSeekableSource` completes remaining bytes from disk on short reads or remote errors.
 - RDMA handshake failures surface as transport errors; no automatic MTCP fallback is performed.
 - MTCP staging waits for credit up to `staging_wait_timeout` and fails with `ResourceExhausted` when the deadline is exceeded.
