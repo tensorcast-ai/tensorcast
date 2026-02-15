@@ -40,7 +40,7 @@ links:
 # Summary
 
 `docs/designs/0055-programmable-framework.md` defines and implements the core **artifact-first programmable primitives**
-(`CallContext`, `Operation[T]`, `Plan`, Instance Agent (node_agent boundary) + Engine Adapter execution boundary).
+(`CallContext`, `Operation[T]`, `Plan` + caller-local `PlanExecutor` (`Plan.run()`), Instance Agent + Engine Adapter execution boundary).
 
 This design (`0056`) specifies **planned** extensions required by external applications (especially LLM apps) that want
 to **actively manage runtime tensors** as part of application logic (e.g., request routing/rebalancing/migration in a
@@ -54,10 +54,11 @@ ToT scheduler), under common production constraints:
 Planned extensions:
 
 - **Phased Plan execution unification**:
-  - current baseline (as of 2026-02-10): `Plan.run()` is SDK-local and instance fragments are executed by
-    `NodeAgent.ExecutePlan`,
-  - planned extension: optionally add daemon ingress `ExecutePlan` (gateway role) without creating a second execution
-    semantics.
+  - current baseline (as of 2026-02-10): `Plan.run()` is SDK-local (caller-local PlanExecutor) and instance fragments
+    are executed via the target instance’s **Instance Agent** boundary (Engine Adapter; legacy code/proto name:
+    `node_agent`),
+- planned extension: add daemon ingress `ExecutePlan` (the `gateway_ingress` role) to run PlanExecutor inside Store Daemons, without
+    creating a second execution semantics.
 - **Unified process runtime**: all caller processes use one `Runtime`/`ProcessContext` object returned by
   `tensorcast.connect(...)` (no separate `init_app(...)`).
 - **Daemon-served Signals**: `TensorCastSignals` is served by daemons with explicit staleness budgets; Global Store is
@@ -70,8 +71,10 @@ remain the source of truth for request→token→KV-key mapping.
 
 Consistency and migration guardrails (required):
 
-- **Single execution semantics**: Node Agent remains the canonical plan-fragment executor for instance-scoped actions.
-  Gateway/daemon ingress is routing/scheduling glue and MUST NOT become a parallel execution plane.
+- **Single execution semantics**: PlanExecutor is the canonical `PlanSpec` executor (0055: caller-local; 0056:
+  daemon-run). Instance-scoped actions execute via the local Instance Agent boundary; worker-scoped actions execute in
+  Store Daemons. Gateway ingress MUST NOT introduce a parallel execution plane with diverging retry/idempotency
+  semantics.
 - **Gateway is a role, not a new service type**: any Store Daemon may serve ingress; no separate gateway registry entity.
 - **Contract reuse over implementation reuse**: directory/cache behavior SHOULD reuse `CapabilityDirectory` semantics
   (freshness, invalidation, fallback), but daemon implementations remain native (no cross-language runtime coupling).
@@ -91,13 +94,12 @@ Goals
 - Keep the Python SDK a clean boundary: caller processes connect to exactly **one** daemon and do not call Global Store
   directly.
 - Push control-plane execution down to Store Daemons so the system scales without a single centralized controller.
-- Avoid creating parallel execution planes (`gateway executor` vs `NodeAgent executor`) with diverging retry/idempotency
-  semantics.
-- Minimize Global Store load by globally registering only long-lived entities (**Worker / Instance / NodeAgent
-  endpoint**) and by using watch/stream + caching inside daemons.
-- Define a node‑local **Instance Agent (node_agent boundary) / Engine Adapter** boundary so instance steps can safely
-  touch engine internals
-  without exposing PID/IPC handles to remote callers.
+- Avoid creating parallel execution planes (`SDK-local PlanExecutor` vs `daemon PlanExecutor`) with diverging
+  retry/idempotency semantics.
+- Minimize Global Store load by globally registering only long-lived entities (**Worker / Instance**) and by using
+  watch/stream + caching inside daemons.
+- Define an instance-local **Instance Agent / Engine Adapter** boundary so instance steps can safely touch engine
+  internals without exposing PID/IPC handles to remote callers.
 - Define a cacheable **Signals** surface (`TensorCastSignals`, `ExecutionSignals`) with explicit staleness semantics for
   control loops.
 - Define an engine‑agnostic **KV cache orchestration contract** compatible with SGLang HiCache/Mooncake:
@@ -131,28 +133,28 @@ flowchart LR
   subgraph CLUSTER["TensorCast cluster (internal network)"]
     GS["Global Store<br/>(long-lived registry + KV shard leases)"]
 
-    subgraph GW["Gateway daemon (any Store Daemon)"]
-      DG["Store Daemon (gateway)<br/>(Plan Executor + Signals cache)"]
+    subgraph GW["Gateway daemon (gateway_ingress role)"]
+      DG["Store Daemon (gateway_ingress role)<br/>(PlanExecutor + Signals cache)"]
     end
 
     subgraph WKA["Worker Node A"]
-      DA["Store Daemon A (Worker)"]
+      DA["Store Daemon A (Worker)<br/>(PlanExecutor)"]
       subgraph PROCA["Instance A process"]
         IA["Inference Instance A<br/>(e.g., SGLang)"]
-        IAA["Instance Agent (in-process)<br/>(node_agent boundary)"]
+        IAA["Instance Agent (in-process)<br/>(Engine Adapter boundary)"]
         IAA <--> |engine adapter hooks| IA
       end
-      DA <--> |"instance steps (local IPC)"| IAA
+      DA <--> |"instance steps (RPC)"| IAA
     end
 
     subgraph WKB["Worker Node B"]
-      DB["Store Daemon B (Worker)"]
+      DB["Store Daemon B (Worker)<br/>(PlanExecutor)"]
       subgraph PROCB["Instance B process"]
         IB["Inference Instance B<br/>(e.g., SGLang)"]
-        IAB["Instance Agent (in-process)<br/>(node_agent boundary)"]
+        IAB["Instance Agent (in-process)<br/>(Engine Adapter boundary)"]
         IAB <--> |engine adapter hooks| IB
       end
-      DB <--> |"instance steps (local IPC)"| IAB
+      DB <--> |"instance steps (RPC)"| IAB
     end
 
     DG <--> |dispatch plan fragments| DA
@@ -173,19 +175,18 @@ flowchart LR
 
 - **Store Daemon (Worker process)** (existing; extended in 0056): owns TensorCast data plane (replicas, tiers, P2P
   copies, placement pins) and additionally hosts control-plane services:
-  - optional ingress `ExecutePlan` role (gateway) for single-entry clients,
+  - PlanExecutor (the `gateway_ingress` role provides ingress `ExecutePlan`; all daemons execute per-target plan fragments),
   - `TensorCastSignals` (cached signals/directory; bounded staleness),
-  - internal dispatch to other daemons and local instance agents (node_agent boundary),
-  - no parallel execution semantics: instance-scoped execution remains aligned with `NodeAgent.ExecutePlan`.
+  - daemon↔daemon dispatch and RPC invocation of Instance Agents for instance-scoped actions.
 - **Global Store** (existing): durable coordination + registries and persistence metadata.
   - 0056 goal: keep it off the hot path by registering only long-lived entities and using watch/stream updates to
     populate daemon caches.
   - KV integration note (planned): Global Store does **not** track high-cardinality KV blobs; it only serves as the
     low-cardinality **shard lease authority** (fencing tokens) and long-lived membership/registry.
-- **Instance Agent (node_agent boundary)** (planned): node-local execution boundary that:
+- **Instance Agent** (planned): instance-local execution boundary that:
   - executes instance-scoped plan actions (targets, transforms, KV adapter),
   - hosts engine adapters safely (in-process with the inference instance),
-  - is callable only by the local Store Daemon via local IPC (not a cluster-routable service).
+  - is callable by Store Daemons via RPC (not exposed to external app networks).
 - **Inference Instance** (external): an inference engine process (e.g., SGLang).
 - **Runtime (Python SDK)** (planned): a lightweight handle used by any caller process. It connects to exactly one Store
   Daemon and does not call Global Store directly.
@@ -194,7 +195,7 @@ Remote-safety rules (unchanged from 0055; reiterated):
 
 - Any action requiring PID/IPC/region references MUST run via the Engine Adapter on the target instance.
 - External apps must not directly call PID/IPC-binding RPCs; they submit plans to daemons, and the target daemon
-  invokes its local Instance Agent (node_agent boundary) for instance-scoped steps.
+  invokes the target Instance Agent via instance-agent RPC for instance-scoped steps.
 - Daemon-owned cache-warm actions that must be retry-safe and PID-independent run in `NO_LEASE`.
 
 ---
@@ -246,20 +247,33 @@ Remote-safety rules (unchanged from 0055; reiterated):
 
 ## Gateway daemon
 
-- **Gateway daemon (role; concrete process)**: the single Store Daemon endpoint that a caller process can reach (by
+- **Gateway daemon (`gateway_ingress` role; concrete process)**: the single Store Daemon endpoint that a caller process can reach (by
   network policy). The gateway daemon:
   - accepts `ExecutePlan(PlanSpec)` from the caller,
   - schedules the DAG and dispatches subplans to other Store Daemons (instance steps execute via the target daemon’s
-    local Instance Agent boundary),
+    Instance Agent RPC boundary),
   - aggregates results into a `PlanResult` and serves it via an `Operation[PlanResult]` (status/wait/cancel).
-- “Gateway” is a **role**, not a separate service type or registry entity. Any Store Daemon can serve as a gateway.
+- “Gateway” is a **role**, not a separate service type or registry entity. Any Store Daemon can be configured with the
+  `gateway_ingress` role.
+
+## PlanExecutor
+
+- **PlanExecutor (abstract component)**: the only component that interprets a `PlanSpec` DAG, schedules/dispatches steps,
+  and aggregates a `PlanResult`.
+  - **0055 (implemented)**: PlanExecutor runs in the caller process as the SDK-local runner (`Plan.run()`).
+    - Worker-only plans can be executed from any process that can reach the target Store Daemons.
+    - Plans containing instance-scoped steps require reachability to the target instance’s Instance Agent boundary.
+  - **0056 (planned)**: PlanExecutor runs inside Store Daemons.
+    - The `gateway_ingress` role provides external ingress (`ExecutePlan`).
+    - Non-gateway daemons execute per-target plan fragments and invoke Instance Agents via RPC for instance steps.
 
 ## KV shard / home daemon (planned)
 
 - **KV shard (abstract partition)**: a fixed partition of KV blob key space used for routing/ownership (e.g., 4096 or
   16384 shards). Sharding is by KV blob identity (CGID), not by request.
-- **Home daemon (role; concrete process)**: the Store Daemon that currently holds the lease for a shard. The home daemon
-  is the authoritative place for:
+- **Home daemon (dynamic responsibility; concrete process)**: the Store Daemon that currently holds the lease for a
+  shard. Only `kv_home_eligible` daemons may acquire shard leases and become home. The home daemon is the authoritative
+  place for:
   - PutIfAbsent/JoinIfMatch enforcement (immutability invariants),
   - existence truth for KV blobs (for the current lease generation),
   - and shard-scoped TTL / resource governance decisions.
@@ -276,22 +290,84 @@ Remote-safety rules (unchanged from 0055; reiterated):
 - Instances are registered/heartbeated as long-lived entities so Store Daemons can route instance steps by stable
   **`instance_id`**.
 
-## Instance Agent / Node Agent
+## Instance Agent (engine integration boundary)
 
-This design treats the Node Agent as the **inference-engine integration boundary** and uses **Instance Agent** as the
-conceptual name. “Node Agent” remains a proto/implementation label in the TensorCast codebase, but the semantics are
-per-instance and in-process.
+Instance Agent is the **inference-engine integration boundary**. In the current TensorCast codebase, the legacy
+proto/package label is `node_agent`, but the semantics are per-instance and in-process.
 
-- **Instance Agent (in-process component; not a separate service)**: the node-local execution boundary that runs
-  instance-scoped plan steps on behalf of the local Store Daemon.
+- **Instance Agent (in-process component; not a separate service)**: the instance-local execution boundary that runs
+  instance-scoped plan steps on behalf of Store Daemons.
   - It hosts an Engine Adapter (and optionally an `EngineKvCacheAdapter`) to safely touch engine internals.
   - It MUST run **in-process with the inference instance** (same OS process). It must not be a sidecar because it
     needs direct access to engine state that should not be re-exported across a separate process boundary.
-  - It is invoked by the co-located Store Daemon via **local IPC** (e.g., UDS). It MUST NOT be exposed as a general
-    cluster-routable service.
-- **Node Agent endpoint (registry attribute; optional)**: if recorded, it is primarily for observability and local
-  daemon reconciliation and MAY be a local-only endpoint (e.g., UDS path). Other daemons MUST NOT assume it is
-  reachable; instance-step routing is done via the instance→daemon mapping and daemon-local invocation.
+  - It is invoked by Store Daemons via **instance-agent RPC** (gRPC; typically over TCP and optionally over a Unix
+    domain socket when co-located).
+    - Co-location (daemon and instance on the same node) is recommended for performance, but not required.
+    - It MUST NOT be exposed to external app networks; only Store Daemons should be able to call it.
+
+---
+
+# Daemon Roles (planned)
+
+0056 uses “roles” as **composable capability flags** attached to Store Daemons (Workers). Roles are an operational policy
+surface used for routing and capacity partitioning; they must not introduce new service types or change Plan/Artifact
+semantics.
+
+## Goals
+
+- Allow deploying a **gateway pool** (ingress) distinct from general workers, without changing APIs.
+- Allow constraining **KV shard home** eligibility to a subset of daemons (e.g., DRAM-heavy nodes), without involving
+  Global Store in the KV hot path.
+- Keep roles **low-cardinality** and **update-on-change** so Global Store remains scalable.
+
+## Role model
+
+- Roles are **worker attributes** (attached to the Worker/daemon_id record), advertised by Store Daemons and cached by
+  other daemons via watch streams. External callers query roles via daemon-served `TensorCastSignals`, not by calling
+  Global Store directly.
+- Roles are **not stable identity**. They MUST NOT participate in deterministic operation/step identities or artifact
+  identities.
+- Roles are **composable**: a daemon can hold multiple roles simultaneously.
+- Separate:
+  - **Static roles / capabilities** (configuration-driven; advertised in the worker registry), from
+  - **Dynamic responsibilities** (lease-derived or registry-derived; not “configured”).
+
+## Static roles (capabilities)
+
+- `gateway_ingress`:
+  - Indicates a Store Daemon is eligible to accept external Runtime connections (e.g., behind a VIP/LB/DNS).
+  - A gateway daemon MUST implement `StoreDaemonService.ExecutePlan` ingress and daemon-served signals.
+  - Non-gateway daemons MAY still execute plan fragments dispatched by other daemons (mesh), but SHOULD reject direct
+    external ingress by policy.
+- `kv_home_eligible`:
+  - Indicates a Store Daemon is eligible to acquire KV shard leases and act as a shard home (authoritative PutIfAbsent /
+    Exists/Get for the current `lease_generation`).
+  - Daemons without this role MUST NOT acquire KV shard leases.
+
+## Dynamic responsibilities (derived)
+
+- **KV shard home**: for a given shard_id, the current holder `{holder_daemon_id, lease_generation}` from the shard lease
+  record. A daemon is “home” for a shard only while it holds the active lease (fenced); this is not a static role.
+- **Instance host**: derived from the instance registry mapping `instance_id -> daemon_id`. A daemon “hosts” an instance
+  when it is the current routing target for that instance’s steps.
+
+## Discovery and enforcement
+
+- Discovery:
+  - `TensorCastSignals.list_workers()` SHOULD include role flags and allow filtering by required roles (e.g.,
+    `required_roles=["gateway_ingress"]`).
+  - Store Daemons cache roles via Global Store watch streams and MUST NOT query Global Store per plan execution.
+- Enforcement (required):
+  - A daemon without `gateway_ingress` SHOULD reject external ingress (`ExecutePlan` from the app network) even though it
+    can still participate in daemon↔daemon dispatch.
+  - A daemon without `kv_home_eligible` MUST fail requests to acquire shard leases and MUST NOT serve as shard home.
+
+## Examples (role composition)
+
+- **Gateway pool**: `{gateway_ingress}` (often small; placed behind LB/VIP/DNS).
+- **KV home pool**: `{kv_home_eligible}` (DRAM-heavy nodes; eligible to hold KV shard leases).
+- **Combined**: `{gateway_ingress, kv_home_eligible}` (small clusters/dev; fewer moving parts).
+- **General workers**: `{}` (implicit Store Daemon; not gateway ingress; not KV-home eligible).
 
 ---
 
@@ -308,7 +384,7 @@ All caller processes use the same entrypoint and the same object:
   - the 0055 Store/data-plane API,
   - phased plan execution (current local runner, optional ingress later),
   - daemon-served signals/directory queries.
-- It is **not** globally scheduled/registered (only Workers/Instances/NodeAgents are registered). It is an API boundary
+- It is **not** globally scheduled/registered (only Workers/Instances are registered). It is an API boundary
   handle for a caller process.
 
 ```python
@@ -330,7 +406,7 @@ class InstanceRegistrationError(Exception): ...
 
 class InstanceRegistrationHandle:
     instance_id: str
-    node_agent_endpoint: str
+    instance_agent_endpoint: str  # instance-agent RPC endpoint (TCP/UDS); routing attribute, not identity
 
     def close(self) -> None: ...
 
@@ -348,9 +424,13 @@ class Runtime:
 Semantics (planned):
 
 - `connect(...)` creates a lightweight process-local handle bound to a single Store Daemon endpoint.
-- `Runtime.serve_instance(...)` is called inside an inference engine process. It binds an engine adapter to the node-local
-  execution boundary and registers a long-lived `Instance` with the connected Store Daemon. The Store Daemon is
-  responsible for publishing/heartbeating `Instance`/`NodeAgent` routing information into Global Store.
+- `Runtime.serve_instance(...)` is called inside an inference engine process. It binds an engine adapter to the
+  instance-local execution boundary (Instance Agent) and registers a long-lived `Instance` with the connected Store
+  Daemon. The Store Daemon is responsible for publishing/heartbeating `Instance` routing information into Global Store,
+  including:
+  - the HA-safe `daemon_id` routing target for instance steps (`instance_id -> daemon_id`), and
+  - an `instance_agent_endpoint` routing attribute used by Store Daemons to invoke instance actions via
+    instance-agent RPC.
 
 ### Initialization UX (planned)
 
@@ -373,7 +453,7 @@ This maps the older 4-mode mental model into a single connect + optional instanc
 `Plan` construction routing (planned):
 
 - `runtime.plan(ctx)` builds a plan bound to the unified execution semantics:
-  - current baseline: SDK local runner + NodeAgent execution path,
+  - current baseline: SDK-local PlanExecutor (`Plan.run()`) + Instance Agent execution boundary,
   - optional ingress phase: daemon `ExecutePlan` as entrypoint with identical semantics.
 - For simplicity, module-level `tensorcast.plan(ctx)` SHOULD:
   - delegate to `runtime().plan(ctx)` when an active `Runtime` exists (local runner or ingress, depending on rollout), and
@@ -392,8 +472,11 @@ Recommended usage patterns (planned):
 Current baseline (as of 2026-02-10):
 
 - In 0055/current code, `Plan.run()` executes in the caller process.
-- Instance fragments already have a concrete executor path via `NodeAgent.ExecutePlan`.
-- SDK/client plumbing is not complete yet: the SDK does not ship a Node Agent discovery+client path, and Global Store instance registry does not yet expose a dialable `node_agent_endpoint` fact (so direct-dispatch requires out-of-band endpoint knowledge in dev).
+- Instance fragments execute via the target instance’s Instance Agent boundary (in-process Engine Adapter; legacy
+  code/proto name: `node_agent`).
+- Direct-dispatch from arbitrary caller processes to remote instances is deployment-dependent (reachability, endpoint
+  discovery). 0056 removes this requirement for external apps by routing instance steps through Store Daemons (by
+  `instance_id -> daemon_id`) and invoking Instance Agents via instance-agent RPC.
 
 Planned migration sequence for external apps that cannot directly reach every daemon/agent:
 
@@ -405,7 +488,7 @@ Planned migration sequence for external apps that cannot directly reach every da
      deployments where callers can directly reach required execution endpoints.
 3. Dispatch semantics are shared:
    - worker steps -> target Store Daemon(s),
-   - instance steps -> target Store Daemon -> local `NodeAgent.ExecutePlan` / Engine Adapter boundary.
+   - instance steps -> target Store Daemon -> instance-agent RPC -> Instance Agent / Engine Adapter boundary.
 4. Completion is exposed as `Operation[PlanResult]` semantics with at-least-once-safe retries and idempotent joins.
 
 Plan operation semantics (planned):
@@ -423,7 +506,7 @@ This makes the scheduler/app’s connectivity requirement explicit: it only need
 Target resolution note (planned):
 
 - Callers SHOULD target steps by stable identities (`daemon_id`, `instance_id`) and MUST NOT assume reachability to
-  `daemon_address` / `node_agent_endpoint`.
+  `daemon_address` or any instance-local endpoint.
 - The gateway daemon SHOULD treat any addresses in `PlanSpec` as hints and re-resolve routing via its directory cache
   (backed by Global Store watches).
 
@@ -469,8 +552,7 @@ must not be expected to mint `TargetSpec` out-of-band.
 
 Planned solution (recommended):
 
-- Add an instance-scoped plan action `mint_target(...) -> TargetSpec` executed by the Instance Agent (node_agent
-  boundary).
+- Add an instance-scoped plan action `mint_target(...) -> TargetSpec` executed by the Instance Agent (in-process).
 - The minted `TargetSpec` is returned as a plan step output and can be:
   - consumed by later steps via step-output references (if supported), or
   - returned to the caller and used as an explicit input to a follow-up plan (two-plan pattern).
@@ -1091,7 +1173,7 @@ This keeps TensorCast core KV-semantics-free while still allowing explicit app-d
 
 Some integration paths create a re-entrant call chain:
 
-Store Daemon (executing an instance step) → local IPC to Instance Agent → engine adapter → engine storage backend
+Store Daemon (executing an instance step) → instance-agent RPC to Instance Agent → engine adapter → engine storage backend
 plugin → TensorCast KV front-door (often the same local Store Daemon, then routed to shard home).
 
 Requirement (required):
@@ -1301,7 +1383,7 @@ Planned call flow (control plane + node-local boundaries):
      the caller has direct reachability.
 3. **Gateway/runner dispatches instance step (flush)**:
    - gateway/runner -> target daemon dispatch path (subplan for `inst_a`’s daemon),
-   - target daemon -> local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_a)`
+   - target daemon PlanExecutor -> instance-agent RPC -> Instance Agent executes `plan_fragment_for_inst_a`
    - Instance Agent calls `EngineKvCacheAdapter.kv_flush(...)`
    - Adapter enumerates per-page keys (SGLang page hashes) and writes missing `cgid:kvcache~...` blobs to backend using
      batch put (PutIfAbsent/JoinIfMatch).
@@ -1310,7 +1392,7 @@ Planned call flow (control plane + node-local boundaries):
    - Store Daemon B prefetches the listed CGID selections into daemon-owned DRAM tier.
 5. **Gateway/runner dispatches instance step (kvcache_prefetch)**:
    - gateway/runner -> target daemon dispatch path (subplan for `inst_b`’s daemon)
-   - target daemon -> local `NodeAgentService.ExecutePlan(plan_fragment_for_inst_b)`
+   - target daemon PlanExecutor -> instance-agent RPC -> Instance Agent executes `plan_fragment_for_inst_b`
    - Instance Agent calls `EngineKvCacheAdapter.kv_prefetch(engine_request_id=..., key_set=...)`
    - Adapter batch-reads blobs (possibly hitting local daemon DRAM if prefetch_many ran) and rehydrates engine-local KV.
 6. **App reassigns request**:
@@ -1341,8 +1423,8 @@ This section is illustrative and intentionally separated from 0055.
 
 - Extend `proto/tensorcast/daemon/v2/store_daemon.proto` in phases:
   - required first: `GetSignals/ListWorkers/ListInstances/...` (daemon-served signals/directory; bounded staleness),
-  - optional ingress phase: `ExecutePlan(PlanSpec) -> Operation[PlanResult]` (gateway role only; execution semantics
-    remain aligned with `NodeAgent.ExecutePlan` + daemon action handlers),
+  - optional ingress phase: `ExecutePlan(PlanSpec) -> Operation[PlanResult]` (the `gateway_ingress` role only; execution semantics
+    remain aligned with the 0055 PlanSpec semantics (PlanExecutor) + Instance Agent boundary + daemon action handlers),
   - optional: `ExecutePlanFragment` (or reuse `ExecutePlan`) for daemon<->daemon dispatch of per-target subplans.
 - Add LaneContext/policy propagation plumbing for plan and non-plan hot paths:
   - short term: metadata + audit fields (no proto bloat on every request),
@@ -1362,12 +1444,19 @@ This section is illustrative and intentionally separated from 0055.
   - watch stream for shard lease updates for daemon caches.
 - For GS de-hotization paths (routing/source selection), any new local-first dispatch contract MUST preserve
   claim/reservation/fencing-equivalent safety; avoid regressions relative to current GS atomic coordination semantics.
-- Extend `proto/tensorcast/node_agent/v1/node_agent.proto` / implementation to execute the new instance actions.
+- Extend `proto/tensorcast/node_agent/v1/node_agent.proto` / implementation (legacy label; Instance Agent boundary) to
+  execute the new instance actions.
 - Extend `proto/tensorcast/global_store/v1/global_store.proto` + `schema.sql` for scalable registries:
-  - store only long-lived entities (workers, instances, node agents) and routable endpoints,
-  - require `RegisterInstance` to persist an HA-safe `daemon_id` (NOT NULL) so routing is `instance_id -> daemon_id`
-    (authoritative) rather than `instance_id -> worker_id` (hint),
-  - add watch/stream APIs so Store Daemons can maintain directory/signal caches without per-call Global Store queries.
+  - store only long-lived entities (workers, instances) and routable endpoints (update-on-change),
+  - workers:
+    - include a bounded role/capability bitset (e.g., `gateway_ingress`, `kv_home_eligible`) used for routing and
+      partitioning (see “Daemon Roles”),
+    - add watch/stream APIs so Store Daemons can maintain directory/signal caches without per-call Global Store queries,
+  - instances:
+    - require `RegisterInstance` to persist an HA-safe `daemon_id` (NOT NULL) so routing is `instance_id -> daemon_id`
+      (authoritative) rather than `instance_id -> worker_id` (hint),
+    - persist an `instance_agent_endpoint` routing attribute used by Store Daemons for instance-agent RPC (not a stable
+      identity; may change under HA/restart).
 
 ---
 
@@ -1379,8 +1468,8 @@ Suggested code locations for implementing the planned features in this design:
   - `tensorcast/api/runtime.py` (new; `Runtime`, `connect`, `runtime`)
   - `tensorcast/startup.py` (existing; add UX aliases for `connect(...)` if desired)
   - `tensorcast/__init__.py` and `tensorcast/api/__init__.py` (export `connect`, `runtime`)
-  - `tensorcast/api/plan/plan.py` (phase 1 keep local runner + NodeAgent execution semantics; optional ingress path
-    via daemon `ExecutePlan`)
+  - `tensorcast/api/plan/plan.py` (phase 1 keep the 0055 local PlanExecutor runner; add optional ingress path via daemon
+    `ExecutePlan` without changing execution semantics)
   - `tensorcast/api/context.py` + `tensorcast/api/store/*` (align lane/policy metadata propagation across non-plan RPCs)
 - Signals (SDK surface + daemon-served signals):
   - `tensorcast/api/signals.py` (new; `TensorCastSignals`, `ExecutionSignals`, `SignalSnapshot`)
@@ -1400,21 +1489,23 @@ Suggested code locations for implementing the planned features in this design:
 - Instance Agent boundary (node_agent):
   - `tensorcast/node_agent/executor.py` (extend to execute new instance actions: KV orchestration, signals)
   - `proto/tensorcast/node_agent/v1/node_agent.proto` (extend if adding step-level dispatch; or reuse `ExecutePlan`)
-  - `proto/tensorcast/config/v1/node_agent_config.proto` (add config for public endpoint + registration)
+  - `proto/tensorcast/config/v1/node_agent_config.proto` (instance-agent RPC endpoint configuration (TCP/UDS); should not be reachable from external app networks)
 - Plan and action IR (batch + KV steps):
   - `proto/tensorcast/plan/v1/plan.proto` (add `PrefetchManyAction` and `KvCache*` actions)
   - `tensorcast/api/plan/plan.py` (add `WorkerStepBuilder.prefetch_many`, `InstanceStepBuilder.materialize_into`, `InstanceStepBuilder.kvcache_*`)
   - `tensorcast/api/plan/targets.py` and `tensorcast/api/plan/transforms.py` (KV layout hashes / transform hooks as needed)
 - Global Store (registry + watches for daemon caches):
-  - `proto/tensorcast/global_store/v1/global_store.proto` (planned: extend instance registry to carry a dialable `node_agent_endpoint` for discovery)
-  - `proto/tensorcast/global_store/v1/global_store.proto` (add `WatchWorkers/WatchInstances/WatchNodeAgents` streams)
+  - `proto/tensorcast/global_store/v1/global_store.proto` (add `WatchWorkers/WatchInstances` streams)
+  - `proto/tensorcast/global_store/v1/global_store.proto` (add worker role flags/capabilities; add `instance_agent_endpoint` routing attribute on `Instance`)
   - `proto/tensorcast/global_store/v1/global_store.proto` (add KV shard lease RPCs + watch stream)
+  - `tensorcast/global_store/services/worker_service.py`
+  - `tensorcast/global_store/repositories/worker_repository.py`
   - `tensorcast/global_store/services/instance_service.py`
   - `tensorcast/global_store/repositories/instance_repository.py`
   - `tensorcast/global_store/models/kv_shard_lease.py` (new; `KvShardLease`)
   - `tensorcast/global_store/repositories/kv_shard_lease_repository.py` (new; lease acquire/keepalive)
   - `tensorcast/global_store/services/kv_shard_lease_service.py` (new; fencing + monotonic generation)
-  - `schema.sql` (planned: add optional `node_agent_endpoint` column for instance discovery)
+  - `schema.sql` (planned: add worker role flags/capabilities + `instance_agent_endpoint` routing attribute)
   - `schema.sql` (new `kv_shard_leases` table)
 - KV service (home shards + fencing; GS-not-hot-path):
   - `daemon/service/controllers/kv_shard_controller.cc` (new; home-scoped exists/get/put + invariants)
