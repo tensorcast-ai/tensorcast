@@ -81,7 +81,12 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
     r.guards.push_back(g.id);
     pid_index_[pid].insert(g.id);
     mon = monitor_;
-    // Finalizer: drop ref for this pid+subject, then attempt immediate reclaim if eligible
+    for (auto& f : extra_finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    // Finalizer: drop ref for this pid+subject, then attempt immediate reclaim if eligible.
+    // Keep this as the last finalizer so resource-specific cleanup (e.g. GPU export
+    // deregistration) in extra_finalizers runs before unload is attempted.
     r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
       refs_.drop_ref(subj, pid);
       // Attempt immediate reclaim if no active uses or pins remain and a daemon-owned GPU replica exists.
@@ -90,9 +95,6 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
       }
       return absl::OkStatus();
     });
-    for (auto& f : extra_finalizers) {
-      r.finalizers.emplace_back(std::move(f));
-    }
     created_id = r.id;
     by_id_[r.id] = std::move(r);
     inc_use_(subj);
@@ -142,7 +144,12 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
     notify_when = push_deadline_(g2.id, g2.deadline, g2.generation);
 
     mon = monitor_;
-    // Finalizer: drop RefTracker and attempt immediate reclaim
+    for (auto& f : extra_finalizers) {
+      r.finalizers.emplace_back(std::move(f));
+    }
+    // Finalizer: drop RefTracker and attempt immediate reclaim.
+    // Keep this as the last finalizer so resource-specific cleanup (e.g. GPU export
+    // deregistration) in extra_finalizers runs before unload is attempted.
     r.finalizers.emplace_back([this, subj, pid]() -> absl::Status {
       refs_.drop_ref(subj, pid);
       if (subj.device.type == DeviceType::GPU) {
@@ -150,9 +157,6 @@ absl::StatusOr<SessionLifecycleManager::LeaseId> SessionLifecycleManager::create
       }
       return absl::OkStatus();
     });
-    for (auto& f : extra_finalizers) {
-      r.finalizers.emplace_back(std::move(f));
-    }
     created_id = r.id;
     by_id_[r.id] = std::move(r);
     inc_use_(subj);

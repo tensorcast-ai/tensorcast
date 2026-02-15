@@ -89,7 +89,7 @@ TEST_CASE(
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
 
@@ -139,11 +139,11 @@ TEST_CASE(
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   // Set an (identity) view spec to exercise canonical planning without requiring Global Store.
-  req.mutable_view();
+  req.mutable_selection()->mutable_view_spec();
 
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;

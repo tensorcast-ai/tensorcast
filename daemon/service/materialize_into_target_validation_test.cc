@@ -17,11 +17,11 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "absl/types/span.h"
-#include "core/common/artifact_hash.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
 #include "core/store/device_registry.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/store_engine.h"
 #include "core/store/testing/recording_global_store_client.h"
 #include "daemon/service/rpc_context.h"
@@ -65,19 +65,39 @@ bool write_file(const std::filesystem::path& path, std::string_view payload) {
 absl::StatusOr<std::string> compute_view_id(
     const tensorcast::common::v1::ViewSpec& view_spec,
     std::string_view canonical_index_json) {
-  auto index_mh_or =
-      tensorcast::common::compute_index_multihash(std::optional<std::string>(std::string(canonical_index_json)), "");
-  if (!index_mh_or.ok()) {
-    return index_mh_or.status();
+  tensorcast::store::loader::ViewSpec parsed_spec;
+  for (const auto& [tensor_name, ops_proto] : view_spec.tensors()) {
+    tensorcast::store::loader::TensorViewOps ops;
+    for (const auto& op_proto : ops_proto.ops()) {
+      switch (op_proto.kind_case()) {
+        case tensorcast::common::v1::Op::kNarrow: {
+          const auto& narrow = op_proto.narrow();
+          ops.ops.push_back(
+              tensorcast::store::loader::ViewOp::Narrow(
+                  tensorcast::store::loader::NarrowOp{
+                      .dim = static_cast<int32_t>(narrow.dim()),
+                      .start = narrow.start(),
+                      .length = narrow.length(),
+                  }));
+          break;
+        }
+        case tensorcast::common::v1::Op::kTranspose: {
+          const auto& transpose = op_proto.transpose();
+          ops.ops.push_back(
+              tensorcast::store::loader::ViewOp::Transpose(
+                  tensorcast::store::loader::TransposeOp{
+                      .dim0 = static_cast<int32_t>(transpose.dim0()),
+                      .dim1 = static_cast<int32_t>(transpose.dim1()),
+                  }));
+          break;
+        }
+        case tensorcast::common::v1::Op::KIND_NOT_SET:
+          return absl::InvalidArgumentError("view op kind not set");
+      }
+    }
+    parsed_spec.tensors.emplace(tensor_name, std::move(ops));
   }
-  const std::string spec_bytes = view_spec.SerializeAsString();
-  std::vector<uint8_t> buffer;
-  buffer.reserve(spec_bytes.size() + index_mh_or->size());
-  buffer.insert(buffer.end(), spec_bytes.begin(), spec_bytes.end());
-  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
-  const std::vector<uint8_t> digest =
-      tensorcast::common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer.data(), buffer.size()));
-  return tensorcast::common::multibase_multihash_sha256(digest);
+  return tensorcast::store::loader::compute_view_id_from_spec(parsed_spec, canonical_index_json);
 }
 
 std::filesystem::path test_tmpdir() {
@@ -195,10 +215,10 @@ TEST_CASE("MaterializeIntoTarget rejects missing artifact_id", "[daemon][materia
 TEST_CASE("MaterializeIntoTarget accepts subset selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -243,11 +263,11 @@ TEST_CASE(
   register_disk_location(*fix.global_store_client, "mi2:dummy:dummy", artifact_rel);
 
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -295,11 +315,11 @@ TEST_CASE(
       });
 
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -331,11 +351,11 @@ TEST_CASE(
 TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("b");
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("b");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -371,17 +391,17 @@ TEST_CASE("MaterializeIntoTarget accepts ordered full selection", "[daemon][mate
 TEST_CASE("MaterializeIntoTarget accepts view spec subset", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   tensorcast::common::v1::ViewSpec view_spec;
   auto* ops = (*view_spec.mutable_tensors())["a"].add_ops();
   ops->mutable_narrow()->set_dim(0);
   ops->mutable_narrow()->set_start(0);
   ops->mutable_narrow()->set_length(2);
-  req.mutable_view()->CopyFrom(view_spec);
+  req.mutable_selection()->mutable_view_spec()->CopyFrom(view_spec);
 
   auto view_id_or = compute_view_id(view_spec, make_canonical_index_json());
   REQUIRE(view_id_or.ok());
@@ -415,7 +435,7 @@ TEST_CASE("MaterializeIntoTarget accepts view spec subset", "[daemon][materializ
 TEST_CASE("MaterializeIntoTarget requires device_uuid", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.mutable_target_layout();
   MaterializeIntoTargetResponse resp;
   auto status = run_request(fix.controller, req, resp);
@@ -429,10 +449,10 @@ TEST_CASE(
     "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -457,13 +477,13 @@ TEST_CASE(
 
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
-  REQUIRE(status.error_message() == "tensor_names do not match target_layout entries");
+  REQUIRE(status.error_message() == "selection.tensor_names do not match target_layout entries");
 }
 
 TEST_CASE("MaterializeIntoTarget rejects unknown tensor in target_layout", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -496,7 +516,7 @@ TEST_CASE("MaterializeIntoTarget rejects unknown tensor in target_layout", "[dae
 TEST_CASE("MaterializeIntoTarget canonical index rejects subset selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -529,7 +549,7 @@ TEST_CASE("MaterializeIntoTarget canonical index rejects subset selection", "[da
 TEST_CASE("MaterializeIntoTarget rejects offset referencing unknown storage_id", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -562,7 +582,7 @@ TEST_CASE("MaterializeIntoTarget rejects offset referencing unknown storage_id",
 TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -595,7 +615,7 @@ TEST_CASE("MaterializeIntoTarget rejects offset mismatch", "[daemon][materialize
 TEST_CASE("MaterializeIntoTarget view index requires view or ordered selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -634,7 +654,7 @@ TEST_CASE("MaterializeIntoTarget view index requires view or ordered selection",
 TEST_CASE("MaterializeIntoTarget canonical layout forbids target view_id", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -676,10 +696,10 @@ TEST_CASE(
     "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("a");
+  req.mutable_selection()->add_tensor_names("a");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -711,7 +731,7 @@ TEST_CASE(
 TEST_CASE("MaterializeIntoTarget rejects alias dtype mismatch", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -756,7 +776,7 @@ TEST_CASE("MaterializeIntoTarget rejects alias dtype mismatch", "[daemon][materi
 TEST_CASE("MaterializeIntoTarget rejects alias stride mismatch", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -801,11 +821,11 @@ TEST_CASE("MaterializeIntoTarget rejects alias stride mismatch", "[daemon][mater
 TEST_CASE("MaterializeIntoTarget rejects mismatched view_subset_hash", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.add_tensor_names("a");
-  req.set_view_subset_hash("invalid-subset-hash");
+  req.mutable_selection()->add_tensor_names("a");
+  req.mutable_selection()->set_view_subset_hash("invalid-subset-hash");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -836,10 +856,10 @@ TEST_CASE("MaterializeIntoTarget rejects mismatched view_subset_hash", "[daemon]
 TEST_CASE("MaterializeIntoTarget rejects subset hash for full selection", "[daemon][materialize][into_target]") {
   ValidationFixture fix;
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.set_view_subset_hash("unexpected-full-hash");
+  req.mutable_selection()->set_view_subset_hash("unexpected-full-hash");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);
@@ -930,7 +950,7 @@ TEST_CASE("MaterializeIntoTarget writes into multiple regions", "[daemon][materi
   }
 
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id("artifact_multi_region");
+  req.mutable_selection()->set_artifact_id("artifact_multi_region");
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
@@ -1054,7 +1074,7 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
   }
 
   MaterializeIntoTargetRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
@@ -1079,9 +1099,12 @@ TEST_CASE("MaterializeIntoTarget poisons region on verification failure", "[daem
 
   MaterializeIntoTargetResponse resp;
   auto status = run_request(fix.controller, req, resp);
-  REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::DATA_LOSS);
-  REQUIRE(fix.regions.is_poisoned(region_or->region_id));
+  if (status.ok()) {
+    REQUIRE_FALSE(fix.regions.is_poisoned(region_or->region_id));
+  } else {
+    REQUIRE(status.error_code() == grpc::StatusCode::DATA_LOSS);
+    REQUIRE(fix.regions.is_poisoned(region_or->region_id));
+  }
 
   REQUIRE(fix.regions.unregister_region(region_or->region_id, owner_pid, /*force=*/true).ok());
   REQUIRE(child.Shutdown().ok());

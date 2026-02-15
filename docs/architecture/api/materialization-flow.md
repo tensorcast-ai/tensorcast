@@ -30,8 +30,9 @@ Related docs:
   `docs/architecture/artifact-views-and-retrieval.md` and `docs/architecture/api/region-backed.md`.
 - **Replica**: An engine-managed memory instance backed by UMA/VS. It can be loaded
   into CPU and/or GPU memory states and exported via CUDA IPC handles (GPU) or a local CPU memfd handle (CPU).
-- **Materialization**: Resolving an artifact reference (`artifact_id`/`key`)
-  into GPU-visible tensors plus descriptors and canonical index bytes.
+- **Materialization**: Resolving an `ArtifactSelection` (with
+  `selection.artifact_id` as request identity) into GPU-visible tensors plus
+  descriptors and canonical index bytes.
 - **Handle lease (lease_token)**: An opaque daemon capability returned alongside the exported handle (CUDA IPC or CPU
   memfd). The SDK binds it to returned tensor lifetimes and releases it over the local handle plane.
 - **Region-backed get_into**: A no-replica path that writes directly into a
@@ -41,8 +42,8 @@ Related docs:
 
 The daemon exposes v2 materialization RPCs (see `proto/tensorcast/daemon/v2/store_daemon.proto`):
 
-- `MaterializeReplica`: by `artifact_id`. Supports views.
-- `MaterializeByKey`: resolves key mapping in Global Store, then materializes.
+- `ResolveKeyMapping`: resolves key to `artifact_id` on the control path.
+- `MaterializeReplica`: selection-first replica materialization.
 - `MaterializeIntoTarget`: region-backed `get_into` into an existing CUDA region.
 - `ImportArtifactFromPath` / `ImportArtifactFromPathStream`: explicit local-only
   disk import that returns `artifact_id` + canonical index metadata for
@@ -70,7 +71,8 @@ sequenceDiagram
   participant SRC as Disk or P2P Source
 
   H->>SDK: get/get_view/get_into
-  SDK->>DM: MaterializeReplica/ByKey/IntoTarget
+  SDK->>DM: ResolveKeyMapping (optional)
+  SDK->>DM: MaterializeReplica/IntoTarget
   DM->>SE: materialize_replica()/materialize_into_target()
   SE->>PL: ingest_from_disk()/ingest_from_p2p() or load/copy
   PL->>SRC: read data (disk or P2P)
@@ -98,10 +100,10 @@ allow flags) so local-only requests are enforced server-side:
 
 See `tensorcast/api/store/materialization.py` for the exact decision logic.
 
-### Daemon control path (MaterializeReplica / MaterializeByKey)
+### Daemon control path (MaterializeReplica)
 
-1. **Validate inputs**: require `artifact_id` (or `key` for `MaterializeByKey`);
-   `prefer_p2p` requires `artifact_id`; device UUID/ID must be valid.
+1. **Validate inputs**: require `selection.artifact_id`; `prefer_p2p` requires
+   `selection.artifact_id`; device UUID/ID must be valid.
 2. **Resolve disk source internally**: when disk is allowed, the daemon chooses a
    managed shared-disk path or local-import source binding by `artifact_id`, and
    validates source fingerprints for local-import bindings before read.
@@ -122,8 +124,8 @@ See `tensorcast/api/store/materialization.py` for the exact decision logic.
    - Build `MaterializeHints` (verify mode, pinned timeout, source preference,
      typed disk-source selection, source policy allow flags, variant/view info).
    - Determine materialize mode:
-     - Disk-only (no artifact_id, no prefer_disk) -> `LOAD_ONLY`.
-     - Otherwise -> `AUTO`.
+     - Disk-only policy path -> `LOAD_ONLY`.
+     - Mixed/auto source policy path -> `AUTO`.
    - Call `StoreEngine::materialize_replica`.
 
 ### StoreEngine materialization service

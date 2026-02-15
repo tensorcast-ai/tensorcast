@@ -75,13 +75,6 @@ grpc::Status MaterializationController::materialize_replica(
   return replica_materialization_service_.materialize_replica(rctx, req, resp);
 }
 
-grpc::Status MaterializationController::materialize_by_key(
-    RpcContext& rctx,
-    const v2::MaterializeByKeyRequest& req,
-    v2::MaterializeByKeyResponse& resp) {
-  return replica_materialization_service_.materialize_by_key(rctx, req, resp);
-}
-
 grpc::Status MaterializationController::materialize_into_target(
     RpcContext& rctx,
     const v2::MaterializeIntoTargetRequest& req,

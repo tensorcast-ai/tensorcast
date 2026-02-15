@@ -145,7 +145,7 @@ TEST_CASE(
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
@@ -195,7 +195,7 @@ TEST_CASE(
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
@@ -210,8 +210,8 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializeByKey waits for managed shared-disk and retries disk-only",
-    "[daemon][materialize][by-key][disk][wait]") {
+    "MaterializeReplica waits for managed shared-disk and retries disk-only (replica path)",
+    "[daemon][materialize][disk][wait]") {
   auto gs_client = std::make_shared<WaitForSharedDiskGlobalStoreClient>();
   gs_client->connected = true;
   gs_client->ready_after_calls = 2;
@@ -228,7 +228,6 @@ TEST_CASE(
   REQUIRE(tensorcast::testing::write_rfc0007_descriptor_for_standard_artifact_dir(artifact_dir).ok());
   const std::string artifact_id = read_artifact_id(artifact_dir);
   REQUIRE_FALSE(artifact_id.empty());
-  gs_client->key_mappings.emplace("key_wait_ready", artifact_id);
   register_disk_location(*gs_client, artifact_id, artifact_rel);
 
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
@@ -243,20 +242,19 @@ TEST_CASE(
   REQUIRE(harness->start().ok());
   auto& svc = harness->service();
 
-  tensorcast::daemon::v2::MaterializeByKeyRequest req;
-  req.set_key("key_wait_ready");
+  tensorcast::daemon::v2::MaterializeReplicaRequest req;
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
-  req.set_device_id(0);
   req.set_wait_for_shared_disk_ms(200);
   req.mutable_source_policy()->set_allow_disk(true);
   req.mutable_source_policy()->set_allow_p2p(true);
 
   grpc::ServerContext ctx;
-  tensorcast::daemon::v2::MaterializeByKeyResponse resp;
-  const auto status = svc.MaterializeByKey(&ctx, &req, &resp);
+  tensorcast::daemon::v2::MaterializeReplicaResponse resp;
+  const auto status = svc.MaterializeReplica(&ctx, &req, &resp);
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
-  REQUIRE_FALSE(resp.used_disk_path().empty());
+  REQUIRE_FALSE(resp.disk_path().empty());
   REQUIRE(gs_client->list_calls.load() >= 3);
 }

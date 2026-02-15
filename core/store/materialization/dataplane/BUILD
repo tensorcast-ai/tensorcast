@@ -294,6 +294,18 @@ sc_cc_library(
 )
 
 sc_cc_library(
+    name = "view_identity",
+    srcs = ["view/view_identity.cc"],
+    hdrs = ["view/view_identity.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//core/common:artifact_hash_lib",
+        "//core/store/materialization/contracts:view_spec",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
     name = "view_plan_source",
     srcs = ["view/view_plan_source.cc"],
     hdrs = ["view/view_plan_source.h"],
@@ -674,6 +686,16 @@ cc_test(
         "//core/testing:catch_main",
         "@catch2//:catch2_main",
         "@nlohmann_json//:json",
+    ],
+)
+
+cc_test(
+    name = "view_identity_test",
+    srcs = ["view/tests/view_identity_test.cc"],
+    deps = [
+        ":view_identity",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
     ],
 )
 

@@ -935,6 +935,7 @@ sc_cc_library(
         ":materialization_request_common_utils_lib",
         ":ref_tracker_hdr",
         ":rpc_context_hdr",
+        ":selection_validation_utils_lib",
         ":session_lifecycle_lib",
         ":sessions_service_hdr",
         ":shutdown_signal_hdr",
@@ -942,6 +943,7 @@ sc_cc_library(
         "//core/store:device_registry",
         "//core/store:global_store_client",
         "//core/store:store_engine",
+        "//core/store:view_utils",
         "//core/store/materialization/dataplane:index_reader",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
@@ -1106,6 +1108,7 @@ sc_cc_library(
         ":materialization_mapped_view_narrow_utils_lib",
         ":materialization_mapped_view_spec_utils_lib",
         ":materialization_policy_utils_lib",
+        ":selection_validation_utils_lib",
         ":status_utils",
         ":types_hdr",
         "//core/common:selection_identity_lib",
@@ -1116,6 +1119,19 @@ sc_cc_library(
         "@abseil-cpp//absl/container:flat_hash_map",
         "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/strings",
+        "@abseil-cpp//absl/types:span",
+    ],
+)
+
+sc_cc_library(
+    name = "selection_validation_utils_lib",
+    srcs = ["service/controllers/selection_validation_utils.cc"],
+    hdrs = ["service/controllers/selection_validation_utils.h"],
+    deps = [
+        "//core/common:selection_identity_lib",
+        "//proto/tensorcast/common/v1:common_cc",
+        "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
+        "@abseil-cpp//absl/container:flat_hash_set",
         "@abseil-cpp//absl/types:span",
     ],
 )
@@ -1203,12 +1219,10 @@ sc_cc_library(
     srcs = ["service/controllers/materialization_policy_utils.cc"],
     hdrs = ["service/controllers/materialization_policy_utils.h"],
     deps = [
-        "//core/common:artifact_hash_lib",
         "//core/store:store_engine",
+        "//core/store/materialization/dataplane:view_identity",
         "//core/store/materialization/dataplane:view_planner",
         "//proto/tensorcast/daemon/v2:daemon_grpc_cc",
-        "@abseil-cpp//absl/strings",
-        "@protobuf",
     ],
 )
 

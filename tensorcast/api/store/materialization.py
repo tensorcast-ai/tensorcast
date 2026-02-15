@@ -58,6 +58,10 @@ from tensorcast.api.store.views import (
     TransformPlacement,
     ViewOrchestrator,
 )
+from tensorcast.common.selection_contract import (
+    build_artifact_selection,
+    compute_selected_index_bytes,
+)
 from tensorcast.common.selection_identity import (
     compute_logical_layout_hash,
     compute_view_subset_hash,
@@ -108,6 +112,61 @@ def _build_source_policy(
     policy.allow_p2p = bool(allow_p2p)
     policy.allow_disk = bool(allow_disk)
     return policy
+
+
+def _selection_debug_fields(
+    *,
+    view: common_pb2.ViewSpec | None,
+    tensor_names: Sequence[str] | None,
+    canonical_index_hint: bytes | None,
+    view_index_hint: bytes | None,
+) -> dict[str, object]:
+    view_ops_count = 0
+    view_tensor_count = 0
+    if view is not None and view.tensors:
+        view_tensor_count = len(view.tensors)
+        view_ops_count = sum(len(ops.ops) for ops in view.tensors.values())
+
+    ordered_names = tuple(str(name) for name in (tensor_names or ()))
+    debug: dict[str, object] = {
+        "view_tensor_count": int(view_tensor_count),
+        "view_ops_count": int(view_ops_count),
+        "tensor_names_count": int(len(ordered_names)),
+        "tensor_names_sample": list(ordered_names[:5]),
+        "canonical_index_hint_len": int(len(canonical_index_hint or b"")),
+        "view_index_hint_len": int(len(view_index_hint or b"")),
+    }
+
+    resolved_view_index_hint = bytes(view_index_hint or b"")
+    if resolved_view_index_hint:
+        with contextlib.suppress(Exception):
+            debug["view_index_hint_hash"] = compute_logical_layout_hash(
+                index_bytes=resolved_view_index_hint,
+                needs_view_index=True,
+            ).hex()
+
+    resolved_canonical_index_hint = bytes(canonical_index_hint or b"")
+    has_selection = bool(ordered_names or (view is not None and view.tensors))
+    if not resolved_canonical_index_hint or not has_selection:
+        return debug
+
+    with contextlib.suppress(Exception):
+        recomputed_view_index = compute_selected_index_bytes(
+            canonical_index_bytes=resolved_canonical_index_hint,
+            view_spec=view if view is not None and view.tensors else None,
+            tensor_names=ordered_names if ordered_names else None,
+        )
+        debug["recomputed_view_index_len"] = int(len(recomputed_view_index))
+        debug["recomputed_view_index_hash"] = compute_logical_layout_hash(
+            index_bytes=recomputed_view_index,
+            needs_view_index=True,
+        ).hex()
+        if resolved_view_index_hint:
+            debug["view_index_hint_matches_recomputed"] = bool(
+                resolved_view_index_hint == recomputed_view_index
+            )
+
+    return debug
 
 
 def _register_target_regions(
@@ -162,6 +221,46 @@ def _register_target_regions(
             retryable=False,
         ) from exc
     return tuple(region_ids)
+
+
+def _build_region_layout_selection(
+    *,
+    artifact_id: str,
+    canonical_index_bytes: bytes,
+    region_layout: _RegionBackedLayout,
+    view_spec: common_pb2.ViewSpec | None,
+) -> common_pb2.ArtifactSelection:
+    subset_hash = bytes(region_layout.view_subset_hash or b"")
+    selection_names: tuple[str, ...] = (
+        tuple(region_layout.selection_names) if subset_hash else ()
+    )
+    view_spec_for_selection = (
+        view_spec if view_spec is not None and view_spec.tensors else None
+    )
+
+    layout_index_bytes: bytes | None = None
+    if region_layout.layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW:
+        if region_layout.view_index_bytes:
+            layout_index_bytes = bytes(region_layout.view_index_bytes)
+        else:
+            layout_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_for_selection,
+                tensor_names=selection_names,
+            )
+
+    return build_artifact_selection(
+        artifact_id=artifact_id,
+        canonical_index_bytes=canonical_index_bytes,
+        layout_index_bytes=layout_index_bytes,
+        view_spec=view_spec_for_selection,
+        tensor_names=selection_names,
+        view_subset_hash=subset_hash if subset_hash else None,
+        view_id=str(region_layout.view_id or ""),
+        allow_view_id_without_spec=bool(
+            region_layout.view_id and view_spec_for_selection is None
+        ),
+    )
 
 
 class FallbackResolver:
@@ -1562,16 +1661,18 @@ class MaterializationPipeline:
                 mark_started()
                 started = True
             try:
-                response = client.materialize_into_target_v2(
+                selection = _build_region_layout_selection(
                     artifact_id=artifact_id,
+                    canonical_index_bytes=canonical_bytes,
+                    region_layout=region_layout,
+                    view_spec=view,
+                )
+                response = client.materialize_into_target_v2(
+                    selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(device_id),
                     preference=preference,
                     source_policy=source_policy,
-                    tensor_names=region_layout.selection_names,
-                    view=view,
-                    view_id=view_id if view is None else None,
-                    view_subset_hash=region_layout.view_subset_hash,
                     placement=placement,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -1801,7 +1902,6 @@ class MaterializationPipeline:
         view_subset_hash = (
             compute_view_subset_hash(tensor_names) if tensor_names else None
         )
-        index_hint = view_index_hint or canonical_hint
         result = self._materialize_fn(
             client=client,
             daemon_address=self._runtime.daemon_endpoint,
@@ -1813,7 +1913,7 @@ class MaterializationPipeline:
             view=view,
             view_id=view_id,
             placement=placement,
-            canonical_index_hint=index_hint,
+            canonical_index_hint=canonical_hint,
             preference=preference,
             source_policy=source_policy,
             tensor_names=tensor_names,
@@ -2328,6 +2428,23 @@ class MaterializationPipeline:
                 lease_mode=lease_mode,
             )
         except Exception as exc:  # noqa: BLE001
+            if "selection.logical_layout_hash does not match resolved selection" in str(
+                exc
+            ):
+                logger.error(
+                    "store.materialize.selection_layout_mismatch",
+                    extra={
+                        "tc.store.daemon": self._runtime.daemon_endpoint,
+                        "tc.artifact.id": artifact_id or "",
+                        "tc.store.key": key or "",
+                        "tc.store.selection_debug": _selection_debug_fields(
+                            view=view,
+                            tensor_names=tensor_names,
+                            canonical_index_hint=canonical_index_hint,
+                            view_index_hint=view_index_hint,
+                        ),
+                    },
+                )
             raise_mapped_materialization_error(exc)
         return materialized, device_id
 

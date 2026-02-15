@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #pragma once
 
@@ -6,6 +6,16 @@
 #include "core/store/materialization/runtime/pipeline/ingestion_context.h"
 
 namespace tensorcast::store::materialization::runtime::pipeline {
+
+struct FullDigestDecision {
+  bool should_compute{false};
+  bool forced_by_hint{false};
+  bool forced_by_engine_option{false};
+  bool forced_by_safetensors{false};
+  bool trusted_existing_data_multihash{false};
+};
+
+[[nodiscard]] FullDigestDecision resolve_full_digest_decision(const IngestionContext& ctx);
 
 class VerificationStage {
  public:

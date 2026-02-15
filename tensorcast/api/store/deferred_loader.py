@@ -24,6 +24,11 @@ from tensorcast.api.store.materialization import _build_source_policy
 from tensorcast.api.store.retry import map_materialization_error
 from tensorcast.api.store.types import ArtifactError, FallbackOptions
 from tensorcast.api.store.view_composer import ViewSpecComposer
+from tensorcast.common.selection_contract import (
+    build_artifact_selection,
+    compute_selected_index_bytes,
+)
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
@@ -79,6 +84,44 @@ def _numel(shape: Sequence[int]) -> int:
             return 0
         total *= dim_value
     return total
+
+
+def _selection_from_region_layout(
+    *,
+    artifact_id: str,
+    canonical_index_bytes: bytes,
+    region_layout,
+    view_spec: common_pb2.ViewSpec | None,
+) -> common_pb2.ArtifactSelection:
+    subset_hash = bytes(region_layout.view_subset_hash or b"")
+    selection_names: tuple[str, ...] = (
+        tuple(region_layout.selection_names) if subset_hash else ()
+    )
+    view_spec_for_selection = (
+        view_spec if view_spec is not None and view_spec.tensors else None
+    )
+    layout_index_bytes: bytes | None = None
+    if region_layout.layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW:
+        if region_layout.view_index_bytes:
+            layout_index_bytes = bytes(region_layout.view_index_bytes)
+        else:
+            layout_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_for_selection,
+                tensor_names=selection_names,
+            )
+    return build_artifact_selection(
+        artifact_id=artifact_id,
+        canonical_index_bytes=canonical_index_bytes,
+        layout_index_bytes=layout_index_bytes,
+        view_spec=view_spec_for_selection,
+        tensor_names=selection_names,
+        view_subset_hash=subset_hash if subset_hash else None,
+        view_id=str(region_layout.view_id or ""),
+        allow_view_id_without_spec=bool(
+            region_layout.view_id and view_spec_for_selection is None
+        ),
+    )
 
 
 class DeferredLoader:
@@ -548,16 +591,18 @@ class DeferredLoader:
                 selection_order=selection_order,
             )
             try:
-                response = client.materialize_into_target_v2(
+                selection = _selection_from_region_layout(
                     artifact_id=artifact_id,
+                    canonical_index_bytes=canonical_index_bytes,
+                    region_layout=region_layout,
+                    view_spec=view_spec_proto,
+                )
+                response = client.materialize_into_target_v2(
+                    selection=selection,
                     target_layout=region_layout.layout,
                     device_uuid=device_uuid_for(self._device_id),
                     preference=preference,
                     source_policy=source_policy,
-                    tensor_names=region_layout.selection_names,
-                    view=view_spec_proto,
-                    view_id=region_layout.view_id if view_spec_proto is None else None,
-                    view_subset_hash=region_layout.view_subset_hash,
                     operation_id=operation_id,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -868,6 +913,7 @@ class DeferredLoader:
         composer = ViewSpecComposer()
         composed_spec, _, _ = composer.compose(
             canonical_index=self._base_index,
+            identity_index_bytes=self._canonical_index_bytes,
             parent_spec=self._base_view_spec,
             child_spec=build_spec,
             parent_depth=self._base_view_depth,

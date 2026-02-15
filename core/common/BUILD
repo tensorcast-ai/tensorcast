@@ -83,6 +83,17 @@ sc_cc_library(
     ],
 )
 
+cc_test(
+    name = "selection_identity_test",
+    size = "small",
+    srcs = ["selection_identity_test.cc"],
+    deps = [
+        ":selection_identity_lib",
+        "@abseil-cpp//absl/strings",
+        "@catch2//:catch2_main",
+    ],
+)
+
 # Memory management - CUDA memory utilities
 sc_cc_library(
     name = "cuda_memory_lib",

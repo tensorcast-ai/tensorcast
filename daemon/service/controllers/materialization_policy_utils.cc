@@ -3,39 +3,17 @@
 #include "daemon/service/controllers/materialization_policy_utils.h"
 
 #include <cstdint>
-#include <limits>
 #include <optional>
 #include <string>
-#include <vector>
 
 #include "absl/status/status.h"
-#include "absl/strings/str_cat.h"
-#include "absl/types/span.h"
-#include "core/common/artifact_hash.h"
-#include "google/protobuf/io/coded_stream.h"
-#include "google/protobuf/io/zero_copy_stream_impl_lite.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 
 namespace tensorcast::daemon::materialization_policy {
 
 namespace {
 
 using store::loader::ViewOp;
-
-absl::StatusOr<std::string> serialize_deterministic_proto(const google::protobuf::Message& message) {
-  const size_t size = message.ByteSizeLong();
-  if (size > static_cast<size_t>(std::numeric_limits<int>::max())) {
-    return absl::OutOfRangeError("proto message too large for deterministic serialization");
-  }
-  std::string buffer;
-  buffer.resize(size);
-  google::protobuf::io::ArrayOutputStream stream(buffer.data(), static_cast<int>(size));
-  google::protobuf::io::CodedOutputStream coded(&stream);
-  coded.SetSerializationDeterministic(true);
-  if (!message.SerializeToCodedStream(&coded) || coded.HadError()) {
-    return absl::InternalError("deterministic proto serialization failed");
-  }
-  return buffer;
-}
 
 } // namespace
 
@@ -132,20 +110,11 @@ absl::StatusOr<ViewSpec> convert_view_spec(const tensorcast::common::v1::ViewSpe
 absl::StatusOr<std::string> compute_view_id_from_spec(
     const tensorcast::common::v1::ViewSpec& view_spec,
     std::string_view canonical_index_json) {
-  auto index_mh_or = common::compute_index_multihash(std::optional<std::string>(canonical_index_json), "");
-  if (!index_mh_or.ok()) {
-    return index_mh_or.status();
+  auto spec_or = convert_view_spec(view_spec);
+  if (!spec_or.ok()) {
+    return spec_or.status();
   }
-  auto proto_bytes_or = serialize_deterministic_proto(view_spec);
-  if (!proto_bytes_or.ok()) {
-    return proto_bytes_or.status();
-  }
-  std::vector<uint8_t> buffer;
-  buffer.reserve(proto_bytes_or->size() + index_mh_or->size());
-  buffer.insert(buffer.end(), proto_bytes_or->begin(), proto_bytes_or->end());
-  buffer.insert(buffer.end(), index_mh_or->begin(), index_mh_or->end());
-  const std::vector<uint8_t> digest = common::sha256_digest_bytes(absl::Span<const uint8_t>(buffer));
-  return common::multibase_multihash_sha256(digest);
+  return store::loader::compute_view_id_from_spec(*spec_or, canonical_index_json);
 }
 
 tensorcast::common::v1::ViewSpec build_view_spec_proto(const ViewSpec& spec) {

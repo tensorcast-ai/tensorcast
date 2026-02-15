@@ -110,7 +110,7 @@ TEST_CASE("LIP same-device denial in MaterializeReplica", "[daemon][lip][fakecud
 
   // Attempt to materialize on the same device (0) using artifact_id; must be denied.
   tensorcast::daemon::v2::MaterializeReplicaRequest mreq;
-  mreq.set_artifact_id(cresp.artifact_descriptor().artifact_id());
+  mreq.mutable_selection()->set_artifact_id(cresp.artifact_descriptor().artifact_id());
   // Default target_device_type = GPU → resolves to device 0
   tensorcast::daemon::v2::MaterializeReplicaResponse mresp;
   st = svc.MaterializeReplica(&ctx, &mreq, &mresp);

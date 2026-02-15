@@ -55,7 +55,7 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
   auto& svc = harness->service();
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id("mi2:dummy:dummy");
+  req.mutable_selection()->set_artifact_id("mi2:dummy:dummy");
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   grpc::ServerContext ctx;
@@ -64,12 +64,12 @@ TEST_CASE("MaterializeReplica rejects while shutting down", "[daemon][parity]") 
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_FAILED);
 }
 
-TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
+TEST_CASE("MaterializeReplica validates selection inputs", "[daemon][parity]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts_basic());
   auto harness = make_harness(engine, make_daemon_options());
   auto& svc = harness->service();
 
-  // Missing artifact_id -> INVALID_ARGUMENT
+  // Missing selection.artifact_id -> INVALID_ARGUMENT
   {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
@@ -79,10 +79,10 @@ TEST_CASE("MaterializeReplica validates one-of inputs", "[daemon][parity]") {
     REQUIRE(st.error_code() == grpc::StatusCode::INVALID_ARGUMENT);
   }
 
-  // artifact_id present is accepted (may still fail deeper in the stack, but not on input validation)
+  // selection.artifact_id present is accepted (may still fail deeper in the stack, but not on input validation)
   {
     tensorcast::daemon::v2::MaterializeReplicaRequest req;
-    req.set_artifact_id("mi2:abc:def");
+    req.mutable_selection()->set_artifact_id("mi2:abc:def");
     req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_GPU);
     tensorcast::daemon::v2::MaterializeReplicaResponse resp;
     grpc::ServerContext ctx;

@@ -30,11 +30,6 @@ from tensorcast.api.store.artifact import (
     _decode_capability_token,
 )
 from tensorcast.api.store.view_composer import compute_view_id
-from tensorcast.common.selection_identity import (
-    compute_logical_layout_hash,
-    compute_selection_hash,
-    compute_view_subset_hash,
-)
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.plan.v1 import plan_pb2
 
@@ -287,41 +282,20 @@ def _resolve_view_index_bytes(
 
 
 def _resolve_artifact_selection(artifact: Artifact) -> _ArtifactSelection:
-    artifact_id = artifact._artifact_id or artifact._ensure_identified()
-    canonical_index_bytes = _ensure_index_bytes(artifact)
-    view_id, view_proto = _resolve_view_id(
-        artifact=artifact, canonical_index_bytes=canonical_index_bytes
+    selection = artifact._build_artifact_selection()
+    view_subset_hash = (
+        bytes(selection.view_subset_hash) if selection.view_subset_hash else None
     )
-    needs_view_index = bool(view_id)
-    if needs_view_index:
-        view_index_bytes = _resolve_view_index_bytes(
-            artifact=artifact,
-            view_proto=view_proto,
-            canonical_index_bytes=canonical_index_bytes,
-        )
-        logical_layout_hash = compute_logical_layout_hash(
-            index_bytes=view_index_bytes, needs_view_index=True
-        )
-    else:
-        logical_layout_hash = compute_logical_layout_hash(
-            index_bytes=canonical_index_bytes, needs_view_index=False
-        )
-
-    view_subset_hash: bytes | None = None
-    tensor_names: tuple[str, ...] | None = None
-    if artifact._view_metadata is not None and artifact._view_metadata.tensor_names:
-        tensor_names = tuple(artifact._view_metadata.tensor_names)
-        view_subset_hash = compute_view_subset_hash(tensor_names)
-
-    selection_hash = compute_selection_hash(
-        view_id=view_id, view_subset_hash=view_subset_hash
+    view_proto: common_pb2.ViewSpec | None = (
+        selection.view_spec if selection.HasField("view_spec") else None
     )
+    tensor_names = tuple(selection.tensor_names) if selection.tensor_names else None
 
     return _ArtifactSelection(
-        artifact_id=artifact_id,
-        view_id=view_id,
-        logical_layout_hash=logical_layout_hash,
-        selection_hash=selection_hash,
+        artifact_id=str(selection.artifact_id),
+        view_id=str(selection.view_id),
+        logical_layout_hash=bytes(selection.logical_layout_hash),
+        selection_hash=bytes(selection.selection_hash),
         view_subset_hash=view_subset_hash,
         view_spec=view_proto,
         tensor_names=tensor_names,

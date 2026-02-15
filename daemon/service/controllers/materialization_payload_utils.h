@@ -39,25 +39,8 @@ absl::StatusOr<std::string> resolve_layout_json(
     const v2::MaterializeReplicaRequest& v2_req,
     store::StoreEngine& engine);
 
-absl::StatusOr<std::string> resolve_layout_json_by_key(
-    const v2::MaterializeByKeyResponse& v1_resp,
-    store::StoreEngine& engine);
-
 absl::Status populate_materialize_payloads(
     v2::MaterializeReplicaResponse& resp,
-    std::string_view layout_json,
-    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
-    std::string_view device_uuid,
-    std::string_view view_subset_hash,
-    bool wait_for_completion,
-    std::string_view replica_uuid,
-    const std::string* ticket_device_uuid,
-    const std::optional<store::loader::ViewPlan>& view_plan,
-    bool prefer_view_plan,
-    bool fill_view_index_bytes);
-
-absl::Status populate_materialize_payloads(
-    v2::MaterializeByKeyResponse& resp,
     std::string_view layout_json,
     const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
     std::string_view device_uuid,

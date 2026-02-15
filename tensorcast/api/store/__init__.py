@@ -158,7 +158,7 @@ def _should_show_from_disk_progress(show_progress: bool | None) -> bool:
     return False
 
 
-_IMPORT_STREAM_ERROR_STATUS: dict[int, str] = {
+_IMPORT_STREAM_ERROR_STATUS: dict[int, ArtifactStatusCode] = {
     int(store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_NOT_FOUND): "NOT_FOUND",
     int(
         store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_SOURCE_PERMISSION_DENIED
@@ -174,6 +174,7 @@ _IMPORT_STREAM_ERROR_STATUS: dict[int, str] = {
         store_daemon_pb2.IMPORT_ARTIFACT_ERROR_CODE_POLICY_DENIED_NON_LOCAL_PEER
     ): "PERMISSION_DENIED",
 }
+_IMPORT_STREAM_DEFAULT_STATUS: ArtifactStatusCode = "INTERNAL"
 
 
 def _stream_error_from_import_event(
@@ -184,7 +185,7 @@ def _stream_error_from_import_event(
         or "ImportArtifactFromPathStream reported an error"
     )
     status_code = _IMPORT_STREAM_ERROR_STATUS.get(
-        int(getattr(event, "error_code", 0) or 0), "INTERNAL"
+        int(getattr(event, "error_code", 0) or 0), _IMPORT_STREAM_DEFAULT_STATUS
     )
     return ArtifactError(
         message,

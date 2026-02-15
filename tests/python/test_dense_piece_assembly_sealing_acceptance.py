@@ -811,8 +811,10 @@ def test_post_seal_reuse_views_if_safe(daemon_process_reuse, gs_server):
 
     mat_resp = stub.MaterializeReplica(
         store_daemon_pb2.MaterializeReplicaRequest(
-            artifact_id=assembly_id,
-            view_id=view_id_a,
+            selection=common_pb2.ArtifactSelection(
+                artifact_id=assembly_id,
+                view_id=view_id_a,
+            ),
             target_device_type=store_daemon_pb2.DEVICE_TYPE_GPU,
             wait_for_completion=True,
         )

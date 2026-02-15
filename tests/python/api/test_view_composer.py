@@ -1,8 +1,9 @@
-#  Copyright (c) 2025, TensorCast Team.
+#  Copyright (c) 2025-2026, TensorCast Team.
 
 import torch
 
-from tensorcast.api._view_ops import NarrowOp
+from tensorcast.api._view_ops import NarrowOp, build_view_spec
+from tensorcast.api.store.common import canonical_index_to_bytes
 from tensorcast.api.store.types import CanonicalIndex, CanonicalIndexEntry
 from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
@@ -120,3 +121,42 @@ def test_compose_narrow_storage_offset_applies_once():
     view_entry = _apply_view_ops(base_entry, ops)
     expected_offset = (parent.start + child.start) * base_entry.stride[0]
     assert view_entry.storage_offset == expected_offset
+
+
+def test_compose_view_cache_uses_selected_index_bytes_semantics() -> None:
+    composer = ViewSpecComposer()
+    base_index = CanonicalIndex(
+        entries=(
+            CanonicalIndexEntry(
+                name="w",
+                dtype=torch.float32,
+                shape=(4, 8),
+                stride=(8, 1),
+                storage_offset=0,
+                segment_offset=0,
+                size_bytes=128,
+            ),
+        ),
+        total_size_bytes=128,
+        avbs_hash="",
+    )
+    child_spec = build_view_spec(
+        entry_shapes={"w": (4, 8)},
+        slices={"w": (1, slice(0, 4))},
+        transpose=None,
+    )
+    _, cache, _ = composer.compose(
+        canonical_index=base_index,
+        identity_index_bytes=canonical_index_to_bytes(base_index),
+        parent_spec=None,
+        child_spec=child_spec,
+        parent_depth=0,
+        subset_names=None,
+    )
+
+    assert cache is not None
+    selected_entry = cache.selected_index.entries[0]
+    assert selected_entry.name == "w"
+    assert selected_entry.shape == (4, 4)
+    assert selected_entry.stride == (4, 1)
+    assert selected_entry.storage_offset == 0

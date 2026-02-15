@@ -192,7 +192,7 @@ TEST_CASE("CPU memfd fails with clear error near RLIMIT_NOFILE", "[daemon][cpu_m
   }
 
   tensorcast::daemon::v2::MaterializeReplicaRequest req;
-  req.set_artifact_id(artifact_id);
+  req.mutable_selection()->set_artifact_id(artifact_id);
   req.set_target_device_type(tensorcast::daemon::v2::DeviceType::DEVICE_TYPE_CPU);
   req.set_preference(tensorcast::daemon::v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
   req.set_wait_for_completion(true);
@@ -206,5 +206,4 @@ TEST_CASE("CPU memfd fails with clear error near RLIMIT_NOFILE", "[daemon][cpu_m
   REQUIRE(st.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED);
   REQUIRE(st.error_message().find("RLIMIT_NOFILE") != std::string::npos);
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_FAILED);
-  REQUIRE_FALSE(resp.has_mem_handle());
 }

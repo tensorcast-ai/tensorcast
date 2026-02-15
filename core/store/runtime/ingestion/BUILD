@@ -153,6 +153,7 @@ cc_test(
         "//core/store:store_engine_options",
         "//core/store:testing_recording_global_store_client",
         "//core/store:worker_identity",
+        "//core/store/replica",
         "//core/store/runtime:runtime_env",
         "//core/store/runtime/context:runtime_context_events",
         "//core/store/runtime/ingestion/testing",

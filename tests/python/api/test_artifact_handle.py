@@ -238,7 +238,7 @@ def test_tensor_subset_materialization_and_release():
         generation=1,
     )
 
-    result = artifact.tensor_dict(device="cpu", names=["bar"])
+    result = artifact.subset(["bar"]).tensor_dict(device="cpu")
 
     assert set(result.keys()) == {"bar"}
     assert pipeline.calls and pipeline.calls[0]["tensor_names"] == ("bar",)

@@ -59,9 +59,7 @@ service StoreDaemonService {
   rpc PublishTargetReplica(PublishTargetReplicaRequest) returns (PublishTargetReplicaResponse) {}
   rpc RetirePublishedReplica(RetirePublishedReplicaRequest) returns (RetirePublishedReplicaResponse) {}
 
-  // ========== Key-based materialization and publish ==========
-  // See docs/architecture/api/materialization-flow.md for semantics.
-  rpc MaterializeByKey(MaterializeByKeyRequest) returns (MaterializeByKeyResponse) {}
+  // ========== Key mapping and publish ==========
   rpc ImportArtifactFromPath(ImportArtifactFromPathRequest) returns (ImportArtifactFromPathResponse) {}
   rpc ImportArtifactFromPathStream(ImportArtifactFromPathRequest) returns (stream ImportArtifactFromPathStreamEvent) {}
   rpc QueryReplicaStatus(QueryReplicaStatusRequest) returns (QueryReplicaStatusResponse) {}
@@ -373,8 +371,7 @@ message ReplicaOperationStatus {
 }
 
 message MaterializeReplicaRequest {
-  // RFC-0007: Use content-addressed artifact_id when available.
-  optional string artifact_id = 1;
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   reserved 2;
   reserved "disk_fallback";
 
@@ -389,17 +386,8 @@ message MaterializeReplicaRequest {
   SourcePolicy source_policy = 14;
   LeaseMode lease_mode = 15;
 
-  // Selective materialization
-  repeated string tensor_names = 10;
-  bytes view_subset_hash = 11;
-
-  reserved 12, 13;
-  reserved "verify_checksums", "disk_path";
-
-  oneof view_identity {
-    tensorcast.common.v1.ViewSpec view = 1001;
-    string view_id = 1002;
-  }
+  reserved 10, 11, 12, 13, 1001, 1002;
+  reserved "tensor_names", "view_subset_hash", "verify_checksums", "disk_path", "view", "view_id";
 
   TransformPlacement placement = 1003;
   bool wait_for_completion = 1004;
@@ -430,6 +418,7 @@ message MaterializeReplicaResponse {
   ReplicaTicket ticket = 9;
   bytes view_index_bytes = 10;
   uint64 generation = 11;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 12;
 
   // Legacy view metadata for compatibility with view-based callers.
   bytes view_index_json = 1001;
@@ -464,10 +453,7 @@ message MappedTensorSpec {
 }
 
 message MaterializeIntoMappedTargetRequest {
-  oneof artifact_ref {
-    string artifact_id = 1;
-    string key = 2;
-  }
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   reserved 3;
   reserved "disk_fallback";
 
@@ -481,22 +467,15 @@ message MaterializeIntoMappedTargetRequest {
   CopyPlan copy_plan = 8;
   repeated MappedTensorSpec dst_tensors = 9;
 
-  bytes view_subset_hash = 10;
   optional string operation_id = 11;
-
-  oneof view_identity {
-    tensorcast.common.v1.ViewSpec view = 1001;
-    string view_id = 1002;
-  }
+  reserved 2, 10, 1001, 1002;
+  reserved "key", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
 }
 
 message MaterializeIntoTargetRequest {
-  oneof artifact_ref {
-    string artifact_id = 1;
-    string key = 2;
-  }
+  tensorcast.common.v1.ArtifactSelection selection = 1;
   reserved 3;
   reserved "disk_fallback";
 
@@ -507,14 +486,9 @@ message MaterializeIntoTargetRequest {
   SourcePreference preference = 7;
   SourcePolicy source_policy = 12;
 
-  repeated string tensor_names = 8;
-  bytes view_subset_hash = 9;
   optional string operation_id = 10;
-
-  oneof view_identity {
-    tensorcast.common.v1.ViewSpec view = 1001;
-    string view_id = 1002;
-  }
+  reserved 2, 8, 9, 1001, 1002;
+  reserved "key", "tensor_names", "view_subset_hash", "view", "view_id";
 
   TransformPlacement placement = 1003;
 }
@@ -528,6 +502,7 @@ message MaterializeIntoTargetResponse {
   bytes view_index_bytes = 6;
   uint64 generation = 7;
   bytes target_write_token = 8;
+  tensorcast.common.v1.ArtifactSelection resolved_selection = 9;
 }
 
 message ConfirmReplicaRequest {
@@ -1021,43 +996,6 @@ message RetirePublishedReplicaResponse {
   bool drained = 1;
   bool removed = 2;
   optional string message = 3;
-}
-
-// Key-based materialization request.
-message MaterializeByKeyRequest {
-  string key = 1;
-  int32 device_id = 2;
-  int32 pinned_allocation_timeout_ms = 3;
-  string replica_uuid = 4;
-  int32 pid = 5;
-  DeviceType target_device_type = 6;
-  LeaseMode lease_mode = 7;
-
-  // Selective materialization
-  repeated string tensor_names = 10;
-  bytes view_subset_hash = 11;
-
-  SourcePreference preference = 12;
-  SourcePolicy source_policy = 13;
-  bool wait_for_completion = 20;
-  // Server-side wait budget for managed shared-disk readiness. When >0 and the
-  // initial materialization attempt fails, the daemon waits for a managed disk
-  // location in the local cluster before retrying disk-only.
-  uint32 wait_for_shared_disk_ms = 21;
-  ExportPolicy export_policy = 22;
-}
-message MaterializeByKeyResponse {
-  MaterializeReplicaStatus status = 1;
-  string artifact_id = 2;
-  string used_disk_path = 3;
-  MemCopyHandle mem_handle = 4;
-  MaterializationSource source = 5;
-  bytes canonical_index_bytes = 6;
-  ViewSubset view_subset = 7;
-  repeated TensorPayloadDescriptor payloads = 8;
-  ReplicaTicket ticket = 9;
-  bytes view_index_bytes = 10;
-  uint64 generation = 11;
 }
 
 message ImportArtifactFromPathRequest {

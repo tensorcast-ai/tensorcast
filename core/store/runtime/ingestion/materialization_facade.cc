@@ -116,6 +116,24 @@ absl::Status validate_existing_replica_for_reuse(
   return absl::OkStatus();
 }
 
+absl::StatusOr<uint64_t> compute_required_source_bytes_for_map(const loader::ByteRangeMap& map) {
+  uint64_t required_bytes = 0;
+  for (const auto& segment : map.segments) {
+    if (segment.kind != loader::ByteRangeSegment::Kind::kData || segment.length == 0) {
+      continue;
+    }
+    if (segment.source_index != 0) {
+      return absl::FailedPreconditionError(
+          absl::StrCat("local view map references unexpected source_index=", segment.source_index));
+    }
+    if (segment.src_offset > std::numeric_limits<uint64_t>::max() - segment.length) {
+      return absl::OutOfRangeError("local view map source range overflows uint64_t");
+    }
+    required_bytes = std::max(required_bytes, segment.src_offset + segment.length);
+  }
+  return required_bytes;
+}
+
 absl::Status load_assembled_ranges_into_replica(
     const std::shared_ptr<replica::Replica>& replica,
     const loader::ByteRangeMap& map,
@@ -734,6 +752,280 @@ absl::StatusOr<std::shared_ptr<loader::SeekableSource>> make_local_piece_source(
   return LocalReplicaSource::Create(std::move(*replica_or), location, device_id, view_size_bytes);
 }
 
+absl::StatusOr<loading::ReplicaHandle> MaterializationFacade::materialize_view_from_local_canonical(
+    const loading::MaterializationRequest& request) {
+  if (!request.requested_view_id().has_value()) {
+    return absl::NotFoundError("no requested view id");
+  }
+  const auto& view_id = *request.requested_view_id();
+  if (view_id.empty()) {
+    return absl::InvalidArgumentError("requested view_id must be non-empty");
+  }
+  if (!request.hints().variant.has_value() || !request.hints().variant->cached_plan.has_value()) {
+    return absl::NotFoundError("local view materialization requires cached view plan");
+  }
+
+  const auto& target_view_plan = *request.hints().variant->cached_plan;
+  if (target_view_plan.is_identity) {
+    return absl::NotFoundError("requested view plan is identity");
+  }
+  if (target_view_plan.selection.map.total_bytes == 0) {
+    return absl::FailedPreconditionError("requested view plan has zero bytes");
+  }
+  loader::ByteRangeMap local_map = target_view_plan.selection.map;
+  local_map.num_sources = 1;
+  auto required_source_bytes_or = compute_required_source_bytes_for_map(local_map);
+  if (!required_source_bytes_or.ok()) {
+    return required_source_bytes_or.status();
+  }
+  const uint64_t required_source_bytes = *required_source_bytes_or;
+
+  auto& replica_registry = config_.replica_runtime->registry();
+  const auto candidates = replica_registry.find_by_artifact(request.canonical_artifact_id());
+  int canonical_candidates = 0;
+
+  std::optional<loading::ReplicaKey> selected_key;
+  std::shared_ptr<replica::Replica> selected_replica;
+  common::memory::MemoryLocation selected_location = common::memory::MemoryLocation::NONE;
+  int selected_device_id = -1;
+  int selected_score = -1;
+  uint64_t selected_source_size = 0;
+
+  auto consider_candidate = [&](const loading::ReplicaKey& candidate,
+                                const std::shared_ptr<replica::Replica>& replica,
+                                common::memory::MemoryLocation location,
+                                uint64_t source_size,
+                                int score) {
+    if (score <= selected_score) {
+      return;
+    }
+    selected_key = candidate;
+    selected_replica = replica;
+    selected_location = location;
+    selected_device_id = location == common::memory::MemoryLocation::GPU ? candidate.device.ordinal : -1;
+    selected_source_size = source_size;
+    selected_score = score;
+  };
+
+  for (const auto& candidate : candidates) {
+    if (candidate.view_id.has_value()) {
+      continue;
+    }
+    ++canonical_candidates;
+
+    auto replica_or = replica_registry.find(candidate);
+    if (!replica_or.ok()) {
+      continue;
+    }
+    const auto& replica = *replica_or;
+    auto source_size_or = replica->get_artifact_size();
+    if (!source_size_or.ok()) {
+      continue;
+    }
+    const uint64_t source_size = *source_size_or;
+    if (required_source_bytes > source_size) {
+      VLOG(1) << "materialize_view.local_canonical_skip artifact_id=" << request.canonical_artifact_id()
+              << " view_id=" << view_id << " candidate=" << candidate
+              << " required_source_bytes=" << required_source_bytes << " candidate_source_bytes=" << source_size;
+      continue;
+    }
+
+    if (candidate.device.type == DeviceType::GPU &&
+        replica->get_memory_state(common::memory::MemoryLocation::GPU) == replica::MemoryState::LOADED) {
+      const auto gpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::GPU);
+      if (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) {
+        int score = 1;
+        if (request.target_is_gpu() && candidate.device.ordinal == request.target_device().ordinal) {
+          score = 3;
+        }
+        consider_candidate(candidate, replica, common::memory::MemoryLocation::GPU, source_size, score);
+      }
+    }
+
+    if (candidate.device.type == DeviceType::CPU &&
+        replica->get_memory_state(common::memory::MemoryLocation::CPU) == replica::MemoryState::LOADED) {
+      const auto cpu_ptrs = replica->get_data_pointer(common::memory::MemoryLocation::CPU);
+      if (!cpu_ptrs.empty() && cpu_ptrs[0] != nullptr) {
+        const int score = request.target_is_gpu() ? 2 : 3;
+        consider_candidate(candidate, replica, common::memory::MemoryLocation::CPU, source_size, score);
+      }
+    }
+  }
+
+  if (!selected_key.has_value() || selected_replica == nullptr) {
+    return absl::NotFoundError(
+        absl::StrCat(
+            "no loaded canonical source for local view materialization: artifact_id=",
+            request.canonical_artifact_id(),
+            ", view_id=",
+            view_id,
+            ", canonical_candidates=",
+            canonical_candidates));
+  }
+
+  const uint64_t source_size = selected_source_size;
+
+  const int concurrency = request.hints().pipeline_concurrency > 0
+      ? static_cast<int>(request.hints().pipeline_concurrency)
+      : std::max(1, config_.num_threads);
+  const loading::TransformPlacement transform_placement =
+      request.hints().variant ? request.hints().variant->placement : loading::TransformPlacement::kServer;
+
+  auto build_sources = [&]() -> absl::StatusOr<std::vector<std::shared_ptr<loader::SeekableSource>>> {
+    auto source_or = LocalReplicaSource::Create(selected_replica, selected_location, selected_device_id, source_size);
+    if (!source_or.ok()) {
+      return source_or.status();
+    }
+    std::vector<std::shared_ptr<loader::SeekableSource>> sources;
+    sources.push_back(*source_or);
+    return sources;
+  };
+
+  loading::ReplicaKey key = request.replica_key();
+
+  auto build_local_view_handle = [&](const std::shared_ptr<replica::Replica>& replica_instance) {
+    loading::ReplicaHandle handle = build_local_replica_handle(key, replica_instance, request.target_location());
+    if (request.target_is_gpu()) {
+      const auto gpu_ptrs = replica_instance->get_data_pointer(common::memory::MemoryLocation::GPU);
+      handle.gpu_base_ptr = (!gpu_ptrs.empty() && gpu_ptrs[0] != nullptr) ? gpu_ptrs[0] : nullptr;
+      auto ipc_or = replica_instance->get_memory_manager().get_ipc_handle();
+      if (ipc_or.ok()) {
+        handle.cuda_ipc_handle = cuda::IpcHandleBytes::from_native(*ipc_or);
+      }
+    }
+
+    const auto& replica_view_plan = replica_instance->view_plan();
+    const loader::ViewPlan* effective_plan = nullptr;
+    if (replica_view_plan.has_value() && !replica_view_plan->is_identity) {
+      effective_plan = &*replica_view_plan;
+    } else if (!target_view_plan.is_identity) {
+      effective_plan = &target_view_plan;
+    }
+    if (effective_plan != nullptr) {
+      handle.view_index_json = effective_plan->view_index_json;
+      if (effective_plan->view_size_bytes > 0) {
+        auto computer = config_.runtime_context->view_hash_computer();
+        if (computer) {
+          auto hash = computer->hash_replica_view(
+              *replica_instance,
+              request.target_location(),
+              effective_plan->view_size_bytes,
+              request.target_is_gpu() ? std::optional<int>(request.target_device().ordinal) : std::nullopt);
+          if (hash.has_value()) {
+            handle.view_data_hash = std::move(hash);
+          }
+        }
+      }
+    }
+    return handle;
+  };
+
+  auto existing_or = replica_registry.find(key);
+  if (existing_or.ok()) {
+    const auto& existing = existing_or.value();
+    absl::Status reuse_status = validate_existing_replica_for_reuse(existing, request.target_location());
+    if (reuse_status.ok()) {
+      LOG(INFO) << "materialize_view.local_canonical_reuse artifact_id=" << request.canonical_artifact_id()
+                << " view_id=" << view_id << " source_key=" << *selected_key;
+      return build_local_view_handle(existing);
+    }
+    if (!absl::IsNotFound(reuse_status)) {
+      return reuse_status;
+    }
+
+    auto sources_or = build_sources();
+    if (!sources_or.ok()) {
+      return sources_or.status();
+    }
+    absl::Status rebuild_status = load_assembled_ranges_into_replica(
+        existing,
+        local_map,
+        std::move(*sources_or),
+        config_.options->byte_mapping,
+        request.target_location(),
+        concurrency,
+        target_view_plan,
+        transform_placement,
+        request.target_device().ordinal);
+    if (!rebuild_status.ok()) {
+      return rebuild_status;
+    }
+    LOG(INFO) << "materialize_view.local_canonical_rebuild artifact_id=" << request.canonical_artifact_id()
+              << " view_id=" << view_id << " source_key=" << *selected_key;
+    return build_local_view_handle(existing);
+  }
+  if (!absl::IsNotFound(existing_or.status())) {
+    return existing_or.status();
+  }
+
+  loading::InlineBufferSource inline_source{.data = nullptr, .size_bytes = local_map.total_bytes};
+  replica::ReplicaConfig cfg{
+      .source = inline_source,
+      .artifact_identifier = key.artifact_id,
+      .device_type = key.device.type,
+      .local_device_id = key.device.type == DeviceType::GPU ? key.device.ordinal : -1,
+      .pinned_buffer_pool = config_.runtime_context->pinned_buffer_pool(),
+      .async_runtime = gsl::not_null<std::shared_ptr<common::AsyncRuntime>>{config_.runtime_context->async_runtime()},
+      .artifact_chunk_bytes = config_.artifact_chunk_bytes,
+      .expected_artifact_size = local_map.total_bytes,
+      .view_plan = target_view_plan,
+      .byte_mapping_config = config_.options->byte_mapping,
+      .memory_tier_config = config_.options->memory_tier_config,
+  };
+  cfg.pinned_memory_timeout = config_.pinned_memory_timeout;
+  cfg.streaming_buffer_chunks = std::max<size_t>(1, config_.runtime_context->options().streaming_buffer_chunks);
+  cfg.view_id = request.requested_view_id();
+  cfg.transform_placement = transform_placement;
+
+  auto replica_or = replica::Replica::create(cfg);
+  if (!replica_or.ok()) {
+    return replica_or.status();
+  }
+  auto replica = std::shared_ptr<replica::Replica>(std::move(replica_or.value()));
+
+  auto sources_or = build_sources();
+  if (!sources_or.ok()) {
+    return sources_or.status();
+  }
+  absl::Status load_status = load_assembled_ranges_into_replica(
+      replica,
+      local_map,
+      std::move(*sources_or),
+      config_.options->byte_mapping,
+      request.target_location(),
+      concurrency,
+      target_view_plan,
+      transform_placement,
+      request.target_device().ordinal);
+  if (!load_status.ok()) {
+    return load_status;
+  }
+
+  absl::Status emplace_status = replica_registry.emplace(key, gsl::not_null{replica});
+  if (absl::IsAlreadyExists(emplace_status)) {
+    auto concurrent_or = replica_registry.find(key);
+    if (!concurrent_or.ok()) {
+      return concurrent_or.status();
+    }
+    const auto& concurrent_replica = concurrent_or.value();
+    absl::Status reuse_status = validate_existing_replica_for_reuse(concurrent_replica, request.target_location());
+    if (!reuse_status.ok()) {
+      return reuse_status;
+    }
+    LOG(INFO) << "materialize_view.local_canonical_raced artifact_id=" << request.canonical_artifact_id()
+              << " view_id=" << view_id << " source_key=" << *selected_key;
+    return build_local_view_handle(concurrent_replica);
+  }
+  if (!emplace_status.ok()) {
+    return emplace_status;
+  }
+
+  LOG(INFO) << "materialize_view.local_canonical_loaded artifact_id=" << request.canonical_artifact_id()
+            << " view_id=" << view_id << " source_key=" << *selected_key
+            << " source_location=" << static_cast<int>(selected_location) << " view_bytes=" << local_map.total_bytes;
+  return build_local_view_handle(replica);
+}
+
 MaterializationFacade::MaterializationFacade(Config config)
     : config_(std::move(config)),
       hooks_(config_.hooks),
@@ -781,6 +1073,18 @@ MaterializationFacade::MaterializationFacade(Config config)
     return run_disk_ingestion_internal(artifact_identifier, source, target, hints, /*publish_to_global_store=*/false);
   };
   deps.run_auto = [this](const loading::MaterializationRequest& request) -> absl::StatusOr<loading::ReplicaHandle> {
+    if (request.requested_view_id().has_value()) {
+      auto local_view_or = materialize_view_from_local_canonical(request);
+      if (local_view_or.ok()) {
+        return *local_view_or;
+      }
+      if (!absl::IsNotFound(local_view_or.status())) {
+        return local_view_or.status();
+      }
+      LOG(INFO) << "materialize_view.local_canonical_unavailable artifact_id=" << request.canonical_artifact_id()
+                << " view_id=" << *request.requested_view_id() << " reason=" << local_view_or.status();
+    }
+
     auto client = config_.runtime_context->global_store_client();
     const bool gs_connected = client && client->is_connected();
     if (!gs_connected) {

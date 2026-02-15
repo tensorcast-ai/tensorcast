@@ -15,6 +15,10 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _Client:
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        del artifact_id
+        return b"{}"
+
     def query_replica_status(self, ticket: store_daemon_pb2.ReplicaTicket):
         resp = store_daemon_pb2.QueryReplicaStatusResponse()
         resp.ticket.replica_uuid = ticket.replica_uuid

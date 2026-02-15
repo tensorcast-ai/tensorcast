@@ -378,9 +378,13 @@ class EngineAdapter:
                     status_code="INVALID_ARGUMENT",
                     retryable=False,
                 )
-            tensors = ctx.source.tensor_dict(
+            selected_source = (
+                ctx.source.subset(list(ctx.tensor_names))
+                if ctx.tensor_names
+                else ctx.source
+            )
+            tensors = selected_source.tensor_dict(
                 device="cpu",
-                names=list(ctx.tensor_names) if ctx.tensor_names else None,
                 ctx=ctx.ctx,
             )
             return ctx.store.register(tensors, key=ctx.out_key, policy=ctx.policy)

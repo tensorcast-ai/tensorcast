@@ -49,27 +49,23 @@ absl::StatusOr<std::optional<ViewSpec>> resolve_mapped_view_spec(
   std::optional<ViewSpec> view_spec;
   std::optional<std::string> request_view_id;
 
-  switch (req.view_identity_case()) {
-    case v2::MaterializeIntoMappedTargetRequest::kView: {
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        set_reason(reason, ResolveViewSpecErrorReason::kViewSpecInvalid);
-        return spec_or.status();
-      }
-      view_spec = std::move(*spec_or);
-      break;
+  if (!req.has_selection()) {
+    return absl::InvalidArgumentError("selection is required");
+  }
+  const auto& selection = req.selection();
+  if (selection.has_view_spec()) {
+    auto spec_or = convert_view_spec(selection.view_spec());
+    if (!spec_or.ok()) {
+      set_reason(reason, ResolveViewSpecErrorReason::kViewSpecInvalid);
+      return spec_or.status();
     }
-    case v2::MaterializeIntoMappedTargetRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        request_view_id = req.view_id();
-      }
-      break;
-    }
-    case v2::MaterializeIntoMappedTargetRequest::VIEW_IDENTITY_NOT_SET:
-      break;
+    view_spec = std::move(*spec_or);
+  }
+  if (!selection.view_id().empty()) {
+    request_view_id = selection.view_id();
   }
 
-  if (!request_view_id.has_value()) {
+  if (!request_view_id.has_value() || view_spec.has_value()) {
     return view_spec;
   }
 

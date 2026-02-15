@@ -98,8 +98,8 @@ Notes:
 
 ### Entry points used by the daemon
 
-- `MaterializeByKey` resolves `key -> artifact_id` via `StoreEngine::resolve_key_mapping` and then calls `materialize_replica` with `MaterializeMode::AUTO` (`daemon/service/controllers/materialization_controller.cc`).
-- `MaterializeReplica` and `materialize_replica_v2` also end in `materialize_replica` with AUTO or LOAD_ONLY depending on preference and inputs.
+- `ResolveKeyMapping` remains the control-path lookup for `key -> artifact_id` when callers start from keys.
+- `MaterializeReplica` consumes `ArtifactSelection` and calls `materialize_replica` with AUTO or LOAD_ONLY depending on preference and inputs.
 
 ### Ingestion pipeline stages
 

@@ -348,6 +348,22 @@ absl::Status UnifiedMemoryAuthority::release_gpu_device(
 
   DeviceKey dev_key = DeviceRegistry::instance().gpu_key(device_id);
 
+  size_t exported_chunks = 0;
+  for (const auto& rec : it->second.chunk_records) {
+    auto export_it = rec.exported_gpu.find(dev_key);
+    if (export_it != rec.exported_gpu.end() && export_it->second) {
+      exported_chunks++;
+    }
+  }
+  if (exported_chunks > 0) {
+    return absl::FailedPreconditionError(
+        absl::StrFormat(
+            "Replica %s GPU device %d has %zu exported chunks; release blocked",
+            key.artifact_id,
+            device_id,
+            exported_chunks));
+  }
+
   // Reset per-chunk GPU residency for this device and update counters
   size_t& counter = it->second.loaded_chunk_counts[dev_key];
   counter = 0;

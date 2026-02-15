@@ -61,10 +61,11 @@ from tensorcast.api.store.view_composer import (
     ViewSpecComposer,
     compute_view_id,
 )
-from tensorcast.common.selection_identity import (
-    compute_selection_hash,
-    compute_view_subset_hash,
+from tensorcast.common.selection_contract import (
+    build_artifact_selection,
+    compute_selected_index_bytes,
 )
+from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 if TYPE_CHECKING:
@@ -301,7 +302,7 @@ class Artifact:
         self._view_metadata = view_metadata
         self._view_depth = max(0, int(view_depth))
         effective_index = (
-            view_metadata.canonical_index
+            view_metadata.selected_index
             if view_metadata is not None
             else canonical_index
         )
@@ -365,13 +366,15 @@ class Artifact:
         self,
         *,
         device: torch.device | str,
-        names: Sequence[str] | None = None,
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
         artifact_id = self._ensure_identified()
-        effective_index = self._effective_index()
-        requested_names = self._validate_tensor_names(effective_index, names)
+        requested_names = (
+            tuple(self._view_metadata.tensor_names)
+            if self._view_metadata is not None and self._view_metadata.tensor_names
+            else None
+        )
         store, runtime, pipeline = self._require_components()
         view_spec_proto = self._view_spec.proto if self._view_spec else None
         view_data_hash = (
@@ -416,7 +419,9 @@ class Artifact:
         ctx: CallContext | None = None,
     ) -> torch.Tensor:
         _ = cache  # cache parameter is reserved for future use
-        result = self.tensor_dict(device=device, names=[name], options=options, ctx=ctx)
+        result = self.subset([name]).tensor_dict(
+            device=device, options=options, ctx=ctx
+        )
         if name not in result:
             raise ArtifactError(
                 f"Tensor '{name}' missing from materialized payload",
@@ -506,18 +511,22 @@ class Artifact:
         *,
         slices: Mapping[str, Sequence[object]] | None = None,
         transpose: Mapping[str, Sequence[tuple[int, int]]] | None = None,
-        names: Sequence[str] | None = None,
     ) -> Artifact:
         """Return a derived lazy view; no RPCs occur until materialization or exists()."""
         return self._derive_view(
             slices=slices,
             transpose=transpose,
-            subset=list(names) if names is not None else None,
+            subset=None,
             composer=ViewSpecComposer(),
         )
 
     def subset(self, names: Sequence[str]) -> Artifact:
-        return self.view(names=names)
+        return self._derive_view(
+            slices=None,
+            transpose=None,
+            subset=list(names),
+            composer=ViewSpecComposer(),
+        )
 
     def slice(self, slices: Mapping[str, Sequence[object]]) -> Artifact:
         return self.view(slices=slices)
@@ -743,18 +752,16 @@ class Artifact:
                     selection_order=selection_order,
                 )
                 try:
+                    selection = self._build_region_layout_selection(
+                        region_layout=region_layout,
+                        view_spec_proto=view_spec_proto,
+                    )
                     response = client.materialize_into_target_v2(
-                        artifact_id=self._ensure_identified(),
+                        selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
-                        tensor_names=region_layout.selection_names,
-                        view=view_spec_proto,
-                        view_id=region_layout.view_id
-                        if view_spec_proto is None
-                        else None,
-                        view_subset_hash=region_layout.view_subset_hash,
                         operation_id=operation_id,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -995,15 +1002,18 @@ class Artifact:
                     selection_order=selection_order,
                 )
                 try:
+                    selection = self._build_region_layout_selection(
+                        region_layout=region_layout,
+                        view_spec_proto=view_spec_proto,
+                    )
                     response = client.materialize_into_mapped_target(
-                        artifact_id=self._ensure_identified(),
+                        selection=selection,
                         target_layout=region_layout.layout,
                         device_uuid=device_uuid_for(device_id),
                         preference=preference,
                         source_policy=source_policy,
                         copy_plan=copy_plan,
                         dst_tensors=target_tensors,
-                        view=view_spec_proto,
                         operation_id=operation_id,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1134,12 +1144,9 @@ class Artifact:
         self,
         *,
         device: torch.device | str,
-        names: Sequence[str] | None = None,
     ) -> dict[str, torch.Tensor]:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self.tensor_dict(device=device, names=names)
-        )
+        return await loop.run_in_executor(None, lambda: self.tensor_dict(device=device))
 
     def prefetch(
         self,
@@ -1182,15 +1189,9 @@ class Artifact:
         daemon_id = (
             getattr(runtime, "daemon_id", None) or None
         ) or runtime.daemon_endpoint
-        view_id = self._control_plane_view_id(runtime)
-        view_subset_hash: bytes | None = None
-        if self._view_metadata is not None and self._view_metadata.tensor_names:
-            view_subset_hash = compute_view_subset_hash(
-                self._view_metadata.tensor_names
-            )
-        selection_hash = compute_selection_hash(
-            view_id=view_id, view_subset_hash=view_subset_hash
-        ).hex()
+        selection = self._build_artifact_selection()
+        view_id = selection.view_id
+        selection_hash = bytes(selection.selection_hash).hex()
 
         deterministic_replica_uuid: str | None = None
         if ctx is not None and ctx.idempotency_key:
@@ -1507,8 +1508,6 @@ class Artifact:
         return store, store._runtime, store._materialization
 
     def _control_plane_view_id(self, runtime: "StoreRuntimeContext") -> str:
-        if self._view_metadata is not None:
-            return str(self._view_metadata.view_id)
         if self._view_spec is None or self._view_spec.is_identity:
             return ""
         view_proto = self._view_spec.proto
@@ -1540,6 +1539,121 @@ class Artifact:
             raise ArtifactError(
                 "Failed to compute view_id for control-plane action",
                 status_code="INTERNAL",
+                retryable=False,
+            ) from exc
+
+    def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
+        artifact_id = self._ensure_identified()
+        runtime = self._runtime_if_available()
+
+        view_spec_proto: common_pb2.ViewSpec | None = None
+        if self._view_spec is not None and not self._view_spec.is_identity:
+            view_spec_proto = self._view_spec.proto
+            if view_spec_proto is None:
+                raise ArtifactError(
+                    "View spec proto missing while building selection",
+                    status_code="FAILED_PRECONDITION",
+                    retryable=False,
+                )
+
+        selection_names: tuple[str, ...] = ()
+        if self._view_metadata is not None and self._view_metadata.tensor_names:
+            selection_names = tuple(self._view_metadata.tensor_names)
+
+        canonical_index_bytes = self._canonical_index_bytes
+        if canonical_index_bytes is None and runtime is not None:
+            canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
+                artifact_id
+            )
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "Canonical index bytes missing while building selection",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        has_transform = bool(view_spec_proto is not None and view_spec_proto.tensors)
+        has_subset = bool(selection_names)
+        layout_index_bytes: bytes | None = None
+        if self._view_metadata is not None and self._view_metadata.view_index_bytes:
+            layout_index_bytes = bytes(self._view_metadata.view_index_bytes)
+        elif has_transform or has_subset:
+            layout_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=selection_names,
+            )
+
+        try:
+            return build_artifact_selection(
+                artifact_id=artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                layout_index_bytes=layout_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=selection_names,
+            )
+        except ValueError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            ) from exc
+
+    def _build_region_layout_selection(
+        self,
+        *,
+        region_layout,
+        view_spec_proto: common_pb2.ViewSpec | None,
+    ) -> common_pb2.ArtifactSelection:
+        artifact_id = self._ensure_identified()
+        canonical_index_bytes = self._canonical_index_bytes
+        runtime = self._runtime_if_available()
+        if canonical_index_bytes is None and runtime is not None:
+            canonical_index_bytes = runtime.ensure_client().get_artifact_index_by_id(
+                artifact_id
+            )
+        if canonical_index_bytes is None:
+            raise ArtifactError(
+                "Canonical index bytes missing while building region selection",
+                status_code="FAILED_PRECONDITION",
+                retryable=False,
+            )
+
+        subset_hash = bytes(region_layout.view_subset_hash or b"")
+        selection_names: tuple[str, ...] = (
+            tuple(region_layout.selection_names) if subset_hash else ()
+        )
+        layout_index_bytes: bytes | None = None
+        if (
+            region_layout.layout.index_kind
+            == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
+        ):
+            if region_layout.view_index_bytes:
+                layout_index_bytes = bytes(region_layout.view_index_bytes)
+            else:
+                layout_index_bytes = compute_selected_index_bytes(
+                    canonical_index_bytes=canonical_index_bytes,
+                    view_spec=view_spec_proto,
+                    tensor_names=selection_names,
+                )
+
+        try:
+            return build_artifact_selection(
+                artifact_id=artifact_id,
+                canonical_index_bytes=canonical_index_bytes,
+                layout_index_bytes=layout_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=selection_names,
+                view_subset_hash=subset_hash if subset_hash else None,
+                view_id=str(region_layout.view_id or ""),
+                allow_view_id_without_spec=bool(
+                    region_layout.view_id and view_spec_proto is None
+                ),
+            )
+        except ValueError as exc:
+            raise ArtifactError(
+                str(exc),
+                status_code="INVALID_ARGUMENT",
                 retryable=False,
             ) from exc
 
@@ -1660,7 +1774,7 @@ class Artifact:
     def _effective_index(self) -> CanonicalIndex:
         base_index = self._ensure_metadata()
         if self._view_metadata is not None:
-            return self._view_metadata.canonical_index
+            return self._view_metadata.selected_index
         return base_index
 
     @staticmethod
@@ -1736,6 +1850,7 @@ class Artifact:
             )
         composed_spec, view_cache, depth = composer.compose(
             canonical_index=base_index,
+            identity_index_bytes=self._canonical_index_bytes,
             parent_spec=self._view_spec,
             child_spec=child_spec,
             parent_depth=self._view_depth,
@@ -1772,7 +1887,7 @@ class Artifact:
         self._canonical_index = canonical_index
         self._generation = generation
         effective_index = (
-            self._view_metadata.canonical_index
+            self._view_metadata.selected_index
             if self._view_metadata is not None
             else canonical_index
         )
@@ -1829,12 +1944,12 @@ class Artifact:
                     )
                 resolved_view_id = compute_view_id(view_proto, canonical_index_bytes)
             view_cache = ViewMetadataCache(
-                view_id=str(resolved_view_id or view_hash),
+                view_id=str(resolved_view_id or ""),
                 view_index_bytes=view_index_bytes,
                 view_data_hash=str(view_hash),
                 tensor_names=subset_names,
                 nbytes=sum(entry.size_bytes for entry in view_index.entries),
-                canonical_index=view_index,
+                selected_index=view_index,
             )
             with self._lock:
                 self._view_metadata = view_cache

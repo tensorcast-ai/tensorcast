@@ -34,7 +34,7 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 
 - `tensorcast.artifact(...)` / `Store.artifact(...)` provide lazy handles that
   expose metadata (`tensor_names`, `tensor_meta`, `describe`) and selective
-  materialization (`tensor_dict(names=...)`, `tensor(name, ...)`, `tensor_into(...)`) as the canonical retrieval surface.
+  materialization (`subset(...).tensor_dict(...)`, `tensor(name, ...)`, `tensor_into(...)`) as the canonical retrieval surface.
 - Handles accept whichever identifiers are available (`artifact_id`, key, or
   disk path). At least one identifier is required, but resolved handles keep all
   known hints so `with_fallback(...)` and `to_dict()/from_dict()` remain valid
@@ -67,7 +67,7 @@ By default, the Python SDK surfaces a concise `ArtifactError` stack without gRPC
 ## Materialization v2 (descriptor streaming)
 
 - `MaterializationPipeline` streams `TensorPayloadDescriptor` + tensor pairs from the daemon v2 surface (`tensorcast.proto.daemon.v2`) by default; the v1 path and `TC_ENABLE_MATERIALIZE_V2` flag have been removed.
-- Selective fetch (`tensor_names`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
+- Selective fetch via handle selection (`artifact.subset(...)`) trims descriptors and canonical index bytes; iterator cancellation still routes through `_release_materialized` so CUDA IPC handles are unmapped even on early exit. `tensor_dict_into` / `tensor_into` copies consume descriptors directly without building intermediate dicts.
 - Telemetry attaches per-descriptor attributes (`tc.tensor.count`/`tc.tensor.bytes`) and a subset/full selector to the materialization span, and the client metrics surface attaches the same selector to latency/error/retry series.
 - Disk fallbacks are forwarded to the daemon through `DiskFallbackHint` + `SourcePolicy` (preference + allow flags). Disk‑first sets `preference=PREFER_DISK` and all disk reads stay in the daemon data path.
 - `MemCopyHandle` is lease-aware: the daemon returns a handle (`cuda_ipc_handle` for GPU or `cpu_memfd` for CPU) plus an opaque `lease_token`. The SDK binds that lease token to the returned `torch.Tensor` lifetimes and releases it over the daemon’s local handle plane (UDS).

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "core/common/const/granularity.h"
 #include "core/store/memory_tier_budget.h"
@@ -83,6 +84,32 @@ TEST_CASE("UMA stable lease guards against preemptible marking", "[uma][stable]"
   auto released_state = uma.get_cpu_chunk_state(key, 0);
   REQUIRE(released_state.ok());
   REQUIRE(*released_state == tensorcast::store::replica::ChunkState::HOT);
+}
+
+TEST_CASE("UMA blocks GPU release while GPU export is active", "[uma][gpu_export]") {
+  const size_t chunk_bytes = tensorcast::common::consts::kArtifactChunkDefault;
+  UnifiedMemoryAuthority uma(chunk_bytes);
+
+  ReplicaKey key{
+      .artifact_id = std::string("uma_gpu_export_guard"),
+      .view_id = std::nullopt,
+      .device = {tensorcast::DeviceType::GPU, 0, ""},
+      .replica = 0};
+
+  REQUIRE(uma.allocate(key, chunk_bytes * 2).ok());
+
+  auto export_on = uma.set_exported(key, MemoryLocation::GPU, std::vector<uint32_t>{0}, /*on=*/true);
+  REQUIRE(export_on.ok());
+
+  auto release_while_exported = uma.release_gpu_device(key, /*device_id=*/0, /*drop_allocation=*/true);
+  REQUIRE_FALSE(release_while_exported.ok());
+  REQUIRE(release_while_exported.code() == absl::StatusCode::kFailedPrecondition);
+
+  auto export_off = uma.set_exported(key, MemoryLocation::GPU, std::vector<uint32_t>{0}, /*on=*/false);
+  REQUIRE(export_off.ok());
+
+  auto release_after_unexport = uma.release_gpu_device(key, /*device_id=*/0, /*drop_allocation=*/true);
+  REQUIRE(release_after_unexport.ok());
 }
 
 TEST_CASE("UMA stable lease guards against preemptible marking (memfd)", "[uma][stable][memfd]") {

@@ -42,6 +42,16 @@ def _global_store_not_connected_hint() -> str:
     )
 
 
+def _selection_layout_mismatch_hint() -> str:
+    return (
+        "Client and daemon computed different selection layout hashes. "
+        "This usually means view_index bytes are inconsistent with "
+        "view_spec/tensor_names for the same request. "
+        "Regenerate selection bytes from canonical index + view inputs, "
+        "or retry without passing a custom view_index hint."
+    )
+
+
 def _grpc_details(exc: grpc.RpcError) -> str:
     try:
         details = exc.details()
@@ -161,6 +171,12 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
         status_name = status_code.name if status_code is not None else "UNKNOWN"
         mapped = details or "retrieval failed"
         lowered = mapped.lower()
+        if "selection.logical_layout_hash does not match resolved selection" in mapped:
+            return ArtifactError(
+                _append_hint(mapped, _selection_layout_mismatch_hint()),
+                status_code="INVALID_ARGUMENT",
+                retryable=False,
+            )
         if "globalstoreclient not connected" in lowered:
             return ArtifactError(
                 _append_hint(mapped, _global_store_not_connected_hint()),
@@ -197,6 +213,12 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             mapped = _append_debug_hint(mapped)
         return ArtifactError(mapped, status_code=status_name, retryable=retryable)
     lowered = message.lower()
+    if "selection.logical_layout_hash does not match resolved selection" in message:
+        return ArtifactError(
+            _append_hint(message, _selection_layout_mismatch_hint()),
+            status_code="INVALID_ARGUMENT",
+            retryable=False,
+        )
     if "globalstoreclient not connected" in lowered:
         return ArtifactError(
             _append_hint(message, _global_store_not_connected_hint()),

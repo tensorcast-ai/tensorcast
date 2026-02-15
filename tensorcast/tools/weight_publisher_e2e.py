@@ -27,6 +27,7 @@ from safetensors.torch import save_file
 
 import tensorcast as tc
 from tensorcast import FallbackOptions
+from tensorcast.api.store import artifact as resolve_artifact
 from tensorcast.api.store.runtime import get_context as get_store_context
 from tensorcast.tools.weight_publisher import WeightPublisher, WeightPublisherConfig
 
@@ -245,7 +246,7 @@ class WeightUpdatePublisher:
 
     def _probe_artifact_exists(self, artifact_id: str) -> bool:
         try:
-            return tc.artifact(artifact_id=artifact_id).exists()
+            return resolve_artifact(artifact_id=artifact_id).exists()
         except Exception as exc:  # noqa: BLE001
             if _is_not_found_error(exc):
                 return False
@@ -279,7 +280,9 @@ class WeightUpdatePublisher:
 
     def _probe_materializable(self, *, key: str, version: int) -> bool:
         try:
-            artifact = tc.artifact(key=key).with_fallback(self._fallback_for_checks())
+            artifact = resolve_artifact(key=key).with_fallback(
+                self._fallback_for_checks()
+            )
             tensors = artifact.tensor_dict(device="cpu")
             _validate_payload(version=version, tensors=tensors)
             return True
@@ -382,7 +385,7 @@ class WeightUpdateReceiver:
 
         while time.monotonic() < deadline:
             try:
-                artifact = tc.artifact(key=key).with_fallback(self._fallback)
+                artifact = resolve_artifact(key=key).with_fallback(self._fallback)
                 if not artifact.exists():
                     time.sleep(self._poll_interval_s)
                     continue

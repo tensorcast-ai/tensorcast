@@ -26,8 +26,9 @@ sequenceDiagram
   participant Engine as StoreEngine
   participant GS as Global Store
 
-  SDK->>Daemon: MaterializeByKey/MaterializeReplica (v2)
-  Daemon->>GS: ResolveKeyMapping / RequestReplicaTransport
+  SDK->>Daemon: ResolveKeyMapping (optional)
+  SDK->>Daemon: MaterializeReplica (v2, selection-first)
+  Daemon->>GS: RequestReplicaTransport
   Daemon->>Engine: materialize_replica(AUTO/LOAD_ONLY, hints)
   Engine-->>Daemon: ReplicaHandle (CUDA IPC)
   Daemon-->>SDK: mem_handle + descriptor stream
@@ -56,7 +57,7 @@ sequenceDiagram
   participant GS as Global Store
 
   SDK->>SDK: Build TargetLayout + TargetTensorOffset (canonical or view index)
-  SDK->>Daemon: MaterializeIntoTarget (artifact_id, layout, device_uuid, pid, view/subset)
+  SDK->>Daemon: MaterializeIntoTarget (selection, layout, device_uuid, pid)
   Daemon->>Daemon: Acquire IpcRegionRegistry ref + map IPC handle
   Daemon->>Engine: materialize_into_target(target_ptr, total_size, index_json)
   Engine->>GS: RequestReplicaTransport (if P2P)

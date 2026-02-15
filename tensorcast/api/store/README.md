@@ -14,7 +14,7 @@ managing clients manually.
   `from_disk(...)` for explicit imports.
   Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
-  selective materialization via `tensor_dict(names=...)` and `tensor(name, ...)`.
+  selective materialization via `subset(...).tensor_dict(...)` and `tensor(name, ...)`.
 - `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
   tensor directly into the provided buffer. Only the requested tensor must be
   present in the target mapping, so multi-tensor artifacts no longer require

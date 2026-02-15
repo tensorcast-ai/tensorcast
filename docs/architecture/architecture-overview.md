@@ -80,7 +80,7 @@ graph TD
 ### 3. User Process Worker
 **Role**: PyTorch client process accessing artifacts
 
-- **Interface**: Uses the handle-first facade (`tensorcast.artifact(...).tensor_dict` / `.tensor_into`) backed by the shared Store to request artifacts via daemon `MaterializeByKey` (RFC‑0017).
+- **Interface**: Uses the handle-first facade (`tensorcast.artifact(...).tensor_dict` / `.tensor_into`) backed by the shared Store to request artifacts via daemon `MaterializeReplica`/`MaterializeIntoTarget` with `ArtifactSelection` (RFC‑0017).
 - **Memory Access**: Maps CUDA IPC handles for zero‑copy GPU access; falls back to RAM/DISK as needed
 - **Lifecycle**: Confirms, references, and unloads replicas via daemon RPCs
 - **Lazy Handles**: `tensorcast.artifact(...)` returns a store-bound handle that
@@ -128,15 +128,15 @@ graph TD
 - System designed for eventual consistency
 - **Documentation**: [High Availability Design](./high-availability-design.md)
 
-## Artifact Load Paths (Key‑based)
+## Artifact Load Paths (Selection-first)
 
 ### P2P‑first Loading (Preferred)
 ```
 Client                                 Store Daemon                        Global Store
    |                                         |                                   |
-   |-- MaterializeByKey(key, device, uuid) ->|                                   |
-   |                                          |-- ResolveKeyMapping(key) ------->|
-   |                                          |<----------- artifact_id ---------|
+   |-- ResolveKeyMapping(key) --------------->|                                   |
+   |<---------------- artifact_id ------------|                                   |
+   |-- MaterializeReplica(selection, device)->|                                   |
    |                                          |-- Request Transport ------------>|
    |                                          |<------ Transport Grant ----------|
    |                                          |   (RDMA/TCP transfer from peer) |
@@ -149,9 +149,9 @@ Client                                 Store Daemon                        Globa
 ```
 Client                                 Store Daemon                        Global Store
    |                                         |                                   |
-   |-- MaterializeByKey(key, device, uuid) ->|                                   |
-   |                                          |-- ResolveKeyMapping(key) ------->|
-   |                                          |<-- artifact_id (+ disk location) |
+   |-- ResolveKeyMapping(key) --------------->|                                   |
+   |<-- artifact_id (+ disk location) --------|                                   |
+   |-- MaterializeReplica(selection, device)->|                                   |
    |                                          |   (Load from local disk)         |
    |                                          |-- Register Local Replica ------->|
   |                                          |<------ Replica ID ---------------|
