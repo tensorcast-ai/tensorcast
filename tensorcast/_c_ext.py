@@ -127,6 +127,13 @@ def compute_view_index_bytes(
     )
 
 
+def compute_view_id(
+    canonical_index_bytes: bytes,
+    normalized_ops: Mapping[str, Any],
+) -> str:
+    return _load_c_ext().compute_view_id(canonical_index_bytes, normalized_ops)
+
+
 def get_cuda_memory_handle(device_id: int, memory_ptr: int) -> bytes:
     return _load_c_ext().get_cuda_memory_handle(device_id, memory_ptr)
 
@@ -163,6 +170,7 @@ def save_model_to_disk(
 __all__ = [
     "build_canonical_index_from_safetensors",
     "collect_tensor_storage_graph",
+    "compute_view_id",
     "compute_view_index_bytes",
     "compute_view_registration_plan",
     "get_c_ext",

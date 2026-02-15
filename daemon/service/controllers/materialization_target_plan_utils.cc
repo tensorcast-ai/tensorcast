@@ -14,7 +14,6 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/str_cat.h"
 #include "absl/types/span.h"
-#include "core/common/selection_identity.h"
 #include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_layout_utils.h"
 #include "daemon/service/controllers/materialization_mapped_copy_plan_utils.h"
@@ -22,6 +21,7 @@
 #include "daemon/service/controllers/materialization_mapped_view_narrow_utils.h"
 #include "daemon/service/controllers/materialization_mapped_view_spec_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
+#include "daemon/service/controllers/selection_validation_utils.h"
 #include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon::materialization_target_plan {
@@ -37,7 +37,6 @@ using materialization_layout::CanonicalIndexTable;
 using materialization_layout::parse_canonical_index;
 using materialization_layout::TargetOffsetEntry;
 using materialization_mapped_copy_plan::build_copy_plan;
-using materialization_mapped_copy_plan::BuildCopyPlanResult;
 using materialization_mapped_copy_plan::ViewNarrowSpec;
 using materialization_mapped_target_layout::validate_mapped_target_layout;
 using materialization_mapped_target_layout::ValidatedMappedTargetLayout;
@@ -68,7 +67,7 @@ struct TargetLayoutTensorSelection {
 };
 
 Status collect_target_layout_tensor_selection(
-    const v2::MaterializeIntoTargetRequest& req,
+    const tensorcast::common::v1::ArtifactSelection& request_selection,
     const std::vector<TargetOffsetEntry>& offsets,
     RecordMaterializeResultFn record_result,
     TargetLayoutTensorSelection& selection) {
@@ -90,29 +89,29 @@ Status collect_target_layout_tensor_selection(
     selection.layout_names.push_back(entry.name);
   }
 
-  if (req.tensor_names_size() == 0) {
+  if (request_selection.tensor_names_size() == 0) {
     return Status::OK;
   }
 
   absl::flat_hash_set<std::string> request_name_set;
-  selection.request_names.reserve(req.tensor_names_size());
-  request_name_set.reserve(req.tensor_names_size());
-  for (const auto& name : req.tensor_names()) {
+  selection.request_names.reserve(request_selection.tensor_names_size());
+  request_name_set.reserve(request_selection.tensor_names_size());
+  for (const auto& name : request_selection.tensor_names()) {
     selection.request_names.push_back(name);
     request_name_set.insert(name);
   }
-  if (request_name_set.size() != static_cast<size_t>(req.tensor_names_size())) {
+  if (request_name_set.size() != static_cast<size_t>(request_selection.tensor_names_size())) {
     record_error(record_result, "tensor_name_duplicate");
-    return {StatusCode::INVALID_ARGUMENT, "tensor_names must not contain duplicates"};
+    return {StatusCode::INVALID_ARGUMENT, "selection.tensor_names must not contain duplicates"};
   }
   if (request_name_set.size() != selection.layout_name_set.size()) {
     record_error(record_result, "tensor_name_mismatch");
-    return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+    return {StatusCode::INVALID_ARGUMENT, "selection.tensor_names do not match target_layout entries"};
   }
   for (const auto& name : selection.layout_name_set) {
     if (!request_name_set.contains(name)) {
       record_error(record_result, "tensor_name_mismatch");
-      return {StatusCode::INVALID_ARGUMENT, "tensor_names do not match target_layout entries"};
+      return {StatusCode::INVALID_ARGUMENT, "selection.tensor_names do not match target_layout entries"};
     }
   }
 
@@ -303,40 +302,35 @@ struct TargetViewResolution {
   bool has_view_transform{false};
 };
 
-Status parse_target_view_identity(const v2::MaterializeIntoTargetRequest& req, TargetViewResolution& view_resolution) {
-  switch (req.view_identity_case()) {
-    case v2::MaterializeIntoTargetRequest::kView: {
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        return to_grpc_status(spec_or.status());
-      }
-      view_resolution.view_spec = std::move(*spec_or);
-      view_resolution.view_spec_proto = req.view();
-      break;
+Status parse_target_view_identity(
+    const tensorcast::common::v1::ArtifactSelection& selection,
+    TargetViewResolution& view_resolution) {
+  if (selection.has_view_spec()) {
+    auto spec_or = convert_view_spec(selection.view_spec());
+    if (!spec_or.ok()) {
+      return to_grpc_status(spec_or.status());
     }
-    case v2::MaterializeIntoTargetRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        view_resolution.view_id_requested = true;
-        view_resolution.request_view_id = req.view_id();
-      }
-      break;
-    }
-    case v2::MaterializeIntoTargetRequest::VIEW_IDENTITY_NOT_SET:
-      break;
+    view_resolution.view_spec = std::move(*spec_or);
+    view_resolution.view_spec_proto = selection.view_spec();
+  }
+  if (!selection.view_id().empty()) {
+    view_resolution.view_id_requested = true;
+    view_resolution.request_view_id = selection.view_id();
   }
   return Status::OK;
 }
 
 Status hydrate_target_view_from_metadata(
     store::StoreEngine& engine,
-    const v2::MaterializeIntoTargetRequest& req,
+    std::string_view resolved_artifact_id,
     RecordMaterializeResultFn record_result,
     TargetViewResolution& view_resolution) {
-  if (!view_resolution.view_id_requested || !view_resolution.request_view_id.has_value()) {
+  if (!view_resolution.view_id_requested || !view_resolution.request_view_id.has_value() ||
+      view_resolution.view_spec.has_value()) {
     return Status::OK;
   }
 
-  auto view_meta_or = engine.get_view_metadata(req.artifact_id(), *view_resolution.request_view_id);
+  auto view_meta_or = engine.get_view_metadata(std::string(resolved_artifact_id), *view_resolution.request_view_id);
   if (!view_meta_or.ok()) {
     record_error(record_result, "view_meta_missing");
     return to_grpc_status(view_meta_or.status());
@@ -531,46 +525,29 @@ Status validate_target_layout_aliases(
   return Status::OK;
 }
 
-Status validate_target_view_subset_hash(
-    const v2::MaterializeIntoTargetRequest& req,
-    bool has_subset,
-    bool has_ordered_selection,
-    const std::vector<std::string>& layout_names,
-    const std::vector<std::string>& request_names,
-    RecordMaterializeResultFn record_result,
-    std::string& view_subset_hash) {
-  view_subset_hash.clear();
-  if (has_subset) {
-    const auto& subset_names = has_ordered_selection ? request_names : layout_names;
-    view_subset_hash = common::compute_view_subset_hash_bytes(absl::MakeSpan(subset_names));
-    if (!req.view_subset_hash().empty() && req.view_subset_hash() != view_subset_hash) {
-      record_error(record_result, "subset_hash_mismatch");
-      return {StatusCode::INVALID_ARGUMENT, "view_subset_hash does not match tensor_names"};
-    }
-    return Status::OK;
-  }
-  if (!req.view_subset_hash().empty()) {
-    record_error(record_result, "subset_hash_mismatch");
-    return {StatusCode::INVALID_ARGUMENT, "view_subset_hash must be empty for full selection"};
-  }
-  return Status::OK;
-}
-
 } // namespace
 
 Status build_target_materialization_plan(
     store::StoreEngine& engine,
+    std::string_view resolved_artifact_id,
     const v2::MaterializeIntoTargetRequest& req,
     const v2::TargetLayout& layout,
     const std::vector<TargetOffsetEntry>& offsets,
     std::string canonical_index_json,
     RecordMaterializeResultFn record_result,
     TargetMaterializationPlan& plan) {
+  if (!req.has_selection()) {
+    record_error(record_result, "selection_missing");
+    return {StatusCode::INVALID_ARGUMENT, "selection is required"};
+  }
+  const auto& selection = req.selection();
+
   plan = TargetMaterializationPlan{};
   plan.canonical_index_json = std::move(canonical_index_json);
 
   TargetLayoutTensorSelection tensor_selection;
-  auto tensor_selection_status = collect_target_layout_tensor_selection(req, offsets, record_result, tensor_selection);
+  auto tensor_selection_status =
+      collect_target_layout_tensor_selection(selection, offsets, record_result, tensor_selection);
   if (!tensor_selection_status.ok()) {
     return tensor_selection_status;
   }
@@ -591,11 +568,12 @@ Status build_target_materialization_plan(
   const bool has_ordered_selection = !tensor_selection.request_names.empty();
 
   TargetViewResolution view_resolution;
-  auto parse_view_status = parse_target_view_identity(req, view_resolution);
+  auto parse_view_status = parse_target_view_identity(selection, view_resolution);
   if (!parse_view_status.ok()) {
     return parse_view_status;
   }
-  auto hydrate_view_status = hydrate_target_view_from_metadata(engine, req, record_result, view_resolution);
+  auto hydrate_view_status =
+      hydrate_target_view_from_metadata(engine, resolved_artifact_id, record_result, view_resolution);
   if (!hydrate_view_status.ok()) {
     return hydrate_view_status;
   }
@@ -671,16 +649,44 @@ Status build_target_materialization_plan(
     return offset_validation_status;
   }
 
-  auto subset_hash_status = validate_target_view_subset_hash(
-      req,
-      plan.has_subset,
-      has_ordered_selection,
-      tensor_selection.layout_names,
-      tensor_selection.request_names,
-      record_result,
-      plan.view_subset_hash);
+  std::string_view selection_error_reason;
+  auto subset_hash_status = selection_validation::compute_and_validate_view_subset_hash(
+      selection,
+      (plan.has_subset || has_ordered_selection)
+          ? absl::MakeSpan(has_ordered_selection ? tensor_selection.request_names : tensor_selection.layout_names)
+          : absl::Span<const std::string>(),
+      plan.view_subset_hash,
+      &selection_error_reason);
   if (!subset_hash_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
     return subset_hash_status;
+  }
+
+  const std::vector<std::string> empty_selection_names;
+  const std::vector<std::string>& resolved_selection_names = (plan.has_subset || has_ordered_selection)
+      ? (has_ordered_selection ? tensor_selection.request_names : tensor_selection.layout_names)
+      : empty_selection_names;
+
+  const std::string resolved_view_id = view_resolution.resolved_view_id.value_or("");
+  const bool needs_view_index = layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW;
+  const tensorcast::common::v1::ViewSpec* resolved_view_spec =
+      (view_resolution.has_view_transform && view_resolution.view_spec_proto.has_value())
+      ? &*view_resolution.view_spec_proto
+      : nullptr;
+  auto selection_identity_status = selection_validation::validate_hashes_and_build_resolved_selection(
+      selection,
+      resolved_artifact_id,
+      resolved_view_id,
+      plan.selected_index_json,
+      needs_view_index,
+      resolved_selection_names,
+      plan.view_subset_hash,
+      resolved_view_spec,
+      plan.resolved_selection,
+      &selection_error_reason);
+  if (!selection_identity_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return selection_identity_status;
   }
 
   plan.layout_names = std::move(tensor_selection.layout_names);
@@ -702,8 +708,39 @@ Status build_mapped_target_materialization_plan(
     std::string canonical_index_json,
     RecordMaterializeResultFn record_result,
     MappedTargetMaterializationPlan& plan) {
+  if (!req.has_selection()) {
+    record_error(record_result, "selection_missing");
+    return {StatusCode::INVALID_ARGUMENT, "selection is required"};
+  }
+  const auto& selection = req.selection();
+  if (selection.artifact_id().empty()) {
+    record_error(record_result, "selection_missing");
+    return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
+  }
+
   plan = MappedTargetMaterializationPlan{};
   plan.canonical_index_json = std::move(canonical_index_json);
+
+  std::vector<std::string> ordered_selection_names;
+  ordered_selection_names.reserve(selection.tensor_names_size());
+  absl::flat_hash_set<std::string> selection_name_set;
+  selection_name_set.reserve(selection.tensor_names_size());
+  for (const auto& name : selection.tensor_names()) {
+    ordered_selection_names.push_back(name);
+    selection_name_set.insert(name);
+  }
+  if (selection_name_set.size() != static_cast<size_t>(selection.tensor_names_size())) {
+    record_error(record_result, "tensor_name_duplicate");
+    return {StatusCode::INVALID_ARGUMENT, "selection.tensor_names must not contain duplicates"};
+  }
+  std::string view_subset_hash;
+  std::string_view selection_error_reason;
+  auto subset_hash_status = selection_validation::compute_and_validate_view_subset_hash(
+      selection, absl::MakeSpan(ordered_selection_names), view_subset_hash, &selection_error_reason);
+  if (!subset_hash_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return subset_hash_status;
+  }
 
   ValidationErrorReason mapped_layout_reason = ValidationErrorReason::kUnknown;
   auto mapped_layout_or = validate_mapped_target_layout(req, offsets, &mapped_layout_reason);
@@ -721,6 +758,8 @@ Status build_mapped_target_materialization_plan(
     return to_grpc_status(view_spec_or.status());
   }
   plan.view_spec = std::move(*view_spec_or);
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
+  std::optional<std::string> resolved_view_id;
 
   ViewNarrowErrorReason view_narrow_reason = ViewNarrowErrorReason::kUnknown;
   auto view_narrows_or = build_view_narrows(plan.view_spec, &view_narrow_reason);
@@ -731,18 +770,36 @@ Status build_mapped_target_materialization_plan(
   absl::flat_hash_map<std::string, ViewNarrowSpec> view_narrows = std::move(*view_narrows_or);
 
   if (plan.view_spec.has_value()) {
+    view_spec_proto = build_view_spec_proto(*plan.view_spec);
     auto view_plan_or = store::StoreEngine::compute_view_plan(plan.canonical_index_json, *plan.view_spec);
     if (!view_plan_or.ok()) {
       record_error(record_result, "view_plan_failed");
       return to_grpc_status(view_plan_or.status());
     }
     plan.view_plan = std::move(*view_plan_or);
+    if (plan.view_plan->is_identity) {
+      if (!selection.view_id().empty()) {
+        record_error(record_result, "view_identity_mismatch");
+        return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec"};
+      }
+    } else {
+      auto view_id_or = compute_view_id_from_spec(*view_spec_proto, plan.canonical_index_json);
+      if (!view_id_or.ok()) {
+        return to_grpc_status(view_id_or.status());
+      }
+      if (!selection.view_id().empty() && selection.view_id() != *view_id_or) {
+        record_error(record_result, "view_id_mismatch");
+        return {StatusCode::INVALID_ARGUMENT, "selection.view_id does not match selection.view_spec"};
+      }
+      resolved_view_id = *view_id_or;
+    }
   }
 
   std::string source_index_json = plan.canonical_index_json;
   if (plan.view_plan.has_value() && !plan.view_plan->is_identity) {
     source_index_json = plan.view_plan->view_index_json;
   }
+  plan.selected_index_json = source_index_json;
   auto source_table_or = parse_canonical_index(source_index_json);
   if (!source_table_or.ok()) {
     record_error(record_result, "index_parse_failed");
@@ -758,6 +815,25 @@ Status build_mapped_target_materialization_plan(
   }
   plan.copy_plan = std::move(*copy_plan_or);
   plan.copy_plan.map.total_bytes = plan.logical_total_size;
+
+  const bool needs_view_index = resolved_view_id.has_value();
+  const tensorcast::common::v1::ViewSpec* resolved_view_spec =
+      (resolved_view_id.has_value() && view_spec_proto.has_value()) ? &*view_spec_proto : nullptr;
+  auto selection_identity_status = selection_validation::validate_hashes_and_build_resolved_selection(
+      selection,
+      resolved_artifact_id,
+      resolved_view_id.value_or(""),
+      plan.selected_index_json,
+      needs_view_index,
+      ordered_selection_names,
+      view_subset_hash,
+      resolved_view_spec,
+      plan.resolved_selection,
+      &selection_error_reason);
+  if (!selection_identity_status.ok()) {
+    record_error(record_result, selection_error_reason.empty() ? "transfer_error" : selection_error_reason);
+    return selection_identity_status;
+  }
   return Status::OK;
 }
 

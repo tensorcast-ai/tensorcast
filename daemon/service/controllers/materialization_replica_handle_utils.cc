@@ -9,8 +9,10 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 
 namespace tensorcast::daemon::materialization_replica_handle {
@@ -125,6 +127,15 @@ absl::Status bind_replica_handle_for_response(
   if (!session_status.ok()) {
     return session_status;
   }
+  auto rollback = absl::MakeCleanup([&]() {
+    if (!replica_uuid.empty()) {
+      (void)sessions.erase(std::string(replica_uuid));
+    }
+    if (allow_pid_ref && effective_pid > 0) {
+      refs.drop_ref(handle.replica_key, effective_pid);
+    }
+    (void)engine.unload_replica(handle.replica_key);
+  });
 
   if (cpu_target) {
     if (!handle.cpu_memfd_region.has_value()) {
@@ -150,13 +161,6 @@ absl::Status bind_replica_handle_for_response(
     };
     auto token_or = handle_leases->mint_cpu_memfd_lease(handle.replica_key, effective_pid, memfd_desc, *chunks_or);
     if (!token_or.ok()) {
-      if (!replica_uuid.empty()) {
-        (void)sessions.erase(std::string(replica_uuid));
-      }
-      if (effective_pid > 0) {
-        refs.drop_ref(handle.replica_key, effective_pid);
-      }
-      (void)engine.unload_replica(handle.replica_key);
       return token_or.status();
     }
 
@@ -164,15 +168,17 @@ absl::Status bind_replica_handle_for_response(
     cpu->set_size_bytes(region.size_bytes);
     cpu->set_offset_bytes(region.offset_bytes);
     out_mem_handle.set_lease_token(*token_or);
+    std::move(rollback).Cancel();
     return absl::OkStatus();
   }
 
-  if (handle.cuda_ipc_handle.is_valid()) {
-    auto handle_view = handle.cuda_ipc_handle.as_string_view();
-    out_mem_handle.set_cuda_ipc_handle(handle_view.data(), handle_view.size());
+  if (!handle.cuda_ipc_handle.is_valid()) {
+    return absl::FailedPreconditionError("CUDA IPC handle unavailable for replica");
   }
+  auto handle_view = handle.cuda_ipc_handle.as_string_view();
+  out_mem_handle.set_cuda_ipc_handle(handle_view.data(), handle_view.size());
 
-  return attach_cuda_lease_for_replica_key(
+  auto lease_status = attach_cuda_lease_for_replica_key(
       handle.replica_key,
       effective_pid,
       handle_leases,
@@ -180,6 +186,12 @@ absl::Status bind_replica_handle_for_response(
       lease_log_context,
       on_lease_create_failed,
       out_mem_handle);
+  if (!lease_status.ok()) {
+    return lease_status;
+  }
+
+  std::move(rollback).Cancel();
+  return absl::OkStatus();
 }
 
 } // namespace tensorcast::daemon::materialization_replica_handle

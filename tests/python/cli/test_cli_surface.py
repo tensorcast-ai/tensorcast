@@ -57,6 +57,7 @@ def test_daemon_start_passes_options(monkeypatch):
         )
 
     monkeypatch.setattr(cli_mod.runtime, "start", _fake_start)
+    monkeypatch.setattr(cli_mod.runtime, "status", lambda _sid=None: None)
 
     runner = CliRunner()
     res = runner.invoke(

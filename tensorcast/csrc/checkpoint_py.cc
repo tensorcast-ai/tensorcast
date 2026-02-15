@@ -39,6 +39,7 @@
 #include "core/store/materialization/dataplane/metadata/safetensors_util.h"
 #include "core/store/materialization/dataplane/metadata/source_hash.h"
 #include "core/store/materialization/dataplane/sources/file_partition_source.h"
+#include "core/store/materialization/dataplane/view/view_identity.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
 
 namespace py = pybind11;
@@ -391,6 +392,16 @@ py::dict compute_view_index_bytes_wrapper(
   result["view_size_bytes"] = py::int_(plan.view_size_bytes);
   result["is_identity"] = plan.is_identity;
   return result;
+}
+
+std::string compute_view_id_wrapper(py::bytes canonical_index_bytes, const py::dict& spec_dict) {
+  const std::string canonical_index_json = canonical_index_bytes.cast<std::string>();
+  ViewSpec spec = build_view_spec_from_py(spec_dict);
+  auto view_id_or = tensorcast::store::loader::compute_view_id_from_spec(spec, canonical_index_json);
+  if (!view_id_or.ok()) {
+    PY_THROW_WITH_LOG(PyExc_RuntimeError, view_id_or.status().ToString());
+  }
+  return *view_id_or;
 }
 
 } // namespace
@@ -987,6 +998,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           py::arg("normalized_ops"),
           py::arg("subset_names") = py::none(),
           "Compute packed view index bytes using the core ViewPlanner")
+      .def(
+          "compute_view_id",
+          &compute_view_id_wrapper,
+          py::arg("canonical_index_bytes"),
+          py::arg("normalized_ops"),
+          "Compute deterministic view_id using core semantic canonicalization")
       .def(
           "restore_tensors",
           &tensorcast::checkpoint::restore_tensors,

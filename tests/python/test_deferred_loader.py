@@ -233,7 +233,9 @@ def test_deferred_loader_commit_preserves_order(
 
     assert len(client.materialize_calls) == 1
     call = client.materialize_calls[0]
-    assert tuple(call["tensor_names"]) == ("beta", "alpha")
+    selection = call["selection"]
+    assert tuple(selection.tensor_names) == ()
+    assert bytes(selection.view_subset_hash) == b""
     layout = call["target_layout"]
     assert layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
     commit_result = slot.commit_result
@@ -259,8 +261,9 @@ def test_deferred_loader_byte_space_full_selection_has_empty_selection(
 
     assert len(client.materialize_calls) == 1
     call = client.materialize_calls[0]
-    assert tuple(call["tensor_names"]) == ()
-    assert call["view_subset_hash"] == b""
+    selection = call["selection"]
+    assert tuple(selection.tensor_names) == ()
+    assert bytes(selection.view_subset_hash) == b""
     layout = call["target_layout"]
     assert (
         layout.index_kind
@@ -284,8 +287,9 @@ def test_deferred_loader_byte_space_safetensors_index(
 
     assert len(client.materialize_calls) == 1
     call = client.materialize_calls[0]
-    assert tuple(call["tensor_names"]) == ()
-    assert call["view_subset_hash"] == b""
+    selection = call["selection"]
+    assert tuple(selection.tensor_names) == ()
+    assert bytes(selection.view_subset_hash) == b""
     layout = call["target_layout"]
     assert (
         layout.index_kind

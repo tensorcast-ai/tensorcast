@@ -243,7 +243,7 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   }
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped");
+  req.mutable_selection()->set_artifact_id("artifact_mapped");
   req.set_device_uuid(device_key.uuid);
   req.set_pid(owner_pid);
   req.set_preference(tensorcast::daemon::v2::SOURCE_PREFERENCE_PREFER_DISK);
@@ -332,7 +332,7 @@ TEST_CASE("MaterializeIntoMappedTarget rejects dst coverage gaps", "[daemon][mat
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_gap");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_gap");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -422,7 +422,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_overlap");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_overlap");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -493,7 +493,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_mixed_dim");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_mixed_dim");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -563,7 +563,7 @@ TEST_CASE(
   MappedFixture fix;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_bad_version");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_bad_version");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -613,7 +613,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_non_contig");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_non_contig");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -672,7 +672,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_offset_mismatch");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_offset_mismatch");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -729,7 +729,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_missing_dst_coverage");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_missing_dst_coverage");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -806,7 +806,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_view_transpose");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_view_transpose");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -851,7 +851,7 @@ TEST_CASE(
   entry->mutable_dst_range()->set_end(2);
   req.mutable_copy_plan()->CopyFrom(plan);
 
-  auto* view = req.mutable_view();
+  auto* view = req.mutable_selection()->mutable_view_spec();
   auto& ops = (*view->mutable_tensors())["src"];
   auto* transpose = ops.add_ops()->mutable_transpose();
   transpose->set_dim0(0);
@@ -873,7 +873,7 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_multiple_narrow");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_multiple_narrow");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
 
@@ -916,7 +916,7 @@ TEST_CASE(
   entry->mutable_dst_range()->set_end(8);
   req.mutable_copy_plan()->CopyFrom(plan);
 
-  auto* view = req.mutable_view();
+  auto* view = req.mutable_selection()->mutable_view_spec();
   auto& ops = (*view->mutable_tensors())["src"];
   auto* narrow0 = ops.add_ops()->mutable_narrow();
   narrow0->set_dim(0);
@@ -943,10 +943,10 @@ TEST_CASE(
   fix.global_store_client->canonical_index_json = canonical_index_json;
 
   MaterializeIntoMappedTargetRequest req;
-  req.set_artifact_id("artifact_mapped_unknown_view");
+  req.mutable_selection()->set_artifact_id("artifact_mapped_unknown_view");
   req.set_device_uuid("gpu-0");
   req.set_pid(123);
-  req.set_view_id("missing-view-id");
+  req.mutable_selection()->set_view_id("missing-view-id");
 
   auto* layout = req.mutable_target_layout();
   layout->set_layout_kind(tensorcast::daemon::v2::TargetLayout::LAYOUT_KIND_COALESCED_UNSPECIFIED);

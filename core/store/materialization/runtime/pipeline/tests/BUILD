@@ -40,3 +40,14 @@ cc_test(
         "@catch2//:catch2_main",
     ],
 )
+
+cc_test(
+    name = "verification_stage_policy_test",
+    srcs = ["verification_stage_policy_test.cc"],
+    deps = [
+        "//core/store:store_engine_options",
+        "//core/store/materialization/runtime/pipeline:ingestion_pipeline",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)

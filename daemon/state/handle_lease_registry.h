@@ -67,12 +67,14 @@ class HandleLeaseRegistry {
   enum class HandleKind : uint8_t { kCudaIpc = 0, kCpuMemfd = 1 };
 
   struct CpuExportState;
+  struct GpuExportState;
 
   struct LeaseRecord {
     HandleKind kind{HandleKind::kCudaIpc};
     store::loading::ReplicaKey key;
     SessionLifecycleManager::LeaseId lease_id{0};
     std::shared_ptr<CpuExportState> cpu_export_state;
+    std::shared_ptr<GpuExportState> gpu_export_state;
   };
 
   struct CpuExportState {
@@ -86,6 +88,14 @@ class HandleLeaseRegistry {
     std::shared_ptr<void> export_keepalive;
   };
 
+  struct GpuExportState {
+    absl::CondVar cv;
+    bool ready{false};
+    absl::Status status;
+    uint64_t refcount{0};
+    std::vector<uint32_t> chunks;
+  };
+
   [[nodiscard]] std::string mint_token_locked() ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
   [[nodiscard]] absl::Status maybe_rate_limit_mint_locked(absl::Time now) ABSL_EXCLUSIVE_LOCKS_REQUIRED(mu_);
 
@@ -94,6 +104,9 @@ class HandleLeaseRegistry {
       CpuMemfdDescriptor memfd,
       absl::Span<const uint32_t> exported_chunks);
   void release_cpu_export_state_(const store::loading::ReplicaKey& key, const std::shared_ptr<CpuExportState>& state);
+  [[nodiscard]] absl::StatusOr<std::shared_ptr<GpuExportState>> acquire_gpu_export_state_(
+      const store::loading::ReplicaKey& key);
+  void release_gpu_export_state_(const store::loading::ReplicaKey& key, const std::shared_ptr<GpuExportState>& state);
 
   const Options opts_;
   store::StoreEngine* engine_;
@@ -106,6 +119,8 @@ class HandleLeaseRegistry {
   absl::flat_hash_map<std::string, LeaseRecord> leases_ ABSL_GUARDED_BY(mu_);
   absl::flat_hash_map<store::loading::ReplicaKey, std::shared_ptr<CpuExportState>, store::loading::ReplicaKeyHash>
       cpu_exports_ ABSL_GUARDED_BY(mu_);
+  absl::flat_hash_map<store::loading::ReplicaKey, std::shared_ptr<GpuExportState>, store::loading::ReplicaKeyHash>
+      gpu_exports_ ABSL_GUARDED_BY(mu_);
 
   // --- Metrics ---
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter_;

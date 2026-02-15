@@ -171,6 +171,9 @@ class MaterializationFacade : public materialization::control::MaterializationBa
  private:
   absl::StatusOr<loading::ReplicaHandle> assemble_from_pieces(const loading::MaterializationRequest& request);
 
+  absl::StatusOr<loading::ReplicaHandle> materialize_view_from_local_canonical(
+      const loading::MaterializationRequest& request);
+
   template <typename SourceT, typename RunnerFn>
   absl::StatusOr<loading::ReplicaHandle> run_pipeline_ingestion(
       IngestionSource source_type,

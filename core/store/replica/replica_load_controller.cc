@@ -299,6 +299,13 @@ absl::Status ReplicaLoadController::allocate_gpu_memory() {
         LOG(WARNING) << "allocate_gpu_memory: failed to set state to FAILED after UMA alloc error: " << _st;
       }
     }
+    // Failed allocation can leave a sticky CUDA last-error on this thread.
+    // Drain it now so later async H2D completion checks are not poisoned.
+    absl::Status clear_st = cuda::get_last_error();
+    if (!clear_st.ok()) {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id
+              << "): drained stale CUDA error after allocation failure: " << clear_st;
+    }
     return absl::ResourceExhaustedError(
         absl::Substitute(
             "ReplicaLoadController($0): Failed UMA GPU allocation on device $1: $2",
@@ -369,9 +376,6 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
             loc_str));
   }
 
-  // Proceed with GPU resource release
-  release_gpu_resources_locked();
-
   // Inform UMA to drop GPU residency and allocation for this device to keep
   // the authoritative ledger in sync and actually reclaim VRAM.
   if (location == MemoryLocation::GPU) {
@@ -380,8 +384,16 @@ absl::Status ReplicaLoadController::release_memory(MemoryLocation location) {
     if (!uma_st.ok() && uma_st.code() != absl::StatusCode::kNotFound) {
       LOG(WARNING) << "ReplicaLoadController(" << replica_key_.artifact_id
                    << "): UMA release_gpu_device returned: " << uma_st;
+      return uma_st;
+    }
+    if (uma_st.code() == absl::StatusCode::kNotFound) {
+      VLOG(1) << "ReplicaLoadController(" << replica_key_.artifact_id
+              << "): UMA release_gpu_device returned NotFound; proceeding with local cleanup.";
     }
   }
+
+  // Proceed with local GPU resource release after UMA accepted the release.
+  release_gpu_resources_locked();
 
   // Clear communication registration if releasing the registered GPU location
   if (location == MemoryLocation::GPU && gpu_.comm_registered) {
@@ -910,9 +922,7 @@ absl::Status ReplicaLoadController::finalize_copy_state_(MemoryLocation destinat
                      << "): UMA post_gpu_load_policy returned: " << uma_policy_st;
       }
       if (cpu_.state != MemoryState::FAILED) {
-        if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
-          (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
-        } else {
+        if (policy != UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
           (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
         }
       }
@@ -1068,9 +1078,7 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
           }
           absl::MutexLock lk(&mutex_);
           if (cpu_.state != MemoryState::FAILED) {
-            if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
-              (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
-            } else {
+            if (policy != UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
               (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
             }
           }
@@ -1180,9 +1188,7 @@ absl::Status ReplicaLoadController::copy_from_peer(const ReplicaLoadController& 
     }
     absl::MutexLock lk(&mutex_);
     if (cpu_.state != MemoryState::FAILED) {
-      if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
-        (void)set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
-      } else {
+      if (policy != UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
         (void)set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
       }
     }
@@ -1472,9 +1478,7 @@ folly::SemiFuture<absl::Status> ReplicaLoadController::load_async_from_source(
               {
                 absl::MutexLock lk(&self->mutex_);
                 if (self->cpu_.state != MemoryState::FAILED) {
-                  if (policy == UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
-                    (void)self->set_state_locked(MemoryLocation::CPU, MemoryState::LOADED);
-                  } else {
+                  if (policy != UnifiedMemoryAuthority::PostGpuLoadPolicy::Keep) {
                     (void)self->set_state_locked(MemoryLocation::CPU, MemoryState::UNALLOCATED);
                   }
                 }

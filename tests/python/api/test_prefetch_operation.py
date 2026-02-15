@@ -8,7 +8,6 @@ from hashlib import sha256
 from typing import Any
 
 import tensorcast as tc
-
 from tensorcast.api._materialize import MaterializationPayload
 from tensorcast.api.store.artifact import Artifact
 from tensorcast.common.selection_identity import (
@@ -19,7 +18,8 @@ from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 class _Client:
-    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:  # noqa: ARG002
+    def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
+        del artifact_id
         return b"{}"
 
     def query_replica_status(self, ticket: store_daemon_pb2.ReplicaTicket):

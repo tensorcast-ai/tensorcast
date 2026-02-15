@@ -208,7 +208,10 @@ absl::StatusOr<std::string> resolve_layout_json(
   if (!v1_resp.view_index_json().empty()) {
     return v1_resp.view_index_json();
   }
-  const std::string& artifact_id = !v2_req.artifact_id().empty() ? v2_req.artifact_id() : v1_resp.artifact_id();
+  std::string artifact_id = v1_resp.artifact_id();
+  if (v2_req.has_selection() && !v2_req.selection().artifact_id().empty()) {
+    artifact_id = v2_req.selection().artifact_id();
+  }
   const std::string disk_path = v1_resp.disk_path();
 
   auto read_from_disk = [&]() -> absl::StatusOr<std::string> {
@@ -241,15 +244,6 @@ absl::StatusOr<std::string> resolve_layout_json(
     return disk_or.status();
   }
   return index_or.status();
-}
-
-absl::StatusOr<std::string> resolve_layout_json_by_key(
-    const v2::MaterializeByKeyResponse& v1_resp,
-    store::StoreEngine& engine) {
-  if (!v1_resp.artifact_id().empty()) {
-    return engine.get_canonical_index_by_id(v1_resp.artifact_id());
-  }
-  return absl::NotFoundError("canonical index JSON unavailable for key materialization");
 }
 
 template <typename ResponseT>
@@ -314,32 +308,6 @@ absl::Status populate_materialize_payloads_impl(
 
 absl::Status populate_materialize_payloads(
     v2::MaterializeReplicaResponse& resp,
-    std::string_view layout_json,
-    const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
-    std::string_view device_uuid,
-    std::string_view view_subset_hash,
-    bool wait_for_completion,
-    std::string_view replica_uuid,
-    const std::string* ticket_device_uuid,
-    const std::optional<store::loader::ViewPlan>& view_plan,
-    bool prefer_view_plan,
-    bool fill_view_index_bytes) {
-  return populate_materialize_payloads_impl(
-      resp,
-      layout_json,
-      tensor_names,
-      device_uuid,
-      view_subset_hash,
-      wait_for_completion,
-      replica_uuid,
-      ticket_device_uuid,
-      view_plan,
-      prefer_view_plan,
-      fill_view_index_bytes);
-}
-
-absl::Status populate_materialize_payloads(
-    v2::MaterializeByKeyResponse& resp,
     std::string_view layout_json,
     const google::protobuf::RepeatedPtrField<std::string>& tensor_names,
     std::string_view device_uuid,

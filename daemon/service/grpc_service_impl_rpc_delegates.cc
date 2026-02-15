@@ -38,14 +38,6 @@ Status StoreDaemonServiceImpl::ConfirmReplica(
   return materialization_controller_->confirm(rctx, *req, *resp);
 }
 
-Status StoreDaemonServiceImpl::MaterializeByKey(
-    grpc::ServerContext* ctx,
-    const v2::MaterializeByKeyRequest* req,
-    v2::MaterializeByKeyResponse* resp) {
-  RpcContext rctx{"MaterializeByKey", *ctx, opts_.allow_high_card_attrs};
-  return materialization_controller_->materialize_by_key(rctx, *req, *resp);
-}
-
 Status StoreDaemonServiceImpl::ImportArtifactFromPath(
     grpc::ServerContext* ctx,
     const v2::ImportArtifactFromPathRequest* req,

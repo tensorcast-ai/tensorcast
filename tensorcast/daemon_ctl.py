@@ -19,7 +19,6 @@ from typing import (
     Literal,
     Mapping,
     NoReturn,
-    Sequence,
     cast,
     overload,
 )
@@ -303,13 +302,49 @@ class DaemonCtl:
     # Channel helpers with sane keepalive defaults
     @staticmethod
     def _channel_options() -> list[tuple[str, int]]:
+        # Long-running unary RPCs (e.g., full materialization) can legitimately run
+        # for several minutes. Use conservative ping defaults to avoid transport
+        # resets caused by overly aggressive keepalive probes.
+        keepalive_time_ms = _parse_env_int(
+            "TENSORCAST_GRPC_KEEPALIVE_TIME_MS",
+            default=600_000,
+            min_value=1_000,
+        )
+        keepalive_timeout_ms = _parse_env_int(
+            "TENSORCAST_GRPC_KEEPALIVE_TIMEOUT_MS",
+            default=20_000,
+            min_value=1_000,
+        )
+        min_time_between_pings_ms = _parse_env_int(
+            "TENSORCAST_GRPC_MIN_TIME_BETWEEN_PINGS_MS",
+            default=600_000,
+            min_value=1_000,
+        )
+        min_ping_interval_without_data_ms = _parse_env_int(
+            "TENSORCAST_GRPC_MIN_PING_INTERVAL_WITHOUT_DATA_MS",
+            default=600_000,
+            min_value=1_000,
+        )
+        max_pings_without_data = _parse_env_int(
+            "TENSORCAST_GRPC_MAX_PINGS_WITHOUT_DATA",
+            default=0,
+            min_value=0,
+        )
+        keepalive_permit_without_calls = _parse_env_int(
+            "TENSORCAST_GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS",
+            default=1,
+            min_value=0,
+        )
         return [
-            ("grpc.keepalive_time_ms", 10_000),
-            ("grpc.keepalive_timeout_ms", 3_000),
-            ("grpc.keepalive_permit_without_calls", 1),
-            ("grpc.http2.min_time_between_pings_ms", 10_000),
-            ("grpc.http2.max_pings_without_data", 0),
-            ("grpc.http2.min_ping_interval_without_data_ms", 10_000),
+            ("grpc.keepalive_time_ms", keepalive_time_ms),
+            ("grpc.keepalive_timeout_ms", keepalive_timeout_ms),
+            ("grpc.keepalive_permit_without_calls", keepalive_permit_without_calls),
+            ("grpc.http2.min_time_between_pings_ms", min_time_between_pings_ms),
+            ("grpc.http2.max_pings_without_data", max_pings_without_data),
+            (
+                "grpc.http2.min_ping_interval_without_data_ms",
+                min_ping_interval_without_data_ms,
+            ),
         ]
 
     def _create_channel(self, addr: str) -> grpc.Channel:
@@ -531,20 +566,22 @@ class DaemonCtl:
 
         pid = self._get_effective_pid()
         with self._client_span("Client/MaterializeReplica") as span:
+            selection = common_pb2.ArtifactSelection(artifact_id=artifact_id)
+            if view is not None:
+                selection.view_spec.CopyFrom(view)
+            elif view_id:
+                selection.view_id = view_id
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
-                artifact_id=artifact_id,
+                selection=selection,
                 replica_uuid=replica_uuid,
                 device_uuid=device_uuid,
                 target_device_type=store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
                 pinned_allocation_timeout_ms=pinned_allocation_timeout_ms,
+                wait_for_completion=wait_for_completion,
             )
             if preference is not None:
                 request.preference = preference
-            if view is not None:
-                request.view.CopyFrom(view)
-            elif view_id:
-                request.view_id = view_id
             if placement is not None:
                 request.placement = placement
             try:
@@ -614,26 +651,22 @@ class DaemonCtl:
     def materialize_into_target_v2(
         self,
         *,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
-        view_subset_hash: bytes | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
         return_response: bool = True,
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
-        if not artifact_id:
-            raise ValueError("artifact_id is required")
+        if not isinstance(selection, common_pb2.ArtifactSelection):
+            raise ValueError("selection is required")
+        if not selection.artifact_id:
+            raise ValueError("selection.artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
-        if view is not None and view_id is not None:
-            raise ValueError("Specify at most one of view or view_id")
         pid_value = self._get_effective_pid() if pid is None else int(pid)
         with self._client_span("Client/MaterializeIntoTarget") as span:
             if preference is not None:
@@ -649,22 +682,14 @@ class DaemonCtl:
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
             request = store_daemon_pb2.MaterializeIntoTargetRequest(
-                artifact_id=artifact_id,
+                selection=selection,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
                 preference=preference_value,
             )
-            if tensor_names is not None:
-                request.tensor_names.extend(list(tensor_names))
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
-            if view_subset_hash is not None:
-                request.view_subset_hash = bytes(view_subset_hash)
-            if view is not None:
-                request.view.CopyFrom(view)
-            elif view_id is not None:
-                request.view_id = str(view_id)
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -688,7 +713,7 @@ class DaemonCtl:
                     ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
                     raise RuntimeError(
-                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                        f"Artifact id '{selection.artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="MaterializeIntoTargetV2 RPC failed")
@@ -702,15 +727,13 @@ class DaemonCtl:
     def materialize_into_mapped_target(
         self,
         *,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         target_layout: store_daemon_pb2.TargetLayout,
         device_uuid: str,
         copy_plan,
         dst_tensors: Mapping[str, torch.Tensor],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         pid: int | None = None,
         operation_id: str | None = None,
@@ -718,12 +741,12 @@ class DaemonCtl:
     ) -> store_daemon_pb2.MaterializeIntoTargetResponse:
         from tensorcast.api.store.mapped_binding import normalize_copy_plan
 
-        if not artifact_id:
-            raise ValueError("artifact_id is required")
+        if not isinstance(selection, common_pb2.ArtifactSelection):
+            raise ValueError("selection is required")
+        if not selection.artifact_id:
+            raise ValueError("selection.artifact_id is required")
         if not device_uuid:
             raise ValueError("device_uuid is required")
-        if view is not None and view_id is not None:
-            raise ValueError("Specify at most one of view or view_id")
         if not isinstance(dst_tensors, Mapping) or not dst_tensors:
             raise ValueError("dst_tensors must be a non-empty mapping")
         normalized_plan = normalize_copy_plan(copy_plan)
@@ -742,7 +765,7 @@ class DaemonCtl:
                     store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
                 )
             request = store_daemon_pb2.MaterializeIntoMappedTargetRequest(
-                artifact_id=artifact_id,
+                selection=selection,
                 target_layout=target_layout,
                 device_uuid=device_uuid,
                 pid=pid_value,
@@ -776,10 +799,6 @@ class DaemonCtl:
                 request.dst_tensors.append(spec)
             if source_policy is not None:
                 request.source_policy.CopyFrom(source_policy)
-            if view is not None:
-                request.view.CopyFrom(view)
-            elif view_id is not None:
-                request.view_id = str(view_id)
             if placement is not None:
                 request.placement = placement
             if operation_id:
@@ -807,7 +826,7 @@ class DaemonCtl:
                     ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
                     raise RuntimeError(
-                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                        f"Artifact id '{selection.artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="MaterializeIntoMappedTarget RPC failed")
@@ -1058,22 +1077,18 @@ class DaemonCtl:
     @overload
     def materialize_by_artifact_id_v2(
         self,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: bool = True,
         wait_for_shared_disk_ms: int = 0,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[True],
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         timeout_s: float | int | None = None,
@@ -1082,22 +1097,18 @@ class DaemonCtl:
     @overload
     def materialize_by_artifact_id_v2(
         self,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[False],
         wait_for_shared_disk_ms: int = 0,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         timeout_s: float | int | None = None,
@@ -1106,22 +1117,18 @@ class DaemonCtl:
     @overload
     def materialize_by_artifact_id_v2(
         self,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         *,
         wait_for_completion: Literal[True] = True,
         wait_for_shared_disk_ms: int = 0,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: Literal[False] = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         timeout_s: float | int | None = None,
@@ -1129,21 +1136,17 @@ class DaemonCtl:
 
     def materialize_by_artifact_id_v2(
         self,
-        artifact_id: str,
+        selection: common_pb2.ArtifactSelection,
         replica_uuid: str,
         device_uuid: str,
         pinned_allocation_timeout_ms: int = int(30e3),
         wait_for_completion: bool = True,
         wait_for_shared_disk_ms: int = 0,
-        view: common_pb2.ViewSpec | None = None,
-        view_id: str | None = None,
         placement: store_daemon_pb2.TransformPlacement | None = None,
         return_response: bool = False,
         preference: store_daemon_pb2.SourcePreference | None = None,
         source_policy: store_daemon_pb2.SourcePolicy | None = None,
         export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
         target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
         lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
         timeout_s: float | int | None = None,
@@ -1152,11 +1155,13 @@ class DaemonCtl:
         | bytes
         | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus]
     ):
-        if view is not None and view_id is not None:
-            raise ValueError("Specify only one of view or view_id")
+        if not isinstance(selection, common_pb2.ArtifactSelection):
+            raise ValueError("selection is required")
+        if not selection.artifact_id:
+            raise ValueError("selection.artifact_id is required")
         logger.debug(
             "materialize_by_artifact_id_v2: %s, %s, wait_for_completion=%s",
-            artifact_id,
+            selection.artifact_id,
             replica_uuid,
             wait_for_completion,
         )
@@ -1181,7 +1186,7 @@ class DaemonCtl:
             )
             request = store_daemon_pb2.MaterializeReplicaRequest(
                 pid=pid,
-                artifact_id=artifact_id,
+                selection=selection,
                 replica_uuid=replica_uuid,
                 device_uuid=device_uuid_value,
                 target_device_type=target_device_type,
@@ -1195,14 +1200,6 @@ class DaemonCtl:
                 request.source_policy.CopyFrom(source_policy)
             if export_policy is not None:
                 request.export_policy = export_policy
-            if tensor_names:
-                request.tensor_names.extend(tensor_names)
-            if view_subset_hash:
-                request.view_subset_hash = view_subset_hash
-            if view is not None:
-                request.view.CopyFrom(view)
-            elif view_id:
-                request.view_id = view_id
             if placement is not None:
                 request.placement = placement
             try:
@@ -1224,7 +1221,7 @@ class DaemonCtl:
                     ) from e
                 if code == grpc.StatusCode.NOT_FOUND:
                     raise RuntimeError(
-                        f"Artifact id '{artifact_id}' was not found by StoreDaemon at {self.server_address}."
+                        f"Artifact id '{selection.artifact_id}' was not found by StoreDaemon at {self.server_address}."
                     ) from e
                 raise RuntimeError(
                     _grpc_message(e, fallback="MaterializeReplicaV2 RPC failed")
@@ -1235,12 +1232,14 @@ class DaemonCtl:
             load_status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
         ):
-            raise RuntimeError(f"Artifact allocation failed for {artifact_id}")
+            raise RuntimeError(
+                f"Artifact allocation failed for {selection.artifact_id}"
+            )
 
         if not wait_for_completion:
             logger.info(
                 "Artifact allocation initiated (async): %s, %s",
-                artifact_id,
+                selection.artifact_id,
                 replica_uuid,
             )
             assert response.mem_handle is not None
@@ -1252,7 +1251,7 @@ class DaemonCtl:
                 )
             return response.mem_handle.cuda_ipc_handle, load_status
 
-        logger.info("Artifact loaded: %s, %s", artifact_id, replica_uuid)
+        logger.info("Artifact loaded: %s, %s", selection.artifact_id, replica_uuid)
         if (
             response.status
             == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
@@ -1265,7 +1264,7 @@ class DaemonCtl:
             if not success:
                 raise RuntimeError(
                     "Failed to confirm artifact loading: "
-                    f"artifact_id={artifact_id}, "
+                    f"artifact_id={selection.artifact_id}, "
                     f"replica_uuid={replica_uuid}, "
                     f"disk_path={response.disk_path or ''}"
                 )
@@ -1277,224 +1276,6 @@ class DaemonCtl:
             )
         assert response.mem_handle is not None
         return response.mem_handle.cuda_ipc_handle
-
-    @overload
-    def materialize_by_key_v2(
-        self,
-        key: str,
-        replica_uuid: str,
-        device_id: int,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        *,
-        wait_for_completion: bool = True,
-        wait_for_shared_disk_ms: int = 0,
-        return_response: Literal[True],
-        preference: store_daemon_pb2.SourcePreference | None = None,
-        source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
-        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
-        timeout_s: float | int | None = None,
-    ) -> store_daemon_pb2.MaterializeByKeyResponse: ...
-
-    @overload
-    def materialize_by_key_v2(
-        self,
-        key: str,
-        replica_uuid: str,
-        device_id: int,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        *,
-        wait_for_completion: Literal[False],
-        wait_for_shared_disk_ms: int = 0,
-        return_response: Literal[False] = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
-        source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
-        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
-        timeout_s: float | int | None = None,
-    ) -> tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]: ...
-
-    @overload
-    def materialize_by_key_v2(
-        self,
-        key: str,
-        replica_uuid: str,
-        device_id: int,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        *,
-        wait_for_completion: Literal[True] = True,
-        wait_for_shared_disk_ms: int = 0,
-        return_response: Literal[False] = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
-        source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
-        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
-        timeout_s: float | int | None = None,
-    ) -> tuple[bytes, str, str]: ...
-
-    def materialize_by_key_v2(
-        self,
-        key: str,
-        replica_uuid: str,
-        device_id: int,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        wait_for_completion: bool = True,
-        wait_for_shared_disk_ms: int = 0,
-        return_response: bool = False,
-        preference: store_daemon_pb2.SourcePreference | None = None,
-        source_policy: store_daemon_pb2.SourcePolicy | None = None,
-        export_policy: store_daemon_pb2.ExportPolicy | None = None,
-        tensor_names: Sequence[str] | None = None,
-        view_subset_hash: bytes | None = None,
-        target_device_type: store_daemon_pb2.DeviceType = store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU,
-        lease_mode: store_daemon_pb2.LeaseMode = store_daemon_pb2.LeaseMode.LEASE_MODE_UNSPECIFIED,
-        timeout_s: float | int | None = None,
-    ) -> (
-        store_daemon_pb2.MaterializeByKeyResponse
-        | tuple[bytes, store_daemon_pb2.MaterializeReplicaStatus, str, str]
-        | tuple[bytes, str, str]
-    ):
-        logger.debug(
-            "materialize_by_key_v2: %s, %s, wait_for_completion=%s",
-            key,
-            replica_uuid,
-            wait_for_completion,
-        )
-        pid = self._get_effective_pid()
-        with self._client_span("Client/MaterializeByKeyV2") as span:
-            if preference is not None:
-                preference_value = preference
-            elif (
-                source_policy is not None
-                and source_policy.preference
-                != store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_UNSPECIFIED
-            ):
-                preference_value = source_policy.preference
-            else:
-                preference_value = (
-                    store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
-                )
-            device_id_value = (
-                0
-                if target_device_type == store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
-                else int(device_id)
-            )
-            request = store_daemon_pb2.MaterializeByKeyRequest(
-                key=key,
-                device_id=device_id_value,
-                pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
-                pid=pid,
-                replica_uuid=replica_uuid,
-                preference=preference_value,
-                target_device_type=target_device_type,
-                lease_mode=lease_mode,
-            )
-            if wait_for_shared_disk_ms:
-                request.wait_for_shared_disk_ms = int(wait_for_shared_disk_ms)
-            if source_policy is not None:
-                request.source_policy.CopyFrom(source_policy)
-            if export_policy is not None:
-                request.export_policy = export_policy
-            if tensor_names:
-                request.tensor_names.extend(tensor_names)
-            if view_subset_hash:
-                request.view_subset_hash = view_subset_hash
-            try:
-                response: store_daemon_pb2.MaterializeByKeyResponse = self._unary_call(
-                    self.stub_v2.MaterializeByKey,
-                    request,
-                    timeout=60 if timeout_s is None else timeout_s,
-                    span=span,
-                    retries=1,
-                )
-            except grpc.RpcError as e:  # noqa: BLE001
-                span.record_exception(e)
-                code = e.code()
-                if code == grpc.StatusCode.UNAVAILABLE:
-                    raise RuntimeError(
-                        f"Local StoreDaemon ({self.server_address}) is not available."
-                    ) from e
-                if code == grpc.StatusCode.NOT_FOUND:
-                    detail = ""
-                    with suppress(Exception):
-                        detail = e.details() or ""
-                    message = (
-                        f"Artifact key '{key}' was not found by StoreDaemon at "
-                        f"{self.server_address}."
-                    )
-                    if detail:
-                        message += f" Daemon response: {detail}."
-                    raise RuntimeError(message) from e
-                status_name = "UNKNOWN"
-                detail_msg = _grpc_message(e, fallback="RPC failed")
-                with suppress(Exception):
-                    if code is not None:
-                        status_name = code.name
-                raise RuntimeError(
-                    f"MaterializeByKeyV2 RPC failed with status={status_name}: {detail_msg}"
-                ) from e
-
-        load_status = response.status
-        if (
-            load_status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
-        ):
-            raise RuntimeError(f"Artifact allocation failed for key={key}")
-
-        used_disk_path = (
-            response.used_disk_path if hasattr(response, "used_disk_path") else ""
-        )
-        artifact_id = response.artifact_id if hasattr(response, "artifact_id") else ""
-
-        handle_bytes = (
-            response.mem_handle.cuda_ipc_handle
-            if response.HasField("mem_handle")
-            else b""
-        )
-        if not wait_for_completion:
-            assert response.mem_handle is not None
-            if return_response:
-                return response
-            if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
-                raise ValueError(
-                    "materialize_by_key_v2 must use return_response=True for non-GPU targets"
-                )
-            return (handle_bytes, load_status, used_disk_path, artifact_id)
-
-        if (
-            response.status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            success = self.confirm_replica_loaded(
-                used_disk_path,
-                replica_uuid,
-                target_device_type=target_device_type,
-            )
-            if not success:
-                raise RuntimeError(
-                    "Failed to confirm artifact loading: "
-                    f"key={key}, "
-                    f"replica_uuid={replica_uuid}, "
-                    f"disk_path={used_disk_path}"
-                )
-
-        assert response.mem_handle is not None
-        if return_response:
-            return response
-        if target_device_type != store_daemon_pb2.DeviceType.DEVICE_TYPE_GPU:
-            raise ValueError(
-                "materialize_by_key_v2 must use return_response=True for non-GPU targets"
-            )
-        return (handle_bytes, used_disk_path, artifact_id)
 
     def import_artifact_from_path_v2(
         self, *, path: str, verify_checksums: bool = True
@@ -1544,108 +1325,6 @@ class DaemonCtl:
                     _raise_import_artifact_from_path_rpc_error(self.server_address, e)
 
         return _event_iter()
-
-    def materialize_by_key(
-        self,
-        key: str,
-        replica_uuid: str,
-        device_id: int,
-        pinned_allocation_timeout_ms: int = int(30e3),
-        wait_for_completion: bool = True,
-        return_response: bool = False,
-    ):
-        """Materialize a replica by key via daemon.
-
-        Returns
-            If wait_for_completion=True: (cuda_ipc_handle_bytes, used_disk_path, artifact_id)
-            If wait_for_completion=False: (cuda_ipc_handle_bytes, load_status, used_disk_path, artifact_id)
-        """
-        logger.debug(
-            f"materialize_by_key: {key}, {replica_uuid}, wait_for_completion={wait_for_completion}"
-        )
-
-        pid = self._get_effective_pid()
-        with self._client_span("Client/MaterializeByKey") as span:
-            request = store_daemon_pb2.MaterializeByKeyRequest(
-                key=key,
-                device_id=int(device_id),
-                pinned_allocation_timeout_ms=int(pinned_allocation_timeout_ms),
-                pid=pid,
-                replica_uuid=replica_uuid,
-            )
-            try:
-                response = self._unary_call(
-                    self.stub.MaterializeByKey,
-                    request,
-                    timeout=60,
-                    span=span,
-                    retries=1,
-                )
-            except grpc.RpcError as e:
-                span.record_exception(e)
-                code = e.code()
-                if code == grpc.StatusCode.UNAVAILABLE:
-                    raise RuntimeError(
-                        f"Local StoreDaemon ({self.server_address}) is not available."
-                    ) from e
-                if code == grpc.StatusCode.NOT_FOUND:
-                    detail = ""
-                    with suppress(Exception):
-                        detail = e.details() or ""
-                    message = (
-                        f"Artifact key '{key}' was not found by StoreDaemon at "
-                        f"{self.server_address}."
-                    )
-                    if detail:
-                        message += f" Daemon response: {detail}."
-                    message += " Verify the key spelling or register the artifact before loading."
-                    raise RuntimeError(message) from e
-                status_name = "UNKNOWN"
-                detail_msg = _grpc_message(e, fallback="RPC failed")
-                with suppress(Exception):
-                    if code is not None:
-                        status_name = code.name
-                raise RuntimeError(
-                    f"MaterializeByKey RPC failed with status={status_name}: {detail_msg}"
-                ) from e
-
-        load_status = response.status
-        if (
-            load_status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_FAILED
-        ):
-            raise RuntimeError(f"Artifact allocation failed for key={key}")
-
-        used_disk_path = (
-            response.used_disk_path if hasattr(response, "used_disk_path") else ""
-        )
-        artifact_id = response.artifact_id if hasattr(response, "artifact_id") else ""
-
-        handle_bytes = response.mem_handle.cuda_ipc_handle
-        if not wait_for_completion:
-            assert response.mem_handle is not None
-            if return_response:
-                return response
-            return (handle_bytes, load_status, used_disk_path, artifact_id)
-
-        # Synchronous path: confirm completion using the session created with replica_uuid
-        if (
-            load_status
-            == store_daemon_pb2.MaterializeReplicaStatus.MATERIALIZE_REPLICA_STATUS_ALLOCATED
-        ):
-            success = self.confirm_replica_loaded(used_disk_path, replica_uuid)
-            if not success:
-                raise RuntimeError(
-                    "Failed to confirm artifact loading: "
-                    f"key={key}, "
-                    f"replica_uuid={replica_uuid}, "
-                    f"disk_path={used_disk_path}"
-                )
-
-        assert response.mem_handle is not None
-        if return_response:
-            return response
-        return (handle_bytes, used_disk_path, artifact_id)
 
     def confirm_replica_loaded(
         self,

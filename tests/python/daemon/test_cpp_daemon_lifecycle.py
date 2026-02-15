@@ -94,6 +94,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
 
     # Allocate ports and temp storage dir
     listen_port = _get_free_port()
+    p2p_port = _get_free_port()
     storage_dir = Path(tempfile.mkdtemp(prefix="tc_daemon_it_"))
     daemon_id = f"daemon_it_{listen_port}"
 
@@ -101,8 +102,8 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
     log_path = storage_dir / "daemon.log"
     cfg = {
         "server": {
-            "listen": {"host": "localhost", "port": listen_port},
-            "p2p_listen": {"host": "localhost", "port": 65090},
+            "listen": {"host": "127.0.0.1", "port": listen_port},
+            "p2p_listen": {"host": "127.0.0.1", "port": p2p_port},
             "storage_path": str(storage_dir),
             "num_threads": 2,
             "grpc": {"tcp_nodelay": True, "so_reuseport": False},
@@ -134,7 +135,7 @@ def test_cpp_daemon_registers_with_global_store(gs_server):
         },
         "high_availability": {
             "enabled": True,
-            "global_store_endpoints": [{"host": "localhost", "port": gs_port}],
+            "global_store_endpoints": [{"host": "127.0.0.1", "port": gs_port}],
         },
         "communicator": {
             "enable_rdma": False,

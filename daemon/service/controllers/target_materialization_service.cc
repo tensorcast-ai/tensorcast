@@ -49,7 +49,6 @@ using materialization_index_source::parse_mi2_data_multihash;
 using materialization_index_source::TargetLayoutSpan;
 using materialization_layout::resolve_target_offsets;
 using materialization_payload::compute_generation_from_index;
-using materialization_policy::build_view_spec_proto;
 using materialization_policy::resolve_source_policy;
 using materialization_policy::resolve_transform_placement;
 using materialization_policy::ResolvedSourcePolicy;
@@ -209,20 +208,18 @@ absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materializatio
     return absl::PermissionDeniedError(std::format("{} is local-only (loopback/UDS)", rpc_name));
   }
 
-  const bool has_artifact_id = req.has_artifact_id() && !req.artifact_id().empty();
-  const bool has_key = req.has_key() && !req.key().empty();
-  if (has_key) {
-    record_materialize_into_target(
-        "error", "key_not_supported", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return absl::InvalidArgumentError(std::format("key-based requests not supported for {}", rpc_name));
-  }
-  if (!has_artifact_id) {
+  if (!req.has_selection()) {
     record_materialize_into_target(
         "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
-    return absl::InvalidArgumentError(std::format("artifact_id is required for {}", rpc_name));
+    return absl::InvalidArgumentError(std::format("selection is required for {}", rpc_name));
+  }
+  if (req.selection().artifact_id().empty()) {
+    record_materialize_into_target(
+        "error", "missing_artifact_id", v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED);
+    return absl::InvalidArgumentError(std::format("selection.artifact_id is required for {}", rpc_name));
   }
 
-  context.resolved_artifact_id = req.artifact_id();
+  context.resolved_artifact_id = req.selection().artifact_id();
   auto binding_or = resolve_artifact_binding(global_store_client, context.resolved_artifact_id);
   if (!binding_or.ok()) {
     record_materialize_into_target(
@@ -392,28 +389,29 @@ grpc::Status TargetMaterializationService::materialize_into_target(
 
   TargetMaterializationPlan plan;
   auto build_plan_status = build_target_materialization_plan(
-      d_.engine, req, layout, offsets, std::move(*canonical_json_or), record_materialize_into_target, plan);
+      d_.engine,
+      resolved_artifact_id,
+      req,
+      layout,
+      offsets,
+      std::move(*canonical_json_or),
+      record_materialize_into_target,
+      plan);
   if (!build_plan_status.ok()) {
     return build_plan_status;
   }
 
-  const auto& layout_names = plan.layout_names;
-  const bool has_subset = plan.has_subset;
+  const auto& resolved_selection = plan.resolved_selection;
+  const bool has_subset = resolved_selection.tensor_names_size() > 0;
   auto& view_spec = plan.view_spec;
   auto& view_plan = plan.view_plan;
   auto& resolved_view_id = plan.resolved_view_id;
   auto& view_data_hash = plan.view_data_hash;
   const bool has_view_transform = plan.has_view_transform;
   const std::string& canonical_index_json = plan.canonical_index_json;
-  const std::string& selected_index_json = plan.selected_index_json;
   const uint64_t logical_total_size = plan.logical_total_size;
   std::vector<RegisterStorageMeta> publish_storages = std::move(plan.publish_storages);
   std::vector<LeaseSegMeta> publish_segments = std::move(plan.publish_segments);
-  std::string view_subset_hash = std::move(plan.view_subset_hash);
-  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
-  if (view_spec.has_value()) {
-    view_spec_proto = build_view_spec_proto(*view_spec);
-  }
 
   if (d_.external_target_verification_enabled && resolved_view_id.has_value() && !view_data_hash.has_value()) {
     auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, *resolved_view_id);
@@ -556,48 +554,22 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   if (view_plan.has_value() && layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW) {
     resp.set_view_index_bytes(view_plan->view_index_json);
   }
-  if (!layout_names.empty()) {
+  if (resolved_selection.tensor_names_size() > 0 || !resolved_selection.view_subset_hash().empty()) {
     auto* subset = resp.mutable_view_subset();
-    if (!view_subset_hash.empty()) {
-      subset->set_subset_hash(view_subset_hash);
+    if (!resolved_selection.view_subset_hash().empty()) {
+      subset->set_subset_hash(resolved_selection.view_subset_hash());
     }
-    for (const auto& name : layout_names) {
+    for (const auto& name : resolved_selection.tensor_names()) {
       subset->add_tensor_names(name);
     }
   }
+  resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
   resp.set_generation(generation);
   if (capability_tokens_ != nullptr && capability_tokens_->configured()) {
-    const std::string view_id_value = resolved_view_id.value_or("");
-    const bool needs_view_index = layout.index_kind() == v2::TargetLayout::INDEX_KIND_VIEW;
-    const std::string logical_layout_hash = common::compute_logical_layout_hash_bytes(
-        absl::Span<const uint8_t>(
-            reinterpret_cast<const uint8_t*>(selected_index_json.data()), selected_index_json.size()),
-        needs_view_index);
-    std::optional<std::string_view> subset_hash_opt;
-    if (!view_subset_hash.empty()) {
-      subset_hash_opt = view_subset_hash;
-    }
-    const std::string selection_hash = common::compute_selection_hash_bytes(view_id_value, subset_hash_opt);
-
-    tensorcast::common::v1::ArtifactSelection selection;
-    selection.set_artifact_id(resolved_artifact_id);
-    selection.set_view_id(view_id_value);
-    selection.set_logical_layout_hash(logical_layout_hash);
-    selection.set_selection_hash(selection_hash);
-    if (!view_subset_hash.empty()) {
-      selection.set_view_subset_hash(view_subset_hash);
-    }
-    for (const auto& name : req.tensor_names()) {
-      selection.add_tensor_names(name);
-    }
-    if (view_spec_proto.has_value()) {
-      selection.mutable_view_spec()->CopyFrom(*view_spec_proto);
-    }
-
     tensorcast::common::v1::ByteSpaceRef byte_space;
-    if (!view_id_value.empty()) {
+    if (!resolved_selection.view_id().empty()) {
       byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
-      byte_space.set_id(view_id_value);
+      byte_space.set_id(resolved_selection.view_id());
     } else {
       byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
       byte_space.set_id("");
@@ -621,7 +593,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
 
       tensorcast::common::v1::TargetWriteScope scope;
       scope.set_write_id(write_id);
-      scope.mutable_selection()->CopyFrom(selection);
+      scope.mutable_selection()->CopyFrom(resolved_selection);
       scope.mutable_byte_space()->CopyFrom(byte_space);
       scope.set_device_uuid(req.device_uuid());
       scope.set_owner_pid(req.pid());
@@ -640,7 +612,7 @@ grpc::Status TargetMaterializationService::materialize_into_target(
           record.write_id = write_id;
           record.layout_key = layout_hash;
           record.target_layout_hash = layout_hash;
-          record.selection = selection;
+          record.selection = resolved_selection;
           record.byte_space = byte_space;
           record.canonical_index_json = std::move(stable_index_json);
           record.index_key_hex = std::move(index_key_hex);
@@ -773,6 +745,7 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   if (!build_mapped_plan_status.ok()) {
     return build_mapped_plan_status;
   }
+  const auto& resolved_selection = mapped_plan.resolved_selection;
   const uint64_t logical_total_size = mapped_plan.logical_total_size;
   const std::string& canonical_index_json = mapped_plan.canonical_index_json;
   auto& view_spec = mapped_plan.view_spec;
@@ -813,6 +786,9 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     }
     store::loading::VariantIdentity variant;
     variant.canonical_artifact_id = resolved_artifact_id;
+    if (!resolved_selection.view_id().empty()) {
+      variant.view_id = resolved_selection.view_id();
+    }
     if (view_spec.has_value()) {
       variant.view_spec = view_spec;
     }
@@ -850,6 +826,16 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   if (view_plan.has_value() && !view_plan->is_identity) {
     resp.set_view_index_bytes(view_plan->view_index_json);
   }
+  if (resolved_selection.tensor_names_size() > 0 || !resolved_selection.view_subset_hash().empty()) {
+    auto* subset = resp.mutable_view_subset();
+    if (!resolved_selection.view_subset_hash().empty()) {
+      subset->set_subset_hash(resolved_selection.view_subset_hash());
+    }
+    for (const auto& name : resolved_selection.tensor_names()) {
+      subset->add_tensor_names(name);
+    }
+  }
+  resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
   resp.set_generation(generation);
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));

@@ -21,6 +21,30 @@ TensorCast is a high-performance distributed artifact storage and loading system
 - If the chosen config enables HA or disk operations, the daemon must have `daemon_id` set (for Global Store registration) and `server.storage_path` set (for disk materialization). Missing values cause startup to exit early with clear errors.
 - **Hard rule (required)**: Python SDK code MUST NOT connect to Global Store directly (no direct gRPC channel/stub, no Global Store endpoint usage). SDK key-mapping, artifact metadata, and control-path operations MUST go through the Store Daemon APIs only.
 
+### Local GS/Daemon Startup (Blocking, Repro Baseline)
+
+Use the following startup order for local debugging/repro:
+
+```bash
+# Terminal 1: start Global Store (blocking)
+source .venv/bin/activate
+tensorcast-cli global start --blocking
+
+# Terminal 2: start Store Daemon (blocking), connect to local GS
+source .venv/bin/activate
+LD_LIBRARY_PATH=/data/cuda/compat tensorcast-cli daemon start --blocking \
+  --global-store-mode connect \
+  --global-store-address 127.0.0.1:50051
+```
+
+Optional cleanup commands:
+
+```bash
+source .venv/bin/activate
+tensorcast-cli daemon stop
+tensorcast-cli global stop
+```
+
 ## Architecture Overview
 
 ### Runtime Topology

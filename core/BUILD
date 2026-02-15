@@ -29,6 +29,7 @@ cc_binary(
         "//core/store/materialization/dataplane:file_partition_source",
         "//core/store/materialization/dataplane:safetensors_util",
         "//core/store/materialization/dataplane:source_hash",
+        "//core/store/materialization/dataplane:view_identity",
         "//core/store/materialization/dataplane:view_planner",
     ],
 )

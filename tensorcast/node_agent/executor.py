@@ -508,7 +508,7 @@ class NodeAgentExecutor:
         )
         tensor_names = tuple(selection.tensor_names) if selection.tensor_names else None
         if tensor_names:
-            artifact = artifact.view(names=list(tensor_names))
+            artifact = artifact.subset(list(tensor_names))
         return artifact, tensor_names
 
     def _transform_into(
@@ -652,13 +652,6 @@ class NodeAgentExecutor:
             replica_uuid = str(uuid.uuid5(ns, action_key))
         else:
             replica_uuid = uuid.uuid4().hex
-        view_spec = None
-        if selection.HasField("view_spec"):
-            view_spec = selection.view_spec
-        view_id = selection.view_id or None
-        view_subset_hash = (
-            selection.view_subset_hash if selection.view_subset_hash else None
-        )
         device_id = int(action.device_id)
         if device_id == CPU_DEVICE_ID:
             target_device_type = store_daemon_pb2.DeviceType.DEVICE_TYPE_CPU
@@ -680,14 +673,11 @@ class NodeAgentExecutor:
             )
         try:
             self._client.materialize_by_artifact_id_v2(
-                artifact_id=selection.artifact_id,
+                selection=selection,
                 replica_uuid=replica_uuid,
                 device_uuid=device_uuid,
                 wait_for_completion=False,
                 return_response=True,
-                view=view_spec,
-                view_id=view_id,
-                view_subset_hash=view_subset_hash,
                 target_device_type=target_device_type,
                 lease_mode=store_daemon_pb2.LeaseMode.LEASE_MODE_NO_LEASE,
                 timeout_s=timeout_s,

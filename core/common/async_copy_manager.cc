@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/log/log.h"
 #include "core/common/trace/trace_cuda_async_fn.h"
 #include "core/cuda/device_guard.h"
 
@@ -34,6 +35,14 @@ namespace {
 
 inline const char* stage_or(const CopyOptions& opts, const char* def_stage) {
   return opts.tracing_stage ? opts.tracing_stage : def_stage;
+}
+
+void clear_stale_cuda_error(const char* op_name, int device_id) {
+  absl::Status stale_st = cuda::get_last_error();
+  if (!stale_st.ok()) {
+    VLOG(1) << "AsyncCopyManager: cleared stale CUDA error before " << op_name << " on device " << device_id << ": "
+            << stale_st;
+  }
 }
 } // namespace
 
@@ -216,6 +225,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_h2d(
   if (!guard.status().ok()) {
     return guard.status();
   }
+  clear_stale_cuda_error("submit_h2d", dst.device_id);
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
     fallback_executor = runtime->blocking_executor();
@@ -296,6 +306,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2d(
   if (!guard.status().ok()) {
     return guard.status();
   }
+  clear_stale_cuda_error("submit_d2d", dst.device_id);
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
     fallback_executor = runtime->blocking_executor();
@@ -370,6 +381,7 @@ absl::StatusOr<CopyHandle> AsyncCopyManager::submit_d2h(
   if (!guard.status().ok()) {
     return guard.status();
   }
+  clear_stale_cuda_error("submit_d2h", src.device_id);
   folly::Executor::KeepAlive<> fallback_executor;
   if (auto runtime = get_async_runtime_()) {
     fallback_executor = runtime->blocking_executor();

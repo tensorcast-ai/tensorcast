@@ -2,10 +2,12 @@
 
 #include "core/store/materialization/runtime/pipeline/allocation_stage.h"
 
+#include <string_view>
 #include <utility>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/match.h"
 #include "absl/time/time.h"
 #include "core/store/components/eviction_service.h"
 #include "core/store/replica/memory_state.h"
@@ -13,6 +15,29 @@
 namespace tensorcast::store::materialization::runtime::pipeline {
 
 namespace {
+
+bool status_indicates_gpu_memory_pressure(const absl::Status& status) {
+  if (status.ok()) {
+    return false;
+  }
+  if (absl::IsResourceExhausted(status)) {
+    return true;
+  }
+  const std::string_view message = status.message();
+  return absl::StrContains(message, "Resource exhausted") || absl::StrContains(message, "resource exhausted") ||
+      absl::StrContains(message, "out of memory") || absl::StrContains(message, "Out of memory") ||
+      absl::StrContains(message, "cudaErrorMemoryAllocation") || absl::StrContains(message, "cudaErrorOutOfMemory");
+}
+
+bool should_retry_gpu_load_after_wait_failure(const absl::Status& wait_status) {
+  if (wait_status.ok()) {
+    return false;
+  }
+  if (absl::IsDeadlineExceeded(wait_status)) {
+    return false;
+  }
+  return status_indicates_gpu_memory_pressure(wait_status);
+}
 
 absl::StatusOr<replica::ReplicaConfig> build_replica_config(IngestionContext& ctx) {
   replica::ReplicaConfig config{
@@ -76,13 +101,14 @@ absl::Status retry_gpu_load_with_eviction(
 
   if (!evict_status.ok()) {
     LOG(WARNING) << "GPU eviction did not free enough memory: " << evict_status;
-    return absl::ResourceExhaustedError("GPU eviction failed");
+    return evict_status;
   }
 
   {
     absl::Status release_status = replica->release_memory(common::memory::MemoryLocation::GPU);
     if (!release_status.ok()) {
       LOG(WARNING) << "release_memory(GPU) failed during retry after eviction: " << release_status;
+      return release_status;
     }
   }
 
@@ -194,7 +220,7 @@ absl::Status AllocationStage::allocate(IngestionContext& ctx) {
       : absl::InfiniteDuration();
   auto wait_status =
       ctx.replica->get_memory_manager().wait_for_state(target_location, replica::MemoryState::LOADED, wait_duration);
-  if (!wait_status.ok() && ctx.target_is_gpu) {
+  if (!wait_status.ok() && ctx.target_is_gpu && should_retry_gpu_load_after_wait_failure(wait_status)) {
     auto retry_status = retry_gpu_load_with_eviction(ctx, ctx.replica, gpu_device);
     if (!retry_status.ok()) {
       return retry_status;

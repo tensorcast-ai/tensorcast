@@ -64,11 +64,6 @@ class MaterializationController {
       const v2::MaterializeReplicaRequest& req,
       v2::MaterializeReplicaResponse& resp);
 
-  grpc::Status materialize_by_key(
-      RpcContext& rctx,
-      const v2::MaterializeByKeyRequest& req,
-      v2::MaterializeByKeyResponse& resp);
-
   grpc::Status materialize_into_target(
       RpcContext& rctx,
       const v2::MaterializeIntoTargetRequest& req,

@@ -27,6 +27,7 @@ struct TargetMaterializationPlan {
   std::optional<std::string> view_data_hash;
   std::optional<store::loader::ViewPlan> view_plan;
   std::optional<std::string> resolved_view_id;
+  tensorcast::common::v1::ArtifactSelection resolved_selection;
   std::string canonical_index_json;
   std::string selected_index_json;
   std::vector<RegisterStorageMeta> publish_storages;
@@ -40,13 +41,16 @@ struct TargetMaterializationPlan {
 struct MappedTargetMaterializationPlan {
   std::optional<store::loader::ViewSpec> view_spec;
   std::optional<store::loader::ViewPlan> view_plan;
+  tensorcast::common::v1::ArtifactSelection resolved_selection;
   materialization_mapped_copy_plan::BuildCopyPlanResult copy_plan;
   std::string canonical_index_json;
+  std::string selected_index_json;
   uint64_t logical_total_size{0};
 };
 
 grpc::Status build_target_materialization_plan(
     store::StoreEngine& engine,
+    std::string_view resolved_artifact_id,
     const v2::MaterializeIntoTargetRequest& req,
     const v2::TargetLayout& layout,
     const std::vector<materialization_layout::TargetOffsetEntry>& offsets,

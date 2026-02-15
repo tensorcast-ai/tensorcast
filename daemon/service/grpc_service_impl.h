@@ -158,11 +158,6 @@ class StoreDaemonServiceImpl final : public v2::StoreDaemonService::Service {
       const v2::RevokeRegisteredArtifactRequest* req,
       v2::RevokeRegisteredArtifactResponse* resp) override;
 
-  grpc::Status MaterializeByKey(
-      grpc::ServerContext* ctx,
-      const v2::MaterializeByKeyRequest* req,
-      v2::MaterializeByKeyResponse* resp) override;
-
   grpc::Status ImportArtifactFromPath(
       grpc::ServerContext* ctx,
       const v2::ImportArtifactFromPathRequest* req,

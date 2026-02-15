@@ -11,20 +11,27 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/escaping.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
+#include "absl/types/span.h"
 #include "opentelemetry/metrics/provider.h"
 
 #include "core/store/device_registry.h"
 #include "core/store/materialization/dataplane/metadata/index_reader.h"
 #include "core/store/materialization/dataplane/view/view_planner.h"
+#include "core/store/view_utils.h"
 #include "daemon/service/controllers/materialization_index_source_utils.h"
 #include "daemon/service/controllers/materialization_payload_utils.h"
 #include "daemon/service/controllers/materialization_policy_utils.h"
 #include "daemon/service/controllers/materialization_post_seal_utils.h"
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/materialization_request_common_utils.h"
+#include "daemon/service/controllers/selection_validation_utils.h"
 #include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon {
@@ -41,7 +48,7 @@ using materialization_index_source::load_descriptor_metadata;
 using materialization_index_source::validate_descriptor_against_index;
 using materialization_payload::populate_materialize_payloads;
 using materialization_payload::resolve_layout_json;
-using materialization_payload::resolve_layout_json_by_key;
+using materialization_policy::build_view_spec_proto;
 using materialization_policy::compute_view_id_from_spec;
 using materialization_policy::convert_view_spec;
 using materialization_policy::resolve_source_policy;
@@ -58,6 +65,9 @@ using materialization_request_common::materialize_with_shared_disk_retry;
 using materialization_request_common::resolve_artifact_and_disk_source;
 using materialization_request_common::try_satisfy_lip_fast_path;
 using materialization_request_common::validate_and_compute_lease_context;
+using selection_validation::compute_and_validate_view_subset_hash;
+using selection_validation::validate_hashes_and_build_resolved_selection;
+using selection_validation::validate_request_tensor_names;
 using store::loader::ViewSpec;
 
 using store::loading::MaterializationSource;
@@ -94,6 +104,33 @@ v2::MaterializationSource to_proto_source(MaterializationSource source) {
     default:
       return v2::MaterializationSource::MATERIALIZATION_SOURCE_UNSPECIFIED;
   }
+}
+
+std::optional<std::string> build_internal_subset_view_id(std::string_view view_subset_hash) {
+  if (view_subset_hash.empty()) {
+    return std::nullopt;
+  }
+  return absl::StrCat("subset:", absl::BytesToHexString(view_subset_hash));
+}
+
+absl::Status validate_impossible_cpu_stable_budget(const store::StoreEngine& engine, uint64_t required_bytes) {
+  if (required_bytes == 0) {
+    return absl::OkStatus();
+  }
+  auto snapshot_opt = engine.get_memory_tier_snapshot();
+  if (!snapshot_opt.has_value()) {
+    return absl::OkStatus();
+  }
+  const auto& snapshot = *snapshot_opt;
+  if (required_bytes <= snapshot.stable_total_bytes) {
+    return absl::OkStatus();
+  }
+  return absl::ResourceExhaustedError(
+      absl::StrFormat(
+          "Insufficient stable bytes: requested=%llu used=%llu total=%llu",
+          static_cast<unsigned long long>(required_bytes),
+          static_cast<unsigned long long>(snapshot.stable_used_bytes),
+          static_cast<unsigned long long>(snapshot.stable_total_bytes)));
 }
 
 absl::Status bind_materialized_handle(
@@ -198,10 +235,10 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
   }
 
-  const bool request_has_artifact = req.has_artifact_id() && !req.artifact_id().empty();
-  if (!request_has_artifact) {
-    return {StatusCode::INVALID_ARGUMENT, "artifact_id is required"};
+  if (!req.has_selection() || req.selection().artifact_id().empty()) {
+    return {StatusCode::INVALID_ARGUMENT, "selection.artifact_id is required"};
   }
+  const auto& selection = req.selection();
 
   const auto dev = d_.devices.From(req.target_device_type(), req.device_uuid(), std::nullopt);
   const bool cpu_target = dev.type == DeviceType::CPU;
@@ -227,7 +264,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
       d_.global_store_client,
       &d_.disk_imports,
       storage_path_,
-      req.artifact_id(),
+      selection.artifact_id(),
       effective_policy.allow_disk,
       /*allow_local_import_fallback=*/true,
       loopback_peer);
@@ -364,92 +401,151 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   const bool has_disk = disk_source.has_value();
   const bool has_artifact = !resolved_artifact_id.empty();
 
+  std::vector<std::string> selection_names;
+  std::string_view selection_error_reason;
+  auto selection_names_status = validate_request_tensor_names(selection, selection_names, &selection_error_reason);
+  if (!selection_names_status.ok()) {
+    if (!selection_error_reason.empty()) {
+      span->SetAttribute("tc.selection.error_reason", std::string(selection_error_reason));
+    }
+    return selection_names_status;
+  }
+  std::string view_subset_hash;
+  auto subset_hash_status = compute_and_validate_view_subset_hash(
+      selection, absl::MakeSpan(selection_names), view_subset_hash, &selection_error_reason);
+  if (!subset_hash_status.ok()) {
+    if (!selection_error_reason.empty()) {
+      span->SetAttribute("tc.selection.error_reason", std::string(selection_error_reason));
+    }
+    return subset_hash_status;
+  }
+
   // View identity handling
   std::optional<ViewSpec> view_spec;
+  std::optional<tensorcast::common::v1::ViewSpec> view_spec_proto;
   std::optional<store::loader::ViewPlan> view_plan;
   std::optional<std::string> canonical_index_json;
-  std::optional<std::string> request_view_id;
+  std::optional<std::string> resolved_view_id;
+  tensorcast::common::v1::ArtifactSelection resolved_selection;
   const std::string& index_source_artifact_id =
       fallback_artifact_id.has_value() ? *fallback_artifact_id : resolved_artifact_id;
 
-  switch (req.view_identity_case()) {
-    case v2::MaterializeReplicaRequest::kView: {
-      if (!has_artifact && !has_disk) {
-        return {StatusCode::INVALID_ARGUMENT, "view spec requires artifact_id or disk_path for canonical planning"};
-      }
-      auto spec_or = convert_view_spec(req.view());
-      if (!spec_or.ok()) {
-        return to_grpc_status(spec_or.status());
-      }
-      view_spec = std::move(*spec_or);
-      auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
-        if (!normalized_disk_path.has_value()) {
-          return absl::FailedPreconditionError("disk source path required for disk-backed view planning");
-        }
-        if (disk_index.has_value() && !disk_index->canonical_index_json.empty()) {
-          return disk_index->canonical_index_json;
-        }
-        auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
-        if (!idx_status.ok()) {
-          return idx_status;
-        }
-        auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
-        if (!local_or.ok()) {
-          return local_or.status();
-        }
-        return local_or->canonical_index_json;
-      };
-
-      const bool prefer_disk_index = has_disk && (!gs_connected || prefer_disk);
-
-      absl::StatusOr<std::string> index_or = prefer_disk_index
-          ? read_canonical_from_disk()
-          : d_.engine.get_canonical_index_by_id(index_source_artifact_id);
-      if (!index_or.ok() && has_disk && !prefer_disk_index) {
-        // If the canonical lookup fails (e.g., local-only daemon without Global Store), use the disk index when
-        // present.
-        auto disk_or = read_canonical_from_disk();
-        if (disk_or.ok()) {
-          index_or = std::move(disk_or);
-        }
-      }
-      if (!index_or.ok()) {
-        return to_grpc_status(index_or.status());
-      }
-      canonical_index_json = std::move(index_or).value();
-      auto plan_or = store::StoreEngine::compute_view_plan(*canonical_index_json, *view_spec);
-      if (!plan_or.ok()) {
-        return to_grpc_status(plan_or.status());
-      }
-      if (!plan_or->is_identity) {
-        view_plan = *plan_or;
-        auto view_id_or = compute_view_id_from_spec(req.view(), *canonical_index_json);
-        if (!view_id_or.ok()) {
-          return to_grpc_status(view_id_or.status());
-        }
-        request_view_id = std::move(*view_id_or);
-      } else {
-        // Identity view collapses to canonical path
-        view_spec.reset();
-        view_plan.reset();
-        canonical_index_json.reset();
-      }
-      break;
+  auto read_canonical_from_disk = [&]() -> absl::StatusOr<std::string> {
+    if (!normalized_disk_path.has_value()) {
+      return absl::FailedPreconditionError("disk source path required for disk-backed canonical planning");
     }
-    case v2::MaterializeReplicaRequest::kViewId: {
-      if (!req.view_id().empty()) {
-        if (!has_artifact) {
-          return {StatusCode::INVALID_ARGUMENT, "view_id requires artifact_id for routing"};
-        }
-        request_view_id = req.view_id();
-      }
-      break;
+    if (disk_index.has_value() && !disk_index->canonical_index_json.empty()) {
+      return disk_index->canonical_index_json;
     }
-    case v2::MaterializeReplicaRequest::VIEW_IDENTITY_NOT_SET:
-      break;
+    auto idx_status = ensure_tensor_index_present(*normalized_disk_path);
+    if (!idx_status.ok()) {
+      return idx_status;
+    }
+    auto local_or = store::loader::read_from_artifact_dir(*normalized_disk_path, dev.ordinal);
+    if (!local_or.ok()) {
+      return local_or.status();
+    }
+    return local_or->canonical_index_json;
+  };
+
+  if (!has_artifact && !has_disk) {
+    return {StatusCode::INVALID_ARGUMENT, "selection requires artifact_id or disk_path for canonical planning"};
   }
-  if (request_view_id.has_value()) {
-    span->SetAttribute("tc.view.id", *request_view_id);
+
+  const bool prefer_disk_index = has_disk && (!gs_connected || prefer_disk);
+  absl::StatusOr<std::string> index_or =
+      prefer_disk_index ? read_canonical_from_disk() : d_.engine.get_canonical_index_by_id(index_source_artifact_id);
+  if (!index_or.ok() && has_disk && !prefer_disk_index) {
+    auto disk_or = read_canonical_from_disk();
+    if (disk_or.ok()) {
+      index_or = std::move(disk_or);
+    }
+  }
+  if (!index_or.ok()) {
+    return to_grpc_status(index_or.status());
+  }
+  canonical_index_json = std::move(index_or).value();
+
+  if (selection.has_view_spec()) {
+    auto spec_or = convert_view_spec(selection.view_spec());
+    if (!spec_or.ok()) {
+      return to_grpc_status(spec_or.status());
+    }
+    view_spec = std::move(*spec_or);
+    view_spec_proto = selection.view_spec();
+  } else if (!selection.view_id().empty()) {
+    if (!has_artifact) {
+      return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires artifact_id for routing"};
+    }
+    auto view_meta_or = d_.engine.get_view_metadata(resolved_artifact_id, selection.view_id());
+    if (!view_meta_or.ok()) {
+      return to_grpc_status(view_meta_or.status());
+    }
+    auto spec_or = store::view::parse_view_spec_json(view_meta_or->view_spec_json);
+    if (!spec_or.ok()) {
+      return to_grpc_status(spec_or.status());
+    }
+    view_spec = std::move(*spec_or);
+    view_spec_proto = build_view_spec_proto(*view_spec);
+  }
+
+  if (view_spec.has_value() || !selection_names.empty()) {
+    auto plan_or =
+        store::StoreEngine::compute_view_plan(*canonical_index_json, view_spec.value_or(ViewSpec{}), selection_names);
+    if (!plan_or.ok()) {
+      return to_grpc_status(plan_or.status());
+    }
+    view_plan = std::move(*plan_or);
+  }
+
+  const bool has_view_transform = view_spec.has_value() && view_plan.has_value() && !view_plan->is_identity;
+  if (has_view_transform) {
+    if (!view_spec_proto.has_value()) {
+      view_spec_proto = build_view_spec_proto(*view_spec);
+    }
+    if (!view_spec_proto.has_value()) {
+      return {StatusCode::FAILED_PRECONDITION, "view spec proto missing while resolving selection"};
+    }
+    auto view_id_or = compute_view_id_from_spec(*view_spec_proto, *canonical_index_json);
+    if (!view_id_or.ok()) {
+      return to_grpc_status(view_id_or.status());
+    }
+    if (!selection.view_id().empty() && selection.view_id() != *view_id_or) {
+      return {StatusCode::INVALID_ARGUMENT, "selection.view_id does not match selection.view_spec"};
+    }
+    resolved_view_id = *view_id_or;
+    span->SetAttribute("tc.view.id", *resolved_view_id);
+  } else {
+    if (!selection.view_id().empty()) {
+      return {StatusCode::INVALID_ARGUMENT, "selection.view_id requires a non-identity view spec"};
+    }
+    view_spec.reset();
+    view_spec_proto.reset();
+  }
+
+  std::string selected_index_json = *canonical_index_json;
+  if (view_plan.has_value() && !view_plan->is_identity) {
+    selected_index_json = view_plan->view_index_json;
+  }
+  const bool needs_view_index = !selection_names.empty() || resolved_view_id.has_value();
+  const tensorcast::common::v1::ViewSpec* resolved_view_spec =
+      (resolved_view_id.has_value() && view_spec_proto.has_value()) ? &*view_spec_proto : nullptr;
+  auto selection_identity_status = validate_hashes_and_build_resolved_selection(
+      selection,
+      resolved_artifact_id,
+      resolved_view_id.value_or(""),
+      selected_index_json,
+      needs_view_index,
+      absl::MakeSpan(selection_names),
+      view_subset_hash,
+      resolved_view_spec,
+      resolved_selection,
+      &selection_error_reason);
+  if (!selection_identity_status.ok()) {
+    if (!selection_error_reason.empty()) {
+      span->SetAttribute("tc.selection.error_reason", std::string(selection_error_reason));
+    }
+    return selection_identity_status;
   }
 
   auto finalize_response = [&]() -> grpc::Status {
@@ -464,15 +560,14 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (!layout_or.ok()) {
       return to_grpc_status(layout_or.status());
     }
-    const bool prefer_view_plan =
-        req.view_identity_case() == v2::MaterializeReplicaRequest::kView && resp.view_index_json().empty();
+    const bool prefer_view_plan = view_plan.has_value() && !view_plan->is_identity && resp.view_index_json().empty();
     const std::string* ticket_device_uuid = req.device_uuid().empty() ? nullptr : &req.device_uuid();
     absl::Status payload_status = populate_materialize_payloads(
         resp,
         *layout_or,
-        req.tensor_names(),
+        resolved_selection.tensor_names(),
         req.device_uuid(),
-        req.view_subset_hash(),
+        resolved_selection.view_subset_hash(),
         req.wait_for_completion(),
         req.replica_uuid(),
         ticket_device_uuid,
@@ -482,12 +577,13 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (!payload_status.ok()) {
       return to_grpc_status(payload_status);
     }
+    resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
     rctx.mark_success();
     return Status::OK;
   };
 
   // Artifact LIP fast path: try cross-device consumption
-  const bool view_requested = view_spec.has_value() || request_view_id.has_value();
+  const bool view_requested = view_spec.has_value() || resolved_view_id.has_value();
   if (has_artifact && !view_requested && dev.type == DeviceType::GPU) {
     LipFastPathRequest lip_request{
         .artifact_id = resolved_artifact_id,
@@ -532,7 +628,7 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (disk_metadata.has_value()) {
     hints.disk_metadata = std::move(*disk_metadata);
   }
-  if (view_spec.has_value() || request_view_id.has_value()) {
+  if (view_spec.has_value() || resolved_view_id.has_value() || !selection_names.empty()) {
     store::loading::VariantIdentity variant;
     if (has_artifact) {
       variant.canonical_artifact_id = resolved_artifact_id;
@@ -546,12 +642,34 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     if (view_plan.has_value()) {
       variant.cached_plan = view_plan;
     }
-    if (request_view_id.has_value()) {
-      variant.view_id = request_view_id;
+    if (resolved_view_id.has_value()) {
+      variant.view_id = resolved_view_id;
+    } else if (!selection_names.empty()) {
+      auto subset_view_id = build_internal_subset_view_id(view_subset_hash);
+      if (subset_view_id.has_value()) {
+        variant.view_id = std::move(*subset_view_id);
+      }
     }
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
   }
+
+  if (cpu_target && selection_names.empty() && !resolved_view_id.has_value() && !view_spec.has_value()) {
+    std::optional<uint64_t> required_stable_bytes;
+    if (hints.disk_metadata.has_value() && hints.disk_metadata->logical_total_size.has_value()) {
+      required_stable_bytes = hints.disk_metadata->logical_total_size;
+    } else if (req.size_bytes() > 0) {
+      required_stable_bytes = req.size_bytes();
+    }
+    if (required_stable_bytes.has_value()) {
+      auto stable_budget_status = validate_impossible_cpu_stable_budget(d_.engine, *required_stable_bytes);
+      if (!stable_budget_status.ok()) {
+        resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
+        return to_grpc_status(stable_budget_status);
+      }
+    }
+  }
+
   const auto mode = (has_disk && !has_artifact && !prefer_disk) ? store::StoreEngine::MaterializeMode::LOAD_ONLY
                                                                 : store::StoreEngine::MaterializeMode::AUTO;
 
@@ -747,261 +865,6 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
     resp.set_view_data_hash(*handle.view_data_hash);
   }
   return finalize_response();
-}
-
-grpc::Status ReplicaMaterializationService::materialize_by_key(
-    RpcContext& rctx,
-    const v2::MaterializeByKeyRequest& req,
-    v2::MaterializeByKeyResponse& resp) {
-  auto& span = rctx.span();
-  span->SetAttribute("tc.key", req.key());
-  const v2::DeviceType requested_type = (req.target_device_type() == v2::DeviceType::DEVICE_TYPE_CPU)
-      ? v2::DeviceType::DEVICE_TYPE_CPU
-      : v2::DeviceType::DEVICE_TYPE_GPU;
-  const bool cpu_target = requested_type == v2::DeviceType::DEVICE_TYPE_CPU;
-  span->SetAttribute("tc.device.type", static_cast<int64_t>(requested_type));
-  using v2::MaterializeReplicaStatus;
-  auto lease_context_or = validate_and_compute_lease_context(
-      rctx.server_context().peer(),
-      req.lease_mode(),
-      req.wait_for_completion(),
-      req.pid(),
-      cpu_target,
-      d_.cpu_shared_memory_enabled,
-      d_.handle_leases != nullptr);
-  if (!lease_context_or.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(lease_context_or.status());
-  }
-  const LeaseContext lease_context = *lease_context_or;
-  const bool loopback_peer = lease_context.loopback_peer;
-  const bool no_lease = lease_context.no_lease;
-  const int32_t effective_pid = lease_context.effective_pid;
-
-  auto policy_or =
-      resolve_and_validate_effective_policy(req.has_source_policy() ? &req.source_policy() : nullptr, req.preference());
-  if (!policy_or.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(policy_or.status());
-  }
-  ResolvedSourcePolicy effective_policy = *policy_or;
-  span->SetAttribute("tc.store.preference", static_cast<int64_t>(effective_policy.preference));
-  span->SetAttribute("tc.store.allow_p2p", effective_policy.allow_p2p);
-  span->SetAttribute("tc.store.allow_disk", effective_policy.allow_disk);
-
-  if (d_.shutdown_signal.is_shutting_down()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return {StatusCode::UNAVAILABLE, "daemon is shutting down"};
-  }
-  if (req.key().empty()) {
-    return {StatusCode::INVALID_ARGUMENT, "key is required"};
-  }
-
-  auto finalize_response = [&]() -> grpc::Status {
-    if (no_lease) {
-      resp.clear_mem_handle();
-    }
-    auto layout_or = resolve_layout_json_by_key(resp, d_.engine);
-    if (!layout_or.ok()) {
-      return to_grpc_status(layout_or.status());
-    }
-    absl::Status payload_status = populate_materialize_payloads(
-        resp,
-        *layout_or,
-        req.tensor_names(),
-        /*device_uuid=*/"",
-        req.view_subset_hash(),
-        req.wait_for_completion(),
-        req.replica_uuid(),
-        /*ticket_device_uuid=*/nullptr,
-        /*view_plan=*/std::nullopt,
-        /*prefer_view_plan=*/false,
-        /*fill_view_index_bytes=*/true);
-    if (!payload_status.ok()) {
-      return to_grpc_status(payload_status);
-    }
-    rctx.mark_success();
-    return Status::OK;
-  };
-
-  auto mapping_or = d_.engine.resolve_key_mapping(req.key());
-  if (!mapping_or.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(mapping_or.status());
-  }
-  const auto& mapping = *mapping_or;
-
-  // Engine path device resolution (also used for local short-circuit checks).
-  store::DeviceKey dev;
-  if (cpu_target) {
-    dev = d_.devices.From(v2::DeviceType::DEVICE_TYPE_CPU, /*uuid=*/"", /*ordinal_hint=*/std::nullopt);
-  } else {
-    if (req.device_id() < 0 || req.device_id() >= d_.engine.get_num_gpus()) {
-      return {StatusCode::INVALID_ARGUMENT, "invalid device_id"};
-    }
-    dev = store::DeviceRegistry::instance().gpu_key(req.device_id());
-  }
-
-  std::string resolved_artifact_id = mapping.artifact_id;
-  store::loading::MaterializeHints hints;
-  if (req.pinned_allocation_timeout_ms() > 0) {
-    hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
-  }
-  hints.artifact_id = resolved_artifact_id;
-  hints.source_preference = to_hint_preference(effective_policy.preference);
-  hints.allow_p2p = effective_policy.allow_p2p;
-  hints.allow_disk = effective_policy.allow_disk;
-
-  auto finalize_materialized = [&](const store::loading::ReplicaHandle& handle, std::string_view used_disk_path) {
-    auto bind_status = bind_materialized_handle(
-        d_.engine,
-        d_.sessions,
-        d_.refs,
-        d_.lifecycle,
-        d_.handle_leases,
-        handle,
-        req.replica_uuid(),
-        effective_pid,
-        loopback_peer,
-        cpu_target,
-        "engine by-key",
-        *resp.mutable_mem_handle());
-    if (!bind_status.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(bind_status);
-    }
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-    resp.set_artifact_id(resolved_artifact_id);
-    resp.set_used_disk_path(std::string(used_disk_path));
-    resp.set_source(to_proto_source(handle.source));
-    span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-    return finalize_response();
-  };
-
-  // Local-first short-circuit: if local CPU/GPU residency is already available,
-  // try a no-remote/no-disk materialization before querying Global Store.
-  store::loading::ReplicaKey cpu_lookup{
-      .artifact_id = resolved_artifact_id,
-      .device = store::DeviceKey{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""},
-      .replica = 0,
-  };
-  const bool local_cpu_loaded =
-      d_.engine.get_replica_state(cpu_lookup, DeviceType::CPU) == store::replica::MemoryState::LOADED;
-  bool local_gpu_loaded = false;
-  if (!cpu_target) {
-    store::loading::ReplicaKey gpu_lookup{
-        .artifact_id = resolved_artifact_id,
-        .device = dev,
-        .replica = 0,
-    };
-    local_gpu_loaded = d_.engine.get_replica_state(gpu_lookup, DeviceType::GPU) == store::replica::MemoryState::LOADED;
-  }
-  if (local_cpu_loaded || local_gpu_loaded) {
-    auto local_hints = hints;
-    local_hints.allow_p2p = false;
-    local_hints.allow_disk = false;
-    auto local_result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, local_hints);
-    if (local_result.ok()) {
-      span->SetAttribute("tc.store.local_short_circuit", true);
-      span->SetAttribute("tc.store.gs_connected", false);
-      return finalize_materialized(*local_result, /*used_disk_path=*/"");
-    }
-    VLOG(1) << "Local short-circuit miss for key=" << req.key() << ": " << local_result.status();
-  }
-
-  auto artifact_resolution_or = resolve_artifact_and_disk_source(
-      d_.global_store_client,
-      /*disk_imports=*/nullptr,
-      storage_path_,
-      mapping.artifact_id,
-      effective_policy.allow_disk,
-      /*allow_local_import_fallback=*/false,
-      loopback_peer);
-  if (!artifact_resolution_or.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(artifact_resolution_or.status());
-  }
-  auto artifact_resolution = std::move(*artifact_resolution_or);
-  resolved_artifact_id = std::move(artifact_resolution.resolved_artifact_id);
-  hints.artifact_id = resolved_artifact_id;
-  std::optional<std::string> bound_artifact_id = std::move(artifact_resolution.bound_artifact_id);
-  if (bound_artifact_id.has_value()) {
-    span->SetAttribute("tc.artifact.bound", *bound_artifact_id);
-  }
-  span->SetAttribute("tc.artifact.id", resolved_artifact_id);
-  std::optional<std::filesystem::path> normalized_disk_path = std::move(artifact_resolution.normalized_disk_path);
-  std::optional<store::loading::DiskSource> disk_source = std::move(artifact_resolution.disk_source);
-  if (disk_source.has_value()) {
-    hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
-  }
-  std::string used_disk_path = normalized_disk_path.has_value() ? normalized_disk_path->string() : std::string();
-  span->SetAttribute("tc.store.gs_connected", artifact_resolution.gs_connected);
-
-  // Try LIP fast path first (GPU only)
-  if (!cpu_target) {
-    LipFastPathRequest lip_request{
-        .artifact_id = resolved_artifact_id,
-        .target_device_id = req.device_id(),
-        .replica_uuid = req.replica_uuid(),
-        .effective_pid = effective_pid,
-        .allow_pid_ref = loopback_peer,
-        .lease_log_context = "LIP by-key",
-    };
-    auto lip_or = try_satisfy_lip_fast_path(
-        d_.lip, d_.sessions, d_.refs, d_.handle_leases, d_.lifecycle, lip_request, *resp.mutable_mem_handle(), [&]() {
-          record_lease_create_failed();
-        });
-    if (!lip_or.ok()) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-      return to_grpc_status(lip_or.status());
-    }
-    if (lip_or->satisfied) {
-      resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
-      resp.set_artifact_id(mapping.artifact_id);
-      resp.set_used_disk_path(used_disk_path);
-      resp.set_source(v2::MaterializationSource::MATERIALIZATION_SOURCE_LOCAL_REPLICA);
-      span->SetAttribute("tc.store.source", static_cast<int64_t>(resp.source()));
-      return finalize_response();
-    }
-  }
-
-  // Engine path
-  auto result = d_.engine.materialize_replica(dev, store::StoreEngine::MaterializeMode::AUTO, hints, disk_source);
-  if (!result.ok()) {
-    auto retry_or = retry_materialize_from_shared_disk(
-        result.status(),
-        d_.engine,
-        dev,
-        store::StoreEngine::MaterializeMode::AUTO,
-        hints,
-        d_.global_store_client.get(),
-        storage_path_,
-        resolved_artifact_id,
-        static_cast<int>(req.wait_for_shared_disk_ms()),
-        effective_policy.allow_disk,
-        rctx.server_context(),
-        normalized_disk_path,
-        [&](const std::filesystem::path& ready_disk_path) -> absl::StatusOr<std::optional<store::loading::DiskSource>> {
-          hints.source_preference = to_hint_preference(v2::SourcePreference::SOURCE_PREFERENCE_PREFER_DISK);
-          hints.allow_p2p = false;
-          hints.allow_disk = true;
-          hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
-          return store::loading::DiskSource{
-              .path = ready_disk_path,
-              .expected_size = std::nullopt,
-              .require_descriptor = true,
-          };
-        });
-    result = std::move(retry_or);
-    if (normalized_disk_path.has_value()) {
-      used_disk_path = normalized_disk_path->string();
-    }
-  }
-  if (!result.ok()) {
-    resp.set_status(MaterializeReplicaStatus::MATERIALIZE_REPLICA_STATUS_FAILED);
-    return to_grpc_status(result.status());
-  }
-  return finalize_materialized(*result, used_disk_path);
 }
 
 } // namespace tensorcast::daemon
