@@ -71,6 +71,10 @@ class StableDramCacheManager {
 
   bool is_evictable(const loading::ReplicaKey& key, absl::Time now) const;
   void on_replica_evicted(const loading::ReplicaKey& key, absl::string_view reason = "");
+  void on_replica_evicted(
+      const loading::ReplicaKey& key,
+      const std::shared_ptr<replica::Replica>& replica,
+      absl::string_view reason = "");
   void set_spill_evictable_callback(SpillEvictableCallback callback);
 
   uint64_t bytes_used() const;

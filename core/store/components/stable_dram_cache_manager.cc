@@ -374,12 +374,60 @@ absl::Status StableDramCacheManager::preempt_for_export(uint64_t required_bytes,
 }
 
 void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, absl::string_view reason) {
+  on_replica_evicted(key, std::shared_ptr<replica::Replica>{}, reason);
+}
+
+void StableDramCacheManager::on_replica_evicted(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    absl::string_view reason) {
   CacheEntry entry;
-  bool found = false;
   loading::ReplicaKey entry_key = key;
   {
     absl::MutexLock lock(&mu_);
     auto it = entries_.find(key);
+    if (it == entries_.end()) {
+      for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
+        if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
+          it = scan;
+          break;
+        }
+      }
+      if (it == entries_.end()) {
+        return;
+      }
+    }
+    entry_key = it->first;
+    entry = it->second;
+  }
+
+  std::shared_ptr<replica::Replica> release_source = replica;
+  if (!release_source) {
+    auto replica_or = registry_->find(entry_key);
+    if (replica_or.ok()) {
+      release_source = replica_or.value();
+    }
+  }
+
+  if (!release_source && entry.stable_lease.has_value()) {
+    LOG(WARNING) << "stable_cache.release_lease_skipped_missing_replica artifact_id=" << entry_key.artifact_id;
+    return;
+  }
+
+  if (release_source) {
+    auto uma = release_source->get_memory_manager().memory_authority();
+    if (uma && entry.stable_lease.has_value()) {
+      absl::Status st = uma->release_stable_lease(*entry.stable_lease);
+      if (!st.ok()) {
+        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << entry_key.artifact_id << " status=" << st;
+      }
+    }
+  }
+
+  bool found = false;
+  {
+    absl::MutexLock lock(&mu_);
+    auto it = entries_.find(entry_key);
     if (it == entries_.end()) {
       for (auto scan = entries_.begin(); scan != entries_.end(); ++scan) {
         if (scan->second.stable_lease.has_value() && scan->second.stable_lease->key == key) {
@@ -398,17 +446,6 @@ void StableDramCacheManager::on_replica_evicted(const loading::ReplicaKey& key, 
   }
   if (!found) {
     return;
-  }
-
-  auto replica_or = registry_->find(entry_key);
-  if (replica_or.ok()) {
-    auto uma = replica_or.value()->get_memory_manager().memory_authority();
-    if (uma && entry.stable_lease.has_value()) {
-      absl::Status st = uma->release_stable_lease(*entry.stable_lease);
-      if (!st.ok()) {
-        LOG(WARNING) << "stable_cache.release_lease_failed artifact_id=" << entry_key.artifact_id << " status=" << st;
-      }
-    }
   }
 
   bytes_used_.fetch_sub(entry.stable_bytes);
