@@ -3,10 +3,12 @@
 #include <array>
 #include <chrono>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "absl/synchronization/mutex.h"
 #include "absl/types/span.h"
 #include "catch2/catch_test_macros.hpp"
 #include "core/common/memory/pinned_buffer_pool.h"
@@ -176,6 +178,29 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
   int register_calls{0};
   std::vector<std::string> registered_artifacts;
 
+  void set_register_blocking(bool enabled) {
+    absl::MutexLock lock(&register_mu_);
+    block_register_ = enabled;
+    register_started_ = false;
+    allow_register_continue_ = !enabled;
+    if (!enabled) {
+      register_cv_.SignalAll();
+    }
+  }
+
+  void wait_for_register_started() {
+    absl::MutexLock lock(&register_mu_);
+    while (!register_started_) {
+      register_cv_.Wait(&register_mu_);
+    }
+  }
+
+  void unblock_register() {
+    absl::MutexLock lock(&register_mu_);
+    allow_register_continue_ = true;
+    register_cv_.SignalAll();
+  }
+
   absl::Status initialize() override {
     return absl::OkStatus();
   }
@@ -221,6 +246,16 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
       uint64_t,
       uint32_t,
       std::optional<std::string_view>) override {
+    {
+      absl::MutexLock lock(&register_mu_);
+      if (block_register_) {
+        register_started_ = true;
+        register_cv_.SignalAll();
+        while (!allow_register_continue_) {
+          register_cv_.Wait(&register_mu_);
+        }
+      }
+    }
     registered_artifacts.emplace_back(artifact_id);
     ++register_calls;
     if (!next_register_status.ok()) {
@@ -479,6 +514,13 @@ class TestGlobalStoreClient final : public tensorcast::store::components::IGloba
   }
 
   void update_local_endpoint(std::string, std::string, uint32_t, uint32_t) override {}
+
+ private:
+  mutable absl::Mutex register_mu_;
+  bool block_register_ ABSL_GUARDED_BY(register_mu_){false};
+  bool register_started_ ABSL_GUARDED_BY(register_mu_){false};
+  bool allow_register_continue_ ABSL_GUARDED_BY(register_mu_){false};
+  absl::CondVar register_cv_;
 };
 
 struct MetadataGatewayHarness {
@@ -578,6 +620,84 @@ TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][r
   auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-2");
   CHECK(second_status.ok());
   CHECK(harness.client->register_calls == 2);
+}
+
+TEST_CASE("MetadataGateway suppresses concurrent publish context duplicates", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_inflight");
+
+  harness.client->set_register_blocking(true);
+
+  absl::Status first_status = absl::UnknownError("not-run");
+  std::thread first([&]() { first_status = harness.gateway->register_replica(replica_key, {}, "ctx-inflight"); });
+
+  harness.client->wait_for_register_started();
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-inflight");
+  CHECK(second_status.ok());
+
+  harness.client->unblock_register();
+  first.join();
+  CHECK(first_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE("MetadataGateway retries publish context after client reconnection", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_client");
+
+  harness.client->connected = false;
+  auto first_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-client");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kFailedPrecondition);
+  CHECK(harness.client->register_calls == 0);
+
+  harness.client->connected = true;
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-client");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE("MetadataGateway retries publish context after replica size lookup failure", "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  DeviceKey cpu_device{.type = DeviceType::CPU, .ordinal = -1, .uuid = ""};
+  auto missing_replica_key = MakeReplicaKey("artifact_ctx_retry_size", cpu_device);
+
+  auto first_status = harness.gateway->register_replica(missing_replica_key, {}, "ctx-retry-size");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kNotFound);
+  CHECK(harness.client->register_calls == 0);
+
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_size");
+  auto second_status = harness.gateway->register_replica(replica_key, {}, "ctx-retry-size");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+}
+
+TEST_CASE(
+    "MetadataGateway retries publish context after canonical artifact validation failure",
+    "[metadata_gateway][runtime]") {
+  SKIP_IF_NO_CUDA();
+
+  MetadataGatewayHarness harness;
+  auto replica_key = CreateCpuReplica(harness.context, harness.replica_runtime, "artifact_ctx_retry_canonical");
+
+  auto first_status = harness.gateway->register_replica(replica_key, "artifact-non-canonical", "ctx-retry-canonical");
+  CHECK_FALSE(first_status.ok());
+  CHECK(first_status.code() == absl::StatusCode::kInvalidArgument);
+  CHECK(harness.client->register_calls == 0);
+
+  auto second_status =
+      harness.gateway->register_replica(replica_key, "mi2:artifact_ctx_retry_canonical", "ctx-retry-canonical");
+  CHECK(second_status.ok());
+  CHECK(harness.client->register_calls == 1);
+  CHECK_FALSE(harness.client->registered_artifacts.empty());
+  CHECK(harness.client->registered_artifacts.back() == "mi2:artifact_ctx_retry_canonical");
 }
 
 TEST_CASE("MetadataGateway keeps publish pending on registration failure", "[metadata_gateway][runtime]") {

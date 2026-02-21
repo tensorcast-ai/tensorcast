@@ -1142,9 +1142,9 @@ void Communicator::process_mtcp_read_task(MtcpReadTask task) {
       release_handed_off = true;
     }
 
-    LOG(INFO) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
-              << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
-              << " outstanding=" << flow_state->ledger.outstanding_credit();
+    VLOG(1) << "[staging_credit] request=" << request_key << " transport=mtcp window=" << staged_window.window_seq
+            << " granted=" << staged_window.granted_credit << " more=" << (staged_window.more_segments ? "yes" : "no")
+            << " outstanding=" << flow_state->ledger.outstanding_credit();
 
     for (auto& segment : staged_window.segments) {
       StageLease lease = std::move(segment.lease);

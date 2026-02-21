@@ -25,6 +25,9 @@ Examples:
 
 3) Quick smoke test with fewer tensors:
    python tools/tensorcast_tp8_from_disk_subset_view_repro.py --name-limit 32
+
+4) Materialize both CPU and GPU per rank:
+   python tools/tensorcast_tp8_from_disk_subset_view_repro.py --dual-materialize
 """
 
 from __future__ import annotations
@@ -60,6 +63,7 @@ class WorkerTask:
     force_device: str | None
     set_cuda_visible_devices: bool
     worker_logs: bool
+    dual_materialize: bool
 
 
 def _dedupe_keep_order(names: list[str]) -> list[str]:
@@ -134,6 +138,30 @@ def _pick_device(
     raise ValueError(f"Unsupported device_mode: {mode}")
 
 
+def _pick_dual_gpu_device(
+    data: dict[str, Any],
+    task: WorkerTask,
+    primary_device: str,
+) -> str:
+    if primary_device.startswith("cuda:"):
+        return primary_device
+
+    if task.force_device is not None:
+        forced = str(task.force_device).strip()
+        if forced.startswith("cuda:"):
+            return forced
+
+    target_from_args = str(data.get("target_device", "")).strip()
+    if target_from_args.startswith("cuda:"):
+        return target_from_args
+
+    if task.set_cuda_visible_devices:
+        # Each worker sees only one visible GPU in this mode.
+        return "cuda:0"
+
+    return f"cuda:{task.tp_rank}"
+
+
 def _run_worker(task: WorkerTask) -> dict[str, Any]:
     start = time.time()
     rank_prefix = f"[tp{task.tp_rank}]"
@@ -173,6 +201,7 @@ def _run_worker(task: WorkerTask) -> dict[str, Any]:
         "args_file": task.args_file,
         "artifact_path": disk_path,
         "device": device,
+        "dual_materialize": bool(task.dual_materialize),
         "subset_count": len(names),
         "slice_count": len(slices),
         "ok": False,
@@ -195,22 +224,53 @@ def _run_worker(task: WorkerTask) -> dict[str, Any]:
             prefer=task.prefer,
             export_policy=task.export_policy,
         )
-        _log("materialize_begin")
-        tensor_dict = artifact_tp.tensor_dict(device=device, options=options)
-        t2 = time.time()
-        _log(f"materialize_done sec={round(t2 - t1, 6)} tensors={len(tensor_dict)}")
+        materialization: dict[str, dict[str, Any]] = {}
 
-        total_bytes = 0
-        for tensor in tensor_dict.values():
-            total_bytes += int(tensor.numel() * tensor.element_size())
+        if task.dual_materialize:
+            gpu_device = _pick_dual_gpu_device(args_data, task, device)
+            targets = [("cpu", "cpu"), ("gpu", gpu_device)]
+            result["device"] = f"cpu+{gpu_device}"
+        else:
+            targets = [("primary", device)]
+
+        _log(
+            "materialize_begin "
+            + ",".join(f"{name}:{target_device}" for name, target_device in targets)
+        )
+
+        for name, target_device in targets:
+            m0 = time.time()
+            tensor_dict = artifact_tp.tensor_dict(device=target_device, options=options)
+            m1 = time.time()
+
+            total_bytes = 0
+            for tensor in tensor_dict.values():
+                total_bytes += int(tensor.numel() * tensor.element_size())
+
+            materialization[name] = {
+                "device": target_device,
+                "materialized_count": len(tensor_dict),
+                "materialized_bytes": total_bytes,
+                "materialize_sec": round(m1 - m0, 6),
+            }
+            _log(
+                f"materialize_done target={name} device={target_device} "
+                f"sec={round(m1 - m0, 6)} tensors={len(tensor_dict)}"
+            )
+
+        t2 = time.time()
+
+        primary_key = "gpu" if task.dual_materialize else "primary"
+        primary_stats = materialization[primary_key]
 
         result.update(
             {
                 "ok": True,
-                "materialized_count": len(tensor_dict),
-                "materialized_bytes": total_bytes,
+                "materialized_count": int(primary_stats["materialized_count"]),
+                "materialized_bytes": int(primary_stats["materialized_bytes"]),
                 "from_disk_sec": round(t1 - t0, 6),
                 "materialize_sec": round(t2 - t1, 6),
+                "materialization": materialization,
                 "total_sec": round(time.time() - start, 6),
             }
         )
@@ -342,6 +402,12 @@ def _parse_args() -> argparse.Namespace:
         help="Override device string for every rank, e.g. cpu or cuda:0",
     )
     parser.add_argument(
+        "--dual-materialize",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Materialize both CPU and GPU in each worker (CPU first, then GPU)",
+    )
+    parser.add_argument(
         "--set-cuda-visible-devices",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -400,6 +466,7 @@ def main() -> int:
             ),
             set_cuda_visible_devices=bool(args.set_cuda_visible_devices),
             worker_logs=bool(args.worker_logs),
+            dual_materialize=bool(args.dual_materialize),
         )
         for rank, path in files_by_rank.items()
     ]

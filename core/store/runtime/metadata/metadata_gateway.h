@@ -89,7 +89,14 @@ class MetadataGateway {
   absl::StatusOr<std::shared_ptr<components::IGlobalStoreClient>> get_connected_client() const;
   RegistrationResources make_registration_resources() const;
   ReplicaFactory make_default_replica_factory() const;
-  bool should_skip_publish_for_context(std::string_view publish_context_id, const loading::ReplicaKey& key) const;
+  enum class PublishContextDecision {
+    kProceed,
+    kSkipInFlight,
+    kSkipPublished,
+    kConflict,
+  };
+  PublishContextDecision begin_publish_for_context(std::string_view publish_context_id, const loading::ReplicaKey& key)
+      const;
   void record_publish_context_result(
       std::string_view publish_context_id,
       const loading::ReplicaKey& key,
@@ -98,6 +105,7 @@ class MetadataGateway {
 
   struct PublishContextRecord {
     loading::ReplicaKey key;
+    bool in_flight;
     absl::Status status;
     absl::Time updated_at;
   };

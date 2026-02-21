@@ -2,6 +2,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -33,6 +35,12 @@ namespace tensorcast::store::components {
  */
 class MetricsCollector {
  public:
+  struct P2PTransferSnapshot {
+    std::uint64_t total_transfers{0};
+    std::uint64_t total_bytes_transferred{0};
+    std::uint64_t total_transfer_errors{0};
+  };
+
   MetricsCollector();
   ~MetricsCollector() = default;
 
@@ -79,6 +87,8 @@ class MetricsCollector {
    * @param success Whether the transfer succeeded
    */
   void record_p2p_transfer(size_t bytes_transferred, bool success);
+
+  [[nodiscard]] P2PTransferSnapshot get_p2p_transfer_snapshot() const;
 
   /**
    * @brief Record the number of in-flight registrations managed by ARM.
@@ -138,6 +148,9 @@ class MetricsCollector {
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Counter<double>> p2p_bytes_total_;
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> artifact_load_seconds_;
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Histogram<double>> registration_commit_seconds_;
+  std::atomic<std::uint64_t> p2p_total_transfers_{0};
+  std::atomic<std::uint64_t> p2p_total_bytes_transferred_{0};
+  std::atomic<std::uint64_t> p2p_total_transfer_errors_{0};
 
   // Async gauge for CPU memory available (exposes last observed value)
   // We keep the latest snapshot here; the ObservableGauge callback reads it.

@@ -129,6 +129,18 @@ class ReplicaRuntime {
       const loading::ReplicaKey& key,
       common::memory::MemoryLocation location,
       bool enabled) const;
+  absl::Status disable_remote_access_for_replica(
+      const loading::ReplicaKey& key,
+      const std::shared_ptr<replica::Replica>& replica,
+      common::memory::MemoryLocation location) const;
+  void teardown_replica_memory(
+      const loading::ReplicaKey& key,
+      const std::shared_ptr<replica::Replica>& replica,
+      bool release_cpu,
+      bool release_gpu,
+      bool* released_any,
+      std::vector<absl::Status>* errors) const;
+  void clear_replica_runtime_state(const loading::ReplicaKey& key);
   size_t get_replica_size_or_zero(const loading::ReplicaKey& key) const;
 
   gsl::not_null<RuntimeContext*> context_;

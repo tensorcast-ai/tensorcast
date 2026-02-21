@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #ifndef CORE_COMMUNICATOR_BASE_CONSTANTS_H_
 #define CORE_COMMUNICATOR_BASE_CONSTANTS_H_
@@ -19,8 +19,8 @@ enum {
 
 // TCP connection constants
 constexpr int kMTcpConnCount = 8;
-constexpr int kMaxTcpConns = 32;
-constexpr int kMaxFd = 32;
+constexpr int kMaxTcpConns = 64;
+constexpr int kMaxFd = 64;
 
 } // namespace tensorcast::communicator::base
 

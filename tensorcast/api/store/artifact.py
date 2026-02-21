@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import threading
 import time
 import uuid
@@ -68,8 +69,11 @@ from tensorcast.common.selection_contract import (
 from tensorcast.proto.common.v1 import common_pb2
 from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
+logger = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from tensorcast.api._config import GetArtifactOptions
+    from tensorcast.api._materialize import MaterializationPayload
     from tensorcast.api.store import Store
     from tensorcast.api.store.batch_context import BatchContext
     from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -102,6 +106,66 @@ class PrefetchedReplica:
     device_id: int
     daemon_id: str
     source: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializationDiagnostics:
+    source: str | None
+    source_code: int | None
+    replica_uuid: str
+    ticket_replica_uuid: str | None
+    ticket_status: str | None
+    disk_path: str | None
+    tensor_count: int
+    total_bytes: int
+    generation: int | None
+    view_data_hash: str | None
+    view_index_bytes_len: int
+    materialize_sec: float
+    tensor_bind_sec: float
+    total_sec: float
+
+
+@dataclass(frozen=True, slots=True)
+class TensorDictMaterializationResult:
+    tensors: dict[str, torch.Tensor]
+    diagnostics: MaterializationDiagnostics
+
+
+def _materialization_source_label(
+    source: store_daemon_pb2.MaterializationSource | None,
+) -> str | None:
+    if source is None:
+        return None
+    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_P2P:
+        return "p2p"
+    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_DISK:
+        return "disk"
+    if source == store_daemon_pb2.MATERIALIZATION_SOURCE_LOCAL_REPLICA:
+        return "local_replica"
+    return None
+
+
+def _materialization_ticket_status_label(
+    status: store_daemon_pb2.MaterializeReplicaStatus | None,
+) -> str | None:
+    if status is None:
+        return None
+    try:
+        raw = store_daemon_pb2.MaterializeReplicaStatus.Name(int(status))
+    except Exception:  # noqa: BLE001
+        return str(int(status))
+    prefix = "MATERIALIZE_REPLICA_STATUS_"
+    if raw.startswith(prefix):
+        return raw[len(prefix) :].lower()
+    return raw.lower()
+
+
+def _payload_total_bytes(payload: "MaterializationPayload") -> int:
+    total = 0
+    for desc in payload.descriptors:
+        total += int(desc.byte_length)
+    return total
 
 
 def _encode_capability_token(token: bytes) -> str:
@@ -369,13 +433,27 @@ class Artifact:
         options: GetArtifactOptions | None = None,
         ctx: CallContext | None = None,
     ) -> dict[str, torch.Tensor]:
+        result = self.tensor_dict_with_diagnostics(
+            device=device,
+            options=options,
+            ctx=ctx,
+        )
+        return result.tensors
+
+    def tensor_dict_with_diagnostics(
+        self,
+        *,
+        device: torch.device | str,
+        options: GetArtifactOptions | None = None,
+        ctx: CallContext | None = None,
+    ) -> TensorDictMaterializationResult:
         artifact_id = self._ensure_identified()
         requested_names = (
             tuple(self._view_metadata.tensor_names)
             if self._view_metadata is not None and self._view_metadata.tensor_names
             else None
         )
-        store, runtime, pipeline = self._require_components()
+        _, runtime, pipeline = self._require_components()
         view_spec_proto = self._view_spec.proto if self._view_spec else None
         view_data_hash = (
             self._view_metadata.view_data_hash if self._view_metadata else None
@@ -384,6 +462,7 @@ class Artifact:
             self._view_metadata.view_index_bytes if self._view_metadata else None
         )
         replica_uuid = self._fallback.replica_uuid if self._fallback else None
+        materialize_start = time.perf_counter()
         payload, _ = pipeline.materialize_subset(
             artifact_id=artifact_id,
             key=None,
@@ -398,13 +477,62 @@ class Artifact:
             options=options,
             ctx=ctx,
         )
+        materialize_end = time.perf_counter()
         state: dict[str, torch.Tensor] | None = None
         try:
             self._update_metadata_from_payload(payload, runtime)
             state = pipeline._payload_state_dict(payload)
+            bind_end = time.perf_counter()
             if requested_names is None:
-                return state
-            return {name: state[name] for name in requested_names}
+                output = state
+            else:
+                output = {name: state[name] for name in requested_names}
+            return_end = time.perf_counter()
+            diagnostics = MaterializationDiagnostics(
+                source=_materialization_source_label(payload.source),
+                source_code=(
+                    int(payload.source) if payload.source is not None else None
+                ),
+                replica_uuid=str(payload.replica_uuid),
+                ticket_replica_uuid=(
+                    str(payload.ticket_replica_uuid)
+                    if payload.ticket_replica_uuid
+                    else None
+                ),
+                ticket_status=_materialization_ticket_status_label(
+                    payload.ticket_status
+                ),
+                disk_path=str(payload.disk_path) if payload.disk_path else None,
+                tensor_count=int(len(payload.descriptors)),
+                total_bytes=int(_payload_total_bytes(payload)),
+                generation=(
+                    int(payload.generation) if payload.generation is not None else None
+                ),
+                view_data_hash=(
+                    str(payload.view_data_hash) if payload.view_data_hash else None
+                ),
+                view_index_bytes_len=int(len(payload.view_index_bytes or b"")),
+                materialize_sec=(materialize_end - materialize_start),
+                tensor_bind_sec=(bind_end - materialize_end),
+                total_sec=(return_end - materialize_start),
+            )
+            logger.debug(
+                "store.tensor_dict.materialized",
+                extra={
+                    "tc.artifact.id": artifact_id,
+                    "tc.store.source": diagnostics.source or "",
+                    "tc.tensor.count": diagnostics.tensor_count,
+                    "tc.tensor.bytes": diagnostics.total_bytes,
+                    "tc.store.replica_uuid": diagnostics.replica_uuid,
+                    "tc.store.ticket_status": diagnostics.ticket_status or "",
+                    "tc.store.materialize_sec": diagnostics.materialize_sec,
+                    "tc.store.total_sec": diagnostics.total_sec,
+                },
+            )
+            return TensorDictMaterializationResult(
+                tensors=output,
+                diagnostics=diagnostics,
+            )
         finally:
             if state is None:
                 pipeline._release_materialized(payload, runtime.ensure_client())
@@ -1984,7 +2112,9 @@ class Artifact:
 __all__ = [
     "Artifact",
     "ArtifactDescriptor",
+    "MaterializationDiagnostics",
     "PlacementPin",
     "PrefetchedReplica",
     "TensorMeta",
+    "TensorDictMaterializationResult",
 ]

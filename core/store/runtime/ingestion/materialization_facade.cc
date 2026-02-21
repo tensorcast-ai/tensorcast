@@ -3368,6 +3368,9 @@ absl::Status MaterializationFacade::register_replica_with_global_store(
     auto stored_context = lookup_publish_context_for_replica(key);
     if (stored_context.has_value()) {
       context = *stored_context;
+    } else {
+      context = config_.runtime_context->mint_publish_context_id();
+      record_publish_context_for_replica(key, context);
     }
   } else {
     record_publish_context_for_replica(key, context);

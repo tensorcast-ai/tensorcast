@@ -38,6 +38,36 @@ class TransportService:
         self.transport_repository = transport_repository
         self.config = get_config()
 
+    def _log_eligibility_snapshot(
+        self,
+        *,
+        artifact_id: str,
+        view_id: str | None,
+        wait_timeout_ms: int,
+        outcome: str,
+        waited_sec: float,
+    ) -> None:
+        try:
+            snapshot = self.replica_repository.get_transport_eligibility_snapshot(
+                artifact_id=artifact_id,
+                view_id=view_id,
+                heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms / 1000,
+            )
+            logger.warning(
+                "Transport request %s for %s (view_id=%s) after %.3fs "
+                "(wait_timeout_ms=%s). %s",
+                outcome,
+                artifact_id,
+                view_id or "",
+                waited_sec,
+                wait_timeout_ms,
+                snapshot.format_for_log(),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to build transport eligibility snapshot for %s", artifact_id
+            )
+
     def request_transport(
         self,
         artifact_id: str,
@@ -69,7 +99,15 @@ class TransportService:
 
         if not self.replica_repository.has_any_replica(artifact_id, view_id):
             inc_transport_request(artifact_id, "not_found")
-            observe_transport_wait(artifact_id, time.time() - start_time)
+            wait_sec = time.time() - start_time
+            self._log_eligibility_snapshot(
+                artifact_id=artifact_id,
+                view_id=view_id,
+                wait_timeout_ms=wait_timeout_ms,
+                outcome="not_found_no_replica",
+                waited_sec=wait_sec,
+            )
+            observe_transport_wait(artifact_id, wait_sec)
             raise NotFoundError(f"No replicas registered for artifact {artifact_id}")
 
         while True:
@@ -111,7 +149,15 @@ class TransportService:
                 if selection.exportable_replicas == 0:
                     inc_transport_request(artifact_id, "not_found")
                     inc_transport_no_exportable(artifact_id)
-                    observe_transport_wait(artifact_id, time.time() - start_time)
+                    wait_sec = time.time() - start_time
+                    self._log_eligibility_snapshot(
+                        artifact_id=artifact_id,
+                        view_id=view_id,
+                        wait_timeout_ms=wait_timeout_ms,
+                        outcome="not_found_no_exportable",
+                        waited_sec=wait_sec,
+                    )
+                    observe_transport_wait(artifact_id, wait_sec)
                     raise NotFoundError(
                         f"No exportable replicas available for artifact {artifact_id}"
                     )
@@ -137,31 +183,25 @@ class TransportService:
                 if not self.replica_repository.has_any_replica(artifact_id, view_id):
                     inc_transport_request(artifact_id, "not_found")
                     wait_sec = time.time() - start_time
+                    self._log_eligibility_snapshot(
+                        artifact_id=artifact_id,
+                        view_id=view_id,
+                        wait_timeout_ms=wait_timeout_ms,
+                        outcome="timeout_not_found",
+                        waited_sec=wait_sec,
+                    )
                     observe_transport_wait(artifact_id, wait_sec)
                     raise NotFoundError(
                         f"No replicas registered for artifact {artifact_id}"
                     )
 
-                try:
-                    snapshot = (
-                        self.replica_repository.get_transport_eligibility_snapshot(
-                            artifact_id=artifact_id,
-                            view_id=view_id,
-                            heartbeat_timeout_seconds=self.config.heartbeat_timeout_ms
-                            / 1000,
-                        )
-                    )
-                    logger.warning(
-                        "Transport request timed out for %s after %sms. %s",
-                        artifact_id,
-                        wait_timeout_ms,
-                        snapshot.format_for_log(),
-                    )
-                except Exception:
-                    logger.exception(
-                        "Failed to build transport eligibility snapshot for %s",
-                        artifact_id,
-                    )
+                self._log_eligibility_snapshot(
+                    artifact_id=artifact_id,
+                    view_id=view_id,
+                    wait_timeout_ms=wait_timeout_ms,
+                    outcome="timeout",
+                    waited_sec=time.time() - start_time,
+                )
 
                 inc_transport_request(artifact_id, "timeout")
                 wait_sec = time.time() - start_time

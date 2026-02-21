@@ -30,14 +30,24 @@ bool is_local_replica(const RemoteReplicaInfo& remote, const WorkerIdentity& loc
   if (!is_local_identity(local)) {
     return false;
   }
-  if (!local.node_id.empty() && !remote.node_id.empty()) {
-    return local.node_id == remote.node_id;
-  }
-  if (!local.node_address.empty() && !remote.node_address.empty() && local.node_address == remote.node_address) {
-    if (local.p2p_port == 0 || remote.node_port == 0) {
-      return true;
+
+  const bool same_node_id = !local.node_id.empty() && !remote.node_id.empty() && local.node_id == remote.node_id;
+  const bool same_node_address =
+      !local.node_address.empty() && !remote.node_address.empty() && local.node_address == remote.node_address;
+  const bool has_local_p2p_port = local.p2p_port != 0;
+  const bool has_remote_p2p_port = remote.node_port != 0;
+  if (has_local_p2p_port && has_remote_p2p_port) {
+    if (local.p2p_port != remote.node_port) {
+      return false;
     }
-    return local.p2p_port == remote.node_port;
+    return same_node_id || same_node_address;
+  }
+
+  if (same_node_address) {
+    return true;
+  }
+  if (same_node_id) {
+    return true;
   }
   return false;
 }
@@ -127,6 +137,8 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   absl::StatusOr<components::TransportSession> transport_or = allow_p2p
       ? absl::FailedPreconditionError("GlobalStoreClient not connected")
       : absl::FailedPreconditionError("source_policy disallows P2P");
+  bool used_canonical_transport_fallback = false;
+  absl::Status view_transport_status;
   if (gs_connected && allow_p2p) {
     if (view_id.has_value()) {
       transport_or = gs_client_->request_view_transport(
@@ -137,6 +149,20 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           local_identity_.p2p_port,
           target_device,
           /*wait_timeout_ms=*/30000);
+      if (!transport_or.ok() &&
+          (absl::IsNotFound(transport_or.status()) || absl::IsUnimplemented(transport_or.status()))) {
+        view_transport_status = transport_or.status();
+        LOG(INFO) << "request_view_transport unavailable for artifact_id=" << artifact_id << " view_id=" << *view_id
+                  << "; retrying canonical transport route";
+        transport_or = gs_client_->request_replica_transport(
+            artifact_id,
+            local_identity_.node_id,
+            local_identity_.node_address,
+            local_identity_.p2p_port,
+            target_device,
+            /*wait_timeout_ms=*/30000);
+        used_canonical_transport_fallback = true;
+      }
     } else {
       transport_or = gs_client_->request_replica_transport(
           artifact_id,
@@ -198,6 +224,10 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           LOG(WARNING) << "register_replica_with_global_store returned error: " << reg_status;
         }
 
+        if (used_canonical_transport_fallback && view_id.has_value()) {
+          LOG(INFO) << "materialize_view loaded via canonical transport fallback: artifact_id=" << artifact_id
+                    << " view_id=" << *view_id;
+        }
         return load_or;
       } // Loading via P2P failed – close transport and log
       absl::Status comp_status = gs_client_->complete_replica_transport(session.transport_id);
@@ -218,9 +248,16 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
 
   } else {
     // Not found or GS unavailable → fall back to disk
-    const char* route_name = view_id.has_value() ? "request_view_transport" : "request_replica_transport";
+    const char* route_name = "request_replica_transport";
+    if (view_id.has_value() && !used_canonical_transport_fallback) {
+      route_name = "request_view_transport";
+    }
+    std::string fallback_note;
+    if (used_canonical_transport_fallback && !view_transport_status.ok()) {
+      fallback_note = absl::StrCat(" (view_transport_status=", view_transport_status.ToString(), ")");
+    }
     LOG(INFO) << route_name << " failed: " << transport_or.status() << "; falling back to disk"
-              << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "");
+              << (view_id ? absl::StrCat(" (view_id=", *view_id, ")") : "") << fallback_note;
     if (!has_disk_source || !allow_disk) {
       return transport_or.status();
     }

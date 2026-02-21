@@ -1,4 +1,4 @@
-// Copyright (c) 2025, TensorCast Team.
+// Copyright (c) 2025-2026, TensorCast Team.
 
 #include "catch2/catch_test_macros.hpp"
 
@@ -89,4 +89,20 @@ TEST_CASE("MTcpTransport active lane calculation handles edge cases", "[mtcp_tra
         testing_ns::compute_active_lanes(/*total_bytes=*/0, /*stage_unit=*/16ULL * 1024 * 1024, /*conn_count=*/4, 0) ==
         1);
   }
+}
+
+TEST_CASE("MTcpTransport lane mapping respects request base offset", "[mtcp_transport]") {
+  constexpr uint64_t kRequestBaseOffset = 1ULL << 30; // 1 GiB
+  constexpr uint64_t kStageUnit = 8ULL * 1024 * 1024; // 8 MiB
+  constexpr int kLanesToUse = 24;
+
+  std::vector<int> lanes;
+  lanes.reserve(6);
+  for (uint64_t segment_offset = 0; segment_offset < 6 * kStageUnit; segment_offset += kStageUnit) {
+    lanes.push_back(
+        testing_ns::compute_gpu_lane_for_subchunk(
+            kRequestBaseOffset + segment_offset, /*sub_offset_in_chunk=*/0, kStageUnit, kLanesToUse));
+  }
+
+  REQUIRE(lanes == std::vector<int>({8, 9, 10, 11, 12, 13}));
 }

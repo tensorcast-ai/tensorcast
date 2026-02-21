@@ -15,6 +15,10 @@ managing clients manually.
   Handles support metadata accessors
   (`tensor_names`, `tensor_meta`, `describe`), existence checks (`exists`), and
   selective materialization via `subset(...).tensor_dict(...)` and `tensor(name, ...)`.
+- `artifact.tensor_dict_with_diagnostics(...)` returns
+  `TensorDictMaterializationResult(tensors, diagnostics)` so callers can collect
+  source/path and timing metadata (`source`, `total_bytes`, `replica_uuid`,
+  `materialize_sec`, `total_sec`) alongside tensors for benchmarking and tuning.
 - `artifact.tensor_into(name, target_tensor, device=None)` materializes a single
   tensor directly into the provided buffer. Only the requested tensor must be
   present in the target mapping, so multi-tensor artifacts no longer require

@@ -14,6 +14,7 @@
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
+#include "absl/strings/match.h"
 #include "absl/strings/str_cat.h"
 #include "absl/time/clock.h"
 #include "core/common/artifact_hash.h"
@@ -1461,7 +1462,8 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
     if (!registration_status.ok()) {
       // GlobalStore not connected - skip publication in standalone mode.
       // Local registration remains valid; artifact is usable on this node.
-      if (absl::IsFailedPrecondition(registration_status)) {
+      if (absl::IsFailedPrecondition(registration_status) &&
+          absl::StrContains(registration_status.message(), "not connected")) {
         LOG(INFO) << "Skipping GlobalStore publication (not connected): " << registration_status.message();
       } else {
         return registration_status;

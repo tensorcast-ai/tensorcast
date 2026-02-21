@@ -192,7 +192,7 @@ communicator:
   enable_rdma: false
   stager:
     stage_cpu_for_rdma: true
-    buffers_per_flow: 4
+    buffers_per_flow: 16
     expected_gpu_channels: 0
   rdma:
     outstanding_wr: 64
@@ -201,7 +201,7 @@ communicator:
     qp_timeout: 20
     qp_retry: 7
   transport:
-    tcp_conn_count: 8
+    tcp_conn_count: 20
     connect_timeout_sec: 10
     tcp_tos: 0
 ```

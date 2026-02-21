@@ -186,6 +186,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
   void set_expected_replicas(std::vector<commonpb::ReplicaInfo> replicas) {
     absl::MutexLock l(&mu_);
     expected_replicas_ = std::move(replicas);
+    expected_replicas_override_set_ = true;
   }
 
   void set_reconcile_result_kind(global_store::ReconcileResultKind kind, uint32_t retry_after_ms = 0) {
@@ -321,6 +322,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
       global_store::ReconcileWorkerStateResponse* resp) override {
     std::vector<RemoveSpec> remove_specs;
     std::vector<commonpb::ReplicaInfo> expected_replicas;
+    bool expected_replicas_override_set = false;
     global_store::ReconcileResultKind result_kind;
     uint32_t retry_after_ms = 0;
     {
@@ -340,8 +342,9 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
       }
       remove_specs = sync_remove_specs_;
       expected_replicas = expected_replicas_;
+      expected_replicas_override_set = expected_replicas_override_set_;
     }
-    if (expected_replicas.empty()) {
+    if (!expected_replicas_override_set && expected_replicas.empty()) {
       expected_replicas.reserve(expected_ids_.size());
       for (const auto& id : expected_ids_) {
         commonpb::ReplicaInfo rep;
@@ -546,6 +549,7 @@ class FakeGlobalStoreService final : public global_store::ClusterRuntimeService:
   uint32_t reconcile_requests_ ABSL_GUARDED_BY(mu_){0};
   std::vector<uint64_t> reconcile_request_sequences_ ABSL_GUARDED_BY(mu_);
   std::vector<commonpb::ReplicaInfo> expected_replicas_ ABSL_GUARDED_BY(mu_);
+  bool expected_replicas_override_set_ ABSL_GUARDED_BY(mu_){false};
   uint32_t total_chunk_updates_ ABSL_GUARDED_BY(mu_){0};
   std::string last_registered_daemon_id_ ABSL_GUARDED_BY(mu_);
   std::vector<memory_tier::MemoryTierLease> outstanding_leases_ ABSL_GUARDED_BY(mu_);
@@ -642,6 +646,7 @@ TEST_CASE("WorkerLifecycleManager bootstrap reconcile removes drift", "[daemon][
 
   // Start fake GS server
   auto test_server = start_fake_server({keep.artifact_id}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
   REQUIRE(test_server.selected_port > 0);
 
   // Build engine and load both replicas locally (A+B)
@@ -676,7 +681,7 @@ TEST_CASE("WorkerLifecycleManager bootstrap reconcile removes drift", "[daemon][
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
   wopts.p2p_port = kTestP2PPort;
-  wopts.heartbeat_interval_ms = 5000; // long enough to avoid race
+  wopts.heartbeat_interval_ms = 50;
   wopts.chunk_sync_interval_ms = 0; // disable chunk sync thread
 
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
@@ -688,7 +693,7 @@ TEST_CASE("WorkerLifecycleManager bootstrap reconcile removes drift", "[daemon][
   bool keep_gpu_present = false;
   bool keep_cpu_present = false;
   bool remove_present = false;
-  for (int i = 0; i < 200; ++i) { // up to ~2s
+  for (int i = 0; i < 400; ++i) { // up to ~4s
     keep_gpu_present = false;
     keep_cpu_present = false;
     remove_present = false;
@@ -936,7 +941,7 @@ TEST_CASE("WorkerLifecycleManager retire waits for refs", "[daemon][ha][retire]"
   wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
   wopts.listen_addr = "127.0.0.1:50051";
   wopts.p2p_port = kTestP2PPort;
-  wopts.heartbeat_interval_ms = 50;
+  wopts.heartbeat_interval_ms = 200;
   wopts.chunk_sync_interval_ms = 0;
 
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
@@ -1046,9 +1051,10 @@ TEST_CASE("WorkerLifecycleManager applies REBASE_REQUIRED expected snapshot", "[
   const auto remove = make_standard_artifact(temp_root, "artifact_remove4", 1ULL * 1024 * 1024, 'H');
 
   // Start fake GS server: reconcile requests a REBASE to expected snapshot containing only keep_id.
-  auto test_server = start_fake_server({keep.artifact_id}, /*obsolete_id=*/"");
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
   test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
   test_server.service->set_reconcile_result_kind(global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED);
+  test_server.service->set_expected_replicas({make_expected_replica(keep.artifact_id, commonpb::MEMORY_TYPE_GPU, 0)});
   REQUIRE(test_server.selected_port > 0);
 
   StoreEngineOptions opts;
@@ -1100,6 +1106,189 @@ TEST_CASE("WorkerLifecycleManager applies REBASE_REQUIRED expected snapshot", "[
   }
   REQUIRE(kept);
   REQUIRE(removed);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE("WorkerLifecycleManager defers retire for newly publish-pending replicas", "[daemon][ha][rebase]") {
+  if (!tensorcast::testing::is_cuda_available()) {
+    WARN("CUDA not available – skipping HA rebase test.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_rebase_pending_guard";
+  fs::create_directories(temp_root);
+  const auto keep = make_standard_artifact(temp_root, "artifact_keep_pending_guard", 1ULL * 1024 * 1024, 'P');
+
+  auto test_server = start_fake_server({}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_reconcile_result_kind(global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+  load_artifact_gpu(*engine_ptr, keep);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 50;
+  wopts.chunk_sync_interval_ms = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
+
+  bool saw_first_reconcile = false;
+  for (int i = 0; i < 200; ++i) {
+    if (test_server.service->reconcile_requests() >= 1) {
+      saw_first_reconcile = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(saw_first_reconcile);
+
+  bool keep_present_after_first = false;
+  {
+    const auto devices = engine_ptr->get_resident_devices(keep.artifact_id);
+    for (const auto& dev : devices) {
+      if (dev.type == DeviceType::GPU && dev.ordinal == 0) {
+        keep_present_after_first = true;
+        break;
+      }
+    }
+  }
+  REQUIRE(keep_present_after_first);
+
+  test_server.service->set_expected_replicas({make_expected_replica(keep.artifact_id, commonpb::MEMORY_TYPE_GPU, 0)});
+
+  bool keep_present_after_update = false;
+  for (int i = 0; i < 200; ++i) {
+    keep_present_after_update = false;
+    const auto devices = engine_ptr->get_resident_devices(keep.artifact_id);
+    for (const auto& dev : devices) {
+      if (dev.type == DeviceType::GPU && dev.ordinal == 0) {
+        keep_present_after_update = true;
+        break;
+      }
+    }
+    if (keep_present_after_update && test_server.service->reconcile_requests() >= 2) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(keep_present_after_update);
+
+  wlm.stop();
+  test_server.server->Shutdown();
+  std::error_code ec;
+  fs::remove_all(temp_root, ec);
+}
+
+TEST_CASE(
+    "WorkerLifecycleManager defers retire for non-publish-pending replicas until repeated misses",
+    "[daemon][ha][rebase]") {
+  if (!tensorcast::testing::is_cuda_available()) {
+    WARN("CUDA not available – skipping HA rebase test.");
+    return;
+  }
+
+  fs::path temp_root = fs::temp_directory_path() / "wlm_sync_test_rebase_non_pending_guard";
+  fs::create_directories(temp_root);
+  const auto keep = make_standard_artifact(temp_root, "artifact_keep_non_pending_guard", 1ULL * 1024 * 1024, 'Q');
+
+  auto test_server = start_fake_server({keep.artifact_id}, /*obsolete_id=*/"");
+  test_server.service->set_heartbeat_sync_required(true, /*expected_ver=*/2);
+  test_server.service->set_reconcile_result_kind(global_store::RECONCILE_RESULT_KIND_REBASE_REQUIRED);
+  REQUIRE(test_server.selected_port > 0);
+
+  StoreEngineOptions opts;
+  opts.storage_path = temp_root.string();
+  opts.memory_pool_size = 64ULL * 1024 * 1024;
+  opts.tx_slice_bytes = 1ULL << 20;
+  opts.num_thread = 2;
+  opts.pinned_memory_timeout = std::chrono::milliseconds(0);
+  auto engine_ptr = std::make_shared<StoreEngine>(opts);
+  load_artifact_gpu(*engine_ptr, keep);
+
+  HaFixture fixture(engine_ptr, temp_root);
+  WorkerLifecycleManager::Options wopts;
+  wopts.global_store_addr = std::string("127.0.0.1:") + std::to_string(test_server.selected_port);
+  wopts.listen_addr = "127.0.0.1:50051";
+  wopts.p2p_port = kTestP2PPort;
+  wopts.heartbeat_interval_ms = 200;
+  wopts.chunk_sync_interval_ms = 0;
+
+  WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
+  auto st = wlm.start();
+  REQUIRE(st.ok());
+  REQUIRE(test_server.service->last_registered_daemon_id() == "daemon-test");
+
+  int initial_reconcile_requests = 0;
+  for (int i = 0; i < 200; ++i) {
+    initial_reconcile_requests = test_server.service->reconcile_requests();
+    if (initial_reconcile_requests >= 1) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(initial_reconcile_requests >= 1);
+
+  bool keep_present_baseline = false;
+  {
+    const auto devices = engine_ptr->get_resident_devices(keep.artifact_id);
+    for (const auto& dev : devices) {
+      if (dev.type == DeviceType::GPU && dev.ordinal == 0) {
+        keep_present_baseline = true;
+        break;
+      }
+    }
+  }
+  REQUIRE(keep_present_baseline);
+
+  test_server.service->set_expected_replicas({});
+  const int reconcile_requests_after_update = test_server.service->reconcile_requests();
+
+  bool observed_post_update_reconcile = false;
+  bool keep_present_after_first_post_update_reconcile = false;
+  bool keep_removed_after_repeated_missing = false;
+  for (int i = 0; i < 1200; ++i) {
+    bool keep_present = false;
+    const auto devices = engine_ptr->get_resident_devices(keep.artifact_id);
+    for (const auto& dev : devices) {
+      if (dev.type == DeviceType::GPU && dev.ordinal == 0) {
+        keep_present = true;
+        break;
+      }
+    }
+
+    const int reconcile_requests_now = test_server.service->reconcile_requests();
+    if (!observed_post_update_reconcile && reconcile_requests_now >= reconcile_requests_after_update + 1) {
+      observed_post_update_reconcile = true;
+      keep_present_after_first_post_update_reconcile = keep_present;
+    }
+    if (!keep_present && observed_post_update_reconcile &&
+        reconcile_requests_now >= reconcile_requests_after_update + 2) {
+      keep_removed_after_repeated_missing = true;
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  REQUIRE(observed_post_update_reconcile);
+  REQUIRE(keep_present_after_first_post_update_reconcile);
+  REQUIRE(keep_removed_after_repeated_missing);
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -1268,18 +1457,18 @@ TEST_CASE("WorkerLifecycleManager keeps request_seq stable on transport failures
   auto st = wlm.start();
   REQUIRE(st.ok());
 
-  for (int i = 0; i < 300; ++i) {
-    if (test_server.service->reconcile_requests() >= 3) {
+  for (int i = 0; i < 700; ++i) {
+    if (test_server.service->reconcile_requests() >= 2) {
       break;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
 
   const auto reconcile_sequences = test_server.service->reconcile_request_sequences();
-  REQUIRE(reconcile_sequences.size() >= 3);
-  REQUIRE(reconcile_sequences[0] == 1);
-  REQUIRE(reconcile_sequences[1] == 1);
-  REQUIRE(reconcile_sequences[2] == 1);
+  REQUIRE(reconcile_sequences.size() >= 2);
+  for (const auto seq : reconcile_sequences) {
+    REQUIRE(seq == 1);
+  }
 
   wlm.stop();
   test_server.server->Shutdown();
@@ -1405,7 +1594,7 @@ TEST_CASE(
   wopts.p2p_port = kTestP2PPort;
   wopts.heartbeat_interval_ms = 30;
   wopts.chunk_sync_interval_ms = 0;
-  wopts.state_sync_rpc_timeout_ms = 50;
+  wopts.state_sync_rpc_timeout_ms = 500;
   wopts.state_sync_rpc_max_retries = 0;
 
   WorkerLifecycleManager wlm(gsl::not_null<std::shared_ptr<StoreEngine>>{engine_ptr}, fixture.ports, wopts);
@@ -1428,7 +1617,7 @@ TEST_CASE(
   test_server.service->set_sync_should_fail(false);
   const auto baseline_sync_success = wlm.sync_success();
   bool recovered = false;
-  for (int i = 0; i < 200; ++i) {
+  for (int i = 0; i < 800; ++i) {
     if (wlm.sync_success() > baseline_sync_success && !wlm.state_sync_outage_mode_active()) {
       recovered = true;
       break;

@@ -410,6 +410,19 @@ absl::Status ReplicaRuntime::unload_replica_status(const loading::ReplicaKey& ke
       ? common::memory::MemoryLocation::CPU
       : common::memory::MemoryLocation::GPU;
 
+  absl::Status unexport_status = disable_remote_access_for_replica(normalized_key, replica, loc);
+  if (!unexport_status.ok()) {
+    return absl::Status(
+        unexport_status.code(),
+        std::format(
+            "ReplicaRuntime::unload_replica: disable_remote_memory_access failed for artifact={} device={} "
+            "location={} status={}",
+            normalized_key.artifact_id,
+            normalized_key.device.ordinal,
+            common::memory::location_to_string(loc),
+            unexport_status.ToString()));
+  }
+
   replica::MemoryState before_state = replica->get_memory_state(loc);
 
   if (before_state <= replica::MemoryState::UNALLOCATED) {
@@ -506,32 +519,20 @@ absl::Status ReplicaRuntime::retire_replica_status(const loading::ReplicaKey& ke
   if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
     replica_size = *size_or;
   }
-
-  bool emitted_evicted = false;
+  bool released_any = false;
   std::vector<absl::Status> release_errors;
-  auto release_location = [&](common::memory::MemoryLocation location) {
-    absl::Status st = replica->release_memory(location);
-    if (st.ok()) {
-      if (!emitted_evicted) {
-        publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
-        emitted_evicted = true;
-      }
-      return;
-    }
-    if (absl::IsNotFound(st)) {
-      return;
-    }
-    release_errors.push_back(st);
-  };
-  release_location(common::memory::MemoryLocation::CPU);
-  release_location(common::memory::MemoryLocation::GPU);
-
-  {
-    absl::MutexLock lock(&publish_state_mu_);
-    publish_states_.erase(canonical_key);
+  teardown_replica_memory(
+      canonical_key,
+      replica,
+      /*release_cpu=*/true,
+      /*release_gpu=*/true,
+      &released_any,
+      &release_errors);
+  if (released_any) {
+    publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
   }
-  clear_transport_state(canonical_key);
-  clear_replica_global_id(canonical_key);
+
+  clear_replica_runtime_state(canonical_key);
   if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
     stable_cache->on_replica_evicted(canonical_key, "deregister");
   }
@@ -839,30 +840,43 @@ std::shared_ptr<replica::Replica> ReplicaRuntime::get_or_create_replica(
 
 int ReplicaRuntime::clear_mem() {
   auto replicas = registry().clear_all();
+  absl::flat_hash_set<const replica::Replica*> processed;
+  processed.reserve(replicas.size());
   std::vector<absl::Status> errors;
 
-  for (const auto& [inst_key, replica] : replicas) {
+  for (const auto& [inst_key, _] : replicas) {
+    clear_replica_runtime_state(inst_key);
+  }
+
+  for (const auto& entry : replicas) {
+    const auto& replica = entry.second;
+    if (!replica) {
+      continue;
+    }
+    if (!processed.insert(replica.get()).second) {
+      continue;
+    }
+
+    const loading::ReplicaKey canonical_key = normalize_replica_key(replica->replica_key());
+    clear_replica_runtime_state(canonical_key);
+
     size_t replica_size = 0;
     if (auto size_or = replica->get_artifact_size(); size_or.ok()) {
       replica_size = *size_or;
     }
-    bool published = false;
-
-    auto cpu_status = replica->release_memory(common::memory::MemoryLocation::CPU);
-    if (!cpu_status.ok()) {
-      LOG(WARNING) << "Failed to release CPU memory for " << inst_key << ": " << cpu_status.message();
-      errors.push_back(cpu_status);
-    } else {
-      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
-      published = true;
+    bool released_any = false;
+    teardown_replica_memory(
+        canonical_key,
+        replica,
+        /*release_cpu=*/true,
+        /*release_gpu=*/true,
+        &released_any,
+        &errors);
+    if (released_any) {
+      publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
     }
-
-    auto gpu_status = replica->release_memory(common::memory::MemoryLocation::GPU);
-    if (!gpu_status.ok() && !absl::IsNotFound(gpu_status)) {
-      LOG(WARNING) << "Failed to release GPU memory for " << inst_key << ": " << gpu_status.message();
-      errors.push_back(gpu_status);
-    } else if (gpu_status.ok() && !published) {
-      publish_replica_event(RuntimeEventType::kReplicaEvicted, inst_key, replica_size);
+    if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+      stable_cache->on_replica_evicted(canonical_key, "clear_mem");
     }
   }
 
@@ -1007,6 +1021,73 @@ MetricsCollector& ReplicaRuntime::metrics() {
 
 const MetricsCollector& ReplicaRuntime::metrics() const {
   return context_->metrics_collector();
+}
+
+absl::Status ReplicaRuntime::disable_remote_access_for_replica(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    common::memory::MemoryLocation location) const {
+  auto comm = communication_manager();
+  if (!comm || !comm->is_enabled() || !replica) {
+    return absl::OkStatus();
+  }
+  absl::Status status = replica->disable_remote_memory_access(location, comm->get_engine());
+  if (absl::IsNotFound(status)) {
+    return absl::OkStatus();
+  }
+  if (status.ok()) {
+    publish_remote_access_event(key, location, /*enabled=*/false);
+  }
+  return status;
+}
+
+void ReplicaRuntime::teardown_replica_memory(
+    const loading::ReplicaKey& key,
+    const std::shared_ptr<replica::Replica>& replica,
+    bool release_cpu,
+    bool release_gpu,
+    bool* released_any,
+    std::vector<absl::Status>* errors) const {
+  if (released_any == nullptr || errors == nullptr || !replica) {
+    return;
+  }
+
+  auto release_location = [&](common::memory::MemoryLocation location) {
+    const std::string location_name = common::memory::location_to_string(location);
+    absl::Status unexport_status = disable_remote_access_for_replica(key, replica, location);
+    if (!unexport_status.ok()) {
+      LOG(WARNING) << "Failed to disable remote access for " << key << " at " << location_name << ": "
+                   << unexport_status;
+      errors->push_back(unexport_status);
+    }
+
+    absl::Status release_status = replica->release_memory(location);
+    if (!release_status.ok() && !absl::IsNotFound(release_status)) {
+      LOG(WARNING) << "Failed to release " << location_name << " memory for " << key << ": " << release_status;
+      errors->push_back(release_status);
+      return;
+    }
+    if (release_status.ok()) {
+      *released_any = true;
+    }
+  };
+
+  if (release_cpu) {
+    release_location(common::memory::MemoryLocation::CPU);
+  }
+  if (release_gpu) {
+    release_location(common::memory::MemoryLocation::GPU);
+  }
+}
+
+void ReplicaRuntime::clear_replica_runtime_state(const loading::ReplicaKey& key) {
+  const loading::ReplicaKey normalized_key = normalize_replica_key(key);
+  {
+    absl::MutexLock lock(&publish_state_mu_);
+    publish_states_.erase(normalized_key);
+  }
+  clear_transport_state(normalized_key);
+  clear_replica_global_id(normalized_key);
 }
 
 void ReplicaRuntime::publish_replica_event(RuntimeEventType type, const loading::ReplicaKey& key, size_t size_bytes)

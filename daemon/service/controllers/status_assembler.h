@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <limits>
 
 #include "absl/container/flat_hash_map.h"
 #include "core/store/store_engine.h"
@@ -92,7 +93,16 @@ class StatusAssembler {
     for (const auto& info : engine.get_all_replicas_info()) {
       any_comm = any_comm || info.is_registered_for_comm;
     }
-    resp.mutable_communication_info()->set_enabled(any_comm);
+    const auto transfer_snapshot = engine.get_p2p_transfer_snapshot();
+    const auto clamp_int64 = [](std::uint64_t value) -> std::int64_t {
+      constexpr std::uint64_t kMaxInt64 = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+      return static_cast<std::int64_t>(value > kMaxInt64 ? kMaxInt64 : value);
+    };
+    auto* comm = resp.mutable_communication_info();
+    comm->set_enabled(any_comm || transfer_snapshot.total_transfers > 0);
+    comm->set_total_transfers(clamp_int64(transfer_snapshot.total_transfers));
+    comm->set_total_bytes_transferred(clamp_int64(transfer_snapshot.total_bytes_transferred));
+    comm->set_total_transfer_errors(clamp_int64(transfer_snapshot.total_transfer_errors));
     resp.set_total_replicas_loaded(total_replicas);
     resp.set_total_artifact_size_bytes(static_cast<int64_t>(total_bytes));
     resp.set_storage_path("");

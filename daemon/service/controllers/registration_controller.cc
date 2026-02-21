@@ -946,6 +946,9 @@ grpc::Status commit_piece_view_registration(
 
   std::string worker_id = dep.identity->worker_id();
   if (worker_id.empty()) {
+    LOG(WARNING) << "worker_id is empty while registering memory replica for artifact_id=" << meta.client_artifact_id
+                 << " view_id=" << meta.view_id
+                 << "; using fallback worker_id='local' (transport eligibility may lag until worker lifecycle sync)";
     worker_id = "local";
   }
   const store::DeviceKey device = store::DeviceRegistry::instance().gpu_key(meta.device_id);

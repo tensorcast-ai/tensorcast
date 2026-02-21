@@ -229,6 +229,9 @@ grpc::Status TargetPublishService::publish_target_replica(
 
   std::string worker_id = d_.identity.worker_id();
   if (worker_id.empty()) {
+    LOG(WARNING) << "worker_id is empty while publishing target replica for artifact_id="
+                 << scope.selection().artifact_id() << " view_id=" << view_id
+                 << "; using fallback worker_id='local' (transport eligibility may lag until worker lifecycle sync)";
     worker_id = "local";
   }
 

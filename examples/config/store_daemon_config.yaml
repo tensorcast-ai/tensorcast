@@ -61,7 +61,7 @@ server:
 # StoreEngine and data-plane memory/transfer tuning.
 engine:
   # UMA chunk granularity; larger chunks reduce metadata but make eviction/leases coarser.
-  artifact_chunk_bytes: 256MB
+  artifact_chunk_bytes: 512MB
   # Default depth for StreamingPinnedBuffer instances created by StoreEngine.
   streaming_buffer_chunks: 16
   # Enable external target verification for MaterializeIntoTarget (off by default).
@@ -74,7 +74,7 @@ engine:
     # When false, CPU chunks stay resident (no preemptible marking); use for stability or debugging.
     enable_preemptible: false
     # Stable budget in bytes; must fit in host DRAM minus total pinned pools (sum(pinned_memory.classes[].pool_bytes)) or startup fails.
-    stable_bytes: 4GB
+    stable_bytes: 32GB
     # Cap for preemptible pool; ignored when enable_preemptible=false (0 means no preemptible budget).
     preemptible_limit_bytes: 0
     # Reclaim target ratio for preemptible pressure; lower values reclaim more aggressively.
@@ -125,8 +125,8 @@ pinned_memory:
     # Startup guardrail (GPU hosts): capacity_slices must cover
     # engine.streaming_buffer_chunks * detected_gpu_count.
     - name: engine
-      slice_bytes: 64MB
-      pool_bytes: 8GB
+      slice_bytes: 512MB
+      pool_bytes: 64GB
     # comm_gpu: Communicator GPU staging pinned pool.
     # Used by communicator staging windows on GPU transport paths (TCP/RDMA staging).
     # slice_bytes controls per-staging GPU chunk size for communicator data movement.
@@ -247,11 +247,11 @@ communicator:
     # Stage CPU tensors for RDMA; disable only if you rely on direct GPU RDMA paths.
     stage_cpu_for_rdma: true
     # Buffers per flow; more buffers increase overlap but require a larger pool.
-    buffers_per_flow: 4
+    buffers_per_flow: 16
     # Cap concurrent in-flight segments; 0 inherits buffers_per_flow.
-    max_window_segments: 0
-    # Cap concurrent GPU channels so pool sizing is predictable (8 for 8-GPU defaults; 0 = auto).
-    expected_gpu_channels: 8
+    max_window_segments: 16
+    # Cap concurrent GPU channels so pool sizing is predictable (0 = auto).
+    expected_gpu_channels: 0
   rdma:
     # Outstanding WRs per QP; increase for bandwidth, decrease to reduce CPU/latency.
     outstanding_wr: 64
@@ -266,7 +266,7 @@ communicator:
     bonding_balance: false  # Enable LAG port balancing (default: false)
   transport:
     # TCP connections per peer; more lanes help bandwidth but add CPU overhead.
-    tcp_conn_count: 8
+    tcp_conn_count: 20
     # Connect timeout; increase when handshakes are slow or firewalled.
     connect_timeout_sec: 10
     # TOS/DSCP value; keep 0 unless fabric QoS is configured.

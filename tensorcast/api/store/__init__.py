@@ -42,8 +42,10 @@ from tensorcast.api.operation import (
 from tensorcast.api.store.artifact import (
     Artifact,
     ArtifactDescriptor,
+    MaterializationDiagnostics,
     PlacementPin,
     PrefetchedReplica,
+    TensorDictMaterializationResult,
     TensorMeta,
 )
 from tensorcast.api.store.async_ops import ArtifactFuture
@@ -1289,6 +1291,7 @@ __all__ = [
     "FallbackOptions",
     "LeaseHandle",
     "MaterializationPayload",
+    "MaterializationDiagnostics",
     "MaterializationBatcher",
     "PlacementPin",
     "PrefetchedReplica",
@@ -1299,6 +1302,7 @@ __all__ = [
     "Store",
     "StoreOptions",
     "TensorMeta",
+    "TensorDictMaterializationResult",
     "TensorDict",
     "TransformPlacement",
     "Range",

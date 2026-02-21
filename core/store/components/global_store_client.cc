@@ -276,6 +276,24 @@ uint64_t fnv1a64(std::string_view payload) {
   }
   return hash;
 }
+
+uint64_t hash_string_sequence(const std::vector<std::string>& values) {
+  std::string canonical;
+  canonical.reserve(values.size() * 32);
+  for (const auto& value : values) {
+    canonical = absl::StrCat(canonical, value.size(), ":", value, ";");
+  }
+  return fnv1a64(canonical);
+}
+
+uint64_t hash_u64_sequence(const std::vector<uint64_t>& values) {
+  std::string canonical;
+  canonical.reserve(values.size() * 24);
+  for (uint64_t value : values) {
+    canonical = absl::StrCat(canonical, value, ";");
+  }
+  return fnv1a64(canonical);
+}
 } // namespace
 
 using common::memory::MemoryLocation;
@@ -1438,6 +1456,8 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica_idempoten
     for (uint64_t size : buffer_sizes) {
       buffer_size_total += size;
     }
+    const uint64_t remote_keys_hash = hash_string_sequence(remote_memory_keys);
+    const uint64_t buffer_sizes_hash = hash_u64_sequence(buffer_sizes);
     request.set_client_request_id(build_client_request_id(
         "register_memory_replica",
         absl::StrCat(
@@ -1461,9 +1481,9 @@ absl::StatusOr<std::string> GlobalStoreClient::register_memory_replica_idempoten
             "|",
             view_id.has_value() ? std::string(*view_id) : std::string(),
             "|",
-            remote_memory_keys.size(),
+            std::format("{:016x}", remote_keys_hash),
             "|",
-            buffer_sizes.size(),
+            std::format("{:016x}", buffer_sizes_hash),
             "|",
             buffer_size_total,
             "|",
