@@ -528,14 +528,13 @@ absl::Status ReplicaRuntime::retire_replica_status(const loading::ReplicaKey& ke
       /*release_gpu=*/true,
       &released_any,
       &release_errors);
+  if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+    stable_cache->on_replica_evicted(canonical_key, replica, "deregister");
+  }
   if (released_any) {
     publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
   }
-
   clear_replica_runtime_state(canonical_key);
-  if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
-    stable_cache->on_replica_evicted(canonical_key, "deregister");
-  }
   metrics().update_all_metrics(*pinned_pool(), registry(), device_manager());
 
   if (!release_errors.empty()) {
@@ -872,11 +871,11 @@ int ReplicaRuntime::clear_mem() {
         /*release_gpu=*/true,
         &released_any,
         &errors);
+    if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
+      stable_cache->on_replica_evicted(canonical_key, replica, "clear_mem");
+    }
     if (released_any) {
       publish_replica_event(RuntimeEventType::kReplicaEvicted, canonical_key, replica_size);
-    }
-    if (auto stable_cache = context_->stable_cache_manager(); stable_cache != nullptr) {
-      stable_cache->on_replica_evicted(canonical_key, "clear_mem");
     }
   }
 

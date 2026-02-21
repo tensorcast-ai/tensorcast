@@ -522,6 +522,92 @@ TEST_CASE("StableDramCacheManager admits logical alias key for physical UMA repl
   REQUIRE(cache.bytes_used() == 0);
 }
 
+TEST_CASE("StableDramCacheManager releases stable lease when registry entry is removed", "[stable_cache]") {
+  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "artifact-release-order",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey key = replica->replica_key();
+  REQUIRE(registry.emplace(key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  StableDramCacheManager::AdmissionRequest request;
+  request.key = key;
+  request.replica = replica;
+  request.size_bytes = kChunkBytes;
+  request.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit = cache.admit(request);
+  REQUIRE(admit.ok());
+  REQUIRE(admit->admitted);
+  REQUIRE(cache.bytes_used() == kChunkBytes);
+  REQUIRE(budget->snapshot().stable_used_bytes == kChunkBytes);
+
+  auto removed = registry.erase(key);
+  REQUIRE(removed.has_value());
+  auto removed_replica = std::move(removed->second);
+  cache.on_replica_evicted(key, removed_replica, "registry_removed_release");
+
+  REQUIRE(cache.bytes_used() == 0);
+  REQUIRE(budget->snapshot().stable_used_bytes == 0);
+}
+
+TEST_CASE("StableDramCacheManager defers eviction when runtime event lacks replica source", "[stable_cache]") {
+  auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
+  auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();
+  auto budget = std::make_shared<MemoryTierBudget>(kChunkBytes * 2, 0);
+  ReplicaRegistry registry;
+
+  StableDramCacheManager cache(
+      StableDramCacheManager::Config{
+          .registry = gsl::not_null<ReplicaRegistry*>{&registry},
+          .memory_tier_budget = budget,
+      });
+
+  auto replica = MakeCpuReplica(
+      "artifact-runtime-event-order",
+      kChunkBytes,
+      gsl::not_null<std::shared_ptr<tensorcast::common::memory::PinnedBufferPool>>{pool},
+      gsl::not_null<std::shared_ptr<tensorcast::common::AsyncRuntime>>{runtime},
+      budget);
+  const ReplicaKey key = replica->replica_key();
+  REQUIRE(registry.emplace(key, gsl::not_null<std::shared_ptr<Replica>>{replica}).ok());
+
+  StableDramCacheManager::AdmissionRequest request;
+  request.key = key;
+  request.replica = replica;
+  request.size_bytes = kChunkBytes;
+  request.policy = MakePolicy(StableRetentionPolicy::kPinned, StableOverflowPolicy::kEvict);
+  auto admit = cache.admit(request);
+  REQUIRE(admit.ok());
+  REQUIRE(admit->admitted);
+  REQUIRE(cache.bytes_used() == kChunkBytes);
+  REQUIRE(budget->snapshot().stable_used_bytes == kChunkBytes);
+
+  auto removed = registry.erase(key);
+  REQUIRE(removed.has_value());
+  auto removed_replica = std::move(removed->second);
+
+  cache.on_replica_evicted(key, "runtime_evicted_no_replica");
+  REQUIRE(cache.bytes_used() == kChunkBytes);
+  REQUIRE(budget->snapshot().stable_used_bytes == kChunkBytes);
+
+  cache.on_replica_evicted(key, removed_replica, "deregister_release");
+  REQUIRE(cache.bytes_used() == 0);
+  REQUIRE(budget->snapshot().stable_used_bytes == 0);
+}
+
 TEST_CASE("StableDramCacheManager evicts alias entry when LRU key is physical", "[stable_cache]") {
   auto pool = std::make_shared<tensorcast::common::memory::PinnedBufferPool>(1 << 20, 1 << 20);
   auto runtime = std::make_shared<tensorcast::common::AsyncRuntime>();

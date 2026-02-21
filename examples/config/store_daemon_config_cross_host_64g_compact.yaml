@@ -1,0 +1,34 @@
+# Cross-host benchmark compact profile for memory-constrained 64GiB workers.
+# Keep startup preflight requirements low so both directions can be tested
+# under the same daemon profile.
+
+server:
+  num_threads: 16
+
+engine:
+  artifact_chunk_bytes: 256MB
+  streaming_buffer_chunks: 16
+  memory_tiers:
+    enable_preemptible: false
+    stable_bytes: 8GB
+    preemptible_limit_bytes: 0
+    preemptible_low_watermark_ratio: 0.4
+
+pinned_memory:
+  allocation_timeout: 30s
+  classes:
+    - name: engine
+      slice_bytes: 256MB
+      pool_bytes: 8GB
+    - name: comm_gpu
+      slice_bytes: 16MB
+      pool_bytes: 6GB
+      rdma_preregister: true
+    - name: comm_cpu
+      slice_bytes: 4MB
+      pool_bytes: 512MB
+      rdma_preregister: true
+
+communicator:
+  stager:
+    stage_cpu_for_rdma: true
