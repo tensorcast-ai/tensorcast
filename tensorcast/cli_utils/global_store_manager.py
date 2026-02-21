@@ -189,6 +189,25 @@ def _current_global_session_id() -> str | None:
         return None
 
 
+def _has_live_recorded_global_store(inst: GlobalSession) -> bool:
+    records = read_json_default(inst.pids_json, {"processes": []})
+    processes = records.get("processes", [])
+    if not isinstance(processes, list):
+        return False
+    for entry in processes:
+        if not isinstance(entry, dict):
+            continue
+        pid = int(entry.get("pid", 0))
+        if pid <= 0 or not psutil.pid_exists(pid):
+            continue
+        with contextlib.suppress(Exception):
+            cmdline = psutil.Process(pid).cmdline()
+            cmd = " ".join(str(part) for part in cmdline)
+            if "tensorcast.global_store" in cmd:
+                return True
+    return False
+
+
 @contextlib.contextmanager
 def _locked(inst: GlobalSession):
     with (
@@ -359,6 +378,16 @@ def start_global_store(
             health = (
                 ping_global_store(existing_addr, timeout=1.0) if existing_addr else None
             )
+            if not health and isinstance(gs_state, dict):
+                listen_host_state = gs_state.get("listen_host")
+                listen_port_state = gs_state.get("listen_port")
+                if listen_host_state and listen_port_state:
+                    fallback_addr = (
+                        f"{resolve_connect_host(str(listen_host_state))}:"
+                        f"{int(listen_port_state)}"
+                    )
+                    if fallback_addr != existing_addr:
+                        health = ping_global_store(fallback_addr, timeout=1.0)
             if health:
                 if (
                     cluster_token
@@ -378,6 +407,12 @@ def start_global_store(
                     owner=bool(gs_state.get("owner"))
                     if isinstance(gs_state, dict)
                     else False,
+                )
+            if _has_live_recorded_global_store(inst):
+                raise ServiceError(
+                    "Global Store process appears to be running but is not healthy via "
+                    "recorded endpoints. Refusing to start a second instance on the "
+                    "same session. Run 'tensorcast-cli global stop --force' and retry."
                 )
 
             prune_process_records(

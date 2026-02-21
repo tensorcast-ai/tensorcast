@@ -184,6 +184,11 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
 
     LOG(INFO) << "GPU communication registration successful.";
 
+    LOG(INFO) << "Disabling GPU communication registration before memory release...";
+    absl::Status disable_status = replica->disable_remote_memory_access(MemoryLocation::GPU, comm_mgr->get_engine());
+    INFO("Comm disable status (GPU): " << disable_status);
+    REQUIRE(disable_status.ok());
+
     // Release memory
     LOG(INFO) << "Releasing GPU memory...";
     absl::Status release_status = replica->release_memory(MemoryLocation::GPU);
@@ -287,6 +292,11 @@ TEST_CASE("Replica Communication Memory Registration", "[replica][comm_registrat
     REQUIRE(reinterpret_cast<void*>(reg_info.buffer_addresses[0]) == cpu_data_ptr); // First chunk should match
 
     LOG(INFO) << "CPU communication registration successful.";
+
+    LOG(INFO) << "Disabling CPU communication registration before memory release...";
+    absl::Status disable_status = replica->disable_remote_memory_access(MemoryLocation::CPU, comm_mgr->get_engine());
+    INFO("Comm disable status (CPU): " << disable_status);
+    REQUIRE(disable_status.ok());
 
     // Release memory
     LOG(INFO) << "Releasing CPU memory...";

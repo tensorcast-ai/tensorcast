@@ -818,6 +818,10 @@ gsl::not_null<std::shared_ptr<components::CommunicationManager>> StoreEngine::ge
   return gsl::not_null<std::shared_ptr<components::CommunicationManager>>{comm_mgr};
 }
 
+components::MetricsCollector::P2PTransferSnapshot StoreEngine::get_p2p_transfer_snapshot() const {
+  return replica_runtime_->metrics().get_p2p_transfer_snapshot();
+}
+
 absl::StatusOr<loader::ViewPlan> StoreEngine::compute_view_plan(
     std::string_view canonical_index_json,
     const loader::ViewSpec& spec) {

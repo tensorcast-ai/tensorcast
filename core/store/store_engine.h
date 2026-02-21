@@ -397,6 +397,8 @@ class StoreEngine {
   // Always non-null; may be disabled (see is_enabled()).
   [[nodiscard]] gsl::not_null<std::shared_ptr<components::CommunicationManager>> get_shared_comm_manager() const;
 
+  [[nodiscard]] components::MetricsCollector::P2PTransferSnapshot get_p2p_transfer_snapshot() const;
+
  private:
   // ═══════════════════════════════════════════════════════════════════════════
   // Configuration

@@ -84,6 +84,7 @@ sc_cc_library(
         "//core/store/runtime/context:runtime_context_events",
         "//core/store/runtime/replica:replica_promotion_manager",
         "//core/store/runtime/replica:replica_runtime",
+        "@abseil-cpp//absl/cleanup",
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
         "@gsl",

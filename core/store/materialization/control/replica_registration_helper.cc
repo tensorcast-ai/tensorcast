@@ -26,7 +26,9 @@ absl::StatusOr<std::string> ReplicaRegistrationHelper::register_local_replica(
       client_request_id);
 
   if (!reg_or.ok()) {
-    LOG(WARNING) << "Failed to register replica replica with Global Store: " << reg_or.status();
+    LOG(WARNING) << "Failed to register replica with Global Store: artifact_id=" << artifact_id
+                 << " worker_id=" << worker_id << " device=" << device.to_string()
+                 << " location=" << static_cast<int>(location) << " status=" << reg_or.status();
     return reg_or.status();
   }
   VLOG(1) << "Registered local replica replica for " << artifact_id << " with replica_id " << *reg_or;

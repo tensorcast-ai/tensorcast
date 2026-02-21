@@ -206,6 +206,9 @@ class WorkerLifecycleManager {
 
   std::mutex retire_mu_;
   absl::flat_hash_map<store::loading::ReplicaKey, RetireEntry, store::loading::ReplicaKeyHash> retire_queue_;
+  std::mutex pending_missing_mu_;
+  absl::flat_hash_map<store::loading::ReplicaKey, uint32_t, store::loading::ReplicaKeyHash>
+      pending_missing_reconcile_counts_;
   std::atomic<bool> retire_pending_{false};
   std::mutex sync_success_mu_;
   std::condition_variable sync_success_cv_;

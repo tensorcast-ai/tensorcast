@@ -45,6 +45,8 @@ using namespace std::chrono_literals;
 
 namespace {
 
+constexpr uint32_t kReconcileRemoveRetireMissThreshold = 2;
+
 struct ReplicaSelector {
   std::string artifact_id;
   std::string view_id;
@@ -1248,6 +1250,22 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
     // Apply server-suggested state changes.
     std::vector<store::loading::ReplicaKey> retire_keys;
     retire_keys.reserve(sync_or->state_changes.size());
+    absl::flat_hash_set<store::loading::ReplicaKey, store::loading::ReplicaKeyHash> remove_seen_keys;
+    const auto increment_missing_count = [this](const store::loading::ReplicaKey& key) -> uint32_t {
+      std::lock_guard<std::mutex> lock(pending_missing_mu_);
+      return ++pending_missing_reconcile_counts_[key];
+    };
+    const auto clear_unseen_missing_counts = [this, &remove_seen_keys]() {
+      std::lock_guard<std::mutex> lock(pending_missing_mu_);
+      for (auto it = pending_missing_reconcile_counts_.begin(); it != pending_missing_reconcile_counts_.end();) {
+        if (remove_seen_keys.contains(it->first)) {
+          ++it;
+          continue;
+        }
+        pending_missing_reconcile_counts_.erase(it++);
+      }
+    };
+
     auto engine_for_unload = engine_.get();
     for (const auto& ch : sync_or->state_changes) {
       switch (ch.type()) {
@@ -1262,7 +1280,23 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
                 engine_->set_replica_global_store_id(key, ri.ref().replica_id());
               }
             }
-            retire_keys.insert(retire_keys.end(), matched_keys.begin(), matched_keys.end());
+            for (const auto& key : matched_keys) {
+              remove_seen_keys.insert(key);
+              const uint32_t missing_count = increment_missing_count(key);
+              if (missing_count < kReconcileRemoveRetireMissThreshold) {
+                const auto publish_state = engine_->get_replica_publish_state(key);
+                VLOG(1) << "reconcile_worker_state: defer retire for " << key << " after " << missing_count
+                        << " missing snapshot(s)"
+                        << " publish_state=" << static_cast<int>(publish_state)
+                        << " has_replica_id=" << (!ri.ref().replica_id().empty() ? 1 : 0);
+                continue;
+              }
+              if (missing_count == kReconcileRemoveRetireMissThreshold) {
+                LOG(WARNING) << "reconcile_worker_state: scheduling retire after " << missing_count
+                             << " consecutive missing snapshots: " << key;
+              }
+              retire_keys.push_back(key);
+            }
           } else {
             VLOG(1) << "Skipping REMOVE for non-resident memory type: artifact_id=" << ri.ref().artifact_id()
                     << " memory_type=" << ri.memory_info().memory_type();
@@ -1345,6 +1379,7 @@ void WorkerLifecycleManager::perform_state_sync(uint64_t epoch) {
           break;
       }
     }
+    clear_unseen_missing_counts();
     if (!retire_keys.empty()) {
       enqueue_retire_keys(std::move(retire_keys), "reconcile_worker_state");
     }
@@ -1709,13 +1744,45 @@ void WorkerLifecycleManager::apply_full_state(const std::vector<commonpb::Replic
 
   absl::flat_hash_set<ReplicaSelector, ReplicaSelectorHash> obsolete_selectors;
   std::vector<store::loading::ReplicaKey> retire_keys;
+
+  const auto clear_pending_missing_count = [this](const store::loading::ReplicaKey& key) {
+    std::lock_guard<std::mutex> lock(pending_missing_mu_);
+    pending_missing_reconcile_counts_.erase(key);
+  };
+  const auto increment_pending_missing_count = [this](const store::loading::ReplicaKey& key) -> uint32_t {
+    std::lock_guard<std::mutex> lock(pending_missing_mu_);
+    return ++pending_missing_reconcile_counts_[key];
+  };
+
   for (const auto& entry : engine_->get_ha_inventory()) {
     std::vector<ReplicaSelector> local_selectors;
     append_local_replica_selectors(entry, &local_selectors);
+    if (local_selectors.empty()) {
+      clear_pending_missing_count(entry.key);
+      continue;
+    }
+    std::vector<ReplicaSelector> missing_selectors;
     for (const auto& selector : local_selectors) {
-      if (expected_keys.find(selector) == expected_keys.end()) {
-        obsolete_selectors.insert(selector);
+      if (expected_keys.find(selector) != expected_keys.end()) {
+        continue;
       }
+      missing_selectors.push_back(selector);
+    }
+    if (missing_selectors.empty()) {
+      clear_pending_missing_count(entry.key);
+      continue;
+    }
+    const uint32_t missing_count = increment_pending_missing_count(entry.key);
+    if (missing_count < kReconcileRemoveRetireMissThreshold) {
+      VLOG(1) << "apply_full_state: defer retire after " << missing_count << " missing snapshot(s): " << entry.key;
+      continue;
+    }
+    if (missing_count == kReconcileRemoveRetireMissThreshold) {
+      LOG(WARNING) << "apply_full_state: replica still missing after " << missing_count
+                   << " consecutive snapshots; scheduling retire: " << entry.key;
+    }
+    for (const auto& selector : missing_selectors) {
+      obsolete_selectors.insert(selector);
     }
   }
   auto engine = engine_.get();
@@ -1950,6 +2017,10 @@ void WorkerLifecycleManager::process_retire_queue() {
     if (retired) {
       std::lock_guard<std::mutex> lock(retire_mu_);
       retire_queue_.erase(key);
+      {
+        std::lock_guard<std::mutex> pending_lock(pending_missing_mu_);
+        pending_missing_reconcile_counts_.erase(key);
+      }
     } else {
       LOG(WARNING) << "Retire unload failed rc=" << rc << " for " << key;
     }

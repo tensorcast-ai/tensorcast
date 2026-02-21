@@ -94,7 +94,7 @@ flowchart TB
 - Mapped region-backed loading: `MaterializeIntoMappedTarget` executes a copy plan (src range → dst range) into client-registered CUDA regions. v1 requires contiguous dst tensors, full dst coverage with no overlaps, and narrow-only views; the RPC is loopback/UDS-only and does not mint publish tokens.
 - Disk fallbacks are daemon-owned: `ImportArtifactFromPathRequest.verify_checksums` controls import-time descriptor/index consistency checks, and disk materialization flows apply read-only source mutation policy for imported sources.
 - Key mapping: `PublishReplicaKey`, `ResolveKeyMapping`, `GetArtifactIndexById`, `SealAssembly`.
-- Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated).
+- Status: `GetServerConfig`, `GetWorkerStatus`, `GetDetailedStatus`, `GetLoadedReplicasV2` (paginated). `GetDetailedStatus.communication_info` reports cumulative P2P transfer counters (`total_transfers`, `total_bytes_transferred`, `total_transfer_errors`) sourced from daemon-side ingestion metrics.
 - Transport: `LockTransportChunks`, `UnlockTransportChunks`.
 - In-memory registration: `BeginRegisterArtifact`, `FeedRegisterArtifactStream`, `KeepAliveRegisterArtifact`, `CommitRegisteredArtifact`, `AbortRegisteredArtifact`, `RevokeRegisteredArtifact`.
 - Local stable tier: `CommitRegisteredArtifact` can synchronously satisfy `stable_dram(scope=local)` based on the resolved `StorePolicy` and returns `local_stable_tier` (`READY`/`DEGRADED`/`SKIPPED`). `must` failures fail the RPC; `should` failures degrade. Metrics: `tc_local_stable_tier_total{op,status,requirement}`, `tc_local_stable_tier_seconds{op,status}`. See `../docs/architecture/api/registration-flow.md#local-stable-tier`.

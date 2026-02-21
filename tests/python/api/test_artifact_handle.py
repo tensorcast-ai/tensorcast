@@ -246,6 +246,43 @@ def test_tensor_subset_materialization_and_release():
     assert pipeline.released == []
 
 
+def test_tensor_dict_with_diagnostics_reports_source_and_bytes():
+    canonical_bytes, payload = _build_payload(
+        {"foo": torch.ones(4, dtype=torch.float32), "bar": torch.zeros(2)}
+    )
+    payload = replace(
+        payload,
+        source=store_daemon_pb2.MATERIALIZATION_SOURCE_P2P,
+        ticket_replica_uuid="ticket-1",
+        ticket_status=store_daemon_pb2.MATERIALIZE_REPLICA_STATUS_ALLOCATED,
+    )
+    runtime = _RuntimeStub(_ClientStub(canonical_bytes))
+    pipeline = _PipelineStub(payload)
+    store = _StoreStub(runtime, pipeline)
+    artifact = Artifact(
+        store_ref=_store_ref(store),
+        artifact_id="aid",
+        canonical_index_bytes=canonical_bytes,
+    )
+
+    result = artifact.tensor_dict_with_diagnostics(device="cpu")
+
+    assert set(result.tensors) == {"foo", "bar"}
+    diagnostics = result.diagnostics
+    assert diagnostics.source == "p2p"
+    assert diagnostics.source_code == int(store_daemon_pb2.MATERIALIZATION_SOURCE_P2P)
+    assert diagnostics.tensor_count == 2
+    assert diagnostics.total_bytes == sum(
+        int(desc.byte_length) for desc in payload.descriptors
+    )
+    assert diagnostics.replica_uuid == "replica-1"
+    assert diagnostics.ticket_replica_uuid == "ticket-1"
+    assert diagnostics.ticket_status == "allocated"
+    assert diagnostics.materialize_sec >= 0.0
+    assert diagnostics.tensor_bind_sec >= 0.0
+    assert diagnostics.total_sec >= diagnostics.materialize_sec
+
+
 def test_tensor_into_materializes_subset_only():
     tensors = {
         "foo": torch.zeros(2, dtype=torch.float32),

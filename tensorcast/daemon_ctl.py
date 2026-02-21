@@ -1436,6 +1436,22 @@ class DaemonCtl:
                 raise
         return response
 
+    def get_detailed_status(self) -> store_daemon_pb2.GetDetailedStatusResponse:
+        with self._client_span("Client/GetDetailedStatus") as span:
+            request = store_daemon_pb2.GetDetailedStatusRequest()
+            try:
+                response: store_daemon_pb2.GetDetailedStatusResponse = self._unary_call(
+                    self.stub_v2.GetDetailedStatus,
+                    request,
+                    timeout=5.0,
+                    span=span,
+                    retries=1,
+                )
+            except grpc.RpcError as e:  # noqa: BLE001
+                span.record_exception(e)
+                raise
+        return response
+
     # ------------------------------------------------------------------
     # Memory Artifact registration (outer-layer client API)
     # ------------------------------------------------------------------

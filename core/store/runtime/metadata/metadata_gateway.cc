@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/cleanup/cleanup.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/match.h"
@@ -180,16 +181,31 @@ absl::Status MetadataGateway::register_replica(
     const loading::ReplicaKey& key,
     std::string_view artifact_id_override,
     std::string_view publish_context_id) {
-  if (should_skip_publish_for_context(publish_context_id, key)) {
-    VLOG(1) << "Publish context " << publish_context_id << " already registered for artifact=" << key.artifact_id
-            << " device=" << key.device.to_string();
-    replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
-    return absl::OkStatus();
+  const PublishContextDecision context_decision = begin_publish_for_context(publish_context_id, key);
+  switch (context_decision) {
+    case PublishContextDecision::kSkipPublished:
+      VLOG(1) << "Publish context " << publish_context_id << " already succeeded for artifact=" << key.artifact_id
+              << " device=" << key.device.to_string();
+      replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+      return absl::OkStatus();
+    case PublishContextDecision::kSkipInFlight:
+      VLOG(1) << "Publish context " << publish_context_id << " already in flight for artifact=" << key.artifact_id
+              << " device=" << key.device.to_string();
+      return absl::OkStatus();
+    case PublishContextDecision::kConflict:
+      return absl::FailedPreconditionError("publish_context_id reused for a different replica key");
+    case PublishContextDecision::kProceed:
+      break;
   }
+
+  absl::Status register_status = absl::InternalError("register_replica exited without final status");
+  auto finalize_publish_context =
+      absl::MakeCleanup([&]() { record_publish_context_result(publish_context_id, key, register_status); });
 
   auto client_or = get_connected_client();
   if (!client_or.ok()) {
-    return client_or.status();
+    register_status = client_or.status();
+    return register_status;
   }
   auto client = std::move(*client_or);
 
@@ -200,12 +216,14 @@ absl::Status MetadataGateway::register_replica(
 
   auto size_or = replica_runtime_->get_replica_size(key);
   if (!size_or.ok()) {
-    return size_or.status();
+    register_status = size_or.status();
+    return register_status;
   }
 
   auto canonical_id_or = canonical_artifact_id(key, artifact_id_override);
   if (!canonical_id_or.ok()) {
-    return canonical_id_or.status();
+    register_status = canonical_id_or.status();
+    return register_status;
   }
   const std::string& artifact_id = *canonical_id_or;
 
@@ -221,26 +239,26 @@ absl::Status MetadataGateway::register_replica(
       *size_or,
       key.view_id.has_value() ? std::optional<std::string_view>(*key.view_id) : std::nullopt,
       publish_context_id.empty() ? std::nullopt : std::optional<std::string_view>(publish_context_id));
-  if (!register_or.ok()) {
-    return register_or.status();
-  }
-  replica_runtime_->set_replica_global_id(key, *register_or);
+  if (register_or.ok()) {
+    replica_runtime_->set_replica_global_id(key, *register_or);
 
-  if (key.view_id.has_value()) {
-    auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
-    if (!view_status.ok()) {
-      if (absl::IsUnimplemented(view_status)) {
-        VLOG(1) << "Global Store does not yet accept view residency updates: " << view_status.message();
-      } else {
-        LOG(WARNING) << "record_view_residency failed for view_id=" << *key.view_id << ": " << view_status;
+    if (key.view_id.has_value()) {
+      auto view_status = client->record_view_residency(key.artifact_id, *key.view_id, *size_or);
+      if (!view_status.ok()) {
+        if (absl::IsUnimplemented(view_status)) {
+          VLOG(1) << "Global Store does not yet accept view residency updates: " << view_status.message();
+        } else {
+          LOG(WARNING) << "record_view_residency failed for view_id=" << *key.view_id << ": " << view_status;
+        }
       }
     }
   }
-  record_publish_context_result(publish_context_id, key, register_or.status());
+  register_status = register_or.ok() ? absl::OkStatus() : register_or.status();
   if (register_or.ok()) {
     replica_runtime_->set_replica_publish_state(key, ReplicaPublishState::kPublished);
+    return absl::OkStatus();
   }
-  return register_or.status();
+  return register_status;
 }
 
 absl::Status MetadataGateway::unregister_replica(std::string_view artifact_id, int device_id) {
@@ -447,21 +465,40 @@ ReplicaFactory MetadataGateway::make_default_replica_factory() const {
   };
 }
 
-bool MetadataGateway::should_skip_publish_for_context(
+MetadataGateway::PublishContextDecision MetadataGateway::begin_publish_for_context(
     std::string_view publish_context_id,
     const loading::ReplicaKey& key) const {
   if (publish_context_id.empty()) {
-    return false;
+    return PublishContextDecision::kProceed;
   }
   absl::MutexLock lock(&publish_context_mu_);
+  const absl::Time now = absl::Now();
   auto it = publish_contexts_.find(publish_context_id);
   if (it == publish_contexts_.end()) {
-    return false;
+    publish_contexts_[std::string(publish_context_id)] = PublishContextRecord{
+        .key = key,
+        .in_flight = true,
+        .status = absl::UnavailableError("publish in progress"),
+        .updated_at = now,
+    };
+    if (publish_contexts_.size() > kMaxPublishContextRecords) {
+      cleanup_publish_contexts_locked(now);
+    }
+    return PublishContextDecision::kProceed;
   }
-  if (!it->second.status.ok()) {
-    return false;
+  if (it->second.key != key) {
+    return PublishContextDecision::kConflict;
   }
-  return it->second.key == key;
+  it->second.updated_at = now;
+  if (it->second.in_flight) {
+    return PublishContextDecision::kSkipInFlight;
+  }
+  if (it->second.status.ok()) {
+    return PublishContextDecision::kSkipPublished;
+  }
+  it->second.in_flight = true;
+  it->second.status = absl::UnavailableError("publish in progress");
+  return PublishContextDecision::kProceed;
 }
 
 void MetadataGateway::record_publish_context_result(
@@ -471,13 +508,12 @@ void MetadataGateway::record_publish_context_result(
   if (publish_context_id.empty()) {
     return;
   }
-  PublishContextRecord record{
-      .key = key,
-      .status = status,
-      .updated_at = absl::Now(),
-  };
   absl::MutexLock lock(&publish_context_mu_);
-  publish_contexts_[std::string(publish_context_id)] = std::move(record);
+  auto& record = publish_contexts_[std::string(publish_context_id)];
+  record.key = key;
+  record.in_flight = false;
+  record.status = status;
+  record.updated_at = absl::Now();
   if (publish_contexts_.size() > kMaxPublishContextRecords) {
     cleanup_publish_contexts_locked(absl::Now());
   }
