@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <functional>
@@ -54,6 +56,8 @@ using materialization::control::MaterializeOrchestrator;
 
 namespace {
 
+constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
+
 bool is_local_identity(const components::WorkerIdentity& local) {
   return !local.node_id.empty() || !local.node_address.empty();
 }
@@ -72,6 +76,34 @@ bool is_local_replica(const components::RemoteReplicaInfo& remote, const compone
     return local.p2p_port == remote.node_port;
   }
   return false;
+}
+
+uint32_t clamp_timeout_to_u32_ms(std::chrono::milliseconds timeout) {
+  if (timeout.count() <= 0) {
+    return 0;
+  }
+  if (timeout.count() > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+    return std::numeric_limits<uint32_t>::max();
+  }
+  return static_cast<uint32_t>(timeout.count());
+}
+
+uint32_t resolve_transport_wait_timeout_ms(
+    std::chrono::milliseconds configured_timeout,
+    std::chrono::milliseconds request_budget) {
+  std::chrono::milliseconds timeout =
+      configured_timeout.count() > 0 ? configured_timeout : std::chrono::milliseconds(kDefaultTransportWaitTimeoutMs);
+  if (request_budget.count() > 0) {
+    timeout = std::min(timeout, request_budget);
+  }
+  if (timeout.count() <= 0) {
+    return 1;
+  }
+  return std::max<uint32_t>(1, clamp_timeout_to_u32_ms(timeout));
+}
+
+uint32_t resolve_transport_wait_timeout_ms(const loading::MaterializeHints& hints) {
+  return resolve_transport_wait_timeout_ms(hints.transport_wait_timeout, hints.request_budget);
 }
 
 absl::Status stale_local_route_status(std::string_view artifact_id) {
@@ -615,7 +647,8 @@ absl::StatusOr<AssemblyPlan> build_assembly_plan(
         local_identity.node_address,
         local_identity.p2p_port,
         target_device,
-        /*wait_timeout_ms=*/30000);
+        resolve_transport_wait_timeout_ms(
+            std::chrono::milliseconds(kDefaultTransportWaitTimeoutMs), std::chrono::milliseconds(0)));
     if (!session_or.ok()) {
       if (absl::IsNotFound(session_or.status())) {
         continue;
@@ -1461,7 +1494,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         local_identity.node_address,
         local_identity.p2p_port,
         target_device,
-        /*wait_timeout_ms=*/30000);
+        resolve_transport_wait_timeout_ms(hints));
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;
@@ -1821,7 +1854,7 @@ absl::StatusOr<loading::MaterializeIntoTargetResult> MaterializationFacade::mate
         local_identity.node_address,
         local_identity.p2p_port,
         target_device,
-        /*wait_timeout_ms=*/30000);
+        resolve_transport_wait_timeout_ms(hints));
     if (transport_or.ok()) {
       const auto& session = *transport_or;
       const auto& remote = session.remote_replica;

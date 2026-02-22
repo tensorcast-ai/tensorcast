@@ -71,6 +71,12 @@ class MaterializationPayload:
     ticket_status: store_daemon_pb2.MaterializeReplicaStatus | None = None
     ticket_created_at_ts: float | None = None
     ticket_expires_at_ts: float | None = None
+    retry_attempts: int = 1
+    retry_reason_buckets: Mapping[str, int] | None = None
+    budget_deadline_sec: float | None = None
+    budget_elapsed_sec: float | None = None
+    budget_remaining_sec: float | None = None
+    budget_exit_reason: str | None = None
 
 
 _LOCAL_HANDLE_RESP_LABELS: dict[int, str] = {

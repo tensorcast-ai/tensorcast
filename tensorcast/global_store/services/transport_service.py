@@ -130,7 +130,23 @@ class TransportService:
                         source_port=source_port,
                     )
 
-                    self.transport_repository.create(transport)
+                    try:
+                        self.transport_repository.create(transport)
+                    except Exception:
+                        logger.exception(
+                            "Transport create failed after claim; releasing claim for replica=%s",
+                            replica.replica_id,
+                        )
+                        try:
+                            self.replica_repository.decrement_requests(
+                                replica.replica_id
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Failed to rollback transport claim for replica=%s",
+                                replica.replica_id,
+                            )
+                        raise
 
                     # Metrics
                     inc_transport_request(artifact_id, "success")
@@ -231,16 +247,23 @@ class TransportService:
         if not transport:
             raise NotFoundError(f"Transport {transport_id} not found")
 
-        # Decrement replica requests counter
-        current, max_conc = self.replica_repository.decrement_requests(
-            transport.replica_id
-        )
-
-        # Update transport status to completed
         from datetime import datetime
 
-        self.transport_repository.update_status(
-            transport_id, "completed", completed_at=datetime.now()
+        status_updated = self.transport_repository.complete_if_in_progress(
+            transport_id,
+            completed_at=datetime.now(),
+        )
+        if not status_updated:
+            replica = self.replica_repository.find_by_id(
+                transport.replica_id, transport.artifact_id
+            )
+            if replica is not None:
+                return int(replica.current_requests), int(replica.max_concurrency)
+            return 0, 0
+
+        # Decrement replica requests counter exactly once for in-progress -> completed
+        current, max_conc = self.replica_repository.decrement_requests(
+            transport.replica_id
         )
 
         dec_active_transports()
@@ -253,7 +276,7 @@ class TransportService:
 
         return current, max_conc
 
-    def cleanup_expired_transports(self, expiration_seconds: int = 600) -> int:
+    def cleanup_expired_transports(self, expiration_seconds: int | None = None) -> int:
         """Release transports that have been in *in_progress* state for too long.
 
         This serves as a safety-net for StoreDaemon crashes or network
@@ -271,13 +294,18 @@ class TransportService:
             Number of transports that were force-completed.
         """
 
+        effective_expiration = (
+            max(60, int(self.config.cleanup_interval_ms / 1000) * 10)
+            if expiration_seconds is None
+            else int(expiration_seconds)
+        )
         expired: list[Transport] = []
 
         try:
             pending = self.transport_repository.list_with_filters(
                 status="in_progress", limit=10_000
             )
-            expired = [t for t in pending if t.age_seconds > expiration_seconds]
+            expired = [t for t in pending if t.age_seconds > effective_expiration]
         except Exception:
             logger.exception("Failed to fetch pending transports for cleanup")
             return 0
@@ -296,7 +324,9 @@ class TransportService:
 
         if cleaned:
             logger.info(
-                "Cleaned up %s stale transports (>%ss)", cleaned, expiration_seconds
+                "Cleaned up %s stale transports (>%ss)",
+                cleaned,
+                effective_expiration,
             )
 
         return cleaned

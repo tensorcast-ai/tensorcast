@@ -392,8 +392,10 @@ class ReplicaRepository(BaseRepository):
                 + "WHEN mr.memory_type = 'DISK' THEN 2 "
                 + "ELSE 3 "
                 + "END, "
-                + "mr.max_concurrency ASC, "
                 + "(COALESCE(rc.current_requests, 0) * 1.0 / GREATEST(mr.max_concurrency, 1)), "
+                + "COALESCE(rc.current_requests, 0) ASC, "
+                + "mr.max_concurrency DESC, "
+                + "COALESCE(rc.last_assigned_at, TIMESTAMP '1970-01-01') ASC, "
                 + "mr.updated_at ASC"
             )
             result = cursor.execute(query, [artifact_id, view_id or ""])

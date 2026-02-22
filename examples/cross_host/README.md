@@ -4,9 +4,11 @@
 
 - `cross_host_matrix_runner.py`：统一矩阵 runner（负责重启两侧 daemon、循环 put/get、收集结果、清理 artifact）。
 - `cross_host_fanout_runner.py`：多机 fanout/cascade runner（验证“get 节点成为新 P2P 源”，并支持 wave 并发扩容性能测试）。
+- `cross_host_chaos_runner.py`：chaos 编排 runner（按 event spec 定时注入故障，输出可回放 timeline，并支持 expected-failure pass 语义）。
 - `cross_host_put_once.py`：单轮 put helper。
 - `cross_host_get_once.py`：单轮 get helper（含可见性等待与 comm bytes delta 采样）。
 - `cross_host_deregister_once.py`：单轮 deregister helper（`wait=true`，用于验证释放收敛）。
+- `run_multihost_chaos_suite.sh`：统一 chaos 执行入口（含 brainctl preflight/predict/launch/cleanup 元数据输出）。
 
 ## 1. 前置条件
 
@@ -130,8 +132,8 @@ source .venv/bin/activate
 
 export TC_SEED_PROC=<SEED_PROCESS_ID>
 export TC_SEED_IP=<SEED_IP>
-export TC_GET_PROCS=<G1_PROCESS_ID>,<G2_PROCESS_ID>,<G3_PROCESS_ID>,<G4_PROCESS_ID>,<G5_PROCESS_ID>,<G6_PROCESS_ID>,<G7_PROCESS_ID>
-export TC_GET_IPS=<G1_IP>,<G2_IP>,<G3_IP>,<G4_IP>,<G5_IP>,<G6_IP>,<G7_IP>
+export TC_GET_PROCS=<G1_PROCESS_ID>,<G2_PROCESS_ID>,<G3_PROCESS_ID>,<...>
+export TC_GET_IPS=<G1_IP>,<G2_IP>,<G3_IP>,<...>
 export TC_GS_ADDR=<GS_IP>:50051
 
 # 可选：
@@ -142,17 +144,112 @@ export TC_GS_ADDR=<GS_IP>:50051
 # export TC_RUN_ID=manual-20260222
 # export TC_PORT_BASE=62800
 
-bash examples/cross_host/run_multihost_benchmark_suite.sh
+# 全阶段（small -> medium -> large）
+bash examples/cross_host/run_multihost_benchmark_suite.sh --phase all
+
+# 仅小规模功能阶段（3/4 节点）
+bash examples/cross_host/run_multihost_benchmark_suite.sh --phase small
+
+# 仅中规模阶段（6 节点）
+bash examples/cross_host/run_multihost_benchmark_suite.sh --phase medium
+
+# 仅大规模阶段（8/9 节点）
+bash examples/cross_host/run_multihost_benchmark_suite.sh --phase large
 ```
 
-默认套件会顺序执行：
-1. `cascade` 4 节点功能链路验证（deregister 退役模式）
-2. `fanout` 6 节点（1GiB）
-3. `fanout` 8 节点（1GiB，`20/16/16/g0`）
-4. `fanout` 8 节点（1GiB，`24/12/24/g0`）
-5. `fanout` 8 节点（1GiB，`20/16/16/g8`）
-6. `fanout` 8 节点（2GiB，`20/16/16/g0`）
-7. 当 `TC_GET_PROCS/TC_GET_IPS` 提供到第 8 个 getter（总 9 节点）时，额外执行 9n case（1GiB 与 2GiB）。
+阶段说明：
+1. `phase=small`
+- 需要至少 2 个 getter。
+- 执行 3/4 节点功能验证（含 cascade 与 fanout）。
+2. `phase=medium`
+- 需要至少 5 个 getter。
+- 执行 6 节点 fanout 收敛与吞吐验证。
+3. `phase=large`
+- 需要至少 7 个 getter。
+- 执行 8 节点负载 case；当 getter >= 8 时追加 9 节点 case。
+4. `phase=all`
+- 自动按 `small -> medium -> large` 顺序执行，节点不足的阶段会自动 skip 并打印原因。
+
+## 2.3 Chaos 套件（事件时间线 + expected-failure 门禁）
+
+`cross_host_chaos_runner.py` 使用 case schema 运行多个 case，每个 case 支持：
+
+- `chaos_events`：
+  - `offset_sec`
+  - `target_role`（`seed/getter/all_getters/custom`）
+  - `action`（`daemon_stop/daemon_kill/command/sleep`）
+  - `duration_sec`
+  - `expected_impact`
+- 负向 case 门禁：
+  - `expected_outcome=success|failure`
+  - `expected_error_pattern`（failure case 可选）
+  - 输出状态区分 `expected_failure_pass` / `unexpected_failure` / `unexpected_success`
+- 失败路径强制清理：
+  - 当 case 失败（含 timeout/执行异常）时，runner 会对 seed/getter 执行 best-effort daemon cleanup
+  - cleanup 结果写入 run/case 的 `events.jsonl` 与 `result.json.cleanup_records`
+
+示例 schema：
+- `examples/cross_host/case_schemas/chaos_suite_example.json`
+
+统一入口脚本：
+
+```bash
+source .venv/bin/activate
+
+export TC_CASE_SCHEMA=examples/cross_host/case_schemas/chaos_suite_example.json
+export TC_OUT_DIR=/tmp/tc_cross_20260222/results_chaos
+export TC_RUN_ID=chaos-20260222
+
+# 可选：让脚本托管 brainctl 生命周期（技能默认 charged-group=tensorcast_dev）
+# export TC_BRAINCTL_ENABLE_LAUNCH=true
+# export TC_BRAINCTL_GPU=1
+# export TC_BRAINCTL_CPU=4
+# export TC_BRAINCTL_MEMORY=106400
+# export TC_BRAINCTL_POSITIVE_TAGS=L40S,H200,H800,H100
+# export TC_BRAINCTL_MOUNT='juicefs+s3://xxx:/mnt/xxx'
+# 可选：门禁评审阈值（默认开启 all_get_complete/source_cardinality/expected_failure/comm_errors gate）
+# export TC_GATE_MAX_RECOVER_TIME_SEC=180
+# export TC_GATE_REQUIRE_SOURCE_CARDINALITY=true
+
+bash examples/cross_host/run_multihost_chaos_suite.sh
+```
+
+输出目录（run 级）：
+
+- `<out_dir>/<run_id>/summary.json`
+- `<out_dir>/<run_id>/events.jsonl`
+- `<out_dir>/<run_id>/cases/<case_name>/result.json`
+- `<out_dir>/<run_id>/cases/<case_name>/metrics.json`
+- `<out_dir>/<run_id>/cases/<case_name>/classification.json`
+- `<out_dir>/<run_id>/meta/brainctl_steps.jsonl`
+- `<out_dir>/<run_id>/gate_review.json`
+- `<out_dir>/<run_id>/gate_review.md`
+
+也可以手工复核（不依赖入口脚本）：
+
+```bash
+source .venv/bin/activate
+
+python examples/cross_host/chaos_gate_review.py \
+  --run-dir <out_dir>/<run_id> \
+  --max-recover-time-sec 180
+```
+
+small/medium/large 三阶段汇总评审：
+
+```bash
+source .venv/bin/activate
+
+python examples/cross_host/chaos_phase_gate_review.py \
+  --small-run-dir <out_dir>/<run_id_small> \
+  --medium-run-dir <out_dir>/<run_id_medium> \
+  --large-run-dir <out_dir>/<run_id_large>
+```
+
+推荐配套：
+
+- fast-failover profile：`examples/config/global_store_config_cross_host_bench_fast_failover.yaml`
+- slow-cleanup profile：`examples/config/global_store_config_cross_host_bench_slow_cleanup.yaml`
 
 ## 3. 输出说明
 
@@ -162,10 +259,22 @@ runner 会输出：
 - `OUTPUT <path>.json`：完整结果文件，包含：
 - `summary`：`put_sec_mean` / `e2e_gibps_mean` / `transfer_gibps_mean` / `visibility_wait_sec_p90` 等。
 - `records`：逐轮明细（put/get/cleanup）。
+- `events`：事件时间线（iteration start/end、get_failed 及分类）。
 - 对 `cross_host_fanout_runner.py`：
 - `mode=cascade`：`summary` 包含 `source_path_expected/observed`、`vram_exportable_failures`。
-- `mode=fanout`：`summary` 包含 `wave1/2 transfer_gibps` 与 `cluster_gibps`。
+- `mode=fanout`：`summary` 额外包含
+  - `all_get_complete` / `incomplete_workers`
+  - `source_cardinality_timeline`
+  - `recover_time_sec`
+  - `put_success_rate` / `get_success_rate`
+  - `retry_reason_buckets`
+  - `failure_classification_counts`（`infra/product/unknown`）
+  - payload sample hash 校验统计
 - `params`：本次运行关键参数快照。
+
+chaos 报告模板：
+
+- `docs/internals/chaos-report-template.md`
 
 ## 4. 常见问题
 
@@ -191,3 +300,12 @@ runner 会输出：
 6. `cannot exec into ... Stopped`
 - 表示 worker 被平台自动回收。
 - 处理：重新 `brainctl launch`，并更新 process id / pod ip 后重跑 case。
+
+7. `cudaErrorNoDevice` / `device_count=0` 导致 daemon 首启崩溃
+- 这是 worker 运行时 GPU 不可用（常见于异常节点），不是 case 参数问题。
+- `cross_host_fanout_runner.py` 现在会在 daemon 重启前先执行 GPU preflight（`nvidia-smi -L`），无 GPU 会直接 fail-fast 并给出明确诊断。
+- 处理：对目标 worker 执行 `nvidia-smi -L` 与 `torch.cuda.device_count()` 健康检查；下线坏 worker 并替换后重跑。
+
+8. `startup memory preflight failed`（`available < total_required`）
+- 常见于同一批 worker 上并发叠加执行多个 suite，导致瞬时可用内存不足。
+- 处理：改为串行执行（`small -> medium -> large`），避免同组 worker 并发压测；必要时重启 worker 清理环境。

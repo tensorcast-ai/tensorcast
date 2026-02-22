@@ -2,6 +2,7 @@
 
 #include "daemon/service/controllers/target_materialization_service.h"
 
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -31,6 +32,7 @@
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/materialization_target_plan_utils.h"
 #include "daemon/service/controllers/materialization_target_storage_utils.h"
+#include "daemon/util/deadline_utils.h"
 #include "daemon/util/grpc_peer_utils.h"
 #include "daemon/util/status_utils.h"
 #include "opentelemetry/metrics/provider.h"
@@ -184,6 +186,16 @@ struct TargetMaterializationCommonContext {
   bool gs_connected{false};
   std::optional<std::filesystem::path> normalized_disk_path;
 };
+
+std::chrono::milliseconds resolve_target_request_budget(const grpc::ServerContext& server_context) {
+  constexpr std::chrono::milliseconds kDefaultBudget{30000};
+  constexpr std::chrono::milliseconds kHardCap{300000};
+  const std::chrono::milliseconds clamped = ClampToDeadline(server_context, kDefaultBudget, kHardCap);
+  if (clamped.count() > 0) {
+    return clamped;
+  }
+  return kDefaultBudget;
+}
 
 template <typename RequestT>
 absl::StatusOr<TargetMaterializationCommonContext> prepare_target_materialization_common(
@@ -480,6 +492,9 @@ grpc::Status TargetMaterializationService::materialize_into_target(
   }
 
   store::loading::MaterializeHints hints;
+  const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
+  hints.request_budget = request_budget;
+  hints.transport_wait_timeout = request_budget;
   hints.artifact_id = resolved_artifact_id;
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;
@@ -771,6 +786,9 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
 
   store::loading::MaterializeHints hints;
+  const std::chrono::milliseconds request_budget = resolve_target_request_budget(rctx.server_context());
+  hints.request_budget = request_budget;
+  hints.transport_wait_timeout = request_budget;
   hints.artifact_id = resolved_artifact_id;
   hints.source_preference = to_hint_preference(effective_policy.preference);
   hints.allow_p2p = effective_policy.allow_p2p;

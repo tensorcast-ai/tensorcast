@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,6 +52,7 @@ std::string read_artifact_id(const std::filesystem::path& artifact_dir) {
 class WaitForSharedDiskGlobalStoreClient final : public tensorcast::store::testing::GlobalStoreClientStub {
  public:
   std::string cluster_id{"cluster-test"};
+  std::filesystem::path storage_root;
   std::unordered_map<std::string, std::string> key_mappings;
   std::vector<tensorcast::store::components::ArtifactDiskLocation> disk_locations;
 
@@ -72,6 +74,31 @@ class WaitForSharedDiskGlobalStoreClient final : public tensorcast::store::testi
     tensorcast::store::components::KeyMapping mapping;
     mapping.artifact_id = it->second;
     return mapping;
+  }
+
+  absl::StatusOr<tensorcast::store::components::ArtifactBinding> get_artifact_binding(std::string_view) override {
+    // These tests use direct MI2 artifact IDs and do not model binding aliases.
+    return absl::NotFoundError("artifact binding not found");
+  }
+
+  absl::StatusOr<std::string> get_artifact_index_by_id(std::string_view artifact_id) override {
+    if (storage_root.empty()) {
+      return absl::FailedPreconditionError("storage_root not configured");
+    }
+    for (const auto& loc : disk_locations) {
+      if (loc.artifact_id != artifact_id) {
+        continue;
+      }
+      const auto index_path = storage_root / loc.relative_path / "tensor_index.json";
+      std::ifstream index_in(index_path);
+      if (!index_in.is_open()) {
+        return absl::NotFoundError("tensor_index.json not found");
+      }
+      std::ostringstream content;
+      content << index_in.rdbuf();
+      return content.str();
+    }
+    return absl::NotFoundError("artifact_id not found");
   }
 
   absl::StatusOr<std::vector<tensorcast::store::components::ArtifactDiskLocation>> list_artifact_disk_locations(
@@ -119,6 +146,7 @@ TEST_CASE(
 
   const auto storage_root = test_tmpdir() / "storage_ready";
   std::filesystem::create_directories(storage_root);
+  gs_client->storage_root = storage_root;
 
   // Prepare a disk artifact that already exists, but only becomes discoverable via disk_locations after a short delay.
   const auto artifact_rel =
@@ -154,6 +182,8 @@ TEST_CASE(
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   auto status = svc.MaterializeReplica(&ctx, &req, &resp);
+  CAPTURE(status.error_code());
+  CAPTURE(status.error_message());
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
@@ -170,6 +200,7 @@ TEST_CASE(
 
   const auto storage_root = test_tmpdir() / "storage_bad";
   std::filesystem::create_directories(storage_root);
+  gs_client->storage_root = storage_root;
 
   const auto artifact_rel = std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact_wait_bad";
   const auto artifact_dir = storage_root / artifact_rel;
@@ -204,6 +235,8 @@ TEST_CASE(
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   auto status = svc.MaterializeReplica(&ctx, &req, &resp);
+  CAPTURE(status.error_code());
+  CAPTURE(status.error_message());
   REQUIRE_FALSE(status.ok());
   REQUIRE(status.error_code() == grpc::StatusCode::FAILED_PRECONDITION);
   REQUIRE(gs_client->list_calls.load() >= 3);
@@ -218,6 +251,7 @@ TEST_CASE(
 
   const auto storage_root = test_tmpdir() / "storage_ready_by_key";
   std::filesystem::create_directories(storage_root);
+  gs_client->storage_root = storage_root;
 
   const auto artifact_rel =
       std::filesystem::path("clusters") / gs_client->cluster_id / "objects" / "artifact_wait_ready_by_key";
@@ -252,6 +286,8 @@ TEST_CASE(
   grpc::ServerContext ctx;
   tensorcast::daemon::v2::MaterializeReplicaResponse resp;
   const auto status = svc.MaterializeReplica(&ctx, &req, &resp);
+  CAPTURE(status.error_code());
+  CAPTURE(status.error_message());
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);

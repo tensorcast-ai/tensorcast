@@ -388,6 +388,8 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
 
   loading::MaterializeHints hints;
   hints.artifact_id = "cgid:artifact_auto";
+  hints.request_budget = std::chrono::milliseconds(1234);
+  hints.transport_wait_timeout = std::chrono::milliseconds(1234);
   loading::DiskSource disk_source{.path = temp_root / "artifact_fallback", .expected_size = std::nullopt};
 
   loading::ReplicaHandle disk_handle;
@@ -400,9 +402,14 @@ TEST_CASE("MaterializationFacade AUTO falls back when Global Store route is stal
   auto handle_or =
       harness.facade->materialize_replica(target_device, loading::MaterializeMode::AUTO, hints, disk_source);
   REQUIRE(handle_or.ok());
-  CHECK(harness.fake_pipeline->disk_invocations().size() == 1);
-  CHECK(harness.fake_pipeline->p2p_invocations().empty());
-  CHECK(gs_client->replica_requests.size() == 1);
+  REQUIRE(harness.fake_pipeline->disk_invocations().size() == 1);
+  REQUIRE(harness.fake_pipeline->p2p_invocations().empty());
+  REQUIRE(gs_client->replica_requests.size() >= 1);
+  REQUIRE(gs_client->replica_request_wait_timeouts_ms.size() == gs_client->replica_requests.size());
+  for (uint32_t timeout_ms : gs_client->replica_request_wait_timeouts_ms) {
+    REQUIRE(timeout_ms <= 1234);
+    REQUIRE(timeout_ms > 0);
+  }
 
   harness.shutdown();
   std::error_code cleanup_ec;

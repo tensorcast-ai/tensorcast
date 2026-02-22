@@ -100,6 +100,11 @@ struct DiskMetadata {
 struct MaterializeHints {
   size_t max_buffer_bytes = 256ULL << 20; // 256 MB default
   std::chrono::milliseconds pinned_timeout{0};
+  // Request-level budget propagated from upper layers (e.g., RPC deadline).
+  // 0 means "unspecified".
+  std::chrono::milliseconds request_budget{0};
+  // Upper bound for each Global Store transport wait call. 0 means default.
+  std::chrono::milliseconds transport_wait_timeout{0};
   uint32_t pipeline_concurrency = 4;
   std::string artifact_id;
   bool prefer_pageable_cpu{false};

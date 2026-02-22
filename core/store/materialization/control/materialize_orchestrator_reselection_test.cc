@@ -2,6 +2,7 @@
 
 #include "core/store/materialization/control/materialize_orchestrator.h"
 
+#include <chrono>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -179,6 +180,52 @@ TEST_CASE("MaterializeOrchestrator reselects source after retryable P2P failure"
   CHECK(backend.p2p_attempts[0].source_ip == "10.2.2.1");
   CHECK(backend.p2p_attempts[1].source_ip == "10.2.2.2");
   REQUIRE(gs_client->replica_requests.size() == 2);
+}
+
+TEST_CASE(
+    "MaterializeOrchestrator reselection is deadline-aware instead of fixed attempts",
+    "[store][materialize][reselection]") {
+  auto gs_client = std::make_shared<RecordingGlobalStoreClient>();
+  gs_client->connected = true;
+  gs_client->allow_replica_transport = true;
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-local-1", "node-local", "10.3.3.1", 50021, common::memory::MemoryLocation::GPU, 0));
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-local-2", "node-local", "10.3.3.1", 50021, common::memory::MemoryLocation::GPU, 0));
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-local-3", "node-local", "10.3.3.1", 50021, common::memory::MemoryLocation::GPU, 0));
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-local-4", "node-local", "10.3.3.1", 50021, common::memory::MemoryLocation::GPU, 0));
+  gs_client->push_scripted_transport_session(make_transport_session(
+      "transport-remote", "node-remote", "10.3.3.2", 50022, common::memory::MemoryLocation::GPU, 0));
+
+  FakeMaterializationBackend backend;
+  MaterializeHints hints;
+  hints.artifact_id = "artifact-reselect-deadline-aware";
+  hints.allow_p2p = true;
+  hints.allow_disk = false;
+  hints.request_budget = std::chrono::seconds(2);
+  hints.transport_wait_timeout = std::chrono::milliseconds(1200);
+
+  components::WorkerIdentity local_identity{
+      .node_id = "node-local",
+      .node_address = "10.3.3.1",
+      .p2p_port = 50021,
+  };
+  MaterializeOrchestrator orchestrator(
+      gsl::not_null<MaterializationBackend*>{&backend},
+      gsl::not_null<components::IGlobalStoreClient*>{gs_client.get()},
+      local_identity);
+
+  auto result = orchestrator.run("artifact-reselect-deadline-aware", make_gpu_target(0), hints, std::nullopt);
+  REQUIRE(result.ok());
+  REQUIRE(backend.p2p_attempts.size() == 1);
+  CHECK(backend.p2p_attempts.front().source_ip == "10.3.3.2");
+  REQUIRE(gs_client->replica_requests.size() == 5);
+  for (uint32_t timeout_ms : gs_client->replica_request_wait_timeouts_ms) {
+    CHECK(timeout_ms <= 1200);
+    CHECK(timeout_ms > 0);
+  }
 }
 
 } // namespace

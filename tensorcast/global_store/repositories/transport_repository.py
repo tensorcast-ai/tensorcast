@@ -131,6 +131,26 @@ class TransportRepository(BaseRepository):
         finally:
             cursor.close()
 
+    def complete_if_in_progress(
+        self, transport_id: UUID, completed_at: datetime
+    ) -> bool:
+        """Atomically mark transport completed only when status is in_progress."""
+        cursor = self.get_cursor()
+        try:
+            result = cursor.execute(
+                """
+                UPDATE artifact_transports
+                SET status = 'completed', completed_at = ?
+                WHERE transport_id = ?
+                  AND status = 'in_progress'
+                RETURNING transport_id
+                """,
+                [completed_at, str(transport_id)],
+            )
+            return result.fetchone() is not None
+        finally:
+            cursor.close()
+
     def list_with_filters(
         self, status: Optional[str] = None, limit: int = 50, offset: int = 0
     ) -> list[Transport]:

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import time
 
@@ -33,6 +34,37 @@ def _bytes_to_gib_per_sec(num_bytes: int, sec: float) -> float:
     if num_bytes <= 0 or sec <= 0:
         return 0.0
     return float(num_bytes) / float(1024**3) / float(sec)
+
+
+def _sample_positions(numel: int, sample_count: int) -> tuple[int, ...]:
+    if numel <= 0:
+        return ()
+    if sample_count <= 1 or numel == 1:
+        return (0,)
+    points: set[int] = {0, numel - 1, numel // 2}
+    while len(points) < sample_count:
+        idx = int((numel - 1) * (len(points) / float(sample_count - 1)))
+        points.add(max(0, min(numel - 1, idx)))
+    return tuple(sorted(points))
+
+
+def _payload_sample_hash(
+    payload: dict[str, torch.Tensor],
+    *,
+    sample_count: int = 3,
+) -> str:
+    chunks: list[str] = []
+    for name in sorted(payload):
+        tensor = payload[name].detach().reshape(-1)
+        numel = int(tensor.numel())
+        positions = _sample_positions(numel, sample_count)
+        sampled_values = [repr(tensor[pos].item()) for pos in positions]
+        chunks.append(
+            "|".join(
+                (name, str(payload[name].dtype), str(numel), ",".join(sampled_values))
+            )
+        )
+    return hashlib.sha256("\n".join(chunks).encode("utf-8")).hexdigest()
 
 
 def _build_payload(
@@ -130,6 +162,7 @@ def main() -> int:
         "artifact_id": str(registered.artifact_id),
         "requested_bytes": int(requested_bytes),
         "effective_bytes": int(effective_bytes),
+        "payload_sample_hash": _payload_sample_hash(payload),
         "put_sec": put_sec,
         "put_gibps": _bytes_to_gib_per_sec(int(effective_bytes), put_sec),
         "put_policy": str(args.put_policy),

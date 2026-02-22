@@ -32,6 +32,7 @@
 #include "daemon/service/controllers/materialization_replica_handle_utils.h"
 #include "daemon/service/controllers/materialization_request_common_utils.h"
 #include "daemon/service/controllers/selection_validation_utils.h"
+#include "daemon/util/deadline_utils.h"
 #include "daemon/util/status_utils.h"
 
 namespace tensorcast::daemon {
@@ -189,6 +190,24 @@ absl::StatusOr<store::loading::ReplicaHandle> retry_materialize_from_shared_disk
         return engine.materialize_replica(dev, mode, hints, retry_disk_source);
       },
       prepare_retry_disk_source);
+}
+
+std::chrono::milliseconds resolve_materialization_request_budget(
+    const grpc::ServerContext& server_context,
+    const v2::MaterializeReplicaRequest& req) {
+  constexpr std::chrono::milliseconds kDefaultBudget{30000};
+  constexpr std::chrono::milliseconds kHardCap{300000};
+  const std::chrono::milliseconds user_budget = req.pinned_allocation_timeout_ms() > 0
+      ? std::chrono::milliseconds(req.pinned_allocation_timeout_ms())
+      : kDefaultBudget;
+  const std::chrono::milliseconds clamped = ClampToDeadline(server_context, user_budget, kHardCap);
+  if (clamped.count() > 0) {
+    return clamped;
+  }
+  if (req.pinned_allocation_timeout_ms() <= 0) {
+    return kDefaultBudget;
+  }
+  return clamped;
 }
 
 } // namespace
@@ -614,6 +633,9 @@ grpc::Status ReplicaMaterializationService::materialize_replica(
   if (req.pinned_allocation_timeout_ms() > 0) {
     hints.pinned_timeout = std::chrono::milliseconds(req.pinned_allocation_timeout_ms());
   }
+  const std::chrono::milliseconds request_budget = resolve_materialization_request_budget(rctx.server_context(), req);
+  hints.request_budget = request_budget;
+  hints.transport_wait_timeout = request_budget;
   hints.verify = verify_checksums ? store::loading::MaterializeHints::Verify::CHECKSUM
                                   : store::loading::MaterializeHints::Verify::NONE;
   hints.source_preference = to_hint_preference(effective_policy.preference);

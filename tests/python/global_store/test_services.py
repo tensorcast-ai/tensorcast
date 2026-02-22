@@ -17,9 +17,9 @@ from tensorcast.global_store.exceptions import (
 )
 from tensorcast.global_store.models import ExportState, MemoryType, Replica, Worker
 from tensorcast.global_store.services.view_state_service import (
+    PROOF_SCHEMA_V1,
     LeafWritePayload,
     PieceProofDigestPayload,
-    PROOF_SCHEMA_V1,
     ViewUpsertPayload,
 )
 from tensorcast.proto.layout.v1 import layout_pb2
@@ -224,7 +224,7 @@ class TestServices:
                 Worker(
                     daemon_id=f"daemon_{i}",
                     node_id=f"node_{i}",
-                    node_address=f"192.168.1.{i+1}",
+                    node_address=f"192.168.1.{i + 1}",
                     grpc_port=50051 + i,
                     p2p_port=50052 + i,
                     mem_pool_total_size=1024,
@@ -239,7 +239,9 @@ class TestServices:
         assert len(all_workers) >= 3
 
         # List only accepting workers
-        accepting_workers = worker_service.list_active_workers(include_unavailable=False)
+        accepting_workers = worker_service.list_active_workers(
+            include_unavailable=False
+        )
         accepting_count = sum(1 for w in accepting_workers if w.accepting_new_requests)
         assert accepting_count >= 2
 
@@ -356,7 +358,9 @@ class TestServices:
         )
 
         # Unregister replica
-        success = artifact_service.unregister_replica(replica.replica_id, "test_artifact")
+        success = artifact_service.unregister_replica(
+            replica.replica_id, "test_artifact"
+        )
         assert success is True
 
         # Verify replica is removed
@@ -457,6 +461,57 @@ class TestServices:
         current, max_conc = transport_service.complete_transport(transport_id)
         assert current == 0
         assert max_conc == 2
+
+    def test_transport_service_complete_is_idempotent(self, services):
+        """Repeated completion must not decrement current_requests twice."""
+        transport_service = services["transport"]
+        artifact_service = services["artifact"]
+        worker_service = services["worker"]
+
+        worker = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_node_idempotent",
+                node_id="node_idempotent",
+                node_address="192.168.9.1",
+                grpc_port=50051,
+                p2p_port=50052,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        replica = artifact_service.register_replica(
+            Replica(
+                artifact_id="idempotent_artifact",
+                node_id="node_idempotent",
+                node_address="192.168.9.1",
+                node_port=8080,
+                memory_size=1024,
+                memory_type=MemoryType.GPU,
+                device_id=0,
+                remote_memory_keys=["rk0"],
+                buffer_sizes=[1024],
+                export_state=ExportState.EXPORTABLE,
+                worker_id=worker.worker_id,
+                max_concurrency=1,
+            )
+        )
+
+        selected, transport_id = transport_service.request_transport(
+            artifact_id="idempotent_artifact",
+            view_id=None,
+            source_node_id="source_node",
+            source_address="192.168.2.1",
+            source_port=9090,
+        )
+        assert selected.replica_id == replica.replica_id
+
+        current, max_conc = transport_service.complete_transport(transport_id)
+        assert current == 0
+        assert max_conc == 1
+
+        current2, max_conc2 = transport_service.complete_transport(transport_id)
+        assert current2 == 0
+        assert max_conc2 == 1
 
     def test_transport_service_no_replicas(self, services):
         """Test transport when no replicas exist."""
@@ -644,7 +699,7 @@ class TestServices:
                 Worker(
                     daemon_id=f"daemon_{i}",
                     node_id=f"node_{i}",
-                    node_address=f"192.168.1.{i+1}",
+                    node_address=f"192.168.1.{i + 1}",
                     grpc_port=50051 + i,
                     p2p_port=50052 + i,
                     mem_pool_total_size=1024,
@@ -663,7 +718,7 @@ class TestServices:
                 Replica(
                     artifact_id="balanced_artifact",
                     node_id=f"node_{i}",
-                    node_address=f"192.168.1.{i+1}",
+                    node_address=f"192.168.1.{i + 1}",
                     node_port=8080,
                     memory_size=1024,
                     memory_type=mem_type,
@@ -920,9 +975,7 @@ class TestServices:
             encoded = base64.b32encode(mh).decode("ascii").lower().rstrip("=")
             return f"b{encoded}"
 
-        canonical_index_bytes = (
-            b'{"weights":[0,32,[8],[1],"torch.float32",0],"bias":[32,32,[8],[1],"torch.float32",0]}'
-        )
+        canonical_index_bytes = b'{"weights":[0,32,[8],[1],"torch.float32",0],"bias":[32,32,[8],[1],"torch.float32",0]}'
         index_multihash = _multibase_multihash_sha256(
             hashlib.sha256(canonical_index_bytes).digest()
         )
@@ -932,9 +985,7 @@ class TestServices:
             index_multihash=index_multihash,
             proof_schema_version=PROOF_SCHEMA_V1,
         )
-        layout.tensors["weights"].overlap_mode = (
-            layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL
-        )
+        layout.tensors["weights"].overlap_mode = layout_pb2.OVERLAP_MODE_REPLICATE_EQUAL
         payload = layout.SerializeToString(deterministic=True)
         layout_id = _multibase_multihash_sha256(hashlib.sha256(payload).digest())
         repositories["layout_spec"].put(

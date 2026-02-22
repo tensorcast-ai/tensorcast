@@ -124,6 +124,12 @@ class MaterializationDiagnostics:
     materialize_sec: float
     tensor_bind_sec: float
     total_sec: float
+    retry_attempts: int
+    retry_reason_buckets: Mapping[str, int]
+    budget_deadline_sec: float | None
+    budget_elapsed_sec: float | None
+    budget_remaining_sec: float | None
+    budget_exit_reason: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,6 +521,12 @@ class Artifact:
                 materialize_sec=(materialize_end - materialize_start),
                 tensor_bind_sec=(bind_end - materialize_end),
                 total_sec=(return_end - materialize_start),
+                retry_attempts=max(1, int(payload.retry_attempts)),
+                retry_reason_buckets=dict(payload.retry_reason_buckets or {}),
+                budget_deadline_sec=payload.budget_deadline_sec,
+                budget_elapsed_sec=payload.budget_elapsed_sec,
+                budget_remaining_sec=payload.budget_remaining_sec,
+                budget_exit_reason=payload.budget_exit_reason,
             )
             logger.debug(
                 "store.tensor_dict.materialized",
