@@ -16,6 +16,41 @@ from tensorcast.error_reporting import debug_errors_enabled, debug_errors_hint
 
 RetryPolicyMap = Mapping[str, RetryPolicy]
 
+_TRANSIENT_STATUS_CODES = frozenset(
+    {
+        "UNAVAILABLE",
+        "DEADLINE_EXCEEDED",
+        "ABORTED",
+        "RESOURCE_EXHAUSTED",
+        "INTERNAL",
+        "UNKNOWN",
+    }
+)
+_TRANSIENT_MESSAGE_TOKENS = (
+    "failed to confirm artifact loading",
+    "stale",
+    "no available replica",
+    "within timeout",
+    "transport",
+    "write-write conflict",
+    "conflict",
+    "serialization",
+    "try again",
+    "temporary",
+    "busy",
+    "capacity",
+    "resource exhausted",
+    "too many requests",
+    "connection reset",
+    "connection refused",
+    "broken pipe",
+)
+
+
+def _looks_transient_message(message: str) -> bool:
+    lowered = message.lower()
+    return any(token in lowered for token in _TRANSIENT_MESSAGE_TOKENS)
+
 
 def _append_debug_hint(message: str) -> str:
     if debug_errors_enabled():
@@ -204,11 +239,9 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
-        retryable = status_code in {
-            grpc.StatusCode.UNAVAILABLE,
-            grpc.StatusCode.DEADLINE_EXCEEDED,
-            grpc.StatusCode.ABORTED,
-        }
+        retryable = status_name in _TRANSIENT_STATUS_CODES or _looks_transient_message(
+            mapped
+        )
         if not details:
             mapped = _append_debug_hint(mapped)
         return ArtifactError(mapped, status_code=status_name, retryable=retryable)
@@ -259,6 +292,8 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
         if "unavailable" in lowered or "not available" in lowered:
             return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
+        if _looks_transient_message(message):
+            return ArtifactError(message, status_code="UNAVAILABLE", retryable=True)
     return ArtifactError(message, status_code="UNKNOWN", retryable=False)
 
 
@@ -292,13 +327,43 @@ def should_retry(
         return False
     if not error.retryable:
         return False
-    if error.status_code not in {"UNAVAILABLE", "DEADLINE_EXCEEDED", "ABORTED"}:
+    if error.status_code not in _TRANSIENT_STATUS_CODES:
         return False
     if policy.deadline_seconds > 0:
         elapsed = time.monotonic() - start_time
         if elapsed >= policy.deadline_seconds:
             return False
     return True
+
+
+def retry_reason_bucket(error: ArtifactError) -> str:
+    status = str(error.status_code or "UNKNOWN").upper()
+    message = str(error).lower()
+    if status == "DEADLINE_EXCEEDED":
+        return "deadline_exceeded"
+    if status == "UNAVAILABLE":
+        if "stale" in message or "confirm artifact loading" in message:
+            return "stale_source"
+        if "transport" in message:
+            return "transport_unavailable"
+        return "unavailable"
+    if status == "ABORTED":
+        return "transaction_conflict"
+    if status == "RESOURCE_EXHAUSTED":
+        return "resource_exhausted"
+    if status in {"INTERNAL", "UNKNOWN"}:
+        if _looks_transient_message(message):
+            return "transient_internal"
+        return "internal_or_unknown"
+    if status == "CANCELLED":
+        return "cancelled"
+    if status == "NOT_FOUND":
+        return "not_found"
+    if status == "FAILED_PRECONDITION":
+        return "failed_precondition"
+    if status == "INVALID_ARGUMENT":
+        return "invalid_argument"
+    return status.lower()
 
 
 def compute_retry_delay(policy: RetryPolicy, attempt: int) -> float:
@@ -327,5 +392,6 @@ __all__ = [
     "raise_mapped_materialization_error",
     "raise_mapped_registration_error",
     "remaining_budget",
+    "retry_reason_bucket",
     "should_retry",
 ]

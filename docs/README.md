@@ -35,6 +35,8 @@ Guides for developing specific components:
 - **[tensor_dict_into Dataflow](internals/tensor_dict_into_dataflow.md)** - Legacy vs region-backed into paths
 - **[Preemptible Memory Internals](internals/preemptible-memory.md)** - UMA/VS preemption workflow and tuning
 - **[Byte-Range Mapping and Execution](internals/byte-range-mapping-and-execution.md)** - Unified byte-range executor semantics
+- **[Chaos Report Template](internals/chaos-report-template.md)** - Standard handoff template for multi-host chaos runs
+- **[Chaos Gate Checklist](internals/chaos-gate-checklist.md)** - Phase gate review checklist and required artifacts
 
 ## ⚙️ Core Modules (C++)
 

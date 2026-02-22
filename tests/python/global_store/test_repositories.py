@@ -21,9 +21,7 @@ class TestRepositories:
                 if sql == "COMMIT":
                     raise RuntimeError("commit_conflict")
                 if sql == "ROLLBACK":
-                    raise RuntimeError(
-                        "cannot rollback - no transaction is active"
-                    )
+                    raise RuntimeError("cannot rollback - no transaction is active")
                 return self
 
             def close(self):
@@ -134,7 +132,7 @@ class TestRepositories:
                 worker_id=f"worker_{i}",
                 daemon_id=f"daemon_{i}",
                 node_id=f"node_{i}",
-                node_address=f"192.168.1.{i+1}",
+                node_address=f"192.168.1.{i + 1}",
                 grpc_port=50051 + i,
                 p2p_port=50052 + i,
                 mem_pool_total_size=1024,
@@ -236,7 +234,7 @@ class TestRepositories:
             replica = Replica(
                 artifact_id=f"model_{i % 2}",  # Two different models
                 node_id=f"node_{i}",
-                node_address=f"192.168.1.{i+1}",
+                node_address=f"192.168.1.{i + 1}",
                 node_port=8080,
                 memory_size=1024,
                 memory_type=MemoryType.GPU,
@@ -333,6 +331,81 @@ class TestRepositories:
         assert selected.memory_type == MemoryType.GPU
         assert selected.current_requests == 3  # Incremented by query
 
+    def test_artifact_replica_load_balancing_avoids_small_capacity_bias(
+        self, repositories
+    ):
+        """Prefer lower utilization instead of preferring smaller max_concurrency."""
+        replica_repo = repositories["replica"]
+        worker_repo = repositories["worker"]
+
+        worker_low = Worker(
+            worker_id="worker_low_cap",
+            daemon_id="daemon_worker_low_cap",
+            node_id="node_low_cap",
+            node_address="192.168.10.1",
+            grpc_port=50101,
+            p2p_port=50102,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+            accepting_new_requests=True,
+        )
+        worker_high = Worker(
+            worker_id="worker_high_cap",
+            daemon_id="daemon_worker_high_cap",
+            node_id="node_high_cap",
+            node_address="192.168.10.2",
+            grpc_port=50111,
+            p2p_port=50112,
+            mem_pool_total_size=1024,
+            mem_pool_available_size=1024,
+            accepting_new_requests=True,
+        )
+        worker_repo.create(worker_low)
+        worker_repo.create(worker_high)
+        assert worker_repo.update_heartbeat("worker_low_cap", 1024, True) is True
+        assert worker_repo.update_heartbeat("worker_high_cap", 1024, True) is True
+
+        low_capacity = Replica(
+            artifact_id="capacity_bias_artifact",
+            node_id="node_low_cap",
+            node_address="192.168.10.1",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            remote_memory_keys=["rk_low"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=2,
+            current_requests=1,
+            worker_id="worker_low_cap",
+        )
+        high_capacity = Replica(
+            artifact_id="capacity_bias_artifact",
+            node_id="node_high_cap",
+            node_address="192.168.10.2",
+            node_port=8080,
+            memory_size=1024,
+            memory_type=MemoryType.GPU,
+            device_id=0,
+            remote_memory_keys=["rk_high"],
+            buffer_sizes=[1024],
+            export_state=ExportState.EXPORTABLE,
+            max_concurrency=20,
+            current_requests=1,
+            worker_id="worker_high_cap",
+        )
+        replica_repo.create(low_capacity)
+        replica_repo.create(high_capacity)
+
+        selection = replica_repo.find_available_for_transport(
+            "capacity_bias_artifact", heartbeat_timeout_seconds=60
+        )
+        assert selection.replica is not None
+        selected = selection.replica
+        assert selected.node_id == "node_high_cap"
+        assert selected.current_requests == 2
+
     def test_artifact_replica_no_available_for_transport(self, repositories):
         """Test when no replicas are available for transport."""
         replica_repo = repositories["replica"]
@@ -408,6 +481,7 @@ class TestRepositories:
 
         # Create transport
         from tensorcast.global_store.models import Transport
+
         transport = Transport(
             replica_id=created_replica.replica_id,
             artifact_id="test_artifact",

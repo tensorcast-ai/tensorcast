@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import time
 from dataclasses import dataclass
@@ -38,58 +39,44 @@ def _sync_if_needed(device: str, enabled: bool) -> None:
         torch.cuda.synchronize(device)
 
 
-def _is_retryable(exc: Exception) -> bool:
-    status_code = str(getattr(exc, "status_code", "")).lower()
-    message = str(exc).lower()
-    if status_code in {
-        "not_found",
-        "failed_precondition",
-        "unavailable",
-        "statuscode.not_found",
-        "statuscode.failed_precondition",
-        "statuscode.unavailable",
-    }:
-        return True
-    if "artifact index not found" in message or "key not found" in message:
-        return True
-    if "statuscode.not_found" in message:
-        return True
-    return "not found" in message and (
-        "artifact id" in message or "storedaemon" in message or "artifact" in message
-    )
+def _sample_positions(numel: int, sample_count: int) -> tuple[int, ...]:
+    if numel <= 0:
+        return ()
+    if sample_count <= 1 or numel == 1:
+        return (0,)
+    points: set[int] = {0, numel - 1, numel // 2}
+    while len(points) < sample_count:
+        idx = int((numel - 1) * (len(points) / float(sample_count - 1)))
+        points.add(max(0, min(numel - 1, idx)))
+    return tuple(sorted(points))
 
 
-def _materialize_with_retry(
+def _payload_sample_hash(
+    tensors: dict[str, torch.Tensor],
     *,
-    key: str,
-    artifact_id: str,
-    lookup_mode: str,
-    fallback: tc.FallbackOptions,
-    device: str,
-    options: tc.GetArtifactOptions,
-    visibility_timeout_sec: float,
-    visibility_retry_sec: float,
-) -> tuple[Any, int]:
-    deadline = time.monotonic() + visibility_timeout_sec
-    attempt = 1
-    while True:
-        try:
-            if lookup_mode == "artifact_id":
-                handle = tc.artifact(artifact_id=artifact_id, fallback=fallback)
-            else:
-                handle = tc.artifact(key=key, fallback=fallback)
-            materialized = handle.tensor_dict_with_diagnostics(
-                device=device,
-                options=options,
+    sample_count: int = 3,
+) -> str:
+    chunks: list[str] = []
+    for name in sorted(tensors):
+        tensor = tensors[name].detach().reshape(-1)
+        numel = int(tensor.numel())
+        positions = _sample_positions(numel, sample_count)
+        sampled_values: list[str] = []
+        for pos in positions:
+            value = tensor[pos].item()
+            sampled_values.append(repr(value))
+        chunks.append(
+            "|".join(
+                (
+                    name,
+                    str(tensors[name].dtype),
+                    str(numel),
+                    ",".join(sampled_values),
+                )
             )
-            return materialized, attempt
-        except Exception as exc:  # noqa: BLE001
-            if not _is_retryable(exc):
-                raise
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(max(0.001, visibility_retry_sec))
-            attempt += 1
+        )
+    digest = hashlib.sha256("\n".join(chunks).encode("utf-8")).hexdigest()
+    return digest
 
 
 def _read_comm_snapshot() -> CommSnapshot | None:
@@ -127,6 +114,11 @@ def main() -> int:
         "--verify-checksums",
         action=argparse.BooleanOptionalAction,
         default=False,
+    )
+    parser.add_argument(
+        "--payload-sample-verify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
     )
     parser.add_argument(
         "--export-policy",
@@ -169,19 +161,28 @@ def main() -> int:
             ),
         )
 
+        ctx = None
+        if float(args.visibility_timeout_sec) > 0:
+            ctx = tc.CallContext(deadline_ms=int(args.visibility_timeout_sec * 1000))
+
         comm_before = _read_comm_snapshot() if bool(args.capture_comm_stats) else None
 
         _sync_if_needed(str(args.get_device), bool(args.sync_cuda))
         get_start = time.perf_counter()
-        materialized, attempts = _materialize_with_retry(
-            key=str(args.key),
-            artifact_id=str(args.artifact_id),
-            lookup_mode=str(args.lookup_mode),
-            fallback=fallback,
+        if str(args.lookup_mode) == "artifact_id":
+            handle = tc.artifact(
+                artifact_id=str(args.artifact_id),
+                fallback=fallback,
+            )
+        else:
+            handle = tc.artifact(
+                key=str(args.key),
+                fallback=fallback,
+            )
+        materialized = handle.tensor_dict_with_diagnostics(
             device=str(args.get_device),
             options=options,
-            visibility_timeout_sec=float(args.visibility_timeout_sec),
-            visibility_retry_sec=float(args.visibility_retry_sec),
+            ctx=ctx,
         )
         _sync_if_needed(str(args.get_device), bool(args.sync_cuda))
         get_end = time.perf_counter()
@@ -212,19 +213,40 @@ def main() -> int:
             comm_after.total_transfer_errors - comm_before.total_transfer_errors,
         )
 
+    payload_sample_hash: str | None = None
+    if bool(args.payload_sample_verify):
+        payload_sample_hash = _payload_sample_hash(materialized.tensors)
+
+    retry_reason_buckets: dict[str, int] = dict(diagnostics.retry_reason_buckets)
+    budget_trace: dict[str, Any] = {
+        "deadline_sec": diagnostics.budget_deadline_sec,
+        "elapsed_sec": diagnostics.budget_elapsed_sec,
+        "remaining_sec": diagnostics.budget_remaining_sec,
+        "exit_reason": diagnostics.budget_exit_reason,
+    }
+    source_reselection_count = max(0, int(diagnostics.retry_attempts) - 1)
+
     output = {
         "key": str(args.key),
         "artifact_id": str(args.artifact_id),
         "lookup_mode": str(args.lookup_mode),
         "source": diagnostics.source or "unknown",
         "source_code": diagnostics.source_code,
+        "ticket_replica_uuid": diagnostics.ticket_replica_uuid,
+        "ticket_status": diagnostics.ticket_status,
         "total_bytes": int(total_bytes),
-        "attempts": int(attempts),
+        "attempts": int(diagnostics.retry_attempts),
+        "retry_reason_buckets": retry_reason_buckets,
+        "source_reselection_count": int(source_reselection_count),
+        "final_error_code": "OK",
+        "budget_trace": budget_trace,
         "e2e_sec": e2e_sec,
         "e2e_gibps": _bytes_to_gib_per_sec(total_bytes, e2e_sec),
         "transfer_sec": transfer_sec,
         "transfer_gibps": _bytes_to_gib_per_sec(total_bytes, transfer_sec),
         "visibility_wait_sec": max(0.0, e2e_sec - transfer_sec),
+        "transport_wait_ms": int(max(0.0, e2e_sec - transfer_sec) * 1000.0),
+        "payload_sample_hash": payload_sample_hash,
         "comm_transfers_delta": comm_transfers_delta,
         "comm_bytes_delta": comm_bytes_delta,
         "comm_errors_delta": comm_errors_delta,

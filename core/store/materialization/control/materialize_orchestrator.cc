@@ -3,8 +3,12 @@
 #include "core/store/materialization/control/materialize_orchestrator.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <map>
+#include <string>
 #include <utility>
 #include "absl/log/log.h"
 #include "absl/status/status.h"
@@ -29,7 +33,10 @@ using tensorcast::store::loading::ReplicaTarget;
 
 namespace {
 
-constexpr int kMaxStaleSourceReselectionAttempts = 3;
+constexpr uint32_t kDefaultTransportWaitTimeoutMs = 30000;
+constexpr int kMaxReselectionAttemptsWithoutBudget = 64;
+constexpr std::chrono::milliseconds kMinReselectionBudget{1};
+constexpr std::chrono::milliseconds kMinReselectionBackoff{50};
 
 struct SourceReselectionMetrics {
   opentelemetry::nostd::shared_ptr<opentelemetry::metrics::Meter> meter;
@@ -146,6 +153,100 @@ bool should_retry_source_selection(const absl::Status& status) {
   return absl::IsUnavailable(status) || absl::IsNotFound(status) || absl::IsFailedPrecondition(status);
 }
 
+std::optional<std::chrono::steady_clock::time_point> resolve_request_deadline(const MaterializeHints& hints) {
+  if (hints.request_budget.count() <= 0) {
+    return std::nullopt;
+  }
+  return std::chrono::steady_clock::now() + hints.request_budget;
+}
+
+std::chrono::milliseconds remaining_request_budget(
+    const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+  if (!deadline.has_value()) {
+    return std::chrono::milliseconds::max();
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now >= *deadline) {
+    return std::chrono::milliseconds(0);
+  }
+  return std::chrono::duration_cast<std::chrono::milliseconds>(*deadline - now);
+}
+
+uint32_t clamp_timeout_to_u32_ms(std::chrono::milliseconds timeout) {
+  if (timeout.count() <= 0) {
+    return 0;
+  }
+  if (timeout.count() > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+    return std::numeric_limits<uint32_t>::max();
+  }
+  return static_cast<uint32_t>(timeout.count());
+}
+
+uint32_t effective_transport_wait_timeout_ms(
+    const MaterializeHints& hints,
+    const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+  const std::chrono::milliseconds configured = hints.transport_wait_timeout.count() > 0
+      ? hints.transport_wait_timeout
+      : std::chrono::milliseconds(kDefaultTransportWaitTimeoutMs);
+  std::chrono::milliseconds timeout = configured;
+  const std::chrono::milliseconds remaining = remaining_request_budget(deadline);
+  if (remaining != std::chrono::milliseconds::max()) {
+    timeout = std::min(timeout, remaining);
+  }
+  if (timeout.count() <= 0) {
+    return 0;
+  }
+  return std::max<uint32_t>(1, clamp_timeout_to_u32_ms(timeout));
+}
+
+bool can_retry_source_selection(
+    const absl::Status& status,
+    int reselection_attempt,
+    const std::optional<std::chrono::steady_clock::time_point>& deadline,
+    int max_reselection_attempts) {
+  if (!should_retry_source_selection(status)) {
+    return false;
+  }
+  if (reselection_attempt >= max_reselection_attempts) {
+    return false;
+  }
+  const std::chrono::milliseconds remaining = remaining_request_budget(deadline);
+  if (remaining != std::chrono::milliseconds::max()) {
+    return remaining >= kMinReselectionBudget;
+  }
+  return true;
+}
+
+int resolve_max_reselection_attempts(const MaterializeHints& hints) {
+  if (hints.request_budget.count() <= 0) {
+    return kMaxReselectionAttemptsWithoutBudget;
+  }
+  const int64_t computed = std::max<int64_t>(1, hints.request_budget.count() / kMinReselectionBackoff.count());
+  if (computed > static_cast<int64_t>(std::numeric_limits<int>::max())) {
+    return std::numeric_limits<int>::max();
+  }
+  return static_cast<int>(computed);
+}
+
+bool should_log_reselection_attempt(int reselection_attempt) {
+  return reselection_attempt <= 5 || (reselection_attempt % 10) == 0;
+}
+
+absl::Status source_reselection_exhausted_status(
+    std::string_view artifact_id,
+    int reselection_attempt,
+    const std::optional<std::chrono::steady_clock::time_point>& deadline) {
+  const std::chrono::milliseconds remaining = remaining_request_budget(deadline);
+  if (remaining != std::chrono::milliseconds::max() && remaining < kMinReselectionBudget) {
+    return absl::DeadlineExceededError(
+        absl::StrCat(
+            "source reselection deadline exhausted for artifact_id=", artifact_id, " attempts=", reselection_attempt));
+  }
+  return absl::UnavailableError(
+      absl::StrCat(
+          "source reselection budget exhausted for artifact_id=", artifact_id, " attempts=", reselection_attempt));
+}
+
 } // namespace
 
 MaterializeOrchestrator::MaterializeOrchestrator(
@@ -230,8 +331,14 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
   absl::Status view_transport_status;
   int reselection_attempt = 0;
   bool had_transport_request = false;
+  const auto request_deadline = resolve_request_deadline(hints);
+  const int max_reselection_attempts = resolve_max_reselection_attempts(hints);
 
   auto request_transport = [&]() -> absl::StatusOr<components::TransportSession> {
+    const uint32_t wait_timeout_ms = effective_transport_wait_timeout_ms(hints, request_deadline);
+    if (wait_timeout_ms == 0) {
+      return absl::DeadlineExceededError(absl::StrCat("transport wait budget exhausted for artifact_id=", artifact_id));
+    }
     used_canonical_transport_fallback = false;
     view_transport_status = absl::OkStatus();
     if (view_id.has_value()) {
@@ -242,7 +349,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
           local_identity_.node_address,
           local_identity_.p2p_port,
           target_device,
-          /*wait_timeout_ms=*/30000);
+          wait_timeout_ms);
       if (!view_transport_or.ok() &&
           (absl::IsNotFound(view_transport_or.status()) || absl::IsUnimplemented(view_transport_or.status()))) {
         view_transport_status = view_transport_or.status();
@@ -254,7 +361,7 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
             local_identity_.node_address,
             local_identity_.p2p_port,
             target_device,
-            /*wait_timeout_ms=*/30000);
+            wait_timeout_ms);
         used_canonical_transport_fallback = true;
         return canonical_transport_or;
       }
@@ -266,10 +373,16 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         local_identity_.node_address,
         local_identity_.p2p_port,
         target_device,
-        /*wait_timeout_ms=*/30000);
+        wait_timeout_ms);
   };
 
   while (gs_connected && allow_p2p) {
+    const std::chrono::milliseconds remaining = remaining_request_budget(request_deadline);
+    if (remaining != std::chrono::milliseconds::max() && remaining < kMinReselectionBudget) {
+      had_transport_request = true;
+      transport_or = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
+      break;
+    }
     transport_or = request_transport();
     had_transport_request = true;
     if (!transport_or.ok()) {
@@ -287,13 +400,22 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
         LOG(WARNING) << "complete_replica_transport after stale-local route returned error: " << comp_status;
       }
       last_p2p_status = stale_local_route_status(artifact_id);
-      if (reselection_attempt < kMaxStaleSourceReselectionAttempts) {
+      if (can_retry_source_selection(
+              last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
         reselection_attempt += 1;
         record_source_reselection_attempt("local_route", view_id.has_value(), reselection_attempt);
-        LOG(WARNING) << "Retrying source selection after stale local route: artifact_id=" << artifact_id
-                     << " attempt=" << reselection_attempt << "/" << kMaxStaleSourceReselectionAttempts;
+        if (should_log_reselection_attempt(reselection_attempt)) {
+          const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
+          const std::string remaining_label = retry_remaining == std::chrono::milliseconds::max()
+              ? "unbounded"
+              : std::to_string(retry_remaining.count());
+          LOG(WARNING) << "Retrying source selection after stale local route: artifact_id=" << artifact_id
+                       << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
+                       << " remaining_budget_ms=" << remaining_label;
+        }
         continue;
       }
+      last_p2p_status = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
       record_source_reselection_exhausted("local_route", view_id.has_value(), reselection_attempt);
       break;
     }
@@ -352,16 +474,22 @@ absl::StatusOr<ReplicaHandle> MaterializeOrchestrator::run(
       LOG(WARNING) << "P2P load failed: " << load_or.status();
     }
 
-    if (should_retry_source_selection(last_p2p_status) && reselection_attempt < kMaxStaleSourceReselectionAttempts) {
+    if (can_retry_source_selection(last_p2p_status, reselection_attempt, request_deadline, max_reselection_attempts)) {
       record_stale_source_detected("p2p_load_failure", view_id.has_value(), reselection_attempt);
       reselection_attempt += 1;
       record_source_reselection_attempt("p2p_load_failure", view_id.has_value(), reselection_attempt);
-      LOG(WARNING) << "Retrying source selection after P2P load failure: artifact_id=" << artifact_id
-                   << " attempt=" << reselection_attempt << "/" << kMaxStaleSourceReselectionAttempts
-                   << " status=" << last_p2p_status;
+      if (should_log_reselection_attempt(reselection_attempt)) {
+        const std::chrono::milliseconds retry_remaining = remaining_request_budget(request_deadline);
+        const std::string remaining_label =
+            retry_remaining == std::chrono::milliseconds::max() ? "unbounded" : std::to_string(retry_remaining.count());
+        LOG(WARNING) << "Retrying source selection after P2P load failure: artifact_id=" << artifact_id
+                     << " attempt=" << reselection_attempt << "/" << max_reselection_attempts
+                     << " remaining_budget_ms=" << remaining_label << " status=" << last_p2p_status;
+      }
       continue;
     }
     if (should_retry_source_selection(last_p2p_status)) {
+      last_p2p_status = source_reselection_exhausted_status(artifact_id, reselection_attempt, request_deadline);
       record_source_reselection_exhausted("p2p_load_failure", view_id.has_value(), reselection_attempt);
     }
     break;

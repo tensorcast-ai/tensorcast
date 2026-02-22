@@ -2,7 +2,10 @@
 
 import grpc
 
-from tensorcast.api.store.retry import map_materialization_error
+from tensorcast.api.store.retry import (
+    map_materialization_error,
+    retry_reason_bucket,
+)
 
 
 class _DummyRpcError(grpc.RpcError):
@@ -54,3 +57,12 @@ def test_materialization_runtime_error_confirm_failed_is_retryable() -> None:
     assert mapped.retryable is True
     assert "Hint:" in str(mapped)
     assert "stale/unavailable" in str(mapped)
+
+
+def test_materialization_runtime_error_transport_timeout_is_retryable() -> None:
+    mapped = map_materialization_error(
+        RuntimeError("No available replica for artifact foo within timeout")
+    )
+    assert mapped.status_code == "UNAVAILABLE"
+    assert mapped.retryable is True
+    assert retry_reason_bucket(mapped) in {"transport_unavailable", "unavailable"}

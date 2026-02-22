@@ -29,6 +29,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool replica_transport_not_found{false};
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
+  std::vector<uint32_t> view_request_wait_timeouts_ms;
+  std::vector<uint32_t> replica_request_wait_timeouts_ms;
   std::vector<std::string> registered_replicas;
   std::vector<std::pair<std::string, std::string>> unregistered_replicas;
   std::vector<std::string> marked_unavailable;
@@ -323,8 +325,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t) override {
+      uint32_t wait_timeout_ms) override {
     replica_requests.emplace_back(std::string(artifact_id));
+    replica_request_wait_timeouts_ms.push_back(wait_timeout_ms);
     if (scripted_transport_next < scripted_transport_sessions.size()) {
       return scripted_transport_sessions[scripted_transport_next++];
     }
@@ -348,8 +351,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       std::string_view,
       uint32_t,
       const tensorcast::store::DeviceKey& target_device,
-      uint32_t) override {
+      uint32_t wait_timeout_ms) override {
     view_requests.emplace_back(std::string(view_id));
+    view_request_wait_timeouts_ms.push_back(wait_timeout_ms);
     if (!allow_view_transport) {
       return absl::NotFoundError("view transport disabled in RecordingGlobalStoreClient");
     }

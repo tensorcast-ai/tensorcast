@@ -176,6 +176,25 @@ def restart_daemon(
     wait_daemon_ready(worker=worker, timeout_sec=timeout_sec)
 
 
+def assert_worker_has_gpu(worker: WorkerSpec, *, timeout_sec: float) -> None:
+    """Fail fast when a worker does not expose a CUDA device."""
+    inner_cmd = "set -euo pipefail; nvidia-smi -L 2>&1 || true"
+    output = run_remote(
+        worker.process_id,
+        inner_cmd,
+        timeout_sec=min(60.0, max(5.0, float(timeout_sec))),
+    )
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    has_gpu = any(line.startswith("GPU ") for line in lines)
+    if has_gpu:
+        return
+    tail = "\n".join(lines[-20:])
+    raise RuntimeError(
+        f"worker={worker.name} process_id={worker.process_id} has no detectable CUDA GPU; "
+        f"nvidia-smi output:\n{tail}"
+    )
+
+
 def wait_daemon_ready(*, worker: WorkerSpec, timeout_sec: float) -> None:
     deadline = time.perf_counter() + max(1.0, float(timeout_sec))
     last_status: dict[str, Any] = {}
@@ -283,6 +302,7 @@ def run_get(
     get_device: str,
     visibility_timeout_sec: float,
     visibility_retry_sec: float,
+    payload_sample_verify: bool,
     timeout_sec: float,
 ) -> dict[str, Any]:
     print(
@@ -303,6 +323,11 @@ def run_get(
         f"--visibility-retry-sec {float(visibility_retry_sec)} "
         "--prefer p2p "
         "--capture-comm-stats"
+    )
+    inner_cmd += (
+        " --payload-sample-verify"
+        if bool(payload_sample_verify)
+        else " --no-payload-sample-verify"
     )
     if lookup_mode == "artifact_id":
         inner_cmd += f" --artifact-id {shlex.quote(artifact_id)}"
@@ -500,6 +525,7 @@ def restart_workers(
     timeout_sec: float,
 ) -> None:
     for worker in workers:
+        assert_worker_has_gpu(worker, timeout_sec=timeout_sec)
         restart_daemon(
             worker=worker,
             daemon_config=daemon_config,
@@ -527,16 +553,40 @@ def summarize_wave(
             "p2p_ratio": 0.0,
             "comm_error_count": 0,
             "comm_bytes_mismatch_count": 0,
+            "failed_count": 0,
+            "failed_workers": [],
+            "all_get_complete": True,
         }
 
-    e2e_vals = [float(item["e2e_gibps"]) for item in gets]
-    transfer_vals = [float(item["transfer_gibps"]) for item in gets]
-    total_bytes = sum(int(item["total_bytes"]) for item in gets)
-    p2p_count = sum(1 for item in gets if str(item.get("source")) == "p2p")
-    comm_errors = sum(1 for item in gets if int(item.get("comm_errors_delta") or 0) > 0)
+    failed_workers = sorted(
+        str(item.get("worker", "unknown")) for item in gets if bool(item.get("failed"))
+    )
+    successful = [item for item in gets if not bool(item.get("failed"))]
+    if not successful:
+        return {
+            "nodes": len(gets),
+            "wall_sec": float(wall_sec),
+            "e2e_gibps_mean": 0.0,
+            "transfer_gibps_mean": 0.0,
+            "cluster_gibps": 0.0,
+            "p2p_ratio": 0.0,
+            "comm_error_count": 0,
+            "comm_bytes_mismatch_count": 0,
+            "failed_count": len(failed_workers),
+            "failed_workers": failed_workers,
+            "all_get_complete": False,
+        }
+
+    e2e_vals = [float(item["e2e_gibps"]) for item in successful]
+    transfer_vals = [float(item["transfer_gibps"]) for item in successful]
+    total_bytes = sum(int(item["total_bytes"]) for item in successful)
+    p2p_count = sum(1 for item in successful if str(item.get("source")) == "p2p")
+    comm_errors = sum(
+        1 for item in successful if int(item.get("comm_errors_delta") or 0) > 0
+    )
     comm_mismatch = sum(
         1
-        for item in gets
+        for item in successful
         if int(item.get("comm_bytes_delta") or 0) != int(item.get("total_bytes") or 0)
     )
 
@@ -544,14 +594,17 @@ def summarize_wave(
         float(total_bytes) / float(1024**3) / float(wall_sec) if wall_sec > 0 else 0.0
     )
     return {
-        "nodes": len(gets),
+        "nodes": len(successful),
         "wall_sec": float(wall_sec),
         "e2e_gibps_mean": float(statistics.mean(e2e_vals)),
         "transfer_gibps_mean": float(statistics.mean(transfer_vals)),
         "cluster_gibps": float(cluster_gibps),
-        "p2p_ratio": float(p2p_count / len(gets)),
+        "p2p_ratio": float(p2p_count / len(successful)),
         "comm_error_count": int(comm_errors),
         "comm_bytes_mismatch_count": int(comm_mismatch),
+        "failed_count": len(failed_workers),
+        "failed_workers": failed_workers,
+        "all_get_complete": len(failed_workers) == 0,
     }
 
 
@@ -564,6 +617,7 @@ def run_wave_gets(
     get_device: str,
     visibility_timeout_sec: float,
     visibility_retry_sec: float,
+    payload_sample_verify: bool,
     remote_timeout_sec: float,
 ) -> tuple[list[dict[str, Any]], float]:
     if not workers:
@@ -582,6 +636,7 @@ def run_wave_gets(
                 get_device=get_device,
                 visibility_timeout_sec=visibility_timeout_sec,
                 visibility_retry_sec=visibility_retry_sec,
+                payload_sample_verify=payload_sample_verify,
                 timeout_sec=remote_timeout_sec,
             ): worker
             for worker in workers
@@ -591,11 +646,123 @@ def run_wave_gets(
             try:
                 payload = future.result()
             except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(f"wave get failed on {worker.name}: {exc}") from exc
+                results.append(
+                    {
+                        "worker": worker.name,
+                        "failed": True,
+                        "error": str(exc),
+                        "final_error_code": "UNKNOWN",
+                        "attempts": 0,
+                    }
+                )
+                continue
+            payload["failed"] = False
             results.append(payload)
     wall_sec = float(time.perf_counter() - start_ts)
     results.sort(key=lambda item: str(item.get("worker")))
     return results, wall_sec
+
+
+def classify_failure(error_message: str) -> str:
+    lowered = error_message.lower()
+    infra_tokens = (
+        "cannot exec into",
+        "stopped",
+        "connection refused",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "temporary failure",
+        "network",
+    )
+    product_tokens = (
+        "invalid_argument",
+        "failed_precondition",
+        "not found",
+        "not_found",
+        "permission denied",
+        "resource exhausted",
+    )
+    if any(token in lowered for token in infra_tokens):
+        return "infra"
+    if any(token in lowered for token in product_tokens):
+        return "product"
+    return "unknown"
+
+
+def build_source_cardinality_entry(
+    *,
+    iteration: int,
+    wave: str,
+    wave_gets: list[dict[str, Any]],
+    artifact_id: str,
+    worker_by_name: dict[str, WorkerSpec],
+    gs_db_file: str,
+    db_probe_enabled: bool,
+) -> dict[str, Any]:
+    source_by_target: dict[str, str] = {}
+    db_probe_errors: list[str] = []
+    for item in wave_gets:
+        if bool(item.get("failed")):
+            continue
+        worker_name = str(item.get("worker", ""))
+        source_value = str(item.get("source", "unknown")) or "unknown"
+        if db_probe_enabled and worker_name in worker_by_name:
+            try:
+                probe = gs_probe_transport_source(
+                    db_file=gs_db_file,
+                    artifact_id=artifact_id,
+                    target_worker=worker_by_name[worker_name],
+                )
+                source_address = str(probe.get("source_address", ""))
+                source_port = int(probe.get("source_port") or 0)
+                if source_address:
+                    source_value = f"{source_address}:{source_port}"
+            except Exception as exc:  # noqa: BLE001
+                db_probe_errors.append(f"{worker_name}: {exc}")
+        source_by_target[worker_name] = source_value
+    unique_sources = sorted(set(source_by_target.values()))
+    return {
+        "iter": int(iteration),
+        "wave": wave,
+        "unique_sources": unique_sources,
+        "unique_source_count": int(len(unique_sources)),
+        "source_by_target": source_by_target,
+        "db_probe_enabled": bool(db_probe_enabled),
+        "db_probe_errors": db_probe_errors,
+    }
+
+
+def aggregate_retry_reason_buckets(gets: list[dict[str, Any]]) -> dict[str, int]:
+    buckets: dict[str, int] = {}
+    for item in gets:
+        raw = item.get("retry_reason_buckets", {})
+        if not isinstance(raw, dict):
+            continue
+        for reason, value in raw.items():
+            count = int(value or 0)
+            buckets[str(reason)] = buckets.get(str(reason), 0) + count
+    return buckets
+
+
+def payload_hash_mismatches(
+    *,
+    expected_hash: str,
+    gets: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    mismatches: list[str] = []
+    missing: list[str] = []
+    for item in gets:
+        if bool(item.get("failed")):
+            continue
+        worker = str(item.get("worker", "unknown"))
+        observed = str(item.get("payload_sample_hash", ""))
+        if not observed:
+            missing.append(worker)
+            continue
+        if expected_hash and observed != expected_hash:
+            mismatches.append(worker)
+    return sorted(mismatches), sorted(missing)
 
 
 def run_cascade_mode(
@@ -679,6 +846,7 @@ def run_cascade_mode(
         get_device=str(args.get_device),
         visibility_timeout_sec=float(args.visibility_timeout_sec),
         visibility_retry_sec=float(args.visibility_retry_sec),
+        payload_sample_verify=bool(args.payload_sample_verify),
         timeout_sec=float(args.remote_timeout_sec),
     )
     first_replica = replica_probe_or_empty(getters[0])
@@ -728,6 +896,7 @@ def run_cascade_mode(
             get_device=str(args.get_device),
             visibility_timeout_sec=float(args.visibility_timeout_sec),
             visibility_retry_sec=float(args.visibility_retry_sec),
+            payload_sample_verify=bool(args.payload_sample_verify),
             timeout_sec=float(args.remote_timeout_sec),
         )
         prev_probe = replica_probe_or_empty(prev_worker)
@@ -877,13 +1046,39 @@ def run_fanout_mode(
     wave2_workers = getters[wave_size:]
     total = int(args.warmup) + int(args.iterations)
     run_tag = f"{int(time.time())}-{random_suffix(8)}"
+    worker_by_name = {worker.name: worker for worker in getters}
+
+    db_probe_enabled = bool(str(args.gs_db_file))
+    db_probe_disabled_reason = ""
+    if db_probe_enabled:
+        try:
+            _ = gs_query_one(str(args.gs_db_file), "SELECT 1", ())
+        except GsDbUnavailableError as exc:
+            db_probe_enabled = False
+            db_probe_disabled_reason = f"duckdb_lock_conflict: {exc}"
+            print(
+                "[warn] disable GS DB probes in fanout mode; "
+                f"fallback to API-level source labels ({db_probe_disabled_reason})",
+                flush=True,
+            )
 
     records: list[dict[str, Any]] = []
+    events: list[dict[str, Any]] = []
+    source_cardinality_timeline: list[dict[str, Any]] = []
     for iteration in range(total):
         warmup = iteration < int(args.warmup)
         key = (
             f"bench:fanout:{args.case_name}:run{run_tag}:iter{iteration}:"
             f"{uuid.uuid4().hex}"
+        )
+        events.append(
+            {
+                "ts_epoch": float(time.time()),
+                "iter": int(iteration),
+                "type": "iteration_start",
+                "warmup": bool(warmup),
+                "key": key,
+            }
         )
         put = run_put(
             worker=seed,
@@ -909,6 +1104,7 @@ def run_fanout_mode(
             get_device=str(args.get_device),
             visibility_timeout_sec=float(args.visibility_timeout_sec),
             visibility_retry_sec=float(args.visibility_retry_sec),
+            payload_sample_verify=bool(args.payload_sample_verify),
             remote_timeout_sec=float(args.remote_timeout_sec),
         )
         wave2_gets, wave2_wall = run_wave_gets(
@@ -919,9 +1115,31 @@ def run_fanout_mode(
             get_device=str(args.get_device),
             visibility_timeout_sec=float(args.visibility_timeout_sec),
             visibility_retry_sec=float(args.visibility_retry_sec),
+            payload_sample_verify=bool(args.payload_sample_verify),
             remote_timeout_sec=float(args.remote_timeout_sec),
         )
         iter_wall = float(time.perf_counter() - iter_start)
+        all_wave_gets = [*wave1_gets, *wave2_gets]
+
+        failed_gets = [item for item in all_wave_gets if bool(item.get("failed"))]
+        classification_counts: dict[str, int] = {"infra": 0, "product": 0, "unknown": 0}
+        for failed in failed_gets:
+            worker = str(failed.get("worker", "unknown"))
+            reason = str(failed.get("error", ""))
+            failure_type = classify_failure(reason)
+            classification_counts[failure_type] = (
+                int(classification_counts.get(failure_type, 0)) + 1
+            )
+            events.append(
+                {
+                    "ts_epoch": float(time.time()),
+                    "iter": int(iteration),
+                    "type": "get_failed",
+                    "worker": worker,
+                    "classification": failure_type,
+                    "error": reason,
+                }
+            )
 
         cleanup: list[dict[str, Any]] = []
         if bool(args.cleanup_artifacts):
@@ -947,14 +1165,49 @@ def run_fanout_mode(
 
         wave1_summary = summarize_wave(gets=wave1_gets, wall_sec=wave1_wall)
         wave2_summary = summarize_wave(gets=wave2_gets, wall_sec=wave2_wall)
-        cluster_total_bytes = sum(
-            int(item["total_bytes"]) for item in wave1_gets
-        ) + sum(int(item["total_bytes"]) for item in wave2_gets)
+        wave1_source_timeline = build_source_cardinality_entry(
+            iteration=iteration,
+            wave="wave1",
+            wave_gets=wave1_gets,
+            artifact_id=artifact_id,
+            worker_by_name=worker_by_name,
+            gs_db_file=str(args.gs_db_file),
+            db_probe_enabled=db_probe_enabled,
+        )
+        wave2_source_timeline = build_source_cardinality_entry(
+            iteration=iteration,
+            wave="wave2",
+            wave_gets=wave2_gets,
+            artifact_id=artifact_id,
+            worker_by_name=worker_by_name,
+            gs_db_file=str(args.gs_db_file),
+            db_probe_enabled=db_probe_enabled,
+        )
+        source_cardinality_timeline.extend(
+            (wave1_source_timeline, wave2_source_timeline)
+        )
+
+        successful_gets = [
+            item for item in all_wave_gets if not bool(item.get("failed"))
+        ]
+        cluster_total_bytes = sum(int(item["total_bytes"]) for item in successful_gets)
         cluster_gibps = (
             float(cluster_total_bytes) / float(1024**3) / float(iter_wall)
             if iter_wall > 0
             else 0.0
         )
+        retry_reason_buckets = aggregate_retry_reason_buckets(all_wave_gets)
+        payload_hash_expected = str(put.get("payload_sample_hash") or "")
+        payload_hash_mismatch_workers, payload_hash_missing_workers = (
+            payload_hash_mismatches(
+                expected_hash=payload_hash_expected,
+                gets=all_wave_gets,
+            )
+        )
+        incomplete_workers = sorted(
+            str(item.get("worker", "unknown")) for item in failed_gets
+        )
+        all_get_complete = len(incomplete_workers) == 0
 
         record = {
             "iter": int(iteration),
@@ -974,16 +1227,39 @@ def run_fanout_mode(
             },
             "iter_wall_sec": iter_wall,
             "cluster_gibps": cluster_gibps,
+            "all_get_complete": bool(all_get_complete),
+            "incomplete_workers": incomplete_workers,
+            "retry_reason_buckets": retry_reason_buckets,
+            "payload_hash_expected": payload_hash_expected,
+            "payload_hash_mismatch_workers": payload_hash_mismatch_workers,
+            "payload_hash_missing_workers": payload_hash_missing_workers,
+            "source_cardinality_timeline": [
+                wave1_source_timeline,
+                wave2_source_timeline,
+            ],
+            "classification_counts": classification_counts,
             "cleanup": cleanup,
         }
         records.append(record)
+        events.append(
+            {
+                "ts_epoch": float(time.time()),
+                "iter": int(iteration),
+                "type": "iteration_end",
+                "warmup": bool(warmup),
+                "all_get_complete": bool(all_get_complete),
+                "incomplete_workers": incomplete_workers,
+                "cluster_gibps": float(cluster_gibps),
+            }
+        )
         print(
             "  "
             f"iter={iteration:02d} warmup={warmup} "
             f"put={float(put.get('put_sec', 0.0)):.4f}s "
             f"w1_xfer={float(wave1_summary['transfer_gibps_mean']):.3f}GiB/s "
             f"w2_xfer={float(wave2_summary['transfer_gibps_mean']):.3f}GiB/s "
-            f"cluster={float(cluster_gibps):.3f}GiB/s",
+            f"cluster={float(cluster_gibps):.3f}GiB/s "
+            f"all_get_complete={all_get_complete}",
             flush=True,
         )
 
@@ -996,10 +1272,11 @@ def run_fanout_mode(
         for item in measured
         for payload in [*item["wave1"]["gets"], *item["wave2"]["gets"]]
     ]
+    successful_gets = [item for item in all_gets if not bool(item.get("failed"))]
     bad_sources = sorted(
         {
             str(payload.get("worker"))
-            for payload in all_gets
+            for payload in successful_gets
             if str(payload.get("source")) != "p2p"
         }
     )
@@ -1033,11 +1310,27 @@ def run_fanout_mode(
         + int(item["wave2"]["summary"]["comm_bytes_mismatch_count"])
         for item in measured
     )
+    payload_hash_mismatch_count = sum(
+        len(item.get("payload_hash_mismatch_workers", [])) for item in measured
+    )
+    payload_hash_missing_count = sum(
+        len(item.get("payload_hash_missing_workers", [])) for item in measured
+    )
+    all_get_complete = all(bool(item.get("all_get_complete")) for item in measured)
+    incomplete_workers = sorted(
+        {
+            str(worker)
+            for item in measured
+            for worker in item.get("incomplete_workers", [])
+        }
+    )
 
     p2p_ratio = (
-        float(sum(1 for payload in all_gets if str(payload.get("source")) == "p2p"))
-        / float(len(all_gets))
-        if all_gets
+        float(
+            sum(1 for payload in successful_gets if str(payload.get("source")) == "p2p")
+        )
+        / float(len(successful_gets))
+        if successful_gets
         else 0.0
     )
     wave2_over_wave1 = (
@@ -1046,6 +1339,53 @@ def run_fanout_mode(
         if statistics.mean(wave1_xfer_vals) > 0
         else 0.0
     )
+    total_gets_expected = int(len(getters) * len(measured))
+    total_gets_success = int(len(successful_gets))
+    get_success_rate = (
+        float(total_gets_success) / float(total_gets_expected)
+        if total_gets_expected > 0
+        else 0.0
+    )
+    put_success_rate = 1.0
+    retry_reason_buckets_total = aggregate_retry_reason_buckets(all_gets)
+    budget_exit_reason_buckets: dict[str, int] = {}
+    for payload in successful_gets:
+        budget = payload.get("budget_trace", {})
+        if not isinstance(budget, dict):
+            continue
+        exit_reason = str(budget.get("exit_reason") or "")
+        if not exit_reason:
+            continue
+        budget_exit_reason_buckets[exit_reason] = (
+            budget_exit_reason_buckets.get(exit_reason, 0) + 1
+        )
+
+    classification_totals: dict[str, int] = {"infra": 0, "product": 0, "unknown": 0}
+    for item in measured:
+        record_class = item.get("classification_counts", {})
+        if not isinstance(record_class, dict):
+            continue
+        for label in ("infra", "product", "unknown"):
+            classification_totals[label] = classification_totals.get(label, 0) + int(
+                record_class.get(label, 0)
+            )
+
+    recover_time_sec = 0.0
+    first_failure_idx: int | None = None
+    for idx, item in enumerate(measured):
+        if not bool(item.get("all_get_complete")):
+            first_failure_idx = idx
+            break
+    if first_failure_idx is not None:
+        for idx in range(first_failure_idx + 1, len(measured)):
+            if bool(measured[idx].get("all_get_complete")):
+                recover_time_sec = float(
+                    sum(
+                        float(row.get("iter_wall_sec", 0.0))
+                        for row in measured[first_failure_idx + 1 : idx + 1]
+                    )
+                )
+                break
 
     summary: dict[str, Any] = {
         "mode": "fanout",
@@ -1074,14 +1414,35 @@ def run_fanout_mode(
         "wave1_wall_sec_p90": percentile(wave1_wall_vals, 0.9),
         "wave2_wall_sec_p90": percentile(wave2_wall_vals, 0.9),
         "p2p_ratio": float(p2p_ratio),
+        "all_get_complete": bool(all_get_complete),
+        "incomplete_workers": incomplete_workers,
+        "source_cardinality_timeline": source_cardinality_timeline,
+        "recover_time_sec": float(recover_time_sec),
+        "put_success_rate": float(put_success_rate),
+        "get_success_rate": float(get_success_rate),
+        "comm_bytes_delta": int(
+            sum(int(item.get("comm_bytes_delta") or 0) for item in successful_gets)
+        ),
+        "comm_errors_delta": int(
+            sum(int(item.get("comm_errors_delta") or 0) for item in successful_gets)
+        ),
+        "retry_reason_buckets": retry_reason_buckets_total,
+        "budget_exit_reason_buckets": budget_exit_reason_buckets,
+        "payload_hash_mismatch_count": int(payload_hash_mismatch_count),
+        "payload_hash_missing_count": int(payload_hash_missing_count),
+        "failure_classification_counts": classification_totals,
         "bad_source_workers": bad_sources,
         "comm_error_count": int(comm_error_count),
         "comm_bytes_mismatch_count": int(comm_mismatch_count),
+        "db_probe_enabled": bool(db_probe_enabled),
+        "db_probe_disabled_reason": db_probe_disabled_reason,
+        "events_count": int(len(events)),
     }
     return {
         "mode": "fanout",
         "summary": summary,
         "records": records,
+        "events": events,
     }
 
 
@@ -1150,6 +1511,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--put-policy", default="pinned")
     parser.add_argument("--put-device", default="cuda:0")
     parser.add_argument("--get-device", default="cuda:0")
+    parser.add_argument(
+        "--payload-sample-verify",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable payload sample hash checks in get helper. "
+            "Disable for pure performance-only phases."
+        ),
+    )
     parser.add_argument("--deregister-device-id", type=int, default=None)
     parser.add_argument("--visibility-timeout-sec", type=float, default=30.0)
     parser.add_argument("--visibility-retry-sec", type=float, default=0.05)
@@ -1349,6 +1719,8 @@ def main() -> int:
         "size_mib": int(args.size_mib),
         "put_seed_base": int(args.put_seed_base),
         "lookup_mode": str(args.lookup_mode),
+        "payload_sample_verify": bool(args.payload_sample_verify),
+        "gs_db_file": str(args.gs_db_file),
         "source_stop_settle_sec": float(args.source_stop_settle_sec),
         "deregister_device_id": deregister_device_id,
     }

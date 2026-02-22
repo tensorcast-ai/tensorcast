@@ -8,7 +8,7 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import CancelledError
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TypedDict
 
 import torch
@@ -41,6 +41,7 @@ from tensorcast.api.store.retry import (
     map_materialization_error,
     raise_mapped_materialization_error,
     remaining_budget,
+    retry_reason_bucket,
     should_retry,
 )
 from tensorcast.api.store.runtime import StoreRuntimeContext
@@ -2113,6 +2114,34 @@ class MaterializationPipeline:
                     backoff_multiplier=policy.backoff_multiplier,
                     jitter=policy.jitter,
                 )
+        retry_reason_buckets: dict[str, int] = {}
+
+        def record_retry_reason(error: ArtifactError) -> None:
+            bucket = retry_reason_bucket(error)
+            retry_reason_buckets[bucket] = retry_reason_buckets.get(bucket, 0) + 1
+
+        def attach_retry_metadata(
+            payload: MaterializationPayload,
+            *,
+            attempts: int,
+            exit_reason: str,
+        ) -> MaterializationPayload:
+            elapsed = time.monotonic() - start_time
+            deadline: float | None = None
+            remaining: float | None = None
+            if policy is not None and policy.deadline_seconds > 0:
+                deadline = float(policy.deadline_seconds)
+                remaining = max(0.0, deadline - elapsed)
+            return replace(
+                payload,
+                retry_attempts=max(1, int(attempts)),
+                retry_reason_buckets=dict(retry_reason_buckets),
+                budget_deadline_sec=deadline,
+                budget_elapsed_sec=float(elapsed),
+                budget_remaining_sec=remaining,
+                budget_exit_reason=exit_reason,
+            )
+
         span_name = "Store/GetInto" if method == "get_into" else "Store/Get"
         attributes: dict[str, SpanAttributeValue] = {
             "tc.store.daemon": self._runtime.daemon_endpoint,
@@ -2212,8 +2241,17 @@ class MaterializationPipeline:
                         span.set_attribute("tc.tensor.bytes", int(bytes_value))
                     if selection_label:
                         span.set_attribute("tc.tensor.selection", selection_label)
+                    materialized = attach_retry_metadata(
+                        materialized,
+                        attempts=attempt,
+                        exit_reason="success",
+                    )
                     record_outcome("OK")
                     span.set_attribute("tc.store.retry.count", attempt)
+                    span.set_attribute(
+                        "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                    )
+                    span.set_attribute("tc.store.budget.exit_reason", "success")
                     span.set_attribute("tc.device.id", int(device_id))
                     span.set_attribute("tc.artifact.id", materialized.artifact_id)
                     span.set_attribute(
@@ -2225,6 +2263,7 @@ class MaterializationPipeline:
                 except Exception as exc:  # noqa: BLE001
                     exc_is_artifact_error = isinstance(exc, ArtifactError)
                     error = map_materialization_error(exc)
+                    record_retry_reason(error)
                     span.record_exception(error)
                     if error.status_code in {"NOT_FOUND", "FAILED_PRECONDITION"}:
                         self._runtime.invalidate_artifact(
@@ -2294,6 +2333,7 @@ class MaterializationPipeline:
                                 )
                             except Exception as exc:  # noqa: BLE001
                                 error = map_materialization_error(exc)
+                                record_retry_reason(error)
                             else:
                                 summary = self._summarize_materialized(
                                     materialized, tensor_names
@@ -2314,8 +2354,21 @@ class MaterializationPipeline:
                                     span.set_attribute(
                                         "tc.tensor.selection", selection_label
                                     )
+                                materialized = attach_retry_metadata(
+                                    materialized,
+                                    attempts=attempt + 1,
+                                    exit_reason="wait_for_shared_disk",
+                                )
                                 record_outcome("OK")
                                 span.set_attribute("tc.store.retry.count", attempt + 1)
+                                span.set_attribute(
+                                    "tc.store.retry.reason_buckets",
+                                    str(retry_reason_buckets),
+                                )
+                                span.set_attribute(
+                                    "tc.store.budget.exit_reason",
+                                    "wait_for_shared_disk",
+                                )
                                 span.set_attribute("tc.device.id", int(device_id))
                                 span.set_attribute(
                                     "tc.artifact.id", materialized.artifact_id
@@ -2331,6 +2384,13 @@ class MaterializationPipeline:
                                 return materialized, device_id
 
                         record_outcome(error.status_code)
+                        span.set_attribute(
+                            "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                        )
+                        span.set_attribute(
+                            "tc.store.budget.exit_reason",
+                            "non_retryable_or_max_attempts",
+                        )
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
                         if exc_is_artifact_error:
                             raise
@@ -2340,6 +2400,12 @@ class MaterializationPipeline:
                     remaining = remaining_budget(policy, start_time)
                     if remaining is not None and remaining <= 0:
                         record_outcome(error.status_code)
+                        span.set_attribute(
+                            "tc.store.retry.reason_buckets", str(retry_reason_buckets)
+                        )
+                        span.set_attribute(
+                            "tc.store.budget.exit_reason", "retry_deadline_exhausted"
+                        )
                         span.set_status(Status(StatusCode.ERROR, error.status_code))
                         if exc_is_artifact_error:
                             raise

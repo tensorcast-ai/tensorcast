@@ -36,6 +36,26 @@ class GlobalStoreMaintenanceCoordinator:
         self._logger = logger
         self._thread: threading.Thread | None = None
 
+    def _initial_maintenance_delay_sec(self) -> float:
+        """Compute startup delay before first maintenance pass.
+
+        Delay is profile-linked to both heartbeat timeout and cleanup interval:
+        - wait enough time for initial worker registrations/heartbeats
+        - never wait longer than one cleanup interval
+        """
+        heartbeat_timeout_sec = max(0.0, self._config.heartbeat_timeout_ms / 1000.0)
+        cleanup_interval_sec = max(1.0, self._config.cleanup_interval_ms / 1000.0)
+        if heartbeat_timeout_sec <= 0:
+            return cleanup_interval_sec
+        return min(cleanup_interval_sec, max(1.0, heartbeat_timeout_sec * 2.0))
+
+    def _transport_expiration_seconds(self) -> int:
+        """Compute stale transport expiration threshold from profile settings."""
+        heartbeat_timeout_sec = max(1, int(self._config.heartbeat_timeout_ms / 1000))
+        cleanup_interval_sec = max(1, int(self._config.cleanup_interval_ms / 1000))
+        profile_window_sec = max(heartbeat_timeout_sec * 2, cleanup_interval_sec * 10)
+        return max(60, int(profile_window_sec))
+
     def start(self) -> threading.Thread:
         if self._thread is not None and self._thread.is_alive():
             return self._thread
@@ -44,11 +64,20 @@ class GlobalStoreMaintenanceCoordinator:
         return self._thread
 
     def _maintenance_loop(self) -> None:
-        # Allow workers some time to register before first maintenance pass
-        time.sleep(self._config.heartbeat_timeout_ms / 1000 * 2)
+        initial_delay_sec = self._initial_maintenance_delay_sec()
+        cleanup_interval_sec = max(1.0, self._config.cleanup_interval_ms / 1000.0)
+        optimize_interval_sec = max(1.0, self._config.optimize_interval_ms / 1000.0)
+        transport_expiration_seconds = self._transport_expiration_seconds()
+        self._logger.info(
+            "GlobalStore maintenance policy: initial_delay_sec=%.3f cleanup_interval_sec=%.3f "
+            "optimize_interval_sec=%.3f transport_expiration_seconds=%s",
+            initial_delay_sec,
+            cleanup_interval_sec,
+            optimize_interval_sec,
+            transport_expiration_seconds,
+        )
+        time.sleep(initial_delay_sec)
 
-        optimize_interval_sec = self._config.optimize_interval_ms / 1000
-        cleanup_interval_sec = self._config.cleanup_interval_ms / 1000
         last_optimize_ts = time.time()
 
         while True:
@@ -67,7 +96,9 @@ class GlobalStoreMaintenanceCoordinator:
                 transport_service = self._get_transport_service()
                 if transport_service is not None:
                     try:
-                        transport_service.cleanup_expired_transports()
+                        transport_service.cleanup_expired_transports(
+                            expiration_seconds=transport_expiration_seconds
+                        )
                     except Exception:
                         self._logger.exception("Error cleaning up expired transports")
 
