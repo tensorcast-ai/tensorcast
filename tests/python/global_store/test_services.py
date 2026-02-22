@@ -94,6 +94,60 @@ class TestServices:
         assert updated.node_address == "192.168.1.2"
         assert updated.grpc_port == 50055
 
+    def test_worker_service_registration_reclaims_inactive_endpoint_conflict(
+        self, services
+    ):
+        """Rebind daemon_id when endpoint is blocked by another inactive row."""
+        worker_service = services["worker"]
+        worker_repo = worker_service.worker_repository
+
+        stable = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_rebind",
+                node_id="node_a",
+                node_address="192.168.1.10",
+                grpc_port=50071,
+                p2p_port=50072,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        assert worker_repo.mark_inactive(stable.worker_id)
+
+        stale = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_stale",
+                node_id="node_b",
+                node_address="192.168.1.20",
+                grpc_port=50081,
+                p2p_port=50082,
+                mem_pool_total_size=1024,
+                mem_pool_available_size=1024,
+            )
+        )
+        assert worker_repo.mark_inactive(stale.worker_id)
+
+        rebound = worker_service.register_worker(
+            Worker(
+                daemon_id="daemon_rebind",
+                node_id="node_c",
+                node_address="192.168.1.20",
+                grpc_port=50081,
+                p2p_port=50083,
+                mem_pool_total_size=2048,
+                mem_pool_available_size=2048,
+            )
+        )
+
+        assert rebound.worker_id == stable.worker_id
+        assert rebound.daemon_id == "daemon_rebind"
+        assert rebound.node_address == "192.168.1.20"
+        assert rebound.grpc_port == 50081
+        assert rebound.p2p_port == 50083
+        assert (
+            worker_repo.find_by_id(stale.worker_id, include_inactive=True) is None
+        )
+
     def test_worker_service_validation(self, services):
         """Test worker validation."""
         worker_service = services["worker"]

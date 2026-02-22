@@ -112,13 +112,34 @@ class WorkerService:
             )
 
             if existing:
-                # Reject address/port conflicts, regardless of node_id match.
+                # Reclaim stale endpoint rows so daemon_id rebinding can proceed.
                 if by_addr and by_addr.worker_id != existing.worker_id:
-                    raise ValidationError(
-                        "Address/port already registered by another worker"
-                    )
+                    if by_addr.inactive_at is not None:
+                        logger.warning(
+                            "register_worker reclaiming inactive endpoint row "
+                            "daemon_id=%s existing_worker_id=%s stale_worker_id=%s "
+                            "endpoint=%s:%s",
+                            daemon_id,
+                            existing.worker_id,
+                            by_addr.worker_id,
+                            worker.node_address,
+                            int(worker.grpc_port),
+                        )
+                        self.replica_repository.mark_unavailable_by_worker(
+                            by_addr.worker_id
+                        )
+                        self.worker_repository.delete(by_addr.worker_id)
+                        by_addr = None
+                    else:
+                        raise ValidationError(
+                            "Address/port already registered by another worker"
+                        )
 
                 reset_state_tracking = bool(existing.inactive_at is not None)
+                if reset_state_tracking:
+                    self.replica_repository.mark_unavailable_by_worker(
+                        existing.worker_id
+                    )
                 existing.daemon_id = daemon_id
                 existing.node_id = worker.node_id
                 existing.node_address = worker.node_address
@@ -141,6 +162,7 @@ class WorkerService:
                     )
 
                 reset_state_tracking = True
+                self.replica_repository.mark_unavailable_by_worker(by_addr.worker_id)
                 by_addr.daemon_id = daemon_id
                 by_addr.node_id = worker.node_id
                 by_addr.node_address = worker.node_address

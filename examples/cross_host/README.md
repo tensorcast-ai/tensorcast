@@ -235,7 +235,7 @@ python examples/cross_host/chaos_gate_review.py \
   --max-recover-time-sec 180
 ```
 
-small/medium/large 三阶段汇总评审：
+Phase-level aggregation review for `small/medium/large`:
 
 ```bash
 source .venv/bin/activate
@@ -246,10 +246,47 @@ python examples/cross_host/chaos_phase_gate_review.py \
   --large-run-dir <out_dir>/<run_id_large>
 ```
 
-推荐配套：
+Recommended profiles:
 
-- fast-failover profile：`examples/config/global_store_config_cross_host_bench_fast_failover.yaml`
-- slow-cleanup profile：`examples/config/global_store_config_cross_host_bench_slow_cleanup.yaml`
+- fast-failover profile: `examples/config/global_store_config_cross_host_bench_fast_failover.yaml`
+- slow-cleanup profile: `examples/config/global_store_config_cross_host_bench_slow_cleanup.yaml`
+
+## 2.4 Fixed 0081 One-Command Entry (Recommended)
+
+This is the fixed execution entrypoint for `docs/designs/0081-multihost-put-get-chaos-stability.md`:
+
+```bash
+source .venv/bin/activate
+
+# Default behavior:
+# - launch 8 workers with --private-machine group
+# - run phases in order: small -> medium -> large
+# - generate phase gate aggregation artifacts
+# - cleanup temporary workers after completion
+bash examples/cross_host/run_0081_multihost_chaos.sh --phase all
+```
+
+Common parameters:
+
+```bash
+bash examples/cross_host/run_0081_multihost_chaos.sh \
+  --phase all \
+  --gs-addr 100.97.246.95:50051 \
+  --run-label 0081-manual-$(date +%Y%m%d-%H%M%S) \
+  --out-root /tmp/tc_cross_20260222/results_chaos_0081_fixed \
+  --charged-group tensorcast_dev \
+  --private-machine group \
+  --keep-workers
+```
+
+Notes:
+
+- If `--gs-addr` is not provided, the script resolves it from `tensorcast-cli global status --json`.
+- The script automatically handles: `brainctl predict`, worker launch/readiness wait, GPU + repo health checks, schema generation, phase execution, and phase-gate aggregation.
+- Output layout:
+  - `<out-root>/<run-label>/schemas/` (small/medium/large schemas)
+  - `<out-root>/<run-label>/results/` (per-phase runs + gate artifacts + phase gate review)
+  - `<out-root>/<run-label>/meta/launcher_meta.json` (full launcher metadata)
 
 ## 3. 输出说明
 
