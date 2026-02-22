@@ -41,3 +41,16 @@ def test_materialization_runtime_error_global_store_not_connected_adds_hint() ->
     assert "tc.init" in str(mapped)
     assert "global_store_address" in str(mapped)
     assert "do not reconfigure" in str(mapped)
+
+
+def test_materialization_runtime_error_confirm_failed_is_retryable() -> None:
+    mapped = map_materialization_error(
+        RuntimeError(
+            "Failed to confirm artifact loading: "
+            "artifact_id=mi2:foo, replica_uuid=abc, disk_path="
+        )
+    )
+    assert mapped.status_code == "UNAVAILABLE"
+    assert mapped.retryable is True
+    assert "Hint:" in str(mapped)
+    assert "stale/unavailable" in str(mapped)

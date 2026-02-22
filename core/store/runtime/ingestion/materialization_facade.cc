@@ -3569,6 +3569,7 @@ void MaterializationFacade::apply_event_defaults(IngestionResultEvent& event, co
   }
   event.source = defaults.source;
   event.materialize_mode = defaults.materialize_mode;
+  event.export_policy = defaults.export_policy;
   event.target_device = defaults.target_device;
   event.target_location = defaults.target_location;
   if (!event.view_id.has_value() && defaults.view_id.has_value()) {

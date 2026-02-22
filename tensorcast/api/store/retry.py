@@ -245,6 +245,16 @@ def map_materialization_error(exc: Exception) -> ArtifactError:
             retryable=False,
         )
     if isinstance(exc, RuntimeError):
+        if "failed to confirm artifact loading" in lowered:
+            hint = (
+                "Transport source may be stale/unavailable (for example peer daemon just exited). "
+                "Retrying get should reselect a healthy source."
+            )
+            return ArtifactError(
+                _append_hint(message, hint),
+                status_code="UNAVAILABLE",
+                retryable=True,
+            )
         if "not found" in lowered:
             return ArtifactError(message, status_code="NOT_FOUND", retryable=False)
         if "unavailable" in lowered or "not available" in lowered:

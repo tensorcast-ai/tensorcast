@@ -1,7 +1,13 @@
 # TensorCast SDK P2P (MTCP) Put->Get（正向链路）/ Get->Put（反向链路）性能调优报告
 
 日期：2026-02-21（含 2026-02-22 跨机双向与稳定性更新）  
-代码版本：`400c81a6`  
+代码版本：`29cb29a5`  
+说明：
+- 本文中的 `Get->Put（反向链路）` 表示 **角色互换后的 Put->Get**（Reverse Link），不是协议方向反转。
+- 大规模多机 fanout/cascade 扩容实验与瓶颈修复详情见：`docs/benchmarks/20260221-multi-host-p2p-fanout-benchmark-report.md`。
+- 2026-02-22 补充：多机扩展已推进到 9 节点（1 seed + 8 getters），1GiB 下 `cluster_gibps` 达 `1.012`，2GiB 下达 `1.783`，8GiB 下达 `3.907`，32GiB 下达 `6.976`；并完成 `deregister_then_stop` 严格链路验证（seed 下线后下一跳仍 `source=p2p`）。
+- 2026-02-22 补充：已修复 32GiB 场景的 stable 预算重复计数问题（CPU export 重复申请 stable lease），对应复测 case `fanout_perf_9n_c20b16w16_g0_s32768_v4` 通过。
+
 测试目标：
 - 在不绕开 key/index 路径（`lookup_mode=key`）的前提下，评估 MTCP 在当前框架内可达到的吞吐上限。
 - 对照本机 TCP 上限（`iperf3`）判断“是否打满”。
@@ -28,7 +34,7 @@
 - OS：Ubuntu 22.04.5 LTS，kernel `5.4.0-153-generic`
 - Bazel：`8.4.1`
 - uv：`0.9.6`
-- TensorCast 代码：`git rev-parse --short HEAD = 400c81a6`
+- TensorCast 代码：`git rev-parse --short HEAD = 29cb29a5`
 
 ### 1.3 Runtime 形态
 - Global Store 1 个（本机）
@@ -606,6 +612,10 @@ bash examples/tensorcast_sdk_p2p_benchmark_driver.sh \
 
 `put` 的语义：
 - `put(policy=pinned)` 是把 artifact 注册并落到 **put 侧 daemon 的本地稳定内存层（stable DRAM）**，随后通过 key/artifact_id 被远端 `get` 拉取。
+
+`wave1/wave2` 的语义与倍数口径：
+- 详见 `docs/benchmarks/20260221-multi-host-p2p-fanout-benchmark-report.md` 的 `2.3`（Wave 定义）与 `3.1`（`2x/4x` 理论差距量化）。
+- 简化口径：`wave2/wave1 > 1` 说明 fanout 扩散生效；`~2x` 是工程可达目标；`~4x` 是理想上限。
 
 本报告中 `compact` 的语义：
 - `compact` 不是协议或传输模式，而是“**内存收缩版 daemon 配置档位**”的简称，用于 64GiB 且波动较大的 worker 上保证启动 preflight 和双向链路都可跑通。

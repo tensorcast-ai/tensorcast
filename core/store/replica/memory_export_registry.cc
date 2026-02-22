@@ -26,6 +26,29 @@ std::string format_tensor_key(const loading::ReplicaKey& key, std::string_view s
   }
   return absl::StrCat(key.artifact_id, "_view_", *key.view_id, "_", suffix);
 }
+
+absl::StatusOr<bool> has_stable_lease_for_chunks(
+    UnifiedMemoryAuthority& uma,
+    const loading::ReplicaKey& key,
+    absl::Span<const uint32_t> chunk_indices) {
+  if (chunk_indices.empty()) {
+    return false;
+  }
+  const auto snapshots = uma.snapshot_cpu_chunks(key);
+  if (snapshots.empty()) {
+    return false;
+  }
+  for (const uint32_t chunk_index : chunk_indices) {
+    if (chunk_index >= snapshots.size()) {
+      return absl::OutOfRangeError(
+          absl::StrFormat("Chunk index %u out of range for snapshot size %zu", chunk_index, snapshots.size()));
+    }
+    if (snapshots[chunk_index].stable_lease_count == 0) {
+      return false;
+    }
+  }
+  return true;
+}
 } // namespace
 
 // OTel gauge callback
@@ -144,12 +167,21 @@ absl::StatusOr<ExportRegistration> MemoryExportRegistry::export_chunks(
     }
     ranges = reg_or->chunk_ranges;
     rec.uma_keepalive = reg_or->keepalive; // Hold VS pin leases across registration lifetime
-    auto lease_or = uma_->acquire_stable_lease(key, absl::MakeSpan(normalized_indices));
-    if (!lease_or.ok()) {
+    auto has_lease_or = has_stable_lease_for_chunks(*uma_, key, absl::MakeSpan(normalized_indices));
+    if (!has_lease_or.ok()) {
       rollback_export();
-      return lease_or.status();
+      return has_lease_or.status();
     }
-    stable_lease = std::move(*lease_or);
+    if (!*has_lease_or) {
+      auto lease_or = uma_->acquire_stable_lease(key, absl::MakeSpan(normalized_indices));
+      if (!lease_or.ok()) {
+        rollback_export();
+        return lease_or.status();
+      }
+      stable_lease = std::move(*lease_or);
+    } else {
+      VLOG(1) << "export_chunks: reusing existing stable lease for artifact_id=" << key.artifact_id;
+    }
     // Derive chunk size from UMA layout to ensure alignment across VS/UMA
     uint64_t kChunk = static_cast<uint64_t>(uma_->get_artifact_chunk_bytes());
     if (auto layout_or = uma_->get_layout(key); layout_or.ok() && layout_or->artifact_chunk_bytes > 0) {

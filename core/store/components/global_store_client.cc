@@ -1634,10 +1634,17 @@ absl::Status GlobalStoreClient::unregister_replica_by_worker(
   if (!status.ok()) {
     return status;
   }
-  if (response.status() != global_store::STATUS_OK) {
-    return absl::InternalError(absl::StrFormat("UnregisterReplicaByWorker failed with status: %d", response.status()));
+  if (response.status() == global_store::STATUS_OK) {
+    return absl::OkStatus();
   }
-  return absl::OkStatus();
+  if (response.status() == global_store::STATUS_NOT_FOUND) {
+    // Idempotency: after a successful replica-id unregister the worker-scoped
+    // cleanup may legitimately see no remaining row.
+    VLOG(1) << "UnregisterReplicaByWorker returned NOT_FOUND for artifact_id=" << artifact_id
+            << " worker_id=" << worker_id << "; treating as success";
+    return absl::OkStatus();
+  }
+  return absl::InternalError(absl::StrFormat("UnregisterReplicaByWorker failed with status: %d", response.status()));
 }
 
 absl::StatusOr<bool> GlobalStoreClient::mark_replica_unavailable(
