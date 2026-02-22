@@ -1766,6 +1766,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "uvicorn" },
 ]
 
@@ -1819,6 +1820,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.2" },
     { name = "setuptools", marker = "extra == 'build'" },
     { name = "torch", specifier = "==2.8.0+cu128", index = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/simple" },
+    { name = "tqdm", specifier = ">=4.66.0" },
     { name = "uvicorn", specifier = ">=0.32.0" },
 ]
 provides-extras = ["build"]
@@ -1926,6 +1928,18 @@ wheels = [
     { url = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/torch/2.8.0+cu128/torch-2.8.0+cu128-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:039b9dcdd6bdbaa10a8a5cd6be22c4cb3e3589a341e5f904cbb571ca28f55bed" },
     { url = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/torch/2.8.0+cu128/torch-2.8.0+cu128-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:4354fc05bb79b208d6995a04ca1ceef6a9547b1c4334435574353d381c55087c" },
     { url = "https://artifactory.stepfun-inc.com/artifactory/api/pypi/pypi-pytorch/torch/2.8.0+cu128/torch-2.8.0+cu128-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:3a852369a38dec343d45ecd0bc3660f79b88a23e0c878d18707f7c13bf49538f" },
+]
+
+[[package]]
+name = "tqdm"
+version = "4.67.3"
+source = { registry = "http://mirrors.i.basemind.com/pypi/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "http://mirrors.i.basemind.com/pypi/packages/packages/09/a9/6ba95a270c6f1fbcd8dac228323f2777d886cb206987444e4bce66338dd4/tqdm-4.67.3.tar.gz", hash = "sha256:7d825f03f89244ef73f1d4ce193cb1774a8179fd96f31d7e1dcde62092b960bb" }
+wheels = [
+    { url = "http://mirrors.i.basemind.com/pypi/packages/packages/16/e1/3079a9ff9b8e11b846c6ac5c8b5bfb7ff225eee721825310c91b3b50304f/tqdm-4.67.3-py3-none-any.whl", hash = "sha256:ee1e4c0e59148062281c49d80b25b67771a127c85fc9676d3be5f243206826bf" },
 ]
 
 [[package]]

@@ -1157,7 +1157,13 @@ void MTcpTransport::recv_loop() {
 
     const uint64_t stage_unit = stager_chunk_bytes;
     const uint64_t network_segment_bytes = stage_unit;
-    std::vector<future_chunk_result_t> results;
+
+    struct PendingChunkResult {
+      future_chunk_result_t future;
+      uint64_t bytes = 0;
+    };
+
+    std::vector<PendingChunkResult> results;
 
     // Check if tensor is on GPU and needs staging
     if (tensor->get_mem_type() == base::COMMUNICATE_ENGINE_DEV_GPU) {
@@ -1329,7 +1335,11 @@ void MTcpTransport::recv_loop() {
                 return result;
               });
 
-          results.push_back(std::move(copy_future));
+          results.push_back(
+              PendingChunkResult{
+                  .future = std::move(copy_future),
+                  .bytes = sub_chunk_size,
+              });
 
           remain_in_segment -= sub_chunk_size;
           sub_offset_in_segment += sub_chunk_size;
@@ -1349,12 +1359,20 @@ void MTcpTransport::recv_loop() {
                      << " (lanes_to_use=" << lanes_to_use << ") for " << msg->get_key();
           auto fail_chunk = std::make_shared<MTcpTransportChunk>(nullptr, 0);
           fail_chunk->set_result(misc::TRANSPORT_FAILED);
-          results.push_back(fail_chunk->get_future());
+          results.push_back(
+              PendingChunkResult{
+                  .future = fail_chunk->get_future(),
+                  .bytes = 0,
+              });
           break;
         }
         auto chunk = std::make_shared<MTcpTransportChunk>(segment_offset + tensor->get_addr<uint8_t>(), segment_size);
         tasks_[lane]->push_recv(chunk);
-        results.push_back(chunk->get_future());
+        results.push_back(
+            PendingChunkResult{
+                .future = chunk->get_future(),
+                .bytes = segment_size,
+            });
       }
     }
 
@@ -1363,10 +1381,12 @@ void MTcpTransport::recv_loop() {
             << msg->get_key();
     for (size_t i = 0; i < results.size(); ++i) {
       VLOG(2) << "[MTcpTransport::recv_loop] Awaiting sub-chunk future index=" << i;
-      auto chunk_result = results[i].get();
+      auto chunk_result = results[i].future.get();
       if (chunk_result.status != misc::SUCCESS) {
         LOG(ERROR) << "[MTcpTransport::recv_loop] Chunk " << i << " failed for " << msg->get_key();
         result = misc::FAILED;
+      } else if (results[i].bytes > 0) {
+        msg->mark_completion_and_is_done(results[i].bytes);
       }
       VLOG(2) << "[MTcpTransport::recv_loop] Completed sub-chunk future index=" << i;
     }

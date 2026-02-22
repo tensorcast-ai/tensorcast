@@ -155,41 +155,7 @@ Case：
 1. 相对 2x 工程目标：8GiB 基本打平，32GiB 超过；1/2GiB 仍有差距。
 2. 相对 4x 理想上限：仍有 `44%~70%` 差距，符合多机真实拓扑与控制面开销预期。
 
-## 10. 根因定位与修复结论
-
-### 10.1 关键根因
-
-1. `DeregisterArtifact` canonical 路径清理不稳定（受 `drain.replica_id` 影响）。
-2. `UnregisterReplicaByWorker` 将 `NOT_FOUND` 当错误，破坏幂等退役语义。
-3. 32GiB put 失败根因为 CPU export 路径重复申请 stable lease，造成预算重复计数。
-4. runner 存在 ready 竞态与 cleanup 参数缺陷。
-
-### 10.2 已落地修复
-
-1. `DeregisterArtifact`：canonical 路径固定执行 worker-scoped GS 清理；无 active lease 时从本地 replica 推断 device。
-2. `UnregisterReplicaByWorker`：`NOT_FOUND` 视为幂等成功。
-3. `memory_export_registry`：chunk 已有 stable lease 时复用，避免 double-count。
-4. runner：daemon ready 轮询、远程超时、`deregister-device-id` 默认推断、DB probe 锁冲突降级。
-5. 回归：新增 daemon/communicator/Python 测试覆盖上述路径。
-
-### 10.3 仍建议推进（后续）
-
-1. 修复 stop 退役故障路径的 streaming buffer 慢释放（避免单次失败拉长到 60s+）。
-2. 启动前输出 `comm_gpu required_slices` 细项与建议值。
-3. 增加 stale-source reselection counters 便于线上观测。
-
-## 11. 踩坑与处置记录
-
-1. DuckDB 锁冲突：runner 自动降级为功能链路模式，任务不中断。
-2. `source-retire=stop` 会命中 stale source：默认改 `deregister` 用于稳定回归。
-3. `comm_gpu` 容量不足导致启动失败：通过调整 `conn/buffers/maxw` 与 pool 规避。
-4. daemon 重启后就绪竞态：增加 ready 轮询后稳定。
-5. `adv-ip` 误填 Host IP(10.x)：统一改为 Pod IP(100.x)。
-6. `brainctl` 自动回收：执行前刷新 process/ip 列表。
-7. helper 混合日志与 JSON：解析最后一行 JSON 规避污染。
-8. 内容寻址复用 artifact_id：使用随机 `put_seed` 保证链路分析可区分。
-
-## 12. 推荐配置与执行顺序
+## 10. 推荐配置与执行顺序
 
 推荐参数（当前基线）：
 1. `conn/buffers/maxw/egc = 20/16/16/0`
@@ -201,7 +167,7 @@ Case：
 2. 再跑 6n/8n/9n fanout 扩容。
 3. 最后跑 8GiB/32GiB 大负载并做 cleanup 回归。
 
-## 13. 产出物
+## 11. 产出物
 
 1. 统一文档（本文档）：`docs/benchmarks/20260221-multi-host-p2p-fanout-benchmark-report.md`
 2. 标准化脚本：`examples/cross_host/cross_host_fanout_runner.py`

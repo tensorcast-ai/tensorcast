@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <optional>
 #include <string>
@@ -78,6 +79,17 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
 
   std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
   std::vector<UnregisterReplicaByWorkerCall> unregister_replica_by_worker_calls;
+  std::vector<components::TransportSession> scripted_transport_sessions;
+  size_t scripted_transport_next{0};
+
+  void push_scripted_transport_session(components::TransportSession session) {
+    scripted_transport_sessions.push_back(std::move(session));
+  }
+
+  void clear_scripted_transport_sessions() {
+    scripted_transport_sessions.clear();
+    scripted_transport_next = 0;
+  }
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -313,6 +325,9 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
       const tensorcast::store::DeviceKey& target_device,
       uint32_t) override {
     replica_requests.emplace_back(std::string(artifact_id));
+    if (scripted_transport_next < scripted_transport_sessions.size()) {
+      return scripted_transport_sessions[scripted_transport_next++];
+    }
     if (replica_transport_not_found) {
       return absl::NotFoundError("replica transport not found in RecordingGlobalStoreClient");
     }

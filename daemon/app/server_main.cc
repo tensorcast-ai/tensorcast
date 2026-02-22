@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <format>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -176,6 +177,33 @@ uint64_t fnv1a_hash_64(std::string_view value) {
 std::string short_socket_name(std::string_view seed) {
   const uint64_t hash = fnv1a_hash_64(seed);
   return std::format("lh-{:016x}.sock", hash);
+}
+
+uint64_t saturating_mul_u64(uint64_t lhs, uint64_t rhs) {
+  if (lhs == 0 || rhs == 0) {
+    return 0;
+  }
+  if (lhs > (std::numeric_limits<uint64_t>::max() / rhs)) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return lhs * rhs;
+}
+
+std::string format_binary_bytes(uint64_t bytes) {
+  constexpr double kKiB = 1024.0;
+  constexpr double kMiB = kKiB * 1024.0;
+  constexpr double kGiB = kMiB * 1024.0;
+  const double value = static_cast<double>(bytes);
+  if (value >= kGiB) {
+    return std::format("{:.2f}GiB", value / kGiB);
+  }
+  if (value >= kMiB) {
+    return std::format("{:.2f}MiB", value / kMiB);
+  }
+  if (value >= kKiB) {
+    return std::format("{:.2f}KiB", value / kKiB);
+  }
+  return std::format("{}B", bytes);
 }
 
 absl::StatusOr<std::string> shorten_socket_path_if_needed(const std::filesystem::path& preferred) {
@@ -630,13 +658,51 @@ int main(int argc, char** argv) {
   tcp_conn_count = std::max(2, tcp_conn_count);
 
   const size_t num_buffers = static_cast<size_t>(buffers_per_flow);
-  const size_t required_gpu_slices = num_buffers + (num_buffers * static_cast<size_t>(tcp_conn_count));
+  const size_t stager_reserve_slices = num_buffers;
+  const size_t tcp_transport_slices = num_buffers * static_cast<size_t>(tcp_conn_count);
+  const size_t required_gpu_slices = stager_reserve_slices + tcp_transport_slices;
   const size_t capacity_gpu_slices = comm_gpu_pool->capacity_slices();
+  const uint32_t expected_gpu_channels = cfg.communicator().stager().expected_gpu_channels();
+  const size_t expected_channel_required_slices = expected_gpu_channels > 0
+      ? (stager_reserve_slices + (num_buffers * static_cast<size_t>(expected_gpu_channels)))
+      : 0;
+  const size_t recommended_gpu_slices = std::max(required_gpu_slices, expected_channel_required_slices);
+  const uint64_t recommended_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(recommended_gpu_slices), comm_gpu_pool->slice_bytes());
+  const uint64_t required_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(required_gpu_slices), comm_gpu_pool->slice_bytes());
+  const uint64_t capacity_pool_bytes =
+      saturating_mul_u64(static_cast<uint64_t>(capacity_gpu_slices), comm_gpu_pool->slice_bytes());
+
+  LOG(INFO) << "comm_gpu startup sizing: capacity_slices=" << capacity_gpu_slices << " ("
+            << format_binary_bytes(capacity_pool_bytes) << ")"
+            << " required_slices=" << required_gpu_slices << " (" << format_binary_bytes(required_pool_bytes)
+            << ") [stager_reserve_slices=" << stager_reserve_slices << ", tcp_transport_slices=" << tcp_transport_slices
+            << ", buffers_per_flow=" << buffers_per_flow << ", tcp_conn_count=" << tcp_conn_count << "]"
+            << " expected_gpu_channels=" << expected_gpu_channels
+            << (expected_gpu_channels > 0 ? std::format(
+                                                " expected_channel_required_slices={} recommended_pool_bytes>={} ({})",
+                                                expected_channel_required_slices,
+                                                recommended_pool_bytes,
+                                                format_binary_bytes(recommended_pool_bytes))
+                                          : std::format(
+                                                " recommended_pool_bytes>={} ({})",
+                                                required_pool_bytes,
+                                                format_binary_bytes(required_pool_bytes)));
+
   if (capacity_gpu_slices < required_gpu_slices) {
+    const size_t missing_slices = required_gpu_slices - capacity_gpu_slices;
+    const uint64_t missing_bytes =
+        saturating_mul_u64(static_cast<uint64_t>(missing_slices), comm_gpu_pool->slice_bytes());
     LOG(ERROR) << "INVALID_ARGUMENT: pinned_memory.classes[name=comm_gpu] too small: capacity_slices="
                << capacity_gpu_slices << " required_slices=" << required_gpu_slices
-               << " slice_bytes=" << comm_gpu_pool->slice_bytes() << " (buffers_per_flow=" << buffers_per_flow
-               << " tcp_conn_count=" << tcp_conn_count << ")";
+               << " slice_bytes=" << comm_gpu_pool->slice_bytes() << " missing_slices=" << missing_slices << " ("
+               << format_binary_bytes(missing_bytes) << ")"
+               << " [stager_reserve_slices=" << stager_reserve_slices
+               << ", tcp_transport_slices=" << tcp_transport_slices << ", buffers_per_flow=" << buffers_per_flow
+               << ", tcp_conn_count=" << tcp_conn_count << "]"
+               << " recommended_pool_bytes>=" << required_pool_bytes << " (" << format_binary_bytes(required_pool_bytes)
+               << ")";
     return 2;
   }
 
@@ -651,7 +717,6 @@ int main(int argc, char** argv) {
     }
   }
 
-  const uint32_t expected_gpu_channels = cfg.communicator().stager().expected_gpu_channels();
   if (expected_gpu_channels > 0) {
     const size_t stager_reserve = num_buffers;
     const size_t available_gpu_slices =
@@ -659,12 +724,16 @@ int main(int argc, char** argv) {
     const size_t computed_limit =
         (buffers_per_flow > 0) ? (available_gpu_slices / static_cast<size_t>(buffers_per_flow)) : 0;
     if (static_cast<size_t>(expected_gpu_channels) > computed_limit) {
+      const uint64_t recommended_expected_pool_bytes =
+          saturating_mul_u64(static_cast<uint64_t>(expected_channel_required_slices), comm_gpu_pool->slice_bytes());
       LOG(ERROR) << "INVALID_ARGUMENT: communicator.stager.expected_gpu_channels=" << expected_gpu_channels
                  << " exceeds staging capacity: computed_limit=" << computed_limit
                  << " (gpu_pool_slices=" << capacity_gpu_slices << " reserve=" << stager_reserve
                  << " buffers_per_flow=" << buffers_per_flow
-                 << "). Increase pinned_memory.classes[name=comm_gpu].pool_bytes "
-                 << "or reduce expected_gpu_channels.";
+                 << " required_slices_for_expected_channels=" << expected_channel_required_slices
+                 << " recommended_pool_bytes>=" << recommended_expected_pool_bytes << " ("
+                 << format_binary_bytes(recommended_expected_pool_bytes)
+                 << ")). Increase pinned_memory.classes[name=comm_gpu].pool_bytes or reduce expected_gpu_channels.";
       return 2;
     }
   }

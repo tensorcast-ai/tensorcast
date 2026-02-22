@@ -1,3 +1,4 @@
+load("@rules_cc//cc:defs.bzl", "cc_test")
 load("//core:BUILD.bzl", "sc_cc_library", "sc_header_only_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -42,5 +43,18 @@ sc_cc_library(
         "@abseil-cpp//absl/log:absl_log",
         "@abseil-cpp//absl/strings",
         "@gsl",
+        "@opentelemetry-cpp//api:api",
+    ],
+)
+
+cc_test(
+    name = "materialize_orchestrator_reselection_test",
+    srcs = ["materialize_orchestrator_reselection_test.cc"],
+    deps = [
+        ":materialize_orchestrator",
+        "//core/store:testing_recording_global_store_client",
+        "//core/testing:catch_main",
+        "@abseil-cpp//absl/status",
+        "@catch2//:catch2_main",
     ],
 )
