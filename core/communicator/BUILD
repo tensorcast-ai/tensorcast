@@ -548,6 +548,17 @@ cc_test(
 )
 
 cc_test(
+    name = "store_test",
+    srcs = ["engine/store_test.cc"],
+    deps = [
+        ":constants_lib",
+        ":store_lib",
+        "//core/testing:catch_main",
+        "@catch2//:catch2_main",
+    ],
+)
+
+cc_test(
     name = "config_io_test",
     srcs = ["config_io_test.cc"],
     deps = [

@@ -19,6 +19,7 @@ def main() -> int:
     )
     parser.add_argument("--daemon", required=True, help="Daemon address host:port")
     parser.add_argument("--artifact-id", required=True)
+    parser.add_argument("--device-id", type=int, default=None)
     args = parser.parse_args()
 
     removed = False
@@ -34,6 +35,7 @@ def main() -> int:
                 str(args.artifact_id),
                 wait=True,
                 drain_timeout_s=30.0,
+                device_id=int(args.device_id) if args.device_id is not None else None,
             )
             removed = bool(outcome.removed)
             drained = bool(outcome.drained)

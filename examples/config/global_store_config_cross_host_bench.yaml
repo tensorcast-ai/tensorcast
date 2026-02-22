@@ -1,0 +1,146 @@
+# Config metadata for auditing and cluster safety.
+meta:
+  # Schema version label for auditing; update if you enforce schema checks.
+  schema_version: "v1"
+  # Free-form description for operators and change tracking.
+  description: "default-global-store"
+  # Cluster identity token used by daemons to avoid split-brain; echoed by HealthCheck.
+  cluster_token: ""
+
+# Metadata persistence (DuckDB).
+database:
+  # Path to DuckDB file; null uses in-memory DB (ephemeral, good for tests).
+  db_file: "/tmp/tc_cross_20260221/gs/gs_bench.duckdb"
+
+# gRPC server settings.
+server:
+  # gRPC listen socket for control-plane services.
+  listen:
+    # Bind host; 0.0.0.0 exposes to network, 127.0.0.1 restricts to local.
+    host: 0.0.0.0
+    # Listen port; 0 picks an ephemeral port for tests.
+    port: 50051
+  # Advertised address for clients/GetServerInfo; auto-detected if unset.
+  advertise:
+    # Routable IP/DNS name for clients; leave empty to auto-detect.
+    host: ""
+    # Advertised port; 0 uses the bound listen port.
+    port: 0
+  # Thread pool size for serving RPCs; increase for many concurrent daemons/clients.
+  max_workers: 10
+  grpc:
+    # Max concurrent HTTP/2 streams; 0 uses gRPC default.
+    max_concurrent_streams: 0
+    # Keepalive ping interval; shorter detects dead clients faster but increases traffic.
+    keepalive_time: 120s
+    # Keepalive timeout before terminating a dead connection.
+    keepalive_timeout: 0s
+    # Close idle connections after this duration; 0s disables.
+    max_connection_idle: 0s
+    # Hard connection max age; 0s disables.
+    max_connection_age: 0s
+    # Disable Nagle when true; set true for low-latency RPCs.
+    tcp_nodelay: false
+    # Enable SO_REUSEPORT for listener load balancing.
+    so_reuseport: false
+    tls:
+      # Enable TLS for the Global Store gRPC server.
+      enabled: false
+      # PEM-encoded server certificate.
+      cert_file: ""
+      # PEM-encoded private key for cert_file.
+      key_file: ""
+      # Optional client CA bundle for mTLS; empty disables client cert checks.
+      client_ca_file: ""
+  # Prometheus metrics HTTP port; 0 lets the service choose an available port.
+  metrics_port: 18000
+
+# Worker lifecycle and cleanup policy.
+worker_policy:
+  # Time before a worker is considered dead without heartbeats; keep > default_heartbeat_interval.
+  heartbeat_timeout: 30s
+  # Sweep cadence for stale workers/transports; smaller cleans faster but adds DB churn.
+  cleanup_interval: 60s
+  # Default heartbeat interval used when a worker omits one; keep < heartbeat_timeout.
+  default_heartbeat_interval: 5s
+  # Optional memory tier telemetry retention; tune DB size vs history.
+  memory_tiers:
+    # Retention window for per-node snapshots; shorter reduces DB growth.
+    snapshot_retention: 600s
+    # Max snapshots per node; caps storage even if publishes are frequent.
+    snapshot_max_rows: 200
+    # Publish interval hint for daemons; lower improves freshness but adds write load.
+    publish_interval: 5s
+
+# v2 limits and retention policies.
+limits:
+  # Batching limits for DigestGrid writes (TreeHash leaves and overlap proofs).
+  digest_writes:
+    # Hard bound on leaf digests per request.
+    max_leaf_writes_per_request: 16384
+    # Hard bound on proof digests per request.
+    max_proof_digests_per_request: 16384
+    # Hard bound on total digest entries per request (leaf + proof).
+    max_total_digests_per_request: 32768
+    # Hard bound on total digest payload bytes per request (sum of digest bytes).
+    max_digest_bytes_per_request: 2097152
+  # Coordinator lease policy for Operation[T] workflows (e.g., seal_assembly).
+  operation_leases:
+    # Default lease TTL when callers omit a TTL.
+    default_ttl: 30s
+    # Maximum lease TTL accepted by the server.
+    max_ttl: 300s
+  # Throttling limits for persisted operation status/snapshot updates.
+  operation_writes:
+    # Minimum interval between persisted status updates for a given operation.
+    min_status_update_interval: 1s
+  # Retention policies for v2 tables.
+  retention:
+    # Retain terminal operations and snapshots for this duration before GC.
+    operations_ttl: 86400s
+    # Retain assembly-scoped proof commitments before GC (post-seal cleanup).
+    assembly_proof_commitments_ttl: 86400s
+    # Retain per-piece proof digests (audit) before GC.
+    piece_proof_digests_ttl: 86400s
+
+# Observability settings.
+observability:
+  # Logging output and verbosity controls.
+  logging:
+    # Minimum severity emitted; higher levels reduce noise at the cost of debugging detail.
+    level: INFO
+    # Optional plain-text logfile; empty logs only to stderr/stdout.
+    file: ""
+    # When true, include trace/span IDs in logs (if tracing is enabled).
+    otel_context_enabled: false
+    # Optional enriched sink file with trace/span IDs; leave empty to disable.
+    sink_file: ""
+    # VLOG verbosity level; 0 disables VLOG.
+    vlog_level: 0
+  # OpenTelemetry export for traces/metrics.
+  otel:
+    # Enable OTLP export; when false, other OTel settings are ignored.
+    enabled: false
+    # Collector endpoint; must be reachable from this service.
+    exporter_otlp_endpoint: http://127.0.0.1:4317
+    # Transport protocol; aliases like "grpc" or "http/protobuf" are normalized.
+    exporter_protocol: grpc
+    # Stable logical service name for traces/metrics grouping.
+    service_name: tensorcast-global-store
+    # Sampler name for Python OTel SDK; leave default unless you need sampling control.
+    sampler: parentbased_traceidratio
+    # Sampler argument (ratio for traceidratio); keep 1.0 for full sampling.
+    sampler_arg: "1.0"
+  # C++-specific OTel knobs (unused in Global Store but kept for schema parity).
+  otel_cxx:
+    # Disable the C++ SDK when embedding in C++ processes.
+    sdk_disabled: false
+    # Force insecure OTLP gRPC; set true when using non-TLS collectors.
+    exporter_insecure: false
+    # Static OTLP headers (e.g., auth tokens).
+    exporter_headers: {}
+    # Emit spans to stdout for debugging.
+    console_exporter: false
+  # Chrome trace output (file-per-process); empty disables.
+  tracing:
+    chrome_trace_dir: ""

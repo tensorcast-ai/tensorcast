@@ -522,15 +522,27 @@ Status StoreDaemonServiceImpl::DeregisterArtifact(
   resp->set_drained(drain.drained);
   resp->set_removed(true);
 
-  if ((!drain.replica_id.has_value() || drain.replica_id->empty()) && !view_id.has_value()) {
+  if (!view_id.has_value()) {
+    absl::flat_hash_set<int32_t> unregister_device_ids;
     if (drained_key.has_value()) {
-      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, drained_key->device_id);
-      if (!gs_st.ok() && !absl::IsNotFound(gs_st)) {
-        artifact_retire::append_deregister_message(
-            resp, absl::StrCat("Global Store deregister failed: ", gs_st.message()));
+      unregister_device_ids.insert(drained_key->device_id);
+    }
+    if (requested_device_id.has_value()) {
+      unregister_device_ids.insert(*requested_device_id);
+    }
+    if (unregister_device_ids.empty()) {
+      const auto local_keys =
+          resolve_retire_replica_keys(engine_, artifact_id, view_id, requested_device_id, drained_key);
+      for (const auto& key : local_keys) {
+        if (key.device.type != DeviceType::GPU || key.device.ordinal < 0) {
+          continue;
+        }
+        unregister_device_ids.insert(key.device.ordinal);
       }
-    } else if (requested_device_id.has_value()) {
-      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, *requested_device_id);
+    }
+
+    for (const int32_t device_id : unregister_device_ids) {
+      absl::Status gs_st = engine_->unregister_replica_from_global_store(artifact_id, device_id);
       if (!gs_st.ok() && !absl::IsNotFound(gs_st)) {
         artifact_retire::append_deregister_message(
             resp, absl::StrCat("Global Store deregister failed: ", gs_st.message()));

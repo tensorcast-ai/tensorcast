@@ -8,6 +8,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "absl/status/status.h"
@@ -28,6 +29,7 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   std::vector<std::string> view_requests;
   std::vector<std::string> replica_requests;
   std::vector<std::string> registered_replicas;
+  std::vector<std::pair<std::string, std::string>> unregistered_replicas;
   std::vector<std::string> marked_unavailable;
   std::vector<std::string> drained_replicas;
   std::vector<std::string> call_sequence;
@@ -45,6 +47,8 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
   bool fail_register_replica{false};
   bool fail_acknowledge_lease{false};
   bool fail_disk_location_upsert{false};
+  absl::Status unregister_replica_status{absl::OkStatus()};
+  absl::Status unregister_replica_by_worker_status{absl::OkStatus()};
   bool drain_success{true};
   uint32_t drain_current_requests{0};
   std::string remote_node_id{"stub-remote"};
@@ -65,7 +69,15 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     int device_id{0};
   };
 
+  struct UnregisterReplicaByWorkerCall {
+    std::string artifact_id;
+    std::string worker_id;
+    std::optional<common::memory::MemoryLocation> memory_type;
+    std::optional<uint32_t> device_id;
+  };
+
   std::unordered_map<std::string, TransportReplicaInfo> transport_replicas;
+  std::vector<UnregisterReplicaByWorkerCall> unregister_replica_by_worker_calls;
 
   absl::Status initialize() override {
     return absl::OkStatus();
@@ -159,16 +171,23 @@ class RecordingGlobalStoreClient final : public components::IGlobalStoreClient {
     return std::string("memory_replica");
   }
 
-  absl::Status unregister_replica(std::string_view, std::string_view) override {
-    return absl::UnimplementedError("unregister_replica not supported in test stub");
+  absl::Status unregister_replica(std::string_view artifact_id, std::string_view replica_id) override {
+    unregistered_replicas.emplace_back(std::string(artifact_id), std::string(replica_id));
+    return unregister_replica_status;
   }
 
   absl::Status unregister_replica_by_worker(
-      std::string_view,
-      std::string_view,
-      std::optional<common::memory::MemoryLocation>,
-      std::optional<uint32_t>) override {
-    return absl::UnimplementedError("unregister_replica_by_worker not supported in test stub");
+      std::string_view artifact_id,
+      std::string_view worker_id,
+      std::optional<common::memory::MemoryLocation> memory_type,
+      std::optional<uint32_t> device_id) override {
+    unregister_replica_by_worker_calls.push_back(
+        UnregisterReplicaByWorkerCall{
+            .artifact_id = std::string(artifact_id),
+            .worker_id = std::string(worker_id),
+            .memory_type = memory_type,
+            .device_id = device_id});
+    return unregister_replica_by_worker_status;
   }
 
   absl::StatusOr<bool> mark_replica_unavailable(

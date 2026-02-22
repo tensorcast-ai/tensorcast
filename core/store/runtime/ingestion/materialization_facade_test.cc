@@ -307,6 +307,7 @@ TEST_CASE("MaterializationFacade handles p2p ingestion flows", "[materialization
   }
 
   SECTION("success publishes completion event") {
+    hints.export_policy = loading::ExportPolicy::kForce;
     loading::ReplicaHandle handle;
     handle.replica_key.artifact_id = "p2p_success";
     harness.fake_pipeline->set_next_p2p_result(std::move(handle));
@@ -316,9 +317,13 @@ TEST_CASE("MaterializationFacade handles p2p ingestion flows", "[materialization
         harness.facade->ingest_from_p2p("p2p_success", source, target, hints, /*publish_to_global_store=*/true);
     REQUIRE(handle_or.ok());
     harness.runtime_context().drain_events();
+    auto started_events = recorder.drain_started();
     auto completed_events = recorder.drain_completed();
+    REQUIRE(started_events.size() == 1);
     REQUIRE(completed_events.size() == 1);
+    CHECK(started_events.back().export_policy == loading::ExportPolicy::kForce);
     CHECK(completed_events.back().artifact_id == "p2p_success");
+    CHECK(completed_events.back().export_policy == loading::ExportPolicy::kForce);
   }
 
   harness.shutdown();

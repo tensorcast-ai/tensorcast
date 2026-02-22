@@ -181,6 +181,40 @@ TEST_CASE("CommitRegisteredArtifact fails when pinned local stable cannot be sat
   REQUIRE(st.error_code() == grpc::StatusCode::RESOURCE_EXHAUSTED);
 }
 
+TEST_CASE(
+    "CommitRegisteredArtifact pinned does not double-count stable lease during CPU export",
+    "[daemon][registration][stable_budget]") {
+  auto opts = make_opts();
+  opts.memory_tier_config = tensorcast::store::MemoryTierConfig{.stable_bytes = 32};
+  auto engine = std::make_shared<tensorcast::store::StoreEngine>(std::move(opts));
+  auto harness = make_harness(engine);
+  auto& service = harness->service();
+
+  tensorcast::daemon::v2::BeginRegisterArtifactRequest breq;
+  breq.set_device_id(0);
+  breq.set_total_size(24);
+  breq.set_owner_pid(getpid());
+  breq.mutable_policy()->set_profile(tensorcast::daemon::v2::POLICY_PROFILE_PINNED);
+  auto* idx = breq.mutable_tensor_index_data();
+  idx->set_data(R"({"weights":[0,24,[6],[1],"torch.float32",0]})");
+  idx->set_schema_version("v3");
+  idx->set_encoding("json");
+
+  grpc::ServerContext ctx;
+  tensorcast::daemon::v2::BeginRegisterArtifactResponse bresp;
+  auto st = service.BeginRegisterArtifact(&ctx, &breq, &bresp);
+  REQUIRE(st.ok());
+  REQUIRE(!bresp.registration_id().empty());
+
+  tensorcast::daemon::v2::CommitRegisteredArtifactRequest creq;
+  creq.set_registration_id(bresp.registration_id());
+  tensorcast::daemon::v2::CommitRegisteredArtifactResponse cresp;
+  st = service.CommitRegisteredArtifact(&ctx, &creq, &cresp);
+  REQUIRE(st.ok());
+  REQUIRE(cresp.has_local_stable_tier());
+  REQUIRE(cresp.local_stable_tier().status() == tensorcast::daemon::v2::LOCAL_STABLE_TIER_STATUS_READY);
+}
+
 TEST_CASE("CommitRegisteredArtifact accepts CGID", "[daemon][registration]") {
   auto engine = std::make_shared<tensorcast::store::StoreEngine>(make_opts());
   auto harness = make_harness(engine);
