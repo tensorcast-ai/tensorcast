@@ -18,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "absl/time/time.h"
+#include "core/common/capability_token.h"
 #include "core/cuda/cuda_api.h"
 #include "core/cuda/cuda_ipc.h"
 #include "core/cuda/device_guard.h"
@@ -112,6 +113,7 @@ struct MappedFixture {
   tensorcast::daemon::ShutdownSignal shutdown_signal;
   tensorcast::common::AsyncRuntime async_runtime;
   tensorcast::daemon::WorkerIdentityStore identity;
+  tensorcast::common::CapabilityTokenManager capability_tokens;
   std::filesystem::path storage_root;
   MaterializationController controller;
 
@@ -126,6 +128,9 @@ struct MappedFixture {
         scheduler(),
         sessions_svc(session_mgr, verif_tracker, &scheduler, /*lifecycle=*/nullptr, absl::Seconds(60)),
         devices(tensorcast::store::DeviceRegistry::instance()),
+        capability_tokens(
+            tensorcast::common::CapabilityTokenConfig{
+                .active = tensorcast::common::CapabilityTokenKey{.version = 1, .secret = "mapped-test-secret"}}),
         storage_root(ensure_dir(test_tmpdir())),
         controller(MaterializationController(
             MaterializationController::Dep{
@@ -142,10 +147,12 @@ struct MappedFixture {
                 .identity = identity,
                 .global_store_client = global_store_client,
                 .lifecycle = nullptr,
+                .capability_tokens = &capability_tokens,
                 .external_target_verification_enabled = false,
                 .storage_path = storage_root,
             })) {
     engine->set_global_store_client_for_testing(global_store_client);
+    identity.set_daemon_id("daemon-mapped-test");
   }
 };
 
@@ -303,6 +310,7 @@ TEST_CASE("MaterializeIntoMappedTarget maps slices into target regions", "[daemo
   REQUIRE(status.ok());
   REQUIRE(resp.status() == tensorcast::daemon::v2::MATERIALIZE_REPLICA_STATUS_ALLOCATED);
   REQUIRE(resp.source() == tensorcast::daemon::v2::MATERIALIZATION_SOURCE_DISK);
+  REQUIRE(!resp.target_write_token().empty());
 
   std::array<char, 4> out0{};
   std::array<char, 4> out1{};
@@ -935,7 +943,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "MaterializeIntoMappedTarget rejects unknown view_id metadata",
+    "MaterializeIntoMappedTarget accepts opaque view_id without metadata lookup hard failure",
     "[daemon][materialize][mapped_target][validation]") {
   MappedFixture fix;
 
@@ -990,5 +998,5 @@ TEST_CASE(
   MaterializeIntoTargetResponse resp;
   auto status = run_request(fix.controller, req, resp);
   REQUIRE_FALSE(status.ok());
-  REQUIRE(status.error_code() == grpc::StatusCode::UNIMPLEMENTED);
+  REQUIRE(status.error_code() != grpc::StatusCode::UNIMPLEMENTED);
 }

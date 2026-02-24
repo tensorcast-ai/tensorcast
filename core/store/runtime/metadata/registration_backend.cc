@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <random>
 #include <unordered_map>
 #include <utility>
@@ -88,6 +89,86 @@ std::vector<CanonicalRange> canonical_ranges_from_write_plan(const loader::ViewW
     }
   }
   return merged;
+}
+
+absl::Status add_non_overlapping_ingested_range(
+    std::map<uint64_t, uint64_t>& ranges,
+    uint64_t offset,
+    uint64_t length,
+    uint64_t* ingested_unique_bytes) {
+  if (length == 0) {
+    return absl::OkStatus();
+  }
+  const uint64_t end = offset + length;
+  uint64_t merged_start = offset;
+  uint64_t merged_end = end;
+  auto it = ranges.lower_bound(offset);
+
+  if (it != ranges.begin()) {
+    auto prev = std::prev(it);
+    if (prev->second > offset) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "registration chunk overlaps previously ingested range: existing=[",
+              prev->first,
+              ",",
+              prev->second,
+              "), incoming=[",
+              offset,
+              ",",
+              end,
+              ")"));
+    }
+    if (prev->second == offset) {
+      merged_start = prev->first;
+      merged_end = std::max<uint64_t>(merged_end, prev->second);
+      it = ranges.erase(prev);
+    }
+  }
+
+  while (it != ranges.end() && it->first <= merged_end) {
+    if (it->first < merged_end) {
+      return absl::FailedPreconditionError(
+          absl::StrCat(
+              "registration chunk overlaps previously ingested range: existing=[",
+              it->first,
+              ",",
+              it->second,
+              "), incoming=[",
+              offset,
+              ",",
+              end,
+              ")"));
+    }
+    merged_end = std::max<uint64_t>(merged_end, it->second);
+    it = ranges.erase(it);
+  }
+
+  ranges.emplace(merged_start, merged_end);
+  *ingested_unique_bytes += length;
+  return absl::OkStatus();
+}
+
+bool ingested_ranges_cover_full_span(const std::map<uint64_t, uint64_t>& ranges, uint64_t total_size_bytes) {
+  if (total_size_bytes == 0) {
+    return true;
+  }
+  if (ranges.size() != 1) {
+    return false;
+  }
+  const auto it = ranges.begin();
+  return it->first == 0 && it->second == total_size_bytes;
+}
+
+uint64_t ingested_prefix_bytes(const std::map<uint64_t, uint64_t>& ranges) {
+  uint64_t cursor = 0;
+  for (const auto& [start, end] : ranges) {
+    if (start != cursor) {
+      break;
+    }
+    cursor = end;
+  }
+  return cursor;
 }
 
 absl::Status enforce_stable_begin_runtime_memory_guard(
@@ -396,6 +477,7 @@ absl::StatusOr<std::vector<CanonicalToViewSpan>> canonical_spans_for_tensor(
 struct RegistrationBackend::PendingRegistrationContext {
   enum class Plan : uint8_t { kCoalesced = 0, kStableDram = 1 };
 
+  mutable std::mutex stream_ingest_mu;
   std::string registration_id;
   std::string artifact_id;
   std::string client_artifact_id;
@@ -411,11 +493,16 @@ struct RegistrationBackend::PendingRegistrationContext {
   std::shared_ptr<replica::Replica> replica;
   loading::ReplicaKey pending_registry_key;
   void* gpu_ptr{nullptr};
+  std::byte* stable_dram_cpu_base{nullptr};
   cudaIpcMemHandle_t ipc_handle{};
   std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
   StableDramOptions stable_dram;
   uint64_t stream_ingested_bytes{0};
+  uint64_t stream_copied_bytes{0};
   uint64_t stream_chunk_count{0};
+  uint64_t stream_inflight_chunks{0};
+  uint64_t stream_memcpy_nanos{0};
+  std::map<uint64_t, uint64_t> stream_ingested_ranges;
   std::optional<components::StableDramCachePolicy> stable_cache_policy;
   std::chrono::steady_clock::time_point expiry_time;
   std::chrono::steady_clock::time_point begin_time;
@@ -450,6 +537,7 @@ RegistrationBackend::RegistrationBackend(
       async_runtime_(std::move(resources.async_runtime)),
       memory_tier_budget_(std::move(resources.memory_tier_budget)),
       memory_tier_config_(resources.memory_tier_config),
+      cpu_shared_memory_enabled_(resources.cpu_shared_memory_enabled),
       promotion_manager_(resources.promotion_manager),
       replica_factory_(std::move(replica_factory)),
       artifact_chunk_bytes_(artifact_chunk_bytes),
@@ -593,6 +681,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
       .artifact_chunk_bytes = artifact_chunk_bytes_,
       .expected_artifact_size = reg.total_size_bytes,
       .byte_mapping_config = byte_mapping_config_};
+  cfg.cpu_shared_memory_enabled = cpu_shared_memory_enabled_;
   if (!reg.view.has_value() && reg.tensor_index_data.has_value() && !reg.tensor_index_data->empty()) {
     cfg.canonical_index_json = *reg.tensor_index_data;
   }
@@ -638,6 +727,7 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   }
 
   void* base_ptr = nullptr;
+  std::byte* stable_dram_cpu_base = nullptr;
   cudaIpcMemHandle_t ipc_handle{};
   std::unique_ptr<common::memory::GpuDeviceMemory> staging_gpu;
   if (stable_dram) {
@@ -645,6 +735,11 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
     if (!alloc_status.ok()) {
       return alloc_status;
     }
+    const auto cpu_ptrs = replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
+    if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+      return absl::FailedPreconditionError("CPU pointer unavailable after stable_dram allocation");
+    }
+    stable_dram_cpu_base = static_cast<std::byte*>(cpu_ptrs[0]);
     if (reg.stable_dram.stage_on_gpu) {
       staging_gpu = std::make_unique<common::memory::GpuDeviceMemory>();
       absl::Status staging_status = staging_gpu->allocate(reg.total_size_bytes, reg.device_id);
@@ -712,11 +807,15 @@ absl::StatusOr<RegistrationBeginResult> RegistrationBackend::begin(const Artifac
   }
   entry->replica = replica;
   entry->gpu_ptr = base_ptr;
+  entry->stable_dram_cpu_base = stable_dram_cpu_base;
   entry->ipc_handle = ipc_handle;
   entry->staging_gpu = std::move(staging_gpu);
   entry->stable_dram = reg.stable_dram;
   entry->stream_ingested_bytes = 0;
+  entry->stream_copied_bytes = 0;
   entry->stream_chunk_count = 0;
+  entry->stream_inflight_chunks = 0;
+  entry->stream_memcpy_nanos = 0;
   entry->stable_cache_policy = reg.stable_cache_policy;
   entry->plan =
       stable_dram ? PendingRegistrationContext::Plan::kStableDram : PendingRegistrationContext::Plan::kCoalesced;
@@ -871,16 +970,49 @@ absl::StatusOr<RegistrationCommitResult> RegistrationBackend::commit(std::string
       }
       LOG(INFO) << "Stable DRAM commit path=staging_gpu bytes=" << entry->size_bytes
                 << " device_id=" << entry->device_id;
-    } else if (entry->stream_ingested_bytes != entry->size_bytes) {
-      return absl::FailedPreconditionError(
-          absl::StrCat(
-              "stable_dram stream ingestion incomplete: expected=",
-              entry->size_bytes,
-              " got=",
-              entry->stream_ingested_bytes));
     } else {
-      LOG(INFO) << "Stable DRAM commit path=cpu_stream bytes=" << entry->size_bytes
-                << " chunks=" << entry->stream_chunk_count;
+      uint64_t stream_ingested_bytes = 0;
+      uint64_t stream_copied_bytes = 0;
+      uint64_t stream_chunk_count = 0;
+      uint64_t stream_inflight_chunks = 0;
+      uint64_t stream_memcpy_nanos = 0;
+      size_t stream_range_count = 0;
+      uint64_t stream_prefix_bytes = 0;
+      bool stream_cover_full_span = false;
+      {
+        std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
+        stream_ingested_bytes = entry->stream_ingested_bytes;
+        stream_copied_bytes = entry->stream_copied_bytes;
+        stream_chunk_count = entry->stream_chunk_count;
+        stream_inflight_chunks = entry->stream_inflight_chunks;
+        stream_memcpy_nanos = entry->stream_memcpy_nanos;
+        stream_range_count = entry->stream_ingested_ranges.size();
+        stream_prefix_bytes = ingested_prefix_bytes(entry->stream_ingested_ranges);
+        stream_cover_full_span = ingested_ranges_cover_full_span(entry->stream_ingested_ranges, entry->size_bytes);
+      }
+      if (stream_ingested_bytes != entry->size_bytes || stream_copied_bytes != entry->size_bytes ||
+          stream_inflight_chunks != 0 || !stream_cover_full_span) {
+        return absl::FailedPreconditionError(
+            absl::StrCat(
+                "stable_dram stream ingestion incomplete: expected=",
+                entry->size_bytes,
+                " got=",
+                stream_ingested_bytes,
+                " copied=",
+                stream_copied_bytes,
+                " inflight=",
+                stream_inflight_chunks,
+                " prefix=",
+                stream_prefix_bytes,
+                " ranges=",
+                stream_range_count));
+      }
+      const double memcpy_seconds = static_cast<double>(stream_memcpy_nanos) / 1e9;
+      const double memcpy_gibps = memcpy_seconds > 0.0
+          ? (static_cast<double>(entry->size_bytes) / static_cast<double>(1ULL << 30)) / memcpy_seconds
+          : 0.0;
+      LOG(INFO) << "Stable DRAM commit path=cpu_stream bytes=" << entry->size_bytes << " chunks=" << stream_chunk_count
+                << " memcpy_s=" << memcpy_seconds << " memcpy_gibps=" << memcpy_gibps;
     }
   }
 
@@ -1611,24 +1743,38 @@ absl::Status RegistrationBackend::ingest_registration_chunk(
   if (entry->view_state) {
     return absl::FailedPreconditionError("registration chunk ingestion is unavailable for view-enabled registrations");
   }
-  if (offset != entry->stream_ingested_bytes) {
-    return absl::FailedPreconditionError(
-        absl::StrCat(
-            "registration chunk offset must be contiguous: expected=", entry->stream_ingested_bytes, " got=", offset));
-  }
   if (offset > entry->size_bytes || data.size() > entry->size_bytes - offset) {
     return absl::OutOfRangeError(
         absl::StrCat(
             "registration chunk out of range: offset=", offset, " bytes=", data.size(), " total=", entry->size_bytes));
   }
-  const auto cpu_ptrs = entry->replica->get_memory_manager().get_pointer(common::memory::MemoryLocation::CPU);
-  if (cpu_ptrs.empty() || cpu_ptrs[0] == nullptr) {
+  if (entry->stable_dram_cpu_base == nullptr) {
     return absl::FailedPreconditionError("CPU pointer unavailable for registration chunk ingestion");
   }
-  auto* dst = static_cast<std::byte*>(cpu_ptrs[0]) + static_cast<size_t>(offset);
+  const auto chunk_size = static_cast<uint64_t>(data.size());
+  {
+    std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
+    auto range_status = add_non_overlapping_ingested_range(
+        entry->stream_ingested_ranges, offset, chunk_size, &entry->stream_ingested_bytes);
+    if (!range_status.ok()) {
+      return range_status;
+    }
+    entry->stream_chunk_count += 1;
+    entry->stream_inflight_chunks += 1;
+  }
+
+  const auto copy_start = std::chrono::steady_clock::now();
+  auto* dst = entry->stable_dram_cpu_base + static_cast<size_t>(offset);
   std::memcpy(dst, data.data(), data.size());
-  entry->stream_ingested_bytes += data.size();
-  entry->stream_chunk_count += 1;
+  const auto copy_nanos = static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - copy_start).count());
+  {
+    std::lock_guard<std::mutex> lock(entry->stream_ingest_mu);
+    entry->stream_copied_bytes += chunk_size;
+    entry->stream_memcpy_nanos += copy_nanos;
+    ABSL_CHECK(entry->stream_inflight_chunks > 0);
+    entry->stream_inflight_chunks -= 1;
+  }
   return absl::OkStatus();
 }
 

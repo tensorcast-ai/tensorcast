@@ -8,7 +8,6 @@ TensorCast is a high-performance distributed artifact storage and loading system
 
 ## Command Execution
 
-- Never invoke `python`, `python3`, or `python -m` directly; this applies to ad-hoc scripts, tooling helpers, tests, `setup.py`, and all other Python entry points.
 - You must use `pytest tests/python/xxxx` to run python tests
 - You must use `bazel test //core/component:xxx_test` to run cxx tests
 - These policies keep virtualenv isolation consistent; violating them can break the build and introduce environment skew.
@@ -58,6 +57,9 @@ following daemon orchestration rules:
   - Start daemon with an explicit session id and verify ready status before
     launching role workloads.
   - Stop the same explicit session during teardown (including failure paths).
+- Run Global Store on the local control host by default for cross-host cases.
+  Do not colocate GS with role workers unless the case explicitly requires it.
+  This avoids worker-scoped daemon lifecycle cleanup from stopping GS.
 - Do not rely on implicit SDK auto-create startup in multi-host tests; role
   scripts should connect to a known local daemon endpoint.
 - Keep SDK connectivity local-only on each node: app processes connect to their

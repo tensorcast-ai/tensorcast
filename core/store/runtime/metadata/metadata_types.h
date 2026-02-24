@@ -114,6 +114,7 @@ struct RegistrationResources {
   std::optional<MemoryTierConfig> memory_tier_config;
   StoreEngineOptions::ByteMappingConfig byte_mapping_config{};
   ::tensorcast::store::runtime::ReplicaPromotionManager* promotion_manager{nullptr};
+  bool cpu_shared_memory_enabled{false};
 };
 
 using ReplicaFactory = std::function<absl::StatusOr<std::shared_ptr<replica::Replica>>(const replica::ReplicaConfig&)>;

@@ -45,6 +45,8 @@ struct MappedTargetMaterializationPlan {
   materialization_mapped_copy_plan::BuildCopyPlanResult copy_plan;
   std::string canonical_index_json;
   std::string selected_index_json;
+  std::vector<RegisterStorageMeta> publish_storages;
+  std::vector<LeaseSegMeta> publish_segments;
   uint64_t logical_total_size{0};
 };
 

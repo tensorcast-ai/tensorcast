@@ -24,6 +24,8 @@ from tensorcast.api.store.mapped_binding import (
     normalize_copy_plan,
     validate_copy_plan,
 )
+from tensorcast.proto.common.v1 import common_pb2
+from tensorcast.proto.daemon.v2 import store_daemon_pb2
 
 
 def _make_index_bytes() -> bytes:
@@ -74,7 +76,12 @@ def test_normalize_copy_plan_accepts_dicts_and_tuples() -> None:
                 "dst_name": "a",
                 "dst_range": {"dim": 0, "start": 0, "end": 4},
             },
-            ("src", {"dim": 0, "start": 4, "end": 8}, "b", {"dim": 0, "start": 0, "end": 4}),
+            (
+                "src",
+                {"dim": 0, "start": 4, "end": 8},
+                "b",
+                {"dim": 0, "start": 0, "end": 4},
+            ),
         ]
     )
     assert plan == (
@@ -153,8 +160,10 @@ class _FakeMappedClient:
         self.unregister_calls: list[str] = []
         self.into_target_calls: list[dict[str, Any]] = []
         self.into_mapped_calls: list[dict[str, Any]] = []
+        self.publish_calls: list[dict[str, Any]] = []
         self._token_counter = 0
         self._region_counter = 0
+        self._lease_counter = 0
 
     def get_artifact_index_by_id(self, artifact_id: str) -> bytes:
         return self._index_bytes
@@ -178,9 +187,13 @@ class _FakeMappedClient:
                 "region_name": region_name,
             }
         )
-        return types.SimpleNamespace(region_id=f"region:mapped:{self._region_counter}", ttl_ms=ttl_ms)
+        return types.SimpleNamespace(
+            region_id=f"region:mapped:{self._region_counter}", ttl_ms=ttl_ms
+        )
 
-    def unregister_vram_region(self, region_id: str, *, force: bool | None = None) -> bool:
+    def unregister_vram_region(
+        self, region_id: str, *, force: bool | None = None
+    ) -> bool:
         self.unregister_calls.append(region_id)
         return True
 
@@ -198,6 +211,14 @@ class _FakeMappedClient:
         return types.SimpleNamespace(
             status=1,  # MATERIALIZE_REPLICA_STATUS_ALLOCATED
             target_write_token=f"token-{self._token_counter}".encode("utf-8"),
+        )
+
+    def publish_target_replica(self, **kwargs: Any) -> Any:
+        self.publish_calls.append(kwargs)
+        self._lease_counter += 1
+        return types.SimpleNamespace(
+            lease_id=f"lease-{self._lease_counter}",
+            replica_id=f"replica-{self._lease_counter}",
         )
 
 
@@ -254,7 +275,9 @@ def test_mapped_binding_uses_materialize_into_mapped_target(
     import tensorcast.api._device as device_mod
     import tensorcast.api.store as store_mod
 
-    monkeypatch.setattr(store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle")
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
     monkeypatch.setattr(
         store_mod,
         "get_cuda_memory_handle_with_offset",
@@ -287,11 +310,76 @@ def test_mapped_binding_uses_materialize_into_mapped_target(
     binding = artifact1.bind_into(dst_tensors, mapping=plan)
     assert len(client.into_mapped_calls) == 1
     assert not client.into_target_calls
+    first_selection = client.into_mapped_calls[0]["selection"]
+    first_layout = client.into_mapped_calls[0]["target_layout"]
+    assert first_selection.view_id
+    assert first_layout.index_kind == store_daemon_pb2.TargetLayout.INDEX_KIND_VIEW
 
     pointers = {name: tensor.data_ptr() for name, tensor in binding.tensors.items()}
     binding.swap(artifact2)
 
     assert len(client.into_mapped_calls) == 2
     assert not client.into_target_calls
+    second_selection = client.into_mapped_calls[1]["selection"]
+    assert second_selection.view_id == first_selection.view_id
     assert binding.tensors["a"].data_ptr() == pointers["a"]
     assert binding.tensors["b"].data_ptr() == pointers["b"]
+
+
+@pytest.mark.requires_cuda_or_fake
+def test_mapped_binding_swap_publish_calls_publish_target_replica(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA tensors unavailable; mapped binding requires torch CUDA")
+
+    index_bytes = _make_index_bytes()
+    client = _FakeMappedClient(index_bytes)
+    runtime = _FakeRuntime(client)
+    store = Store("fake://daemon", runtime=runtime)
+    _cache_index(runtime, "artifact-1", index_bytes)
+    _cache_index(runtime, "artifact-2", index_bytes)
+
+    import tensorcast.api._device as device_mod
+    import tensorcast.api.store as store_mod
+
+    monkeypatch.setattr(
+        store_mod, "get_cuda_memory_handle", lambda *args, **kwargs: b"fake-handle"
+    )
+    monkeypatch.setattr(
+        store_mod,
+        "get_cuda_memory_handle_with_offset",
+        lambda *args, **kwargs: (b"fake-handle", 0),
+    )
+    monkeypatch.setattr(device_mod, "device_uuid_for", lambda device_id: "gpu-0")
+
+    dst_tensors = {
+        "a": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+        "b": torch.empty((4,), dtype=torch.uint8, device="cuda:0"),
+    }
+    plan = [
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=0, end=4),
+            dst_name="a",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+        CopyPlanEntry(
+            ckpt_name="src",
+            ckpt_range=Range(dim=0, start=4, end=8),
+            dst_name="b",
+            dst_range=Range(dim=0, start=0, end=4),
+        ),
+    ]
+
+    artifact1 = store.artifact(artifact_id="artifact-1")
+    artifact2 = store.artifact(artifact_id="artifact-2")
+
+    binding = artifact1.bind_into(dst_tensors, mapping=plan)
+    assert not client.publish_calls
+    binding.swap(artifact2, publish=True)
+    assert len(client.publish_calls) == 1
+    publish_call = client.publish_calls[0]
+    byte_space = publish_call["byte_space"]
+    assert byte_space.kind == common_pb2.BYTE_SPACE_KIND_VIEW
+    assert byte_space.id

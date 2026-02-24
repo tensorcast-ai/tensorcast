@@ -6,10 +6,12 @@ import atexit
 import contextlib
 import json
 import logging
+import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import CancelledError
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -96,6 +98,89 @@ class RegistrationResult:
 
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_FEED_VIEW_UPLOAD_WORKERS = 1
+_DEFAULT_FEED_VIEW_CHUNK_BYTES_SINGLE_WORKER = 4 * 1024 * 1024
+_DEFAULT_FEED_VIEW_CHUNK_BYTES_CONCURRENT_WORKERS = 1 * 1024 * 1024
+_DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES = 512 * 1024 * 1024
+
+
+def _stable_dram_feed_upload_workers(*, total_bytes: int, tensor_count: int) -> int:
+    raw = os.environ.get("TENSORCAST_FEED_VIEW_UPLOAD_WORKERS")
+    if raw is None or not str(raw).strip():
+        payload_bytes = max(0, int(total_bytes))
+        if payload_bytes >= 16 * 1024 * 1024 * 1024:
+            return 8
+        if payload_bytes >= 4 * 1024 * 1024 * 1024 and int(tensor_count) > 1:
+            return 4
+        return _DEFAULT_FEED_VIEW_UPLOAD_WORKERS
+    try:
+        configured = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid TENSORCAST_FEED_VIEW_UPLOAD_WORKERS=%r; using default=%d",
+            raw,
+            _DEFAULT_FEED_VIEW_UPLOAD_WORKERS,
+        )
+        configured = _DEFAULT_FEED_VIEW_UPLOAD_WORKERS
+    if configured <= 0:
+        logger.warning(
+            "Invalid TENSORCAST_FEED_VIEW_UPLOAD_WORKERS=%r; expected >= 1, using 1",
+            raw,
+        )
+        return 1
+    if configured > 16:
+        logger.warning(
+            "TENSORCAST_FEED_VIEW_UPLOAD_WORKERS=%d is too large; clamping to 16",
+            configured,
+        )
+        return 16
+    return configured
+
+
+def _stable_dram_feed_chunk_bytes(*, upload_workers: int) -> int:
+    raw = os.environ.get("TENSORCAST_FEED_VIEW_CHUNK_BYTES")
+    if raw is not None and str(raw).strip():
+        try:
+            configured = int(str(raw).strip())
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid TENSORCAST_FEED_VIEW_CHUNK_BYTES=%r; using auto default",
+                raw,
+            )
+        else:
+            if configured > 0:
+                return configured
+            logger.warning(
+                "Invalid TENSORCAST_FEED_VIEW_CHUNK_BYTES=%r; expected >= 1, using auto default",
+                raw,
+            )
+    if int(upload_workers) > 1:
+        return _DEFAULT_FEED_VIEW_CHUNK_BYTES_CONCURRENT_WORKERS
+    return _DEFAULT_FEED_VIEW_CHUNK_BYTES_SINGLE_WORKER
+
+
+def _stable_dram_feed_stream_span_bytes() -> int:
+    raw = os.environ.get("TENSORCAST_FEED_VIEW_STREAM_SPAN_BYTES")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES
+    try:
+        configured = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid TENSORCAST_FEED_VIEW_STREAM_SPAN_BYTES=%r; using default=%d",
+            raw,
+            _DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES,
+        )
+        return _DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES
+    if configured <= 0:
+        logger.warning(
+            "Invalid TENSORCAST_FEED_VIEW_STREAM_SPAN_BYTES=%r; expected >= 1, using default=%d",
+            raw,
+            _DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES,
+        )
+        return _DEFAULT_FEED_VIEW_STREAM_SPAN_BYTES
+    return configured
 
 
 @dataclass(frozen=True)
@@ -883,9 +968,22 @@ class _StableDramUploader:
             )
             ctl = handle.client
             total_streamed_bytes = 0
-            for name in ordered_names:
+            stream_start = time.monotonic()
+            upload_workers = _stable_dram_feed_upload_workers(
+                total_bytes=int(layout.total_size),
+                tensor_count=len(ordered_names),
+            )
+            feed_chunk_bytes = _stable_dram_feed_chunk_bytes(
+                upload_workers=upload_workers
+            )
+            stream_span_bytes = _stable_dram_feed_stream_span_bytes()
+
+            def _prepare_tensor_payload(
+                name: str,
+            ) -> tuple[int, int, memoryview, float]:
                 if cancel_event and cancel_event.is_set():
                     raise CancelledError
+                tensor_prepare_start = time.monotonic()
                 if name not in artifact:
                     raise TensorCastError(
                         f"Tensor '{name}' missing from registration payload"
@@ -906,21 +1004,128 @@ class _StableDramUploader:
                         f"Tensor '{name}' byte size mismatch: expected {int(expected_bytes)}, got {actual_bytes}"
                     )
                 payload_view = memoryview(local.view(torch.uint8).numpy()).cast("B")
-                ok = ctl.feed_register_artifact_view_chunks(
-                    handle.registration_id,
+                prepare_elapsed_s = time.monotonic() - tensor_prepare_start
+                return (
+                    canonical_offset,
+                    int(expected_bytes),
                     payload_view,
-                    base_offset=canonical_offset,
+                    prepare_elapsed_s,
+                )
+
+            def _upload_one_span(
+                canonical_offset: int,
+                payload_view: memoryview,
+            ) -> int:
+                ok = ctl.feed_register_artifact_view_spans(
+                    handle.registration_id,
+                    ((canonical_offset, payload_view),),
+                    chunk_bytes=feed_chunk_bytes,
                 )
                 if not ok:
                     raise FeedFailed(
-                        f"FeedRegisterArtifactStream(stable_dram_cpu) failed for tensor '{name}'"
+                        "FeedRegisterArtifactStream(stable_dram_cpu) failed during span upload"
                     )
-                total_streamed_bytes += int(expected_bytes)
+                return int(payload_view.nbytes)
+
+            if upload_workers <= 1:
+
+                def _iter_tensor_spans():
+                    nonlocal total_streamed_bytes
+                    for name in ordered_names:
+                        (
+                            canonical_offset,
+                            expected_bytes,
+                            payload_view,
+                            prepare_elapsed_s,
+                        ) = _prepare_tensor_payload(name)
+                        logger.info(
+                            "stable_dram upload tensor_ready "
+                            "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
+                            handle.registration_id,
+                            name,
+                            expected_bytes,
+                            prepare_elapsed_s,
+                        )
+                        stream_tensor_start = time.monotonic()
+                        yield (canonical_offset, payload_view)
+                        stream_tensor_s = time.monotonic() - stream_tensor_start
+                        total_streamed_bytes += expected_bytes
+                        logger.info(
+                            "stable_dram upload tensor_done "
+                            "registration_id=%s tensor=%s bytes=%d stream_s=%.3f",
+                            handle.registration_id,
+                            name,
+                            expected_bytes,
+                            stream_tensor_s,
+                        )
+
+                ok = ctl.feed_register_artifact_view_spans(
+                    handle.registration_id,
+                    _iter_tensor_spans(),
+                    chunk_bytes=feed_chunk_bytes,
+                )
+                if not ok:
+                    raise FeedFailed(
+                        "FeedRegisterArtifactStream(stable_dram_cpu) failed during tensor upload"
+                    )
+            else:
+                upload_spans: list[tuple[int, memoryview]] = []
+                for name in ordered_names:
+                    (
+                        canonical_offset,
+                        expected_bytes,
+                        payload_view,
+                        prepare_elapsed_s,
+                    ) = _prepare_tensor_payload(name)
+                    logger.info(
+                        "stable_dram upload tensor_ready "
+                        "registration_id=%s tensor=%s bytes=%d prepare_s=%.3f",
+                        handle.registration_id,
+                        name,
+                        expected_bytes,
+                        prepare_elapsed_s,
+                    )
+                    cursor = 0
+                    while cursor < expected_bytes:
+                        take = min(
+                            int(stream_span_bytes),
+                            int(expected_bytes) - int(cursor),
+                        )
+                        upload_spans.append(
+                            (
+                                int(canonical_offset) + int(cursor),
+                                payload_view[cursor : cursor + take],
+                            )
+                        )
+                        cursor += take
+                with ThreadPoolExecutor(
+                    max_workers=upload_workers,
+                    thread_name_prefix="tc-feed-view",
+                ) as executor:
+                    futures = {
+                        executor.submit(_upload_one_span, offset, view): index
+                        for index, (offset, view) in enumerate(upload_spans)
+                    }
+                    try:
+                        for future in as_completed(futures):
+                            total_streamed_bytes += int(future.result())
+                    except Exception:
+                        if cancel_event is not None:
+                            cancel_event.set()
+                        for future in futures:
+                            future.cancel()
+                        raise
+            stream_elapsed_s = time.monotonic() - stream_start
             logger.info(
-                "stable_dram upload path=cpu_stream registration_id=%s tensors=%d total_bytes=%d",
+                "stable_dram upload path=cpu_stream registration_id=%s tensors=%d spans=%d total_bytes=%d stream_seconds=%.3f workers=%d chunk_bytes=%d span_bytes=%d",
                 handle.registration_id,
                 len(ordered_names),
+                len(ordered_names) if upload_workers <= 1 else len(upload_spans),
                 total_streamed_bytes,
+                stream_elapsed_s,
+                upload_workers,
+                feed_chunk_bytes,
+                stream_span_bytes,
             )
             return artifact
         base_ptr = get_cuda_memory_ptr(ctx.device_id, handshake.staging_cuda_ipc_handle)

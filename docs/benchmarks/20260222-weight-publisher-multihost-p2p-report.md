@@ -842,3 +842,261 @@
    - 增加结构化延迟指标：`key_visible_at`、`index_ready_at`、`first_resolve_success_at`，直接量化窗口时长。
 3. 调度策略：
    - 大权重场景建议从固定 `publish_interval` 过渡到“receiver 全量 ACK 后再发下一版”的手动/半自动驱动，减少纯等待时间并避免阈值误配。
+
+### 9.15 TP8-320GB 尾延迟根因收敛与框架修复（mapped source 可扩散）
+
+复现口径（同一问题域）：
+
+1. 复现 case 仍使用 `tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1`。
+2. 关键配置：`tp_world_size=8`、`keep_last=1`、`max_concurrency=1`、`poll=1.5s`。
+3. 多机编排规则采用本仓库规范：GS 建议运行在本地控制机，worker 仅跑 daemon + role 进程。
+
+问题收敛：
+
+1. 关于“单实例是否 8 rank 并发发起 materialize”
+   - 代码路径 `tensorcast/tools/weight_publisher_e2e.py` 在 `tp_bind_into_swap` 中对 rank 执行 `for rank in range(tp_world_size)` 串行循环；
+   - 单实例在任一时刻只有 1 个 rank 在执行 materialize/swap，请求并非 8 卡并发齐发。
+2. 为什么 `key_mapping_absent` 看起来很长
+   - 该等待主要是“下一版本尚未发布或尚未可见”的控制面等待；
+   - 在本 case 中，`publish_interval(600s) + publish_latency(~352s)` 叠加导致版本节拍本身很长，receiver 在“上一版处理完成到下一版可见”之间会自然进入长等待窗口。
+3. 为什么 key 可见后 3 个 receiver 的 TP8 `swap` 总耗时差异大（`153s / 374s / 422s`）
+   - 旧语义下 mapped binding 不支持 publish，且 mapped 选择未形成可路由的稳定 view byte-space 身份；
+   - 结果是后续 receiver 仍主要回源到少数 canonical source，在 `max_concurrency=1` 下形成排队级联，后到达实例尾延迟被放大；
+   - 因此“第一个 swap 完成后应有更多 source 并迅速拉平尾延迟”的前提在旧实现中并不成立。
+
+根本修复（已落地）：
+
+1. SDK 为 mapped binding 生成稳定 `mapped view_id`（`mapped:v1:<sha256>`），身份绑定：
+   - canonical index
+   - source view identity
+   - copy plan
+   - target tensor layout
+2. `bind_into(..., mapping=...)` / `swap(..., publish=True)` 打通 mapped publish：
+   - `MaterializeIntoMappedTarget` 可返回 `target_write_token`；
+   - `PublishTargetReplica` 可发布 VIEW byte-space 副本；
+   - 使已完成 rank/实例可成为后续请求 source（可扩散）。
+3. daemon/controller 放开 opaque `selection.view_id`（无 metadata 也可作为 byte-space 身份），并将 mapped request 的 `VariantIdentity` 下传给 StoreEngine。
+4. core ingestion 的 mapped 路径优先 `request_view_transport`，仅在 `NOT_FOUND/UNIMPLEMENTED` 时回退 canonical route，保证新旧集群混部兼容。
+
+验证状态：
+
+1. Python：`pytest tests/python/api/test_mapped_binding.py` 通过（`4 passed, 2 skipped`）。
+2. Daemon：`bazel test //daemon:materialize_into_mapped_target_test --test_env=TENSORCAST_CUDA_BACKEND=fake` 通过。
+3. Core：`bazel test //core/store/runtime/ingestion:materialization_facade_test --test_env=TENSORCAST_CUDA_BACKEND=fake` 通过。
+
+预期收益：
+
+1. 在 TP 多实例 fanout 下，source 不再长期收敛到单点 canonical replica；
+2. 随着首批 rank 完成并 publish，后续 rank 可直接拉取 mapped/view byte-space，降低排队与尾延迟；
+3. `publish latency` 与 `key_mapping_absent` 长尾将联动下降（后者受前者与发布节拍共同影响）。
+
+### 9.16 修复后同参数 TP8-320GB 复跑（2026-02-24，local GS）
+
+执行：
+
+1. case：`tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1-fix`
+2. 结果文件：
+   - `/data/tc_cross_20260224/results_weight_publisher_mainline_tp8_fix/tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1-fix-1771943117/tp8-320gb-r3-v2-mainline-hb60-p1p5-mc1-k1-fix.json`
+3. 参数口径（与 9.14 同域）：
+   - `tp_world_size=8`
+   - `tp_total_bytes=343597383680`（320GiB）
+   - `receiver_apply_mode=tp_bind_into_swap`
+   - `keep_last=1`
+   - `publish_interval_s=600`
+   - `poll_interval_s=1.5`
+   - `daemon_heartbeat_interval=60s`
+   - `daemon_periodic_sync_interval=60s`
+   - daemon transport `max_concurrency=1`
+   - `publish_device=cpu`
+   - GS 运行在本地控制机（按本仓库多机编排规则）
+
+结果摘要：
+
+1. 功能稳定性：
+   - `all_receivers_completed=true`
+   - `receiver_skips_present=false`
+   - `binding_pointer_stable=true`
+   - `receiver_mode_consistent=true`
+2. 首版异常窗口：
+   - `Artifact id ... was not found by StoreDaemon`：`0/0/0`（修复前为 `5/5/5`）
+3. runner 顶层 `passed=false` 的原因：
+   - `cluster_probe.materializable_versions_within_window=false`
+   - 但 `global_store_probe` 的保留窗口检查全部通过（`old_versions_released=true`、`replica_versions_within_window=true`），功能/数据路径口径可判定为通过。
+
+修复前后核心指标对比（同问题域）：
+
+| 指标 | 修复前（9.14） | 修复后（9.16） | 变化 |
+|---|---:|---:|---:|
+| publish latency mean | `351.768s` | `410.203s` | `+58.435s` |
+| `v2 key_mapping_absent`（3 receiver 最大等待） | `527.2s / 517.4s / 548.2s` | `801.6s / 801.4s / 811.8s` | 增长 |
+| `v2` 8-rank `swap` 总耗时 | `153246ms / 373979ms / 421511ms` | `341808ms / 325272ms / 260884ms` | 尾延迟显著收敛 |
+| `swap` max/min 比值 | `2.75` | `1.31` | 收敛 |
+
+围绕“预期”的四点判定：
+
+1. 什么时候 key 应该可见
+   - 预期：`publish(version)` 完成后，`key -> artifact` 映射与可解析 artifact 应原子可见。
+   - 实测：修复后未再出现“key 已可见但 artifact not found”窗口；修复前 `v1` 每个 receiver 仍有 5 次该异常。
+2. 可见后多长时间应发起传输
+   - 预期：在 `poll=1.5s` 下，应在下一个轮询周期内发起首个 rank。
+   - 实测：3 个 receiver 均表现为 `resolve status=ok (v2)` 下一行即 `rank=0 phase=start`（行距恒为 1），满足预期。
+3. 中间有没有预期之外内容
+   - 修复前：存在预期外内容（首版 not-found 窗口）。
+   - 修复后：该窗口消失；数据路径仅表现为 `key_mapping_absent -> key 可见 -> swap`。
+4. 性能表现是否良好
+   - `swap` 尾延迟目标达成：多 receiver 之间显著拉平（`2.75 -> 1.31`）。
+   - `publish/key_mapping_absent` 仍偏高：本轮 `v1->v2` 发布节拍约 `1077.97s`，叠加 receiver 的串行 TP8 执行，导致 `key_mapping_absent` 保持长窗口。
+   - 当前结论：本次修复主要命中“source 可扩散与尾延迟放大”问题，对“发布链路本身耗时”不是直接优化项。
+
+发布/传输分段观察（本轮）：
+
+1. publish（put 到 stable DRAM）：
+   - `v1 publish_latency=375.512s`
+   - `v2 publish_latency=444.894s`
+   - 从日志看 `v2` 在 upload 前有 `pre_publish trim`，且 publish 内部前段耗时较高，需继续细拆。
+2. publish 完成到 receiver 启动传输：
+   - 可见后发起传输及时（见“行距=1”证据），不是主要瓶颈。
+3. 传输阶段（v2 swap）：
+   - 三个 receiver 分别约 `260.884s / 325.272s / 341.809s`；
+   - 比修复前尾部明显收敛，符合“mapped source 可扩散”预期。
+
+下一步（owner 视角，系统性优化）：
+
+1. 给 publish 增加结构化阶段指标：`build_tensors_s / pre_publish_trim_s / stream_upload_s / post_upload_finalize_s`，并按 version 上报。
+2. 引入 ACK 驱动或半自动发布节拍（替代固定 `publish_interval=600`），缩短纯等待导致的 `key_mapping_absent`。
+3. 在 TP 模式下评估“单实例 rank 串行”到“受控并发 rank”策略，配合 `max_concurrency` 做全局并发预算，避免串行尾部放大。
+
+### 9.17 publish 路径专项优化（40GB 快速迭代 + 网络栈确认，2026-02-25）
+
+目标：
+
+1. 聚焦 `publish`（不带 receiver/swap），把瓶颈从控制面等待中剥离出来。
+2. 确认“是不是网络栈吞吐限制”。
+3. 在当前框架语义约束下，把 `put_s` 先大幅降下来，再回 320GB 终验。
+
+#### 9.17.1 关键发现（根因）
+
+1. 40GB publish-only 基线（TP8、`keep_last=1`、单 daemon）显示：
+   - `publish_breakdown` 几乎全部耗时在 `put_s`（`verify_key_mapping/gc` 可忽略）。
+2. 新增中间日志后确认：
+   - 并非“完全 hang”，而是 `FeedRegisterArtifactStream` 持续前进但吞吐低。
+3. 热点 micro-bench（Python protobuf 赋值路径）显示：
+   - `req.view_chunk.data = mv.tobytes()` 在不同 chunk 下吞吐差异极大；
+   - `16MB` 显著慢于 `4MB`。
+4. 网络栈确认（同一 worker 的纯 TCP 发送，2GiB）：
+   - `127.0.0.1`: `5.098 GiB/s`
+   - `host_ip`: `5.708 GiB/s`
+   - 结论：网络栈吞吐远高于 publish 上传吞吐，网络不是主瓶颈。
+
+#### 9.17.2 关于“offset 必须连续”约束的根本思考
+
+1. 历史现状（已修复）：
+   - 早期 stable_dram CPU-stream ingestion 要求全局 `offset` 严格连续；
+   - 尝试多 stream 并发上传时会触发 `FAILED_PRECONDITION`：
+     - `registration chunk offset must be contiguous: expected=... got=...`
+2. 这条约束的本质：
+   - 它简化了完整性判定（`ingested_bytes == total_size`）和状态机；
+   - 但直接阻断了“乱序/并发写入”这条高收益优化路径。
+3. owner 视角的长期最优：
+   - 需要升级为“允许乱序写入 + commit 前完整性校验（区间覆盖）”语义；
+   - 这样既保正确性，也能开启多 stream 并发上传。
+4. 当前语义（9.18 后）：
+   - 已升级为“允许乱序写入 + commit 前全覆盖校验 + 重叠拒绝”；
+   - 并发上传（`upload_workers>1`）可用；
+   - 仍保留 `4MB` chunk 作为当前最优参数。
+
+#### 9.17.3 本轮修复（已落地）
+
+代码改动：
+
+1. `tensorcast/daemon_ctl.py`
+   - 默认 `TENSORCAST_FEED_VIEW_CHUNK_BYTES` 从 `16MB` 调整为 `4MB`（稳定提升）。
+   - 新增/保留流式进度日志开关：
+     - `TENSORCAST_FEED_PROGRESS_LOG_INTERVAL_BYTES`（默认 `0`，按需开启）。
+2. `tensorcast/api/_register.py`
+   - 保留 tensor 级上传阶段日志（`tensor_ready/tensor_done`）。
+   - 支持 `TENSORCAST_FEED_VIEW_UPLOAD_WORKERS>1` 并发上传（需配合 9.17.2 的“乱序 chunk + commit 全覆盖校验”语义）。
+3. `daemon/service/controllers/registration_controller.cc`
+   - 增加 `FeedRegisterArtifactStream` 接收侧进度/完成日志（便于定位“慢 vs 卡住”）。
+
+#### 9.17.4 40GB publish-only 对比（实测）
+
+参数口径：
+
+1. `payload_mode=tp_ranked`
+2. `tp_world_size=8`
+3. `tp_total_bytes=42949672960`（40GiB）
+4. `keep_last=1`
+5. 单 daemon，publisher-only（无 receiver）
+
+结果目录：
+
+1. baseline（host_ip + 16MB）：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-1771950878`
+2. loopback（127.0.0.1 + 16MB）：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-loopback-1771951660`
+3. loopback（127.0.0.1 + 64MB）：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-chunk64-1771951435`
+4. loopback（127.0.0.1 + 4MB）：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-c4m-1771952004`
+
+核心指标（v1）：
+
+| 配置 | `put_s` | stream seconds | 观察 |
+|---|---:|---:|---|
+| host_ip + 16MB | `80.016s` | `76.216s` | 基线 |
+| loopback + 16MB | `77.420s` | `73.959s` | 略优，非主因 |
+| loopback + 64MB | `136.366s` | `132.842s` | 明显退化 |
+| loopback + 4MB | `45.364s` | `42.057s` | 最优（本轮） |
+
+结论：
+
+1. 主瓶颈在 Python gRPC/protobuf 上传热路径，不在网络栈。
+2. 在当前连续 offset 语义下，`4MB` chunk 显著优于 `16/64MB`。
+3. 本轮可立即生效的优化已把 40GB `put_s` 从约 `77~80s` 降到 `45s`（约 `43%` 降低）。
+
+### 9.18 CPU memfd 可用性问题根因与修复（2026-02-25）
+
+问题现象（并发 publish 之后做 `tensor_dict(cpu)` 校验）：
+
+1. receiver 持续报错：
+   - `ArtifactError: CPU memfd handle unavailable for replica`
+2. daemon 侧反复告警：
+   - `cpu_target but engine handle missing cpu_memfd_region`
+
+根因拆解：
+
+1. 配置传播缺失：
+   - `RegistrationBackend` 在 stable_dram 注册路径创建 `ReplicaConfig` 时，未继承 `cpu_shared_memory_enabled`。
+   - 结果：这条路径注册出来的 CPU 副本不是 memfd-backed。
+2. memfd 查找 key 语义错误：
+   - CPU memfd 读取使用的是请求 key（`cgid/mi2`），
+   - 但 UMA 分配记录在 replica 内部 allocation key 上（两者在注册后可能不一致）。
+   - 结果：即使开启了 memfd，也会查找 miss。
+
+修复（根本性）：
+
+1. 打通配置链路：
+   - `StoreEngineOptions.cpu_shared_memory_enabled`
+   - `-> RegistrationResources.cpu_shared_memory_enabled`
+   - `-> RegistrationBackend::cpu_shared_memory_enabled_`
+   - `-> ReplicaConfig.cpu_shared_memory_enabled`
+2. 修正 memfd 查找语义：
+   - `HandleStage` / `MaterializationService` 改为基于 `replica->replica_key()`（allocation key）查询 `get_cpu_memfd_region(...)`。
+
+本地回归：
+
+1. `bazel test //core/store/runtime/metadata:metadata_gateway_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
+2. `bazel test //daemon:grpc_service_impl_cpu_memfd_e2e_test --test_env=TENSORCAST_CUDA_BACKEND=fake`
+
+远端复验（同 worker、同 40GB 参数）：
+
+1. 修复前 run：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-c4m-w4-rerun-1771956633`
+   - `receiver tensor_dict(cpu)` 长时间 `materialize_failed`，`CPU memfd handle unavailable`
+   - daemon 告警计数：`cpu_target but engine handle missing cpu_memfd_region = 115`
+2. 修复后 run：
+   - `/data/tc_cross_20260224/publish_only_40g/tp8-40gb-publish-only-c4m-w4-fixmemfd-1771957537`
+   - publish：`put_s=41.302s`（`publish_latency_s=41.305s`，`stream_seconds=38.338s`）
+   - receiver `tensor_dict(cpu)` 成功：`materialize_latency_s=4.131s`，payload 校验通过
+   - daemon 告警计数：`cpu_target but engine handle missing cpu_memfd_region = 0`

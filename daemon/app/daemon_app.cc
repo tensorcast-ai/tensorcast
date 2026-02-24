@@ -371,6 +371,12 @@ absl::Status DaemonApp::build_grpc_server_() {
   if (options_.grpc.max_concurrent_streams > 0) {
     builder.AddChannelArgument("grpc.max_concurrent_streams", options_.grpc.max_concurrent_streams);
   }
+  if (options_.grpc.max_send_message_length > 0) {
+    builder.AddChannelArgument("grpc.max_send_message_length", options_.grpc.max_send_message_length);
+  }
+  if (options_.grpc.max_receive_message_length > 0) {
+    builder.AddChannelArgument("grpc.max_receive_message_length", options_.grpc.max_receive_message_length);
+  }
   if (options_.grpc.keepalive_time_ms.has_value()) {
     builder.AddChannelArgument("grpc.keepalive_time_ms", *options_.grpc.keepalive_time_ms);
   }

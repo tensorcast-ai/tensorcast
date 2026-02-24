@@ -37,6 +37,7 @@ from tensorcast.api.store.deferred_loader import DeferredCommitResult, DeferredL
 from tensorcast.api.store.inplace_slot import InplaceSlot
 from tensorcast.api.store.mapped_binding import (
     CopyPlan,
+    compute_mapped_view_id,
     normalize_copy_plan,
     validate_copy_plan,
     view_narrow_ranges,
@@ -1010,12 +1011,6 @@ class Artifact:
                 status_code="INVALID_ARGUMENT",
                 retryable=False,
             )
-        if publish:
-            raise ArtifactError(
-                "publish is not supported for mapped binding in v1",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
 
         self._ensure_metadata()
         canonical_index = self._canonical_index
@@ -1023,13 +1018,6 @@ class Artifact:
         if canonical_index is None or canonical_index_bytes is None:
             raise ArtifactError(
                 "Missing canonical index for bind_into",
-                status_code="FAILED_PRECONDITION",
-                retryable=False,
-            )
-
-        if self._view_metadata is not None and self._view_spec is None:
-            raise ArtifactError(
-                "mapped binding requires a view spec (view_id-only handles not supported)",
                 status_code="FAILED_PRECONDITION",
                 retryable=False,
             )
@@ -1108,6 +1096,19 @@ class Artifact:
         view_spec_proto = None
         if self._view_spec is not None and not self._view_spec.is_identity:
             view_spec_proto = self._view_spec.proto
+        selection_index_bytes = bytes(canonical_index_bytes)
+        if view_spec_proto is not None and view_spec_proto.tensors:
+            selection_index_bytes = compute_selected_index_bytes(
+                canonical_index_bytes=canonical_index_bytes,
+                view_spec=view_spec_proto,
+                tensor_names=None,
+            )
+        elif (
+            self._view_metadata is not None
+            and self._view_metadata.view_index_bytes
+            and not str(self._view_metadata.view_id).startswith("mapped:v1:")
+        ):
+            selection_index_bytes = bytes(self._view_metadata.view_index_bytes)
 
         preference = store_daemon_pb2.SourcePreference.SOURCE_PREFERENCE_AUTO
         effective_prefer = (
@@ -1138,6 +1139,13 @@ class Artifact:
         client = runtime.ensure_client()
         operation_id = uuid.uuid4().hex
         rpc_timeout_s = _ctx_timeout_s(ctx)
+        source_view_id = self._mapped_source_view_id(runtime)
+        mapped_view_id = compute_mapped_view_id(
+            canonical_index_bytes=canonical_index_bytes,
+            source_view_id=source_view_id,
+            plan=copy_plan,
+            target_tensors=target_tensors,
+        )
         try:
             response = None
             region_layout = None
@@ -1147,6 +1155,8 @@ class Artifact:
                     target=target_tensors,
                     device_id=device_id,
                     selection_order=selection_order,
+                    mapped_view_id=mapped_view_id,
+                    selection_index_bytes=selection_index_bytes,
                 )
                 try:
                     selection = self._build_region_layout_selection(
@@ -1250,7 +1260,7 @@ class Artifact:
             target_write_token=getattr(response, "target_write_token", None),
             copy_plan=copy_plan,
         )
-        return Binding(slot, publish=False, ctx=ctx)
+        return Binding(slot, publish=publish, ctx=ctx)
 
     def batch(self, *, device: torch.device | str) -> "BatchContext":
         from tensorcast.api.store.batch_context import BatchContext
@@ -1768,6 +1778,11 @@ class Artifact:
                 status_code="INTERNAL",
                 retryable=False,
             ) from exc
+
+    def _mapped_source_view_id(self, runtime: "StoreRuntimeContext") -> str:
+        if self._view_metadata is not None and self._view_metadata.view_id:
+            return str(self._view_metadata.view_id)
+        return self._control_plane_view_id(runtime)
 
     def _build_artifact_selection(self) -> common_pb2.ArtifactSelection:
         artifact_id = self._ensure_identified()

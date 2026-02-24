@@ -775,6 +775,8 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   const std::string& canonical_index_json = mapped_plan.canonical_index_json;
   auto& view_spec = mapped_plan.view_spec;
   auto& view_plan = mapped_plan.view_plan;
+  auto publish_storages = std::move(mapped_plan.publish_storages);
+  auto publish_segments = std::move(mapped_plan.publish_segments);
   auto copy_plan = std::move(mapped_plan.copy_plan);
 
   AcquireTargetStoragesError acquire_error = AcquireTargetStoragesError::kUnknown;
@@ -808,10 +810,10 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     hints.source_mutation_policy = store::loading::SourceMutationPolicy::kReadOnly;
   }
 
-  if (view_plan.has_value()) {
-    if (view_plan->transform.requires_materialization) {
-      return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
-    }
+  if (view_plan.has_value() && view_plan->transform.requires_materialization) {
+    return {StatusCode::INVALID_ARGUMENT, "mapped binding does not support view transforms"};
+  }
+  if (!resolved_selection.view_id().empty() || view_spec.has_value() || view_plan.has_value()) {
     store::loading::VariantIdentity variant;
     variant.canonical_artifact_id = resolved_artifact_id;
     if (!resolved_selection.view_id().empty()) {
@@ -820,7 +822,9 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
     if (view_spec.has_value()) {
       variant.view_spec = view_spec;
     }
-    variant.cached_plan = view_plan;
+    if (view_plan.has_value()) {
+      variant.cached_plan = view_plan;
+    }
     variant.canonical_index_json = canonical_index_json;
     variant.placement = resolve_transform_placement(req.placement(), view_spec);
     hints.variant = std::move(variant);
@@ -865,6 +869,76 @@ grpc::Status TargetMaterializationService::materialize_into_mapped_target(
   }
   resp.mutable_resolved_selection()->CopyFrom(resolved_selection);
   resp.set_generation(generation);
+  if (capability_tokens_ != nullptr && capability_tokens_->configured()) {
+    tensorcast::common::v1::ByteSpaceRef byte_space;
+    if (!resolved_selection.view_id().empty()) {
+      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_VIEW);
+      byte_space.set_id(resolved_selection.view_id());
+    } else {
+      byte_space.set_kind(tensorcast::common::v1::BYTE_SPACE_KIND_CANONICAL);
+      byte_space.set_id("");
+    }
+
+    const std::string layout_hash = compute_target_layout_hash(layout);
+    const std::string write_id = mint_write_id();
+    const absl::Time expires_at = absl::Now() + TargetPublishService::target_write_token_ttl();
+
+    auto stable_index_or = store::loader::rebuild_stable_canonical_index(canonical_index_json, device.ordinal);
+    if (!stable_index_or.ok()) {
+      VLOG(1) << "MaterializeIntoMappedTarget: failed to rebuild canonical index for target write token: "
+              << stable_index_or.status();
+    } else {
+      std::string stable_index_json = std::move(*stable_index_or);
+      const auto digest = common::sha256_digest_bytes(
+          absl::Span<const uint8_t>(
+              reinterpret_cast<const uint8_t*>(stable_index_json.data()), stable_index_json.size()));
+      std::string index_key_hex =
+          absl::BytesToHexString(absl::string_view(reinterpret_cast<const char*>(digest.data()), digest.size()));
+
+      tensorcast::common::v1::TargetWriteScope scope;
+      scope.set_write_id(write_id);
+      scope.mutable_selection()->CopyFrom(resolved_selection);
+      scope.mutable_byte_space()->CopyFrom(byte_space);
+      scope.set_device_uuid(req.device_uuid());
+      scope.set_owner_pid(req.pid());
+      scope.set_target_layout_hash(layout_hash);
+
+      auto scope_or = common::CapabilityTokenManager::serialize_scope_deterministic(scope);
+      if (scope_or.ok()) {
+        const uint64_t expires_at_ms = static_cast<uint64_t>(absl::ToUnixMillis(expires_at));
+        auto token_or = capability_tokens_->mint(
+            d_.identity.daemon_id(),
+            tensorcast::common::v1::CAPABILITY_AUDIENCE_TARGET_WRITE,
+            *scope_or,
+            expires_at_ms);
+        if (token_or.ok()) {
+          TargetWriteRegistry::Record record;
+          record.write_id = write_id;
+          record.layout_key = layout_hash;
+          record.target_layout_hash = layout_hash;
+          record.selection = resolved_selection;
+          record.byte_space = byte_space;
+          record.canonical_index_json = std::move(stable_index_json);
+          record.index_key_hex = std::move(index_key_hex);
+          record.device_uuid = req.device_uuid();
+          record.owner_pid = req.pid();
+          if (req.has_operation_id()) {
+            record.operation_id = req.operation_id();
+          }
+          record.expires_at = expires_at;
+          record.segments = std::move(publish_segments);
+          record.storages = std::move(publish_storages);
+          auto inserted = target_publish_service_.remember_target_write(std::move(record));
+          (void)inserted;
+          resp.set_target_write_token(*token_or);
+        } else {
+          VLOG(1) << "MaterializeIntoMappedTarget: failed to mint target_write_token: " << token_or.status();
+        }
+      } else {
+        VLOG(1) << "MaterializeIntoMappedTarget: failed to serialize target_write scope: " << scope_or.status();
+      }
+    }
+  }
   if (rctx.allow_high_card_attrs()) {
     span->SetAttribute("tc.mapped.entries", static_cast<int64_t>(req.copy_plan().entries_size()));
     span->SetAttribute("tc.mapped.bytes", static_cast<int64_t>(copy_plan.total_bytes_copied));

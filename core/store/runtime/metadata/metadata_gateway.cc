@@ -470,6 +470,7 @@ RegistrationResources MetadataGateway::make_registration_resources() const {
       .memory_tier_config = runtime_context_->options().memory_tier_config,
       .byte_mapping_config = runtime_context_->options().byte_mapping,
       .promotion_manager = promotion_manager_,
+      .cpu_shared_memory_enabled = runtime_context_->options().cpu_shared_memory_enabled,
   };
   return resources;
 }

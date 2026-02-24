@@ -22,6 +22,7 @@ def _build_event(version: int) -> PublishEvent:
         publish_device="cpu",
         published_at_s=0.0,
         publish_latency_s=0.0,
+        publish_breakdown_s={},
     )
 
 
@@ -158,6 +159,9 @@ def test_publish_one_version_releases_source_before_retention(
         def publish(self, tensors, *, version: int) -> str:  # noqa: ANN001
             _ = (tensors, version)
             return "artifact-1"
+
+        def last_publish_breakdown_s(self) -> dict[str, float]:
+            return {}
 
     publisher._publisher = _FakeInnerPublisher()
 

@@ -3,6 +3,7 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <string_view>
 
 #include "absl/status/statusor.h"
@@ -21,7 +22,12 @@ enum class ResolveViewSpecErrorReason {
 
 std::string_view resolve_view_spec_error_reason(ResolveViewSpecErrorReason reason);
 
-absl::StatusOr<std::optional<store::loader::ViewSpec>> resolve_mapped_view_spec(
+struct ResolvedMappedViewSpec {
+  std::optional<store::loader::ViewSpec> view_spec;
+  std::optional<std::string> request_view_id;
+};
+
+absl::StatusOr<ResolvedMappedViewSpec> resolve_mapped_view_spec(
     const v2::MaterializeIntoMappedTargetRequest& req,
     std::string_view resolved_artifact_id,
     store::StoreEngine& engine,

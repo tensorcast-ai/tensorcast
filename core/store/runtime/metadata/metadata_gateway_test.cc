@@ -703,7 +703,45 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "RegistrationBackend stable_dram streamed ingestion requires contiguous complete bytes",
+    "RegistrationBackend stable_dram streamed ingestion propagates cpu_shared_memory_enabled to replicas",
+    "[registration_backend][stable_dram][cpu_memfd]") {
+  RegistrationBackendHarness harness;
+  harness.resources.cpu_shared_memory_enabled = true;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 16> payload{};
+  auto ingest_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(payload));
+  REQUIRE(ingest_status.ok());
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  auto keys = harness.replica_registry->find_by_artifact(commit_or->artifact_id);
+  REQUIRE(keys.size() == 1);
+  auto replica_or = harness.replica_registry->find(keys.front());
+  REQUIRE(replica_or.ok());
+
+  const auto& allocation_key = replica_or.value()->replica_key();
+  CHECK_FALSE(allocation_key.artifact_id.empty());
+  auto uma = replica_or.value()->get_memory_manager().memory_authority();
+  REQUIRE(uma != nullptr);
+  auto region_or = uma->get_cpu_memfd_region(allocation_key);
+  REQUIRE(region_or.ok());
+  CHECK(region_or->fd >= 0);
+  CHECK(region_or->size_bytes >= reg.total_size_bytes);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion accepts out-of-order chunks and enforces full coverage",
     "[registration_backend][stable_dram]") {
   RegistrationBackendHarness harness;
   auto backend = harness.make_backend();
@@ -717,18 +755,107 @@ TEST_CASE(
   REQUIRE(begin_or.ok());
 
   std::array<std::byte, 8> chunk{};
-  auto non_contiguous_status =
-      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/4, absl::MakeConstSpan(chunk));
-  REQUIRE_FALSE(non_contiguous_status.ok());
-  CHECK(non_contiguous_status.code() == absl::StatusCode::kFailedPrecondition);
+  auto tail_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/8, absl::MakeConstSpan(chunk));
+  REQUIRE(tail_status.ok());
 
-  auto ingest_status =
+  auto premature_commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE_FALSE(premature_commit_or.ok());
+  CHECK(premature_commit_or.status().code() == absl::StatusCode::kFailedPrecondition);
+
+  auto head_status =
       backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(chunk));
-  REQUIRE(ingest_status.ok());
+  REQUIRE(head_status.ok());
 
   auto commit_or = backend.commit(begin_or->registration_id);
-  REQUIRE_FALSE(commit_or.ok());
-  CHECK(commit_or.status().code() == absl::StatusCode::kFailedPrecondition);
+  REQUIRE(commit_or.ok());
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion rejects overlapping chunks",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  auto reg = MakeRegistration(/*total_bytes=*/16);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::byte, 8> chunk{};
+  auto first_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/0, absl::MakeConstSpan(chunk));
+  REQUIRE(first_status.ok());
+
+  auto overlap_status =
+      backend.ingest_registration_chunk(begin_or->registration_id, /*offset=*/4, absl::MakeConstSpan(chunk));
+  REQUIRE_FALSE(overlap_status.ok());
+  CHECK(overlap_status.code() == absl::StatusCode::kFailedPrecondition);
+}
+
+TEST_CASE(
+    "RegistrationBackend stable_dram streamed ingestion supports concurrent non-overlapping chunks",
+    "[registration_backend][stable_dram]") {
+  RegistrationBackendHarness harness;
+  auto backend = harness.make_backend();
+
+  constexpr uint64_t kChunkBytes = 4096;
+  constexpr uint64_t kChunkCount = 4;
+  auto reg = MakeRegistration(/*total_bytes=*/kChunkBytes * kChunkCount);
+  reg.plan = RegistrationPlan::kStableDram;
+  reg.stable_dram.stage_on_gpu = false;
+  reg.stable_dram.release_gpu_on_commit = false;
+
+  auto begin_or = backend.begin(reg);
+  REQUIRE(begin_or.ok());
+
+  std::array<std::array<std::byte, kChunkBytes>, kChunkCount> chunks{};
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    for (size_t byte_index = 0; byte_index < chunks[chunk_index].size(); ++byte_index) {
+      chunks[chunk_index][byte_index] = static_cast<std::byte>(chunk_index + 1);
+    }
+  }
+  const std::array<uint64_t, kChunkCount> offsets = {kChunkBytes * 2, 0, kChunkBytes * 3, kChunkBytes};
+
+  std::array<absl::Status, kChunkCount> ingest_status;
+  std::vector<std::thread> workers;
+  workers.reserve(kChunkCount);
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    workers.emplace_back([&, chunk_index]() {
+      ingest_status[chunk_index] = backend.ingest_registration_chunk(
+          begin_or->registration_id, offsets[chunk_index], absl::MakeConstSpan(chunks[chunk_index]));
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  for (const auto& status : ingest_status) {
+    REQUIRE(status.ok());
+  }
+
+  auto commit_or = backend.commit(begin_or->registration_id);
+  REQUIRE(commit_or.ok());
+
+  auto keys = harness.replica_registry->find_by_artifact(commit_or->artifact_id);
+  REQUIRE(keys.size() == 1);
+  auto replica_or = harness.replica_registry->find(keys.front());
+  REQUIRE(replica_or.ok());
+  const auto cpu_ptrs = replica_or.value()->get_memory_manager().get_pointer(MemoryLocation::CPU);
+  REQUIRE(cpu_ptrs.size() == 1);
+  REQUIRE(cpu_ptrs[0] != nullptr);
+
+  const auto* bytes = static_cast<const std::byte*>(cpu_ptrs[0]);
+  for (size_t chunk_index = 0; chunk_index < chunks.size(); ++chunk_index) {
+    const uint64_t chunk_offset = offsets[chunk_index];
+    for (size_t byte_index = 0; byte_index < chunks[chunk_index].size(); ++byte_index) {
+      const auto actual = bytes[static_cast<size_t>(chunk_offset) + byte_index];
+      const auto expected = chunks[chunk_index][byte_index];
+      REQUIRE(actual == expected);
+    }
+  }
 }
 
 TEST_CASE("MetadataGateway deduplicates publish contexts", "[metadata_gateway][runtime]") {

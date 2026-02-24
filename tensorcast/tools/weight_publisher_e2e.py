@@ -85,6 +85,7 @@ class PublishEvent:
     publish_device: str
     published_at_s: float
     publish_latency_s: float
+    publish_breakdown_s: dict[str, float]
 
 
 @dataclass(frozen=True)
@@ -928,6 +929,7 @@ class WeightUpdatePublisher:
         publish_start = time.monotonic()
         artifact_id = self._publisher.publish(tensors, version=version)
         publish_latency_s = time.monotonic() - publish_start
+        publish_breakdown_s = self._publisher.last_publish_breakdown_s()
         _publish_memory_log(
             stage="after_publish",
             version=version,
@@ -953,6 +955,7 @@ class WeightUpdatePublisher:
             publish_device=publish_device,
             published_at_s=time.time(),
             publish_latency_s=publish_latency_s,
+            publish_breakdown_s=publish_breakdown_s,
         )
         events.append(event)
         self._verify_retention_window(events=events)
@@ -1153,9 +1156,7 @@ class WeightUpdateReceiver:
                     f"tp4_bind_into_swap requires tp_world_size=4, got {self._tp_world_size}"
                 )
             if self._payload_mode != "tp_ranked":
-                raise ValueError(
-                    f"{self._apply_mode} requires payload_mode=tp_ranked"
-                )
+                raise ValueError(f"{self._apply_mode} requires payload_mode=tp_ranked")
             if os.environ.get("TENSORCAST_CUDA_BACKEND") == "fake":
                 raise ValueError(f"{self._apply_mode} requires real CUDA backend")
             if not torch.cuda.is_available():
