@@ -79,6 +79,8 @@ def _derive_action_idempotency_key(
     digest.update(action.encode("utf-8"))
     digest.update(b"|target=")
     digest.update(target_id.encode("utf-8"))
+    digest.update(b"|artifact=")
+    digest.update(str(selection.artifact_id).encode("utf-8"))
     if device_id is not None:
         digest.update(f"|device={int(device_id)}".encode("utf-8"))
     if ttl_ms is not None:
